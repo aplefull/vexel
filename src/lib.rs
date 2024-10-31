@@ -1,4 +1,5 @@
 mod utils;
+mod decoders;
 
 use crate::bitreader::BitReader;
 use crate::utils::marker::Marker;
@@ -8,8 +9,10 @@ pub use utils::{bitreader, writer};
 use std::f32::consts::PI;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
-use std::io::{Cursor, Error, ErrorKind, Read, Seek};
+use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path};
+use crate::decoders::jpeg_ls::JpegLsDecoder;
+use crate::decoders::gif::GifDecoder;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JpegMarker {
@@ -354,7 +357,6 @@ pub struct ColorComponentInfo {
     pub ac_table_selector: u8,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct MCU {
     y: Vec<i32>,
@@ -366,13 +368,45 @@ pub struct MCU {
 pub enum ImageFormat {
     Jpeg,
     JpegLs,
+    Gif,
     Unknown,
+}
+
+#[derive(Debug)]
+pub enum PixelFormat {
+    RGB8,
+    RGBA8,
+    RGB16,
+    RGBA16,
+    RGB32F,
+    RGBA32F,
+    L1,
+    L8,
+    LA8,
 }
 
 #[derive(Debug)]
 pub enum Decoders<R: Read + Seek> {
     Jpeg(JpegDecoder<R>),
+    JpegLs(JpegLsDecoder<R>),
+    Gif(GifDecoder<R>),
     Unknown,
+}
+
+#[derive(Debug)]
+pub struct ImageFrame {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    pub delay: u32,
+}
+
+#[derive(Debug)]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    pub frames: Vec<ImageFrame>,
 }
 
 #[derive(Debug)]
@@ -409,43 +443,120 @@ impl Vexel<File> {
 }
 
 impl<R: Read + Seek> Vexel<R> {
-    pub fn new(reader: R) -> Result<Vexel<R>, Error> {
-        // TODO detect image format by reading the first few bytes
-        let decoder = Decoders::Jpeg(JpegDecoder::new(reader)?);
+    pub fn new(mut reader: R) -> Result<Vexel<R>, Error> {
+        let format = Vexel::try_guess_format(&mut reader)?;
+        
+        let decoder = match format {
+            ImageFormat::Jpeg => Decoders::Jpeg(JpegDecoder::new(reader)),
+            ImageFormat::JpegLs => Decoders::JpegLs(JpegLsDecoder::new(reader)),
+            ImageFormat::Gif => Decoders::Gif(GifDecoder::new(reader)),
+            ImageFormat::Unknown => Decoders::Unknown,
+        };
 
         Ok(Vexel {
             decoder,
-            format: ImageFormat::Unknown,
+            format,
             width: 0,
             height: 0,
         })
     }
 
-    pub fn decode(&mut self) -> Result<Vec<u8>, Error> {
+    pub fn decode(&mut self) -> Result<Image, Error> {
         // Each decoder must return a vector of pixels and update the width and height
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
                 let pixels = jpeg_decoder.decode()?;
-                
+
                 self.width = jpeg_decoder.width();
                 self.height = jpeg_decoder.height();
-                
-                Ok(pixels)
+
+                Ok(Image {
+                    width: self.width,
+                    height: self.height,
+                    format: PixelFormat::RGB8,
+                    frames: vec![ImageFrame {
+                        width: self.width,
+                        height: self.height,
+                        pixels,
+                        delay: 0,
+                    }],
+                })
+            }
+            Decoders::JpegLs(jpeg_ls_decoder) => {
+                let pixels = jpeg_ls_decoder.decode()?;
+
+                self.width = jpeg_ls_decoder.width();
+                self.height = jpeg_ls_decoder.height();
+
+                Ok(Image {
+                    width: self.width,
+                    height: self.height,
+                    format: PixelFormat::RGB8,
+                    frames: vec![ImageFrame {
+                        width: self.width,
+                        height: self.height,
+                        pixels,
+                        delay: 0,
+                    }],
+                })
+            }
+            Decoders::Gif(gif_decoder) => {
+                let frames = gif_decoder.decode()?;
+
+                self.width = gif_decoder.width();
+                self.height = gif_decoder.height();
+
+                Ok(Image {
+                    width: self.width,
+                    height: self.height,
+                    format: PixelFormat::RGB8,
+                    frames: frames.iter().map(|frame| ImageFrame {
+                        width: self.width,
+                        height: self.height,
+                        pixels: frame.to_owned(),
+                        delay: 0,
+                    }).collect(),
+                })
             }
             Decoders::Unknown => Err(Error::new(ErrorKind::InvalidData, "Unknown image format")),
         }
     }
-    
+
     pub fn decoder(&self) -> &Decoders<R> {
         &self.decoder
     }
-    
+
     pub fn width(&self) -> u32 {
         self.width
     }
-    
+
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    fn try_guess_format(reader: &mut R) -> Result<ImageFormat, Error> {
+        let mut header = [0u8; 12];
+        reader.read_exact(&mut header)?;
+        reader.seek(SeekFrom::Start(0))?;
+
+        // JPEG-LS
+        if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            if header.windows(4).any(|window| window == [0xFF, 0xF7, 0x00, 0x0B]) {
+                return Ok(ImageFormat::JpegLs);
+            }
+        }
+
+        // JPEG
+        if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            return Ok(ImageFormat::Jpeg);
+        }
+
+        // GIF87a and GIF89a
+        if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+            return Ok(ImageFormat::Gif);
+        }
+
+        Ok(ImageFormat::Unknown)
     }
 }
 
@@ -488,8 +599,8 @@ impl<R: Read + Seek> Debug for JpegDecoder<R> {
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
-    pub fn new(reader: R) -> Result<Self, Error> {
-        Ok(Self {
+    pub fn new(reader: R) -> Self {
+        Self {
             width: 0,
             height: 0,
             precision: 0,
@@ -505,7 +616,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             restart_interval: 0,
             data: Vec::new(),
             reader: BitReader::new(reader),
-        })
+        }
     }
 
     pub fn width(&self) -> u32 {

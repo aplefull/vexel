@@ -22,14 +22,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
-    
+
     match decoder.decode() {
-        Ok(pixels) => {
+        Ok(image) => {
             let image_path = PathBuf::from(image_path);
             let output_path = image_path.with_extension("ppm");
-            
-            Vexel::write_ppm(output_path.clone(), decoder.width(), decoder.height(), &pixels.as_slice())?;
-            
+
+            Vexel::write_ppm(output_path.clone(), decoder.width(), decoder.height(), &image.frames[0].pixels.as_slice())?;
+
             println!("Image written to {:?}", output_path);
         }
         Err(e) => {
