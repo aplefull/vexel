@@ -2,12 +2,13 @@ extern crate core;
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
     use std::io::Cursor;
     use vexel::{bitreader::BitReader, Vexel};
 
-    const PATH_RED: &str = "./tests/images/1x1_red.jpg";
-    const PATH_CAT: &str = "./tests/images/cat.jpg";
+    const PATH_JPEG_RED: &str = "./tests/images/jpeg/1x1_red.jpg";
+    const PATH_JPEG_CAT: &str = "./tests/images/jpeg/cat.jpg";
+    const PATH_JPEG_LS_1: &str = "./tests/images/jpeg-ls/test_4x4.jls";
+    const PATH_GIF_1: &str = "./tests/images/gif/still_transparent.gif";
 
     #[test]
     pub fn test_bitreader() -> Result<(), Box<dyn std::error::Error>> {
@@ -62,11 +63,15 @@ mod tests {
 
     #[test]
     pub fn test_reading_image_header() -> Result<(), Box<dyn std::error::Error>> {
-        let file = File::open(PATH_CAT)?;
-        let mut decoder = vexel::JpegDecoder::new(file)?;
+        let mut decoder = Vexel::open(PATH_JPEG_CAT)?;
 
         match decoder.decode() {
             Ok(_) => {
+                let decoder = match decoder.decoder() {
+                    vexel::Decoders::Jpeg(jpeg_decoder) => jpeg_decoder,
+                    _ => panic!("Invalid decoder"),
+                };
+                
                 assert_eq!(decoder.width(), 680);
                 assert_eq!(decoder.height(), 453);
 
@@ -90,14 +95,18 @@ mod tests {
 
     #[test]
     pub fn test_reading_quantization_tables() -> Result<(), Box<dyn std::error::Error>> {
-        let file = File::open(PATH_CAT)?;
-        let mut decoder = vexel::JpegDecoder::new(file)?;
-
+        let mut decoder = Vexel::open(PATH_JPEG_CAT)?;
+        
         let table_1 = [6, 4, 4, 6, 10, 16, 20, 24, 5, 5, 6, 8, 10, 23, 24, 22, 6, 5, 6, 10, 16, 23, 28, 22, 6, 7, 9, 12, 20, 35, 32, 25, 7, 9, 15, 22, 27, 44, 41, 31, 10, 14, 22, 26, 32, 42, 45, 37, 20, 26, 31, 35, 41, 48, 48, 40, 29, 37, 38, 39, 45, 40, 41, 40];
         let table_2 = [7, 7, 10, 19, 40, 40, 40, 40, 7, 8, 10, 26, 40, 40, 40, 40, 10, 10, 22, 40, 40, 40, 40, 40, 19, 26, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40];
 
         match decoder.decode() {
             Ok(_) => {
+                let decoder = match decoder.decoder() {
+                    vexel::Decoders::Jpeg(jpeg_decoder) => jpeg_decoder,
+                    _ => panic!("Invalid decoder"),
+                };
+                
                 let tables = decoder.quantization_tables();
 
                 assert_eq!(tables[0].table.len(), table_1.len());
@@ -121,8 +130,7 @@ mod tests {
 
     #[test]
     pub fn test_reading_huffman_tables() -> Result<(), Box<dyn std::error::Error>> {
-        let file = File::open(PATH_CAT)?;
-        let mut decoder = vexel::JpegDecoder::new(file)?;
+        let mut decoder = Vexel::open(PATH_JPEG_CAT)?;
 
         let ac_1_offsets = [0, 0, 2, 3, 6, 9, 11, 15, 18, 23, 28, 32, 36, 36, 36, 37, 162];
         let ac_2_offsets = [0, 0, 2, 3, 5, 9, 13, 16, 20, 27, 32, 36, 40, 40, 41, 43, 162];
@@ -131,6 +139,11 @@ mod tests {
 
         match decoder.decode() {
             Ok(_) => {
+                let decoder = match decoder.decoder() {
+                    vexel::Decoders::Jpeg(jpeg_decoder) => jpeg_decoder,
+                    _ => panic!("Invalid decoder"),
+                };
+                
                 let tables = decoder.huffman_tables();
                 assert_eq!(tables.len(), 2);
 
@@ -185,10 +198,12 @@ mod tests {
 
     #[test]
     pub fn test_decode() -> Result<(), Box<dyn std::error::Error>> {
-        let mut decoder = Vexel::open(PATH_CAT)?;
+        let mut decoder = Vexel::open(PATH_JPEG_CAT)?;
 
         match decoder.decode() {
-            Ok(pixels) => {
+            Ok(image) => {
+                let pixels = &image.frames[0].pixels;
+                
                 assert_eq!(pixels.len(), 680 * 453 * 3);
                 assert_eq!(pixels[0], 25);
                 assert_eq!(pixels[10], 20);
@@ -200,13 +215,15 @@ mod tests {
                 assert!(false);
             }
         }
-        
-        decoder = Vexel::open(PATH_RED)?;
-        
+
+        decoder = Vexel::open(PATH_JPEG_RED)?;
+
         match decoder.decode() {
-            Ok(pixels) => {
+            Ok(image) => {
+                let pixels = &image.frames[0].pixels;
                 let expected = vec![255, 0, 2];
-                assert_eq!(pixels, expected);
+                
+                assert_eq!(pixels, &expected);
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
@@ -214,6 +231,43 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_jls_decode() -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = Vexel::open(PATH_JPEG_LS_1)?;
+
+        match decoder.decode() {
+            Ok(image) => {
+                //Vexel::write_bmp("test.bmp", decoder.width(), decoder.height(), image.frames[0].pixels.as_slice())?;
+            }
+            Err(e) => {
+                println!("Error decoding image: {:?}", e);
+                assert!(false);
+            }
+        }
+        Ok(())
+    }
+    
+    #[test]
+    pub fn test_gif_decode() -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = Vexel::open(PATH_GIF_1)?;
+
+        match decoder.decode() {
+            Ok(image) => {
+                let frames = image.frames;
+                for (index, frame) in frames.iter().enumerate() {
+                    let pixels = &frame.pixels;
+                    let name = format!("frame_{}.bmp", index);
+                    //Vexel::write_bmp(name, frame.width, frame.height, pixels.as_slice())?;
+                }
+            }
+            Err(e) => {
+                println!("Error decoding image: {:?}", e);
+                assert!(false);
+            }
+        }
         Ok(())
     }
 }
