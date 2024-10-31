@@ -136,7 +136,7 @@ impl<R: Read + Seek> BitReader<R> {
         self.reader.seek(pos)
     }
     
-    /// Resets the bitreader to the start of the bitstream.
+    /// Resets the bitreader to the start of the bitstream and clears the buffer.
     /// 
     /// # Returns
     /// - `std::io::Error` if an I/O error occurs
