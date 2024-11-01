@@ -202,7 +202,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                let pixels = &image.frames[0].pixels;
+                let pixels = image.pixels();
 
                 assert_eq!(pixels.len(), 680 * 453 * 3);
                 assert_eq!(pixels[0], 25);
@@ -220,7 +220,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                let pixels = &image.frames[0].pixels;
+                let pixels = image.pixels();
                 let expected = vec![255, 0, 2];
 
                 assert_eq!(pixels, &expected);
@@ -247,6 +247,7 @@ mod tests {
                 assert!(false);
             }
         }
+        
         Ok(())
     }
 
@@ -256,13 +257,6 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                let frames = image.frames;
-                for (index, frame) in frames.iter().enumerate() {
-                    let pixels = &frame.pixels;
-                    let name = format!("frame_{}.bmp", index);
-                    let rgb_pixels: Vec<u8> = pixels.chunks_exact(4).map(|pixel| pixel[0..3].to_vec()).flatten().collect();
-                    //Vexel::write_bmp(name, frame.width, frame.height, rgb_pixels.as_slice())?;
-                }
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);

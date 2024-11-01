@@ -611,20 +611,8 @@ impl<R: Read + Seek> GifDecoder<R> {
                 pixels: canvas,
                 delay: frame.delay as u32,
             });
-
-            //let pixels = self.decode_frame(frame)?;
-            // Convert RGBA to RGB for now
-           // let rgb_pixels = pixels.chunks_exact(4).map(|pixel| pixel[0..3].to_vec()).flatten().collect();
-
         }
 
-        let image = Image {
-            width: self.canvas_width,
-            height: self.canvas_height,
-            pixel_format: crate::PixelFormat::RGBA8,
-            frames: decoded_frames,
-        };
-
-        Ok(image)
+        Ok(Image::new(self.width, self.height, crate::PixelFormat::RGBA8, decoded_frames))
     }
 }

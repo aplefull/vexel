@@ -20,7 +20,7 @@ pub enum ImageFormat {
     Unknown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PixelFormat {
     RGB8,
     RGBA8,
@@ -43,26 +43,113 @@ pub enum Decoders<R: Read + Seek> {
 
 #[derive(Debug)]
 pub struct ImageFrame {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
-    pub delay: u32,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    delay: u32,
+}
+
+impl ImageFrame {
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>, delay: u32) -> ImageFrame {
+        ImageFrame {
+            width,
+            height,
+            pixels,
+            delay,
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    pub fn delay(&self) -> u32 {
+        self.delay
+    }
+
+    // TODO this is temporary, until pixels are not generic
+    // when pixels become generic, it'll be possible to convert correctly, knowing 
+    // the actual pixel format
+    pub fn into_rgb8(self) -> ImageFrame {
+        let pixels = self.pixels.chunks_exact(4).map(|pixel| pixel[0..3].to_vec()).flatten().collect();
+
+        ImageFrame {
+            width: self.width,
+            height: self.height,
+            pixels,
+            delay: self.delay,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Image {
-    pub width: u32,
-    pub height: u32,
-    pub pixel_format: PixelFormat,
+    width: u32,
+    height: u32,
+    pixel_format: PixelFormat,
     pub frames: Vec<ImageFrame>,
+    pixels: Vec<u8>,
 }
 
 #[derive(Debug)]
 pub struct Vexel<R: Read + Seek> {
     decoder: Decoders<R>,
     format: ImageFormat,
-    width: u32,
-    height: u32,
+}
+
+impl Image {
+    pub fn new(width: u32, height: u32, pixel_format: PixelFormat, frames: Vec<ImageFrame>) -> Image {
+        let pixels = if frames.len() > 0 {
+            frames[0].pixels.clone()
+        } else {
+            Vec::new()
+        };
+        
+        Image {
+            width,
+            height,
+            pixel_format,
+            frames,
+            pixels,
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format.clone()
+    }
+    
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+    
+    /// Converts the image to RGB8 format, consuming the original image
+    pub fn into_rgb8(mut self) -> Image {
+        let new_frames = self.frames.drain(..).map(|frame| frame.into_rgb8()).collect();
+
+        Image {
+            width: self.width,
+            height: self.height,
+            pixel_format: PixelFormat::RGB8,
+            frames: new_frames,
+            pixels: self.pixels,
+        }
+    }
 }
 
 impl Vexel<File> {
@@ -104,72 +191,69 @@ impl<R: Read + Seek> Vexel<R> {
         Ok(Vexel {
             decoder,
             format,
-            width: 0,
-            height: 0,
         })
     }
 
     pub fn decode(&mut self) -> Result<Image, Error> {
-        // Each decoder must return a vector of pixels and update the width and height
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
                 let pixels = jpeg_decoder.decode()?;
+                let frames = Vec::from(
+                    [
+                        ImageFrame::new(
+                            jpeg_decoder.width(),
+                            jpeg_decoder.height(),
+                            pixels,
+                            0,
+                        )
+                    ]
+                );
 
-                self.width = jpeg_decoder.width();
-                self.height = jpeg_decoder.height();
-
-                Ok(Image {
-                    width: self.width,
-                    height: self.height,
-                    pixel_format: PixelFormat::RGB8,
-                    frames: vec![ImageFrame {
-                        width: self.width,
-                        height: self.height,
-                        pixels,
-                        delay: 0,
-                    }],
-                })
+                Ok(
+                    Image::new(
+                        jpeg_decoder.width(),
+                        jpeg_decoder.height(),
+                        PixelFormat::RGB8,
+                        frames,
+                    )
+                )
             }
+            
             Decoders::JpegLs(jpeg_ls_decoder) => {
                 let pixels = jpeg_ls_decoder.decode()?;
+                let frames = Vec::from(
+                    [
+                        ImageFrame::new(
+                            jpeg_ls_decoder.width(),
+                            jpeg_ls_decoder.height(),
+                            pixels,
+                            0,
+                        )
+                    ]
+                );
 
-                self.width = jpeg_ls_decoder.width();
-                self.height = jpeg_ls_decoder.height();
-
-                Ok(Image {
-                    width: self.width,
-                    height: self.height,
-                    pixel_format: PixelFormat::RGB8,
-                    frames: vec![ImageFrame {
-                        width: self.width,
-                        height: self.height,
-                        pixels,
-                        delay: 0,
-                    }],
-                })
+                Ok(
+                    Image::new(
+                        jpeg_ls_decoder.width(),
+                        jpeg_ls_decoder.height(),
+                        PixelFormat::RGB8,
+                        frames,
+                    )
+                )
             }
+
             Decoders::Gif(gif_decoder) => {
                 let image = gif_decoder.decode()?;
 
-                self.width = gif_decoder.width();
-                self.height = gif_decoder.height();
-
                 Ok(image)
             }
+
             Decoders::Unknown => Err(Error::new(ErrorKind::InvalidData, "Unknown image format")),
         }
     }
 
     pub fn decoder(&self) -> &Decoders<R> {
         &self.decoder
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
     }
 
     fn try_guess_format(reader: &mut R) -> Result<ImageFormat, Error> {

@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let image_path = PathBuf::from(image_path);
             let output_path = image_path.with_extension("ppm");
 
-            Vexel::write_ppm(output_path.clone(), decoder.width(), decoder.height(), &image.frames[0].pixels.as_slice())?;
+            Vexel::write_ppm(output_path.clone(), image.width(), image.height(), &image.pixels())?;
 
             println!("Image written to {:?}", output_path);
         }
