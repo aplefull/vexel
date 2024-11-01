@@ -53,7 +53,7 @@ pub struct ImageFrame {
 pub struct Image {
     pub width: u32,
     pub height: u32,
-    pub format: PixelFormat,
+    pub pixel_format: PixelFormat,
     pub frames: Vec<ImageFrame>,
 }
 
@@ -121,7 +121,7 @@ impl<R: Read + Seek> Vexel<R> {
                 Ok(Image {
                     width: self.width,
                     height: self.height,
-                    format: PixelFormat::RGB8,
+                    pixel_format: PixelFormat::RGB8,
                     frames: vec![ImageFrame {
                         width: self.width,
                         height: self.height,
@@ -139,7 +139,7 @@ impl<R: Read + Seek> Vexel<R> {
                 Ok(Image {
                     width: self.width,
                     height: self.height,
-                    format: PixelFormat::RGB8,
+                    pixel_format: PixelFormat::RGB8,
                     frames: vec![ImageFrame {
                         width: self.width,
                         height: self.height,
@@ -149,22 +149,12 @@ impl<R: Read + Seek> Vexel<R> {
                 })
             }
             Decoders::Gif(gif_decoder) => {
-                let frames = gif_decoder.decode()?;
+                let image = gif_decoder.decode()?;
 
                 self.width = gif_decoder.width();
                 self.height = gif_decoder.height();
 
-                Ok(Image {
-                    width: self.width,
-                    height: self.height,
-                    format: PixelFormat::RGB8,
-                    frames: frames.iter().map(|frame| ImageFrame {
-                        width: self.width,
-                        height: self.height,
-                        pixels: frame.to_owned(),
-                        delay: 0,
-                    }).collect(),
-                })
+                Ok(image)
             }
             Decoders::Unknown => Err(Error::new(ErrorKind::InvalidData, "Unknown image format")),
         }

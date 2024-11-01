@@ -3,6 +3,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
 use crate::bitreader::BitReader;
+use crate::{Image, ImageFrame};
 
 pub struct FrameInfo {
     pub left: u32,
@@ -35,7 +36,16 @@ pub struct GifDecoder<R: Read + Seek> {
     pixel_aspect_ratio: u8,
     global_color_table: Vec<u8>,
     frames: Vec<FrameInfo>,
+    comments: Vec<String>,
+    app_extensions: Vec<ApplicationExtension>,
     reader: BitReader<R>,
+}
+
+#[derive(Debug)]
+pub struct ApplicationExtension {
+    pub identifier: Vec<u8>,
+    pub auth_code: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -91,6 +101,8 @@ impl<R: Read + Seek> Debug for GifDecoder<R> {
             .field("pixel_aspect_ratio", &self.pixel_aspect_ratio)
             .field("global_color_table", &self.global_color_table)
             .field("frames", &self.frames)
+            .field("comments", &self.comments)
+            .field("app_extensions", &self.app_extensions)
             .finish()
     }
 }
@@ -111,6 +123,8 @@ impl<R: Read + Seek> GifDecoder<R> {
             pixel_aspect_ratio: 0,
             global_color_table: Vec::new(),
             frames: Vec::new(),
+            comments: Vec::new(),
+            app_extensions: Vec::new(),
             reader: BitReader::new(reader),
         }
     }
@@ -167,6 +181,66 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(())
     }
 
+    fn read_application_extension(&mut self) -> Result<(), std::io::Error> {
+        let block_size = self.reader.read_bits(8)? as u8;
+        if block_size != 11 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid application extension block size",
+            ));
+        }
+
+        // Read application identifier (8 bytes) and authentication code (3 bytes)
+        let mut identifier = Vec::with_capacity(8);
+        let mut auth_code = Vec::with_capacity(3);
+
+        for _ in 0..8 {
+            identifier.push(self.reader.read_bits(8)? as u8);
+        }
+        for _ in 0..3 {
+            auth_code.push(self.reader.read_bits(8)? as u8);
+        }
+
+        // Read application data
+        let mut data = Vec::new();
+        loop {
+            let sub_block_size = self.reader.read_bits(8)? as usize;
+            if sub_block_size == 0 {
+                break;
+            }
+            for _ in 0..sub_block_size {
+                data.push(self.reader.read_bits(8)? as u8);
+            }
+        }
+        
+        self.app_extensions.push(ApplicationExtension {
+            identifier,
+            auth_code,
+            data,
+        });
+
+        Ok(())
+    }
+
+    fn read_comment_extension(&mut self) -> Result<(), std::io::Error> {
+        loop {
+            let block_size = self.reader.read_bits(8)? as usize;
+            if block_size == 0 {
+                break;
+            }
+
+            let mut block = Vec::with_capacity(block_size);
+            for _ in 0..block_size {
+                let byte = self.reader.read_bits(8)? as u8;
+                block.push(byte);
+            }
+
+            self.comments.push(String::from_utf8(block).unwrap());
+        }
+
+        Ok(())
+    }
+
     fn read_frames(&mut self) -> Result<(), std::io::Error> {
         let mut current_gce: Option<GraphicsControlExtension> = None;
 
@@ -188,6 +262,13 @@ impl<R: Read + Seek> GifDecoder<R> {
                         0xF9 => {
                             current_gce = Some(self.read_graphics_control_extension()?);
                         }
+                        0xFE => {
+                            self.read_comment_extension()?;
+                        }
+                        0xFF => {
+                            self.read_application_extension()?;
+                        }
+                        // TODO handle plain text extension
                         // Other extensions - skip them
                         _ => {
                             loop {
@@ -462,19 +543,88 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(image_data)
     }
 
-    pub fn decode(&mut self) -> Result<Vec<Vec<u8>>, std::io::Error> {
+    fn compose_frame(&self, frame_index: usize, previous_canvas: Option<&Vec<u8>>) -> Result<Vec<u8>, std::io::Error> {
+        let frame = &self.frames[frame_index];
+        let frame_pixels = self.decode_frame(frame)?;
+
+        // Create a new canvas with the full GIF dimensions
+        let canvas_size = (self.width * self.height * 4) as usize;
+        let mut canvas = match (frame.disposal_method, previous_canvas) {
+            (DisposalMethod::Previous, Some(prev)) => prev.clone(),
+            (DisposalMethod::None, Some(prev)) => prev.clone(),
+            _ => vec![0; canvas_size],
+        };
+
+        // Calculate frame boundaries
+        let frame_width = frame.width;
+        let frame_height = frame.height;
+        let left = frame.left;
+        let top = frame.top;
+
+        // Compose frame onto canvas
+        for y in 0..frame_height {
+            let canvas_y = top + y;
+            if canvas_y >= self.height {
+                continue;
+            }
+
+            for x in 0..frame_width {
+                let canvas_x = left + x;
+                if canvas_x >= self.width {
+                    continue;
+                }
+
+                let frame_pixel_index = ((y * frame_width + x) * 4) as usize;
+                let canvas_pixel_index = ((canvas_y * self.width + canvas_x) * 4) as usize;
+
+                // Only copy non-transparent pixels
+                if frame_pixels[frame_pixel_index + 3] > 0 {
+                    canvas[canvas_pixel_index..canvas_pixel_index + 4]
+                        .copy_from_slice(&frame_pixels[frame_pixel_index..frame_pixel_index + 4]);
+                }
+            }
+        }
+
+        Ok(canvas)
+    }
+
+    pub fn decode(&mut self) -> Result<Image, std::io::Error> {
         self.read_header()?;
         self.read_global_color_table()?;
         self.read_frames()?;
 
-        let mut images = Vec::new();
-        for frame in &self.frames {
-            let pixels = self.decode_frame(frame)?;
+        let mut decoded_frames = Vec::new();
+        let mut previous_canvas: Option<Vec<u8>> = None;
+
+        for frame_index in 0..self.frames.len() {
+            let frame = &self.frames[frame_index];
+            let canvas = self.compose_frame(frame_index, previous_canvas.as_ref())?;
+
+            previous_canvas = match frame.disposal_method {
+                DisposalMethod::None | DisposalMethod::Previous => Some(canvas.clone()),
+                DisposalMethod::Background => None,
+            };
+
+            decoded_frames.push(ImageFrame {
+                width: self.width,
+                height: self.height,
+                pixels: canvas,
+                delay: frame.delay as u32,
+            });
+
+            //let pixels = self.decode_frame(frame)?;
             // Convert RGBA to RGB for now
-            let rgb_pixels = pixels.chunks_exact(4).map(|pixel| pixel[0..3].to_vec()).flatten().collect();
-            images.push(rgb_pixels);
+           // let rgb_pixels = pixels.chunks_exact(4).map(|pixel| pixel[0..3].to_vec()).flatten().collect();
+
         }
 
-        Ok(images)
+        let image = Image {
+            width: self.canvas_width,
+            height: self.canvas_height,
+            pixel_format: crate::PixelFormat::RGBA8,
+            frames: decoded_frames,
+        };
+
+        Ok(image)
     }
 }

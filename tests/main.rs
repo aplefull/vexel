@@ -71,7 +71,7 @@ mod tests {
                     vexel::Decoders::Jpeg(jpeg_decoder) => jpeg_decoder,
                     _ => panic!("Invalid decoder"),
                 };
-                
+
                 assert_eq!(decoder.width(), 680);
                 assert_eq!(decoder.height(), 453);
 
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     pub fn test_reading_quantization_tables() -> Result<(), Box<dyn std::error::Error>> {
         let mut decoder = Vexel::open(PATH_JPEG_CAT)?;
-        
+
         let table_1 = [6, 4, 4, 6, 10, 16, 20, 24, 5, 5, 6, 8, 10, 23, 24, 22, 6, 5, 6, 10, 16, 23, 28, 22, 6, 7, 9, 12, 20, 35, 32, 25, 7, 9, 15, 22, 27, 44, 41, 31, 10, 14, 22, 26, 32, 42, 45, 37, 20, 26, 31, 35, 41, 48, 48, 40, 29, 37, 38, 39, 45, 40, 41, 40];
         let table_2 = [7, 7, 10, 19, 40, 40, 40, 40, 7, 8, 10, 26, 40, 40, 40, 40, 10, 10, 22, 40, 40, 40, 40, 40, 19, 26, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40];
 
@@ -106,7 +106,7 @@ mod tests {
                     vexel::Decoders::Jpeg(jpeg_decoder) => jpeg_decoder,
                     _ => panic!("Invalid decoder"),
                 };
-                
+
                 let tables = decoder.quantization_tables();
 
                 assert_eq!(tables[0].table.len(), table_1.len());
@@ -143,7 +143,7 @@ mod tests {
                     vexel::Decoders::Jpeg(jpeg_decoder) => jpeg_decoder,
                     _ => panic!("Invalid decoder"),
                 };
-                
+
                 let tables = decoder.huffman_tables();
                 assert_eq!(tables.len(), 2);
 
@@ -203,7 +203,7 @@ mod tests {
         match decoder.decode() {
             Ok(image) => {
                 let pixels = &image.frames[0].pixels;
-                
+
                 assert_eq!(pixels.len(), 680 * 453 * 3);
                 assert_eq!(pixels[0], 25);
                 assert_eq!(pixels[10], 20);
@@ -222,7 +222,7 @@ mod tests {
             Ok(image) => {
                 let pixels = &image.frames[0].pixels;
                 let expected = vec![255, 0, 2];
-                
+
                 assert_eq!(pixels, &expected);
             }
             Err(e) => {
@@ -249,7 +249,7 @@ mod tests {
         }
         Ok(())
     }
-    
+
     #[test]
     pub fn test_gif_decode() -> Result<(), Box<dyn std::error::Error>> {
         let mut decoder = Vexel::open(PATH_GIF_1)?;
@@ -260,7 +260,8 @@ mod tests {
                 for (index, frame) in frames.iter().enumerate() {
                     let pixels = &frame.pixels;
                     let name = format!("frame_{}.bmp", index);
-                    //Vexel::write_bmp(name, frame.width, frame.height, pixels.as_slice())?;
+                    let rgb_pixels: Vec<u8> = pixels.chunks_exact(4).map(|pixel| pixel[0..3].to_vec()).flatten().collect();
+                    //Vexel::write_bmp(name, frame.width, frame.height, rgb_pixels.as_slice())?;
                 }
             }
             Err(e) => {
