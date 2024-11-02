@@ -9,6 +9,7 @@ mod tests {
     const PATH_JPEG_CAT: &str = "./tests/images/jpeg/cat.jpg";
     const PATH_JPEG_LS_1: &str = "./tests/images/jpeg-ls/test_4x4.jls";
     const PATH_GIF_1: &str = "./tests/images/gif/still_transparent.gif";
+    const PATH_PPM_1: &str = "./tests/images/netpbm/p5_16bit.pgm";
 
     #[test]
     pub fn test_bitreader() -> Result<(), Box<dyn std::error::Error>> {
@@ -202,7 +203,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                let pixels = image.pixels();
+                let pixels = image.as_rgb8();
 
                 assert_eq!(pixels.len(), 680 * 453 * 3);
                 assert_eq!(pixels[0], 25);
@@ -220,10 +221,10 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                let pixels = image.pixels();
-                let expected = vec![255, 0, 2];
+                let pixels = image.as_rgb8();
+                let expected: Vec<u8> = Vec::from([255, 0, 2]);
 
-                assert_eq!(pixels, &expected);
+                assert_eq!(pixels, expected);
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
@@ -263,6 +264,23 @@ mod tests {
                 assert!(false);
             }
         }
+        Ok(())
+    }
+    
+    #[test]
+    pub fn test_netpbm_decode() -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = Vexel::open(PATH_PPM_1)?;
+
+        match decoder.decode() {
+            Ok(image) => {
+               //Vexel::write_bmp("test.bmp", image.width(), image.height(), &image.as_rgb8())?;
+            }
+            Err(e) => {
+                println!("Error decoding image: {:?}", e);
+                assert!(false);
+            }
+        }
+        
         Ok(())
     }
 }

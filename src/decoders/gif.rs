@@ -3,7 +3,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
 use crate::bitreader::BitReader;
-use crate::{Image, ImageFrame};
+use crate::{Image, ImageFrame, PixelData, PixelFormat};
 
 pub struct FrameInfo {
     pub left: u32,
@@ -212,7 +212,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                 data.push(self.reader.read_bits(8)? as u8);
             }
         }
-        
+
         self.app_extensions.push(ApplicationExtension {
             identifier,
             auth_code,
@@ -608,11 +608,11 @@ impl<R: Read + Seek> GifDecoder<R> {
             decoded_frames.push(ImageFrame {
                 width: self.width,
                 height: self.height,
-                pixels: canvas,
+                pixels: PixelData::RGBA8(canvas),
                 delay: frame.delay as u32,
             });
         }
 
-        Ok(Image::new(self.width, self.height, crate::PixelFormat::RGBA8, decoded_frames))
+        Ok(Image::new(self.width, self.height, PixelFormat::RGBA8, decoded_frames))
     }
 }

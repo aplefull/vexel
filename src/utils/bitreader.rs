@@ -51,6 +51,24 @@ impl<R: Read + Seek> BitReader<R> {
         Ok(result)
     }
     
+    /// Reads a single byte from the bitstream.
+    /// 
+    /// # Returns
+    /// - The byte read
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read_u8(&mut self) -> Result<u8, std::io::Error> {
+        self.read_bits(8).map(|b| b as u8)
+    }
+    
+    /// Reads a single 16-bit value from the bitstream.
+    /// 
+    /// # Returns
+    /// - The 16-bit value read
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read_u16(&mut self) -> Result<u16, std::io::Error> {
+        self.read_bits(16).map(|b| b as u16)
+    }
+    
     /// Clears the current bit buffer.
     pub fn clear_buffer(&mut self) {
         self.bits_in_buffer = 0;
@@ -134,6 +152,21 @@ impl<R: Read + Seek> BitReader<R> {
     /// - `std::io::Error` if an I/O error occurs
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, std::io::Error> {
         self.reader.seek(pos)
+    }
+    
+    /// Reads the remaining bits in the bitstream and returns them as a vector of bytes,
+    /// not including the current buffer. The buffer is cleared after reading.
+    /// 
+    /// # Returns
+    /// - A vector of bytes containing the remaining bits in the bitstream
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read_to_end(&mut self) -> Result<Vec<u8>, std::io::Error> {
+        let mut bytes = Vec::new();
+        
+        self.reader.read_to_end(&mut bytes)?;
+        self.clear_buffer();
+        
+        Ok(bytes)
     }
     
     /// Resets the bitreader to the start of the bitstream and clears the buffer.
