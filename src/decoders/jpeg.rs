@@ -357,8 +357,13 @@ pub struct MCU {
 pub struct JpegDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    mcu_width: u32,
+    mcu_height: u32,
+    mcu_r_width: u32,
+    mcu_r_height: u32,
     precision: u8,
     component_count: u8,
+    components_in_scan: u8,
     components: Vec<ColorComponentInfo>,
     quantization_tables: Vec<QuantizationTable>,
     ac_huffman_tables: Vec<HuffmanTable>,
@@ -367,6 +372,8 @@ pub struct JpegDecoder<R: Read + Seek> {
     end_of_spectral_selection: u8,
     successive_approximation_high: u8,
     successive_approximation_low: u8,
+    horizontal_sampling_factor: u8,
+    vertical_sampling_factor: u8,
     restart_interval: u16,
     data: Vec<u8>,
     reader: BitReader<R>,
@@ -377,6 +384,10 @@ impl<R: Read + Seek> Debug for JpegDecoder<R> {
         f.debug_struct("JpegDecoder")
             .field("width", &self.width)
             .field("height", &self.height)
+            .field("mcu_width", &self.mcu_width)
+            .field("mcu_height", &self.mcu_height)
+            .field("mcu_r_width", &self.mcu_r_width)
+            .field("mcu_r_height", &self.mcu_r_height)
             .field("precision", &self.precision)
             .field("component_count", &self.component_count)
             .field("components", &self.components)
@@ -387,6 +398,9 @@ impl<R: Read + Seek> Debug for JpegDecoder<R> {
             .field("end_of_spectral_selection", &self.end_of_spectral_selection)
             .field("successive_approximation_high", &self.successive_approximation_high)
             .field("successive_approximation_low", &self.successive_approximation_low)
+            .field("horizontal_sampling_factor", &self.horizontal_sampling_factor)
+            .field("vertical_sampling_factor", &self.vertical_sampling_factor)
+            .field("restart_interval", &self.restart_interval)
             .field("data", &self.data.len())
             .finish()
     }
@@ -397,16 +411,23 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Self {
             width: 0,
             height: 0,
+            mcu_width: 0,
+            mcu_height: 0,
+            mcu_r_width: 0,
+            mcu_r_height: 0,
             precision: 0,
             component_count: 0,
             start_of_spectral_selection: 0,
             end_of_spectral_selection: 0,
             successive_approximation_high: 0,
             successive_approximation_low: 0,
+            components_in_scan: 0,
             components: Vec::new(),
             quantization_tables: Vec::new(),
             ac_huffman_tables: Vec::new(),
             dc_huffman_tables: Vec::new(),
+            horizontal_sampling_factor: 1,
+            vertical_sampling_factor: 1,
             restart_interval: 0,
             data: Vec::new(),
             reader: BitReader::new(reader),
@@ -456,6 +477,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid image dimensions"));
         }
 
+        self.mcu_width = (self.width + 7) / 8;
+        self.mcu_height = (self.height + 7) / 8;
+        self.mcu_r_width = self.mcu_width;
+        self.mcu_r_height = self.mcu_height;
+
         // Read number of components (1 byte)
         self.component_count = self.reader.read_bits(8)? as u8;
 
@@ -467,6 +493,19 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let horizontal_sampling_factor = (sampling_factors >> 4) & 0xF;
             let vertical_sampling_factor = sampling_factors & 0xF;
             let quantization_table_id = self.reader.read_bits(8)? as u8;
+
+            if id == 1 {
+                if horizontal_sampling_factor == 2 && self.mcu_width % 2 == 1 {
+                    self.mcu_r_width += 1;
+                }
+
+                if vertical_sampling_factor == 2 && self.mcu_height % 2 == 1 {
+                    self.mcu_r_height += 1;
+                }
+
+                self.horizontal_sampling_factor = horizontal_sampling_factor;
+                self.vertical_sampling_factor = vertical_sampling_factor;
+            }
 
             self.components.push(ColorComponentInfo {
                 id,
@@ -775,10 +814,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     fn decode_huffman(&mut self) -> Result<Vec<MCU>, Error> {
         let mut mcus = Vec::new();
 
-        let mcu_height = (self.height + 7) / 8;
-        let mcu_width = (self.width + 7) / 8;
-
-        mcus.resize((mcu_height * mcu_width) as usize, MCU {
+        mcus.resize((self.mcu_r_height * self.mcu_r_width) as usize, MCU {
             y: vec![0; 64],
             cb: vec![0; 64],
             cr: vec![0; 64],
@@ -790,25 +826,33 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut reader = BitReader::new(Cursor::new(self.data.clone()));
 
         let mut previous_dc = [0i32; 3];
+        let restart_interval = self.restart_interval * self.horizontal_sampling_factor as u16 * self.vertical_sampling_factor as u16;
 
-        for i in 0..mcu_height * mcu_width {
-            if self.restart_interval > 0 && i % self.restart_interval as u32 == 0 {
-                previous_dc = [0; 3];
-                reader.clear_buffer();
-            }
+        for y in (0..self.mcu_height).step_by(self.vertical_sampling_factor as usize) {
+            for x in (0..self.mcu_width).step_by(self.horizontal_sampling_factor as usize) {
+                if restart_interval > 0 && (y * self.mcu_r_width + x) % restart_interval as u32 == 0 {
+                    previous_dc = [0; 3];
+                    reader.clear_buffer();
+                }
 
-            for j in 0..self.component_count {
-                let dc_table = self.dc_huffman_tables[self.components[j as usize].dc_table_selector as usize].clone();
-                let ac_table = self.ac_huffman_tables[self.components[j as usize].ac_table_selector as usize].clone();
+                for i in 0..self.component_count {
+                    for v in 0..self.components[i as usize].vertical_sampling_factor {
+                        for h in 0..self.components[i as usize].horizontal_sampling_factor {
+                            let dc_table = self.dc_huffman_tables[self.components[i as usize].dc_table_selector as usize].clone();
+                            let ac_table = self.ac_huffman_tables[self.components[i as usize].ac_table_selector as usize].clone();
 
-                let mcu_component = match j {
-                    0 => &mut mcus[i as usize].y,
-                    1 => &mut mcus[i as usize].cb,
-                    2 => &mut mcus[i as usize].cr,
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid component index")),
-                };
+                            let mcu_index = ((y + v as u32) * self.mcu_r_width + x + h as u32) as usize;
+                            let mcu_component = match i {
+                                0 => &mut mcus[mcu_index].y,
+                                1 => &mut mcus[mcu_index].cb,
+                                2 => &mut mcus[mcu_index].cr,
+                                _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid component index when decoding huffman")),
+                            };
 
-                self.decode_mcu(&mut reader, mcu_component, &dc_table, &ac_table, &mut previous_dc[j as usize])?;
+                            self.decode_mcu(&mut reader, mcu_component, &dc_table, &ac_table, &mut previous_dc[i as usize])?;
+                        }
+                    }
+                }
             }
         }
 
@@ -816,20 +860,30 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn dequantize(&self, mcus: &mut Vec<MCU>) -> Result<(), Error> {
-        for mcu in mcus {
-            for component in &self.components {
-                let quantization_table = &self.quantization_tables[component.quantization_table_id as usize];
-                let q = quantization_table.table.clone();
+        for y in (0..self.mcu_height).step_by(self.vertical_sampling_factor as usize) {
+            for x in (0..self.mcu_width).step_by(self.horizontal_sampling_factor as usize) {
+                for i in 0..self.component_count {
+                    for v in 0..self.components[i as usize].vertical_sampling_factor {
+                        for h in 0..self.components[i as usize].horizontal_sampling_factor {
+                            let mcu_index = ((y + v as u32) * self.mcu_r_width + x + h as u32) as usize;
+                            let mcu = &mut mcus[mcu_index];
 
-                let mcu_component = match component.id {
-                    1 => &mut mcu.y,
-                    2 => &mut mcu.cb,
-                    3 => &mut mcu.cr,
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid component index")),
-                };
+                            let quantization_table = self.quantization_tables.iter()
+                                .find(|q| q.id == self.components[i as usize].quantization_table_id)
+                                .ok_or(Error::new(ErrorKind::InvalidData, "Invalid quantization table"))?;
 
-                for i in 0..64 {
-                    mcu_component[i] *= q[i] as i32;
+                            let mcu_component = match i {
+                                0 => &mut mcu.y,
+                                1 => &mut mcu.cb,
+                                2 => &mut mcu.cr,
+                                _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid component index when dequantizing")),
+                            };
+
+                            for j in 0..64 {
+                                mcu_component[j] *= quantization_table.table[j] as i32;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -854,153 +908,162 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let s_6 = (6.0 / 16.0 * PI).cos() / 2.0;
         let s_7 = (7.0 / 16.0 * PI).cos() / 2.0;
 
-        for mcu in mcus {
-            for component in &self.components {
-                let mcu_component = match component.id {
-                    1 => &mut mcu.y,
-                    2 => &mut mcu.cb,
-                    3 => &mut mcu.cr,
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid component index")),
-                };
+        for y in (0..self.mcu_height).step_by(self.vertical_sampling_factor as usize) {
+            for x in (0..self.mcu_width).step_by(self.horizontal_sampling_factor as usize) {
+                for i in 0..self.component_count {
+                    for v in 0..self.components[i as usize].vertical_sampling_factor {
+                        for h in 0..self.components[i as usize].horizontal_sampling_factor {
+                            let mcu_index = ((y + v as u32) * self.mcu_r_width + x + h as u32) as usize;
+                            let mcu = &mut mcus[mcu_index];
 
-                let mut temp_components = [0.0; 64];
+                            let mcu_component = match i {
+                                0 => &mut mcu.y,
+                                1 => &mut mcu.cb,
+                                2 => &mut mcu.cr,
+                                _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid component index when performing inverse DCT")),
+                            };
 
-                // Process columns
-                for i in 0..8 {
-                    let g_0 = mcu_component[0 * 8 + i] as f32 * s_0;
-                    let g_1 = mcu_component[4 * 8 + i] as f32 * s_4;
-                    let g_2 = mcu_component[2 * 8 + i] as f32 * s_2;
-                    let g_3 = mcu_component[6 * 8 + i] as f32 * s_6;
-                    let g_4 = mcu_component[5 * 8 + i] as f32 * s_5;
-                    let g_5 = mcu_component[1 * 8 + i] as f32 * s_1;
-                    let g_6 = mcu_component[7 * 8 + i] as f32 * s_7;
-                    let g_7 = mcu_component[3 * 8 + i] as f32 * s_3;
+                            let mut temp_components = [0.0; 64];
 
-                    let f_0 = g_0;
-                    let f_1 = g_1;
-                    let f_2 = g_2;
-                    let f_3 = g_3;
-                    let f_4 = g_4 - g_7;
-                    let f_5 = g_5 + g_6;
-                    let f_6 = g_5 - g_6;
-                    let f_7 = g_4 + g_7;
+                            // Process columns
+                            for col in 0..8 {
+                                let g_0 = mcu_component[0 * 8 + col] as f32 * s_0;
+                                let g_1 = mcu_component[4 * 8 + col] as f32 * s_4;
+                                let g_2 = mcu_component[2 * 8 + col] as f32 * s_2;
+                                let g_3 = mcu_component[6 * 8 + col] as f32 * s_6;
+                                let g_4 = mcu_component[5 * 8 + col] as f32 * s_5;
+                                let g_5 = mcu_component[1 * 8 + col] as f32 * s_1;
+                                let g_6 = mcu_component[7 * 8 + col] as f32 * s_7;
+                                let g_7 = mcu_component[3 * 8 + col] as f32 * s_3;
 
-                    let e_0 = f_0;
-                    let e_1 = f_1;
-                    let e_2 = f_2 - f_3;
-                    let e_3 = f_2 + f_3;
-                    let e_4 = f_4;
-                    let e_5 = f_5 - f_7;
-                    let e_6 = f_6;
-                    let e_7 = f_5 + f_7;
-                    let e_8 = f_4 + f_6;
+                                let f_0 = g_0;
+                                let f_1 = g_1;
+                                let f_2 = g_2;
+                                let f_3 = g_3;
+                                let f_4 = g_4 - g_7;
+                                let f_5 = g_5 + g_6;
+                                let f_6 = g_5 - g_6;
+                                let f_7 = g_4 + g_7;
 
-                    let d_0 = e_0;
-                    let d_1 = e_1;
-                    let d_2 = e_2 * m_1;
-                    let d_3 = e_3;
-                    let d_4 = e_4 * m_2;
-                    let d_5 = e_5 * m_3;
-                    let d_6 = e_6 * m_4;
-                    let d_7 = e_7;
-                    let d_8 = e_8 * m_5;
+                                let e_0 = f_0;
+                                let e_1 = f_1;
+                                let e_2 = f_2 - f_3;
+                                let e_3 = f_2 + f_3;
+                                let e_4 = f_4;
+                                let e_5 = f_5 - f_7;
+                                let e_6 = f_6;
+                                let e_7 = f_5 + f_7;
+                                let e_8 = f_4 + f_6;
 
-                    let c_0 = d_0 + d_1;
-                    let c_1 = d_0 - d_1;
-                    let c_2 = d_2 - d_3;
-                    let c_3 = d_3;
-                    let c_4 = d_4 + d_8;
-                    let c_5 = d_5 + d_7;
-                    let c_6 = d_6 - d_8;
-                    let c_7 = d_7;
-                    let c_8 = c_5 - c_6;
+                                let d_0 = e_0;
+                                let d_1 = e_1;
+                                let d_2 = e_2 * m_1;
+                                let d_3 = e_3;
+                                let d_4 = e_4 * m_2;
+                                let d_5 = e_5 * m_3;
+                                let d_6 = e_6 * m_4;
+                                let d_7 = e_7;
+                                let d_8 = e_8 * m_5;
 
-                    let b_0 = c_0 + c_3;
-                    let b_1 = c_1 + c_2;
-                    let b_2 = c_1 - c_2;
-                    let b_3 = c_0 - c_3;
-                    let b_4 = c_4 - c_8;
-                    let b_5 = c_8;
-                    let b_6 = c_6 - c_7;
-                    let b_7 = c_7;
+                                let c_0 = d_0 + d_1;
+                                let c_1 = d_0 - d_1;
+                                let c_2 = d_2 - d_3;
+                                let c_3 = d_3;
+                                let c_4 = d_4 + d_8;
+                                let c_5 = d_5 + d_7;
+                                let c_6 = d_6 - d_8;
+                                let c_7 = d_7;
+                                let c_8 = c_5 - c_6;
 
-                    temp_components[0 * 8 + i] = b_0 + b_7;
-                    temp_components[1 * 8 + i] = b_1 + b_6;
-                    temp_components[2 * 8 + i] = b_2 + b_5;
-                    temp_components[3 * 8 + i] = b_3 + b_4;
-                    temp_components[4 * 8 + i] = b_3 - b_4;
-                    temp_components[5 * 8 + i] = b_2 - b_5;
-                    temp_components[6 * 8 + i] = b_1 - b_6;
-                    temp_components[7 * 8 + i] = b_0 - b_7;
-                }
+                                let b_0 = c_0 + c_3;
+                                let b_1 = c_1 + c_2;
+                                let b_2 = c_1 - c_2;
+                                let b_3 = c_0 - c_3;
+                                let b_4 = c_4 - c_8;
+                                let b_5 = c_8;
+                                let b_6 = c_6 - c_7;
+                                let b_7 = c_7;
 
-                // Process rows
-                for i in 0..8 {
-                    let g_0 = temp_components[i * 8 + 0] * s_0;
-                    let g_1 = temp_components[i * 8 + 4] * s_4;
-                    let g_2 = temp_components[i * 8 + 2] * s_2;
-                    let g_3 = temp_components[i * 8 + 6] * s_6;
-                    let g_4 = temp_components[i * 8 + 5] * s_5;
-                    let g_5 = temp_components[i * 8 + 1] * s_1;
-                    let g_6 = temp_components[i * 8 + 7] * s_7;
-                    let g_7 = temp_components[i * 8 + 3] * s_3;
+                                temp_components[0 * 8 + col] = b_0 + b_7;
+                                temp_components[1 * 8 + col] = b_1 + b_6;
+                                temp_components[2 * 8 + col] = b_2 + b_5;
+                                temp_components[3 * 8 + col] = b_3 + b_4;
+                                temp_components[4 * 8 + col] = b_3 - b_4;
+                                temp_components[5 * 8 + col] = b_2 - b_5;
+                                temp_components[6 * 8 + col] = b_1 - b_6;
+                                temp_components[7 * 8 + col] = b_0 - b_7;
+                            }
 
-                    let f_0 = g_0;
-                    let f_1 = g_1;
-                    let f_2 = g_2;
-                    let f_3 = g_3;
-                    let f_4 = g_4 - g_7;
-                    let f_5 = g_5 + g_6;
-                    let f_6 = g_5 - g_6;
-                    let f_7 = g_4 + g_7;
+                            // Process rows
+                            for row in 0..8 {
+                                let g_0 = temp_components[row * 8 + 0] * s_0;
+                                let g_1 = temp_components[row * 8 + 4] * s_4;
+                                let g_2 = temp_components[row * 8 + 2] * s_2;
+                                let g_3 = temp_components[row * 8 + 6] * s_6;
+                                let g_4 = temp_components[row * 8 + 5] * s_5;
+                                let g_5 = temp_components[row * 8 + 1] * s_1;
+                                let g_6 = temp_components[row * 8 + 7] * s_7;
+                                let g_7 = temp_components[row * 8 + 3] * s_3;
 
-                    let e_0 = f_0;
-                    let e_1 = f_1;
-                    let e_2 = f_2 - f_3;
-                    let e_3 = f_2 + f_3;
-                    let e_4 = f_4;
-                    let e_5 = f_5 - f_7;
-                    let e_6 = f_6;
-                    let e_7 = f_5 + f_7;
-                    let e_8 = f_4 + f_6;
+                                let f_0 = g_0;
+                                let f_1 = g_1;
+                                let f_2 = g_2;
+                                let f_3 = g_3;
+                                let f_4 = g_4 - g_7;
+                                let f_5 = g_5 + g_6;
+                                let f_6 = g_5 - g_6;
+                                let f_7 = g_4 + g_7;
 
-                    let d_0 = e_0;
-                    let d_1 = e_1;
-                    let d_2 = e_2 * m_1;
-                    let d_3 = e_3;
-                    let d_4 = e_4 * m_2;
-                    let d_5 = e_5 * m_3;
-                    let d_6 = e_6 * m_4;
-                    let d_7 = e_7;
-                    let d_8 = e_8 * m_5;
+                                let e_0 = f_0;
+                                let e_1 = f_1;
+                                let e_2 = f_2 - f_3;
+                                let e_3 = f_2 + f_3;
+                                let e_4 = f_4;
+                                let e_5 = f_5 - f_7;
+                                let e_6 = f_6;
+                                let e_7 = f_5 + f_7;
+                                let e_8 = f_4 + f_6;
 
-                    let c_0 = d_0 + d_1;
-                    let c_1 = d_0 - d_1;
-                    let c_2 = d_2 - d_3;
-                    let c_3 = d_3;
-                    let c_4 = d_4 + d_8;
-                    let c_5 = d_5 + d_7;
-                    let c_6 = d_6 - d_8;
-                    let c_7 = d_7;
-                    let c_8 = c_5 - c_6;
+                                let d_0 = e_0;
+                                let d_1 = e_1;
+                                let d_2 = e_2 * m_1;
+                                let d_3 = e_3;
+                                let d_4 = e_4 * m_2;
+                                let d_5 = e_5 * m_3;
+                                let d_6 = e_6 * m_4;
+                                let d_7 = e_7;
+                                let d_8 = e_8 * m_5;
 
-                    let b_0 = c_0 + c_3;
-                    let b_1 = c_1 + c_2;
-                    let b_2 = c_1 - c_2;
-                    let b_3 = c_0 - c_3;
-                    let b_4 = c_4 - c_8;
-                    let b_5 = c_8;
-                    let b_6 = c_6 - c_7;
-                    let b_7 = c_7;
+                                let c_0 = d_0 + d_1;
+                                let c_1 = d_0 - d_1;
+                                let c_2 = d_2 - d_3;
+                                let c_3 = d_3;
+                                let c_4 = d_4 + d_8;
+                                let c_5 = d_5 + d_7;
+                                let c_6 = d_6 - d_8;
+                                let c_7 = d_7;
+                                let c_8 = c_5 - c_6;
 
-                    mcu_component[i * 8 + 0] = (b_0 + b_7 + 0.5) as i32;
-                    mcu_component[i * 8 + 1] = (b_1 + b_6 + 0.5) as i32;
-                    mcu_component[i * 8 + 2] = (b_2 + b_5 + 0.5) as i32;
-                    mcu_component[i * 8 + 3] = (b_3 + b_4 + 0.5) as i32;
-                    mcu_component[i * 8 + 4] = (b_3 - b_4 + 0.5) as i32;
-                    mcu_component[i * 8 + 5] = (b_2 - b_5 + 0.5) as i32;
-                    mcu_component[i * 8 + 6] = (b_1 - b_6 + 0.5) as i32;
-                    mcu_component[i * 8 + 7] = (b_0 - b_7 + 0.5) as i32;
+                                let b_0 = c_0 + c_3;
+                                let b_1 = c_1 + c_2;
+                                let b_2 = c_1 - c_2;
+                                let b_3 = c_0 - c_3;
+                                let b_4 = c_4 - c_8;
+                                let b_5 = c_8;
+                                let b_6 = c_6 - c_7;
+                                let b_7 = c_7;
+
+                                mcu_component[row * 8 + 0] = (b_0 + b_7 + 0.5) as i32;
+                                mcu_component[row * 8 + 1] = (b_1 + b_6 + 0.5) as i32;
+                                mcu_component[row * 8 + 2] = (b_2 + b_5 + 0.5) as i32;
+                                mcu_component[row * 8 + 3] = (b_3 + b_4 + 0.5) as i32;
+                                mcu_component[row * 8 + 4] = (b_3 - b_4 + 0.5) as i32;
+                                mcu_component[row * 8 + 5] = (b_2 - b_5 + 0.5) as i32;
+                                mcu_component[row * 8 + 6] = (b_1 - b_6 + 0.5) as i32;
+                                mcu_component[row * 8 + 7] = (b_0 - b_7 + 0.5) as i32;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1009,23 +1072,42 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn ycbcr_to_rgb(&self, mcus: &mut Vec<MCU>) -> Result<(), Error> {
-        for mcu in mcus {
-            for i in 0..64 {
-                let y = mcu.y[i] as f32;
-                let cb = mcu.cb[i] as f32;
-                let cr = mcu.cr[i] as f32;
+        for y in (0..self.mcu_height).step_by(self.vertical_sampling_factor as usize) {
+            for x in (0..self.mcu_width).step_by(self.horizontal_sampling_factor as usize) {
+                let cbcr_mcu_index = (y * self.mcu_r_width + x) as usize;
+                let cbcr_mcu = mcus[cbcr_mcu_index].clone();
 
-                let mut r = y + 1.402 * cr + 128.0;
-                let mut g = y - 0.344136 * cb - 0.714136 * cr + 128.0;
-                let mut b = y + 1.772 * cb + 128.0;
+                for v in (0..self.vertical_sampling_factor).rev() {
+                    for h in (0..self.horizontal_sampling_factor).rev() {
+                        let y_mcu_index = ((y + v as u32) * self.mcu_r_width + x + h as u32) as usize;
+                        let mcu = &mut mcus[y_mcu_index];
 
-                r = r.max(0.0).min(255.0);
-                g = g.max(0.0).min(255.0);
-                b = b.max(0.0).min(255.0);
+                        for y in (0..8).rev() {
+                            for x in (0..8).rev() {
+                                let y_index = (y * 8 + x) as usize;
+                                let cbcr_row = y / self.vertical_sampling_factor + 4 * v;
+                                let cbcr_col = x / self.horizontal_sampling_factor + 4 * h;
+                                let cbcr_index = (cbcr_row * 8 + cbcr_col) as usize;
 
-                mcu.y[i] = r as i32;
-                mcu.cb[i] = g as i32;
-                mcu.cr[i] = b as i32;
+                                let y = mcu.y[y_index] as f32;
+                                let cb = cbcr_mcu.cb[cbcr_index] as f32;
+                                let cr = cbcr_mcu.cr[cbcr_index] as f32;
+
+                                let mut r = y + 1.402 * cr + 128.0;
+                                let mut g = y - 0.344136 * cb - 0.714136 * cr + 128.0;
+                                let mut b = y + 1.772 * cb + 128.0;
+
+                                r = r.max(0.0).min(255.0);
+                                g = g.max(0.0).min(255.0);
+                                b = b.max(0.0).min(255.0);
+
+                                mcu.y[y_index] = r as i32;
+                                mcu.cb[y_index] = g as i32;
+                                mcu.cr[y_index] = b as i32;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1075,7 +1157,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
                             self.read_sos_bitstream()?;
                         }
                         JpegMarker::EOI => {
-                            println!("End of image marker found");
                             break;
                         }
                         _ => {
