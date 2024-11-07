@@ -1,8 +1,10 @@
 use std::f32::consts::PI;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::io::{Cursor, Error, ErrorKind, Read, Seek};
 use crate::bitreader::BitReader;
+use crate::utils::info_display::JpegInfo;
 use crate::utils::marker::Marker;
+use crate::utils::types::ByteOrder;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JpegMarker {
@@ -320,7 +322,7 @@ const ZIGZAG_MAP: [u8; 64] = [
     53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QuantizationTable {
     pub id: u8,
     pub precision: u8,
@@ -335,6 +337,19 @@ pub struct HuffmanTable {
     pub offsets: Vec<u32>,
     pub symbols: Vec<u8>,
     pub codes: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArithmeticCodingValue {
+    pub value: u8,
+    pub length: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArithmeticCodingTable {
+    pub table_class: u8,
+    pub identifier: u8,
+    pub values: Vec<ArithmeticCodingValue>,
 }
 
 #[derive(Debug)]
@@ -354,9 +369,54 @@ pub struct MCU {
     cr: Vec<i32>,
 }
 
+#[derive(Debug, Clone)]
+pub struct JFIFHeader {
+    pub identifier: String,     // "JFIF\0" (5 bytes)
+    pub version_major: u8,      // JFIF format version major
+    pub version_minor: u8,      // JFIF format version minor
+    pub density_units: u8,      // Units for pixel density (0 = no units, 1 = pixels per inch, 2 = pixels per cm)
+    pub x_density: u16,        // Horizontal pixel density
+    pub y_density: u16,        // Vertical pixel density
+    pub thumbnail_width: u8,   // Width of embedded thumbnail (0 if no thumbnail)
+    pub thumbnail_height: u8,  // Height of embedded thumbnail (0 if no thumbnail)
+    pub thumbnail_data: Vec<u8>, // RGB thumbnail data if present
+}
+
+#[derive(Debug, Clone)]
+pub struct ExifHeader {
+    pub identifier: String,     // "Exif\0\0" (6 bytes)
+    pub byte_order: ByteOrder,  // Either "II" (little-endian) or "MM" (big-endian)
+    pub first_ifd_offset: u32, // Offset to first IFD
+    pub ifd_entries: Vec<IFDEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IFDEntry {
+    pub tag: u16,
+    pub format: u16,
+    pub components: u32,
+    pub value_offset: u32,
+}
+
 pub struct JpegDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    jfif_header: Option<JFIFHeader>,
+    exif_header: Option<ExifHeader>,
+    comments: Vec<String>,
+    quantization_tables: Vec<QuantizationTable>,
+    ac_huffman_tables: Vec<HuffmanTable>,
+    dc_huffman_tables: Vec<HuffmanTable>,
+    ac_arithmetic_tables: Vec<ArithmeticCodingTable>,
+    dc_arithmetic_tables: Vec<ArithmeticCodingTable>,
+    start_of_spectral_selection: u8,
+    end_of_spectral_selection: u8,
+    successive_approximation_high: u8,
+    successive_approximation_low: u8,
+    horizontal_sampling_factor: u8,
+    vertical_sampling_factor: u8,
+    restart_interval: u16,
+    // Internal state
     mcu_width: u32,
     mcu_height: u32,
     mcu_r_width: u32,
@@ -365,45 +425,8 @@ pub struct JpegDecoder<R: Read + Seek> {
     component_count: u8,
     components_in_scan: u8,
     components: Vec<ColorComponentInfo>,
-    quantization_tables: Vec<QuantizationTable>,
-    ac_huffman_tables: Vec<HuffmanTable>,
-    dc_huffman_tables: Vec<HuffmanTable>,
-    start_of_spectral_selection: u8,
-    end_of_spectral_selection: u8,
-    successive_approximation_high: u8,
-    successive_approximation_low: u8,
-    horizontal_sampling_factor: u8,
-    vertical_sampling_factor: u8,
-    restart_interval: u16,
     data: Vec<u8>,
     reader: BitReader<R>,
-}
-
-impl<R: Read + Seek> Debug for JpegDecoder<R> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JpegDecoder")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("mcu_width", &self.mcu_width)
-            .field("mcu_height", &self.mcu_height)
-            .field("mcu_r_width", &self.mcu_r_width)
-            .field("mcu_r_height", &self.mcu_r_height)
-            .field("precision", &self.precision)
-            .field("component_count", &self.component_count)
-            .field("components", &self.components)
-            .field("quantization_tables", &self.quantization_tables)
-            .field("ac_huffman_tables", &self.ac_huffman_tables)
-            .field("dc_huffman_tables", &self.dc_huffman_tables)
-            .field("start_of_spectral_selection", &self.start_of_spectral_selection)
-            .field("end_of_spectral_selection", &self.end_of_spectral_selection)
-            .field("successive_approximation_high", &self.successive_approximation_high)
-            .field("successive_approximation_low", &self.successive_approximation_low)
-            .field("horizontal_sampling_factor", &self.horizontal_sampling_factor)
-            .field("vertical_sampling_factor", &self.vertical_sampling_factor)
-            .field("restart_interval", &self.restart_interval)
-            .field("data", &self.data.len())
-            .finish()
-    }
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
@@ -411,6 +434,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Self {
             width: 0,
             height: 0,
+            comments: Vec::new(),
+            jfif_header: None,
+            exif_header: None,
             mcu_width: 0,
             mcu_height: 0,
             mcu_r_width: 0,
@@ -426,6 +452,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             quantization_tables: Vec::new(),
             ac_huffman_tables: Vec::new(),
             dc_huffman_tables: Vec::new(),
+            ac_arithmetic_tables: Vec::new(),
+            dc_arithmetic_tables: Vec::new(),
             horizontal_sampling_factor: 1,
             vertical_sampling_factor: 1,
             restart_interval: 0,
@@ -460,6 +488,211 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     pub fn huffman_tables(&self) -> [&Vec<HuffmanTable>; 2] {
         [&self.ac_huffman_tables, &self.dc_huffman_tables]
+    }
+
+    pub fn get_data(&self) -> JpegInfo {
+        JpegInfo {
+            width: self.width,
+            height: self.height,
+            color_depth: self.precision,
+            number_of_components: self.component_count,
+            jfif_header: self.jfif_header.clone(),
+            exif_header: self.exif_header.clone(),
+            quantization_tables: self.quantization_tables.clone(),
+            ac_huffman_tables: self.ac_huffman_tables.clone(),
+            dc_huffman_tables: self.dc_huffman_tables.clone(),
+            ac_arithmetic_tables: self.ac_arithmetic_tables.clone(),
+            dc_arithmetic_tables: self.dc_arithmetic_tables.clone(),
+            spectral_selection: (self.start_of_spectral_selection, self.end_of_spectral_selection),
+            successive_approximation: (self.successive_approximation_high, self.successive_approximation_low),
+            horizontal_sampling_factor: self.horizontal_sampling_factor,
+            vertical_sampling_factor: self.vertical_sampling_factor,
+            restart_interval: self.restart_interval,
+            comments: self.comments.clone(),
+        }
+    }
+
+    fn read_com(&mut self) -> Result<(), Error> {
+        // Read marker length (2 bytes)
+        let length = self.reader.read_bits(16)? as usize - 2; // Subtract length field size
+
+        // Read comment text
+        let mut comment_bytes = Vec::with_capacity(length);
+        for _ in 0..length {
+            comment_bytes.push(self.reader.read_bits(8)? as u8);
+        }
+
+        // Try to convert to UTF-8, fallback to lossy conversion if invalid
+        let text = String::from_utf8_lossy(&comment_bytes).to_string();
+
+        self.comments.push(text);
+
+        Ok(())
+    }
+
+    fn read_app0_jfif(&mut self) -> Result<(), Error> {
+        // Skip marker length (2 bytes)
+        let length = self.reader.read_u16()?;
+
+        // Read JFIF identifier (5 bytes)
+        let mut identifier = Vec::new();
+        for _ in 0..5 {
+            identifier.push(self.reader.read_u8()?);
+        }
+
+        let identifier = String::from_utf8_lossy(&identifier).to_string();
+
+        if identifier != "JFIF\0" {
+            return Err(Error::new(ErrorKind::InvalidData, "Invalid JFIF signature"));
+        }
+
+        // Read version
+        let version_major = self.reader.read_bits(8)? as u8;
+        let version_minor = self.reader.read_bits(8)? as u8;
+
+        // Read density information
+        let density_units = self.reader.read_bits(8)? as u8;
+        let x_density = self.reader.read_bits(16)? as u16;
+        let y_density = self.reader.read_bits(16)? as u16;
+
+        // Read thumbnail dimensions
+        let thumbnail_width = self.reader.read_bits(8)? as u8;
+        let thumbnail_height = self.reader.read_bits(8)? as u8;
+
+        // Read thumbnail data if present
+        let thumbnail_size = thumbnail_width * thumbnail_height * 3; // RGB data
+        let mut thumbnail_data = Vec::new();
+
+        if thumbnail_size > 0 {
+            for _ in 0..thumbnail_size {
+                thumbnail_data.push(self.reader.read_bits(8)? as u8);
+            }
+        }
+
+        self.jfif_header = Some(JFIFHeader {
+            identifier,
+            version_major,
+            version_minor,
+            density_units,
+            x_density,
+            y_density,
+            thumbnail_width,
+            thumbnail_height,
+            thumbnail_data,
+        });
+
+        Ok(())
+    }
+
+    fn read_app1_exif(&mut self) -> Result<(), Error> {
+        // Skip marker length (2 bytes)
+        self.reader.read_bits(16)? as usize;
+
+        // Read Exif identifier (6 bytes)
+        let mut identifier = Vec::new();
+        for _ in 0..6 {
+            identifier.push(self.reader.read_bits(8)? as u8);
+        }
+
+        let identifier = String::from_utf8_lossy(&identifier).to_string();
+
+        if identifier != "Exif\0\0" {
+            return Err(Error::new(ErrorKind::InvalidData, "Invalid Exif signature"));
+        }
+
+        // Read byte order marker
+        let mut byte_order_marker = Vec::new();
+        for _ in 0..2 {
+            byte_order_marker.push(self.reader.read_bits(8)? as u8);
+        }
+
+        let byte_order_str = String::from_utf8_lossy(&byte_order_marker).to_string();
+
+        let byte_order = match byte_order_str.as_str() {
+            "II" => Some(ByteOrder::LittleEndian),
+            "MM" => Some(ByteOrder::BigEndian),
+            // Try to figure out byte order from the 42 constant later
+            _ => None
+        };
+
+        // Read 42 constant
+        let byte_order = match byte_order {
+            Some(_) => {
+                self.reader.read_bits(16)?;
+
+                byte_order.unwrap()
+            }
+            None => {
+                let forty_two = self.reader.read_bits(16)?;
+
+                if forty_two == 42 {
+                    ByteOrder::LittleEndian
+                } else if forty_two.swap_bytes() == 42 {
+                    ByteOrder::BigEndian
+                } else {
+                    // Something is very wrong, let's warn and assume little-endian
+                    eprintln!("Invalid 42 constant in Exif header, assuming little-endian byte order");
+                    ByteOrder::LittleEndian
+                }
+            }
+        };
+
+        // Read first IFD offset
+        let first_ifd_offset = match byte_order {
+            ByteOrder::LittleEndian => self.reader.read_bits(32)?,
+            ByteOrder::BigEndian => self.reader.read_bits(32)?.swap_bytes(),
+        };
+
+        // Read IFD entries
+        let mut ifd_entries = Vec::new();
+
+        // Seek to first IFD
+        self.reader.seek(std::io::SeekFrom::Start(first_ifd_offset as u64))?;
+
+        // Read number of IFD entries
+        let num_entries = match byte_order {
+            ByteOrder::LittleEndian => self.reader.read_bits(16)?,
+            ByteOrder::BigEndian => self.reader.read_bits(16)?.swap_bytes(),
+        };
+
+        // Read each IFD entry
+        for _ in 0..num_entries {
+            let tag = match byte_order {
+                ByteOrder::LittleEndian => self.reader.read_u16()?,
+                ByteOrder::BigEndian => self.reader.read_u16()?.swap_bytes(),
+            };
+
+            let format = match byte_order {
+                ByteOrder::LittleEndian => self.reader.read_u16()?,
+                ByteOrder::BigEndian => self.reader.read_u16()?.swap_bytes(),
+            };
+
+            let components = match byte_order {
+                ByteOrder::LittleEndian => self.reader.read_bits(32)?,
+                ByteOrder::BigEndian => self.reader.read_bits(32)?.swap_bytes(),
+            };
+
+            let value_offset = match byte_order {
+                ByteOrder::LittleEndian => self.reader.read_bits(32)?,
+                ByteOrder::BigEndian => self.reader.read_bits(32)?.swap_bytes(),
+            };
+
+            ifd_entries.push(IFDEntry {
+                tag,
+                format,
+                components,
+                value_offset,
+            });
+        }
+
+        self.exif_header = Some(ExifHeader {
+            identifier,
+            byte_order,
+            first_ifd_offset,
+            ifd_entries,
+        });
+
+        Ok(())
     }
 
     fn read_sof_info(&mut self) -> Result<(), Error> {
@@ -618,6 +851,59 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid Huffman table class")),
             }
         }
+
+        Ok(())
+    }
+
+    fn read_dac(&mut self) -> Result<(), Error> {
+        // Read length of DAC segment (includes the length bytes)
+        let mut data_length = self.reader.read_bits(16)? as usize - 2;
+
+        let mut ac_tables = Vec::new();
+        let mut dc_tables = Vec::new();
+
+        // Read tables while we have data
+        while data_length > 0 {
+            // Read table class and identifier
+            let table_info = self.reader.read_bits(8)? as u8;
+            let table_class = (table_info >> 4) & 0x0F;  // Upper 4 bits
+            let identifier = table_info & 0x0F;         // Lower 4 bits
+
+            // Read conditioning values
+            let value = self.reader.read_bits(8)? as u8;
+
+            // For DC tables (class 0), the value represents:
+            // - Lower 4 bits: Conditioning length (Li)
+            // - Upper 4 bits: Conditioning value (Vi)
+            // For AC tables (class 1), all 8 bits are the value
+            let (value, length) = if table_class == 0 {
+                ((value >> 4) & 0x0F, value & 0x0F)
+            } else {
+                (value, 0) // AC tables don't use length
+            };
+
+            let ac_value = ArithmeticCodingValue {
+                value,
+                length,
+            };
+
+            let table = ArithmeticCodingTable {
+                table_class,
+                identifier,
+                values: Vec::from([ac_value]),
+            };
+
+            match table_class {
+                0 => dc_tables.push(table),
+                1 => ac_tables.push(table),
+                _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid DAC table class")),
+            }
+
+            data_length -= 2;
+        }
+
+        self.ac_arithmetic_tables = ac_tables;
+        self.dc_arithmetic_tables = dc_tables;
 
         Ok(())
     }
@@ -1146,12 +1432,18 @@ impl<R: Read + Seek> JpegDecoder<R> {
         while let Ok(marker) = self.reader.next_marker(&JPEG_MARKERS) {
             match marker {
                 Some(marker) => {
+                    //log_info!("Found marker: {:?} {}");
+                    //println!("Found marker: {:?}", marker);
                     match marker {
                         JpegMarker::SOI => {}
+                        JpegMarker::COM => self.read_com()?,
+                        JpegMarker::APP0 => self.read_app0_jfif()?,
+                        JpegMarker::APP1 => self.read_app1_exif()?,
                         JpegMarker::SOF0 => self.read_sof_info()?,
                         JpegMarker::DRI => self.read_restart_interval()?,
                         JpegMarker::DQT => self.read_quantization_table()?,
                         JpegMarker::DHT => self.read_huffman_table()?,
+                        JpegMarker::DAC => self.read_dac()?,
                         JpegMarker::SOS => {
                             self.read_sos_info()?;
                             self.read_sos_bitstream()?;

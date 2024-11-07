@@ -6,12 +6,13 @@ use crate::decoders::gif::GifDecoder;
 use crate::decoders::jpeg::JpegDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 
-pub use utils::{bitreader, writer};
+pub use utils::{bitreader, writer, logger};
 
 use std::fmt::{Debug};
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path};
+use crate::utils::info_display::ImageInfo;
 
 // TODO move these somewhere
 fn drop_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
@@ -71,7 +72,6 @@ pub enum PixelFormat {
     LA8,
 }
 
-#[derive(Debug)]
 pub enum Decoders<R: Read + Seek> {
     Jpeg(JpegDecoder<R>),
     JpegLs(JpegLsDecoder<R>),
@@ -214,7 +214,6 @@ pub struct Image {
     pub frames: Vec<ImageFrame>,
 }
 
-#[derive(Debug)]
 pub struct Vexel<R: Read + Seek> {
     decoder: Decoders<R>,
     format: ImageFormat,
@@ -388,9 +387,16 @@ impl<R: Read + Seek> Vexel<R> {
             Decoders::Unknown => Err(Error::new(ErrorKind::InvalidData, "Unknown image format")),
         }
     }
-
-    pub fn decoder(&self) -> &Decoders<R> {
-        &self.decoder
+    
+    pub fn get_image_info(&mut self) -> ImageInfo {
+        match &mut self.decoder {
+            Decoders::Jpeg(jpeg_decoder) => {
+                let image_data = jpeg_decoder.get_data();
+                
+                ImageInfo::Jpeg(image_data)
+            }
+            _ => unimplemented!(),
+        }
     }
 
     fn try_guess_format(reader: &mut R) -> Result<ImageFormat, Error> {

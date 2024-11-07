@@ -116,28 +116,34 @@ impl<R: Read + Seek> BitReader<R> {
     /// - `std::io::Error` if an I/O error occurs
     pub fn next_marker<M: Marker>(&mut self, known_markers: &[M]) -> Result<Option<M>, std::io::Error> {
         let marker_set: HashSet<u16> = known_markers.iter().map(|m| m.to_u16()).collect();
-        let mut buffer = [0u8; 1];
+        let mut buffer = [0u8; 2];
+        let mut sliding_window = [0u8; 2];
 
-        // TODO - patterns like 0xFFFF11 are probably handled incorrectly and 11 is being skipped
+        // Read first byte for initial sliding window
+        match self.reader.read_exact(&mut buffer[..1]) {
+            Ok(_) => sliding_window[0] = buffer[0],
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e),
+        }
+
         loop {
-            match self.reader.read_exact(&mut buffer) {
-                Ok(_) => {},
+            // Read next byte
+            match self.reader.read_exact(&mut buffer[..1]) {
+                Ok(_) => {
+                    // Update sliding window
+                    sliding_window[1] = buffer[0];
+
+                    // Check if sliding window matches any of the known markers
+                    let potential_marker = u16::from_be_bytes(sliding_window);
+                    if marker_set.contains(&potential_marker) {
+                        return Ok(M::from_u16(potential_marker));
+                    }
+
+                    // Slide window forward
+                    sliding_window[0] = sliding_window[1];
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(e),
-            }
-
-            if buffer[0] == 0xFF {
-                // Read the next byte
-                match self.reader.read_exact(&mut buffer) {
-                    Ok(_) => {},
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                    Err(e) => return Err(e),
-                }
-                
-                let marker = u16::from_be_bytes([0xFF, buffer[0]]);
-                if marker_set.contains(&marker) {
-                    return Ok(M::from_u16(marker));
-                }
             }
         }
     }
