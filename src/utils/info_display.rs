@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
-use crate::decoders::jpeg::{ArithmeticCodingTable, ExifHeader, HuffmanTable, JFIFHeader, QuantizationTable};
+use crate::decoders::jpeg::{ArithmeticCodingTable, ExifHeader, HuffmanTable, JFIFHeader, QuantizationTable, ScanInfo};
 
 fn print_matrix<T: Display + Debug>(f: &mut Formatter<'_>, values: &Vec<T>, width: usize) -> std::fmt::Result {
     if values.is_empty() {
@@ -33,6 +33,24 @@ fn print_matrix<T: Display + Debug>(f: &mut Formatter<'_>, values: &Vec<T>, widt
     Ok(())
 }
 
+fn print_huffman_table(f: &mut Formatter<'_>, table: &HuffmanTable) -> std::fmt::Result {
+    writeln!(f, "Table ID: {}", table.id)?;
+
+    for j in 0..16 {
+        write!(f, "{}: ", j + 1)?;
+
+        let start = table.offsets[j];
+        let end = table.offsets[j + 1];
+
+        for k in start..end {
+            write!(f, "0x{:02X}, ", table.symbols[k as usize])?;
+        }
+        writeln!(f)?;
+    }
+
+    Ok(())
+}
+
 pub enum ImageInfo {
     Jpeg(JpegInfo),
     Gif,
@@ -60,10 +78,9 @@ pub struct JpegInfo {
     pub jfif_header: Option<JFIFHeader>,
     pub exif_header: Option<ExifHeader>,
     pub quantization_tables: Vec<QuantizationTable>,
-    pub ac_huffman_tables: Vec<HuffmanTable>,
-    pub dc_huffman_tables: Vec<HuffmanTable>,
     pub ac_arithmetic_tables: Vec<ArithmeticCodingTable>,
     pub dc_arithmetic_tables: Vec<ArithmeticCodingTable>,
+    pub scans: Vec<ScanInfo>,
     pub spectral_selection: (u8, u8),
     pub successive_approximation: (u8, u8),
     pub horizontal_sampling_factor: u8,
@@ -81,13 +98,13 @@ impl Debug for JpegInfo {
         writeln!(f, "Vertical sampling factor: {}", self.vertical_sampling_factor)?;
         writeln!(f, "Restart interval: {}", self.restart_interval)?;
 
-        writeln!(f)?;
-
         writeln!(f, "====================")?;
 
         for comment in &self.comments {
             writeln!(f, "Comment: {}", comment)?;
         }
+
+        writeln!(f, "====================")?;
 
         match &self.jfif_header {
             Some(jfif_header) => {
@@ -122,52 +139,59 @@ impl Debug for JpegInfo {
 
         writeln!(f, "====================")?;
 
-        writeln!(f, "Quantization tables:")?;
-
         for table in &self.quantization_tables {
-            writeln!(f, "  ID: {}", table.id)?;
+            writeln!(f, "Quantization table:")?;
             writeln!(f, "  Precision: {}", table.precision)?;
-            writeln!(f, "  Length: {}", table.length)?;
-            writeln!(f, "  Table:")?;
+            writeln!(f, "  ID: {}", table.id)?;
 
             print_matrix(f, &table.table, 8)?;
+            writeln!(f, "-----------------")?;
         }
 
         writeln!(f, "====================")?;
 
-        writeln!(f, "AC Huffman tables:")?;
+        for scan in &self.scans {
+            writeln!(f, "Scan:")?;
+            writeln!(f, "  Components:")?;
 
-        for table in &self.ac_huffman_tables {
-            writeln!(f, "  ID: {}", table.id)?;
-            writeln!(f, "  Class: {}", table.class)?;
+            writeln!(f, "  Spectral selection: {}-{}", scan.start_spectral, scan.end_spectral)?;
+            writeln!(f, "  Successive approximation: {}-{}", scan.successive_low, scan.successive_high)?;
+            writeln!(f, "  Data length: {}", scan.data_length)?;
 
-            writeln!(f, "  Offsets:")?;
-            print_matrix(f, &table.offsets, 8)?;
+            for component in &scan.components {
+                writeln!(f, "    Component: {}", component.component_id)?;
+                writeln!(f, "    AC table selector: {}", component.ac_table_selector)?;
+                writeln!(f, "    DC table selector: {}", component.dc_table_selector)?;
+            }
 
-            writeln!(f, "  Symbols:")?;
-            print_matrix(f, &table.symbols, 8)?;
+            writeln!(f, "====================")?;
 
-            writeln!(f, "  Codes:")?;
-            print_matrix(f, &table.codes, 8)?;
+            writeln!(f, "AC Huffman tables:")?;
+            for table in scan.ac_tables.iter() {
+                writeln!(f, "  ID: {}", table.id)?;
+                writeln!(f, "  Class: {}", table.class)?;
+
+                writeln!(f, "  Values:")?;
+                print_huffman_table(f, table)?;
+                writeln!(f, "-----------------")?;
+            }
+
+            writeln!(f, "====================")?;
+
+            writeln!(f, "DC Huffman tables:")?;
+            for table in scan.dc_tables.iter() {
+                writeln!(f, "  ID: {}", table.id)?;
+                writeln!(f, "  Class: {}", table.class)?;
+
+                writeln!(f, "  Values:")?;
+                print_huffman_table(f, table)?;
+
+                writeln!(f, "-----------------")?;
+            }
+
+            writeln!(f, "====================")?;
         }
 
-        writeln!(f, "====================")?;
-
-        writeln!(f, "DC Huffman tables:")?;
-
-        for table in &self.dc_huffman_tables {
-            writeln!(f, "  ID: {}", table.id)?;
-            writeln!(f, "  Class: {}", table.class)?;
-
-            writeln!(f, "  Offsets:")?;
-            print_matrix(f, &table.offsets, 8)?;
-
-            writeln!(f, "  Symbols:")?;
-            print_matrix(f, &table.symbols, 8)?;
-
-            writeln!(f, "  Codes:")?;
-            print_matrix(f, &table.codes, 8)?;
-        }
 
         writeln!(f, "====================")?;
 

@@ -71,6 +71,7 @@ macro_rules! log_error {
     };
 }
 
+#[derive(Debug, PartialEq)]
 pub enum LogLevel {
     Debug,
     Info,
@@ -109,7 +110,7 @@ impl Logger {
         };
 
         println!(
-            "{} | {}{:5}{}| {}",
+            "{} [{}{:5}{}] {}",
             Self::get_timestamp(),
             color,
             level_str,

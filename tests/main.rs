@@ -7,7 +7,7 @@ mod tests {
 
     const PATH_JPEG_RED: &str = "./tests/images/jpeg/1x1_red.jpg";
     const PATH_JPEG_CAT: &str = "./tests/images/jpeg/cat.jpg";
-    const PATH_JPEG_SUBSAMPLED: &str = "./tests/images/jpeg/fish.jpg";
+    const PATH_JPEG_PROGRESSIVE: &str = "./tests/images/jpeg/earth.jpg";
     const PATH_JPEG_LS_1: &str = "./tests/images/jpeg-ls/test_4x4.jls";
     const PATH_GIF_1: &str = "./tests/images/gif/still_transparent.gif";
     const PATH_PPM_1: &str = "./tests/images/netpbm/p5_16bit.pgm";
@@ -62,7 +62,7 @@ mod tests {
 
         Ok(())
     }
-    
+
     #[test]
     pub fn test_jpeg_decode() -> Result<(), Box<dyn std::error::Error>> {
         let mut decoder = Vexel::open(PATH_JPEG_CAT)?;
@@ -98,10 +98,10 @@ mod tests {
             }
         }
 
-        decoder = Vexel::open(PATH_JPEG_SUBSAMPLED)?;
+        decoder = Vexel::open(PATH_JPEG_PROGRESSIVE)?;
 
         match decoder.decode() {
-            Ok(image) => {
+            Ok(_) => {
                 //Vexel::write_bmp("test.bmp", image.width(), image.height(), &image.as_rgb8())?;
             }
             Err(e) => {
@@ -118,8 +118,8 @@ mod tests {
         let mut decoder = Vexel::open(PATH_JPEG_LS_1)?;
 
         match decoder.decode() {
-            Ok(image) => {
-                //Vexel::write_bmp("test.bmp", decoder.width(), decoder.height(), image.frames[0].pixels.as_slice())?;
+            Ok(_) => {
+                //Vexel::write_bmp("test.bmp", image.width(), image.height(), &image.as_rgb8())?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
@@ -135,7 +135,7 @@ mod tests {
         let mut decoder = Vexel::open(PATH_GIF_1)?;
 
         match decoder.decode() {
-            Ok(image) => {}
+            Ok(_) => {}
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
                 assert!(false);
@@ -149,7 +149,7 @@ mod tests {
         let mut decoder = Vexel::open(PATH_PPM_1)?;
 
         match decoder.decode() {
-            Ok(image) => {
+            Ok(_) => {
                 //Vexel::write_bmp("test.bmp", image.width(), image.height(), &image.as_rgb8())?;
             }
             Err(e) => {

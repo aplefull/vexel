@@ -1,7 +1,7 @@
 extern crate vexel;
 
 use std::path::PathBuf;
-use vexel::{Decoders, Vexel};
+use vexel::Vexel;
 use clap::Parser;
 use glob::glob;
 

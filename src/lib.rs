@@ -109,7 +109,7 @@ impl PixelData {
             PixelData::LA8(_) => PixelFormat::LA8,
         }
     }
-    
+
     pub fn into_rgb8(self) -> PixelData {
         match self {
             PixelData::RGB8(pixels) => PixelData::RGB8(pixels),
@@ -139,7 +139,7 @@ impl PixelData {
             PixelData::L16(pixels) => PixelData::RGBA8(add_transparency_channel(l16_to_u8_rgb(pixels))),
         }
     }
-    
+
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             PixelData::RGB8(pixels) => pixels,
@@ -182,7 +182,7 @@ impl ImageFrame {
     pub fn delay(&self) -> u32 {
         self.delay
     }
-    
+
     pub fn pixel_format(&self) -> PixelFormat {
         self.pixels.pixel_format()
     }
@@ -195,7 +195,7 @@ impl ImageFrame {
             delay: self.delay,
         }
     }
-    
+
     pub fn into_rgba8(self) -> ImageFrame {
         ImageFrame {
             width: self.width,
@@ -228,7 +228,7 @@ impl Image {
             frames,
         }
     }
-    
+
     pub fn from_frame(frame: ImageFrame) -> Image {
         Image {
             width: frame.width(),
@@ -259,7 +259,7 @@ impl Image {
     }
 
     /// Converts the image to RGB8 format, consuming the original image.
-    /// 
+    ///
     /// This method converts all frames to RGB8 format, while `as_rgb8` returns
     /// vector of the first frame's pixels, converted to RGB8 format without
     /// modifying the original image
@@ -387,12 +387,16 @@ impl<R: Read + Seek> Vexel<R> {
             Decoders::Unknown => Err(Error::new(ErrorKind::InvalidData, "Unknown image format")),
         }
     }
+
+    pub fn get_format(&self) -> ImageFormat {
+        self.format.clone()
+    }
     
     pub fn get_image_info(&mut self) -> ImageInfo {
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
                 let image_data = jpeg_decoder.get_data();
-                
+
                 ImageInfo::Jpeg(image_data)
             }
             _ => unimplemented!(),

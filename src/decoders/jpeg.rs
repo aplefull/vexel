@@ -1,7 +1,8 @@
 use std::f32::consts::PI;
-use std::fmt::{Debug, Display, Formatter};
-use std::io::{Cursor, Error, ErrorKind, Read, Seek};
+use std::fmt::{Debug};
+use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
+use crate::{log_debug, log_warn};
 use crate::utils::info_display::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::utils::types::ByteOrder;
@@ -322,6 +323,14 @@ const ZIGZAG_MAP: [u8; 64] = [
     53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum JpegMode {
+    Baseline,
+    ExtendedSequential,
+    Progressive,
+    Lossless,
+}
+
 #[derive(Debug, Clone)]
 pub struct QuantizationTable {
     pub id: u8,
@@ -371,22 +380,22 @@ pub struct MCU {
 
 #[derive(Debug, Clone)]
 pub struct JFIFHeader {
-    pub identifier: String,     // "JFIF\0" (5 bytes)
-    pub version_major: u8,      // JFIF format version major
-    pub version_minor: u8,      // JFIF format version minor
-    pub density_units: u8,      // Units for pixel density (0 = no units, 1 = pixels per inch, 2 = pixels per cm)
-    pub x_density: u16,        // Horizontal pixel density
-    pub y_density: u16,        // Vertical pixel density
-    pub thumbnail_width: u8,   // Width of embedded thumbnail (0 if no thumbnail)
-    pub thumbnail_height: u8,  // Height of embedded thumbnail (0 if no thumbnail)
-    pub thumbnail_data: Vec<u8>, // RGB thumbnail data if present
+    pub identifier: String,
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub density_units: u8,
+    pub x_density: u16,
+    pub y_density: u16,
+    pub thumbnail_width: u8,
+    pub thumbnail_height: u8,
+    pub thumbnail_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExifHeader {
-    pub identifier: String,     // "Exif\0\0" (6 bytes)
-    pub byte_order: ByteOrder,  // Either "II" (little-endian) or "MM" (big-endian)
-    pub first_ifd_offset: u32, // Offset to first IFD
+    pub identifier: String,
+    pub byte_order: ByteOrder,
+    pub first_ifd_offset: u32,
     pub ifd_entries: Vec<IFDEntry>,
 }
 
@@ -398,12 +407,44 @@ pub struct IFDEntry {
     pub value_offset: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScanInfo {
+    pub start_spectral: u8,
+    pub end_spectral: u8,
+    pub successive_high: u8,
+    pub successive_low: u8,
+    pub components: Vec<ScanComponent>,
+    pub dc_tables: Vec<HuffmanTable>,
+    pub ac_tables: Vec<HuffmanTable>,
+    pub data_length: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanData {
+    pub start_spectral: u8,
+    pub end_spectral: u8,
+    pub successive_high: u8,
+    pub successive_low: u8,
+    pub components: Vec<ScanComponent>,
+    pub dc_tables: Vec<HuffmanTable>,
+    pub ac_tables: Vec<HuffmanTable>,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanComponent {
+    pub component_id: u8,
+    pub dc_table_selector: u8,
+    pub ac_table_selector: u8,
+}
+
 pub struct JpegDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
     jfif_header: Option<JFIFHeader>,
     exif_header: Option<ExifHeader>,
     comments: Vec<String>,
+    mode: JpegMode,
     quantization_tables: Vec<QuantizationTable>,
     ac_huffman_tables: Vec<HuffmanTable>,
     dc_huffman_tables: Vec<HuffmanTable>,
@@ -423,13 +464,13 @@ pub struct JpegDecoder<R: Read + Seek> {
     mcu_r_height: u32,
     precision: u8,
     component_count: u8,
-    components_in_scan: u8,
     components: Vec<ColorComponentInfo>,
-    data: Vec<u8>,
+    scans: Vec<ScanData>,
     reader: BitReader<R>,
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
+    // TODO remove redundant fields, that are duplicated in scans
     pub fn new(reader: R) -> Self {
         Self {
             width: 0,
@@ -437,6 +478,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             comments: Vec::new(),
             jfif_header: None,
             exif_header: None,
+            mode: JpegMode::Baseline,
             mcu_width: 0,
             mcu_height: 0,
             mcu_r_width: 0,
@@ -447,7 +489,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
             end_of_spectral_selection: 0,
             successive_approximation_high: 0,
             successive_approximation_low: 0,
-            components_in_scan: 0,
             components: Vec::new(),
             quantization_tables: Vec::new(),
             ac_huffman_tables: Vec::new(),
@@ -457,7 +498,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             horizontal_sampling_factor: 1,
             vertical_sampling_factor: 1,
             restart_interval: 0,
-            data: Vec::new(),
+            scans: Vec::new(),
             reader: BitReader::new(reader),
         }
     }
@@ -470,26 +511,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.height
     }
 
-    pub fn precision(&self) -> u8 {
-        self.precision
-    }
-
-    pub fn component_count(&self) -> u8 {
-        self.component_count
-    }
-
-    pub fn components(&self) -> &Vec<ColorComponentInfo> {
-        &self.components
-    }
-
-    pub fn quantization_tables(&self) -> &Vec<QuantizationTable> {
-        &self.quantization_tables
-    }
-
-    pub fn huffman_tables(&self) -> [&Vec<HuffmanTable>; 2] {
-        [&self.ac_huffman_tables, &self.dc_huffman_tables]
-    }
-
     pub fn get_data(&self) -> JpegInfo {
         JpegInfo {
             width: self.width,
@@ -499,8 +520,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
             jfif_header: self.jfif_header.clone(),
             exif_header: self.exif_header.clone(),
             quantization_tables: self.quantization_tables.clone(),
-            ac_huffman_tables: self.ac_huffman_tables.clone(),
-            dc_huffman_tables: self.dc_huffman_tables.clone(),
             ac_arithmetic_tables: self.ac_arithmetic_tables.clone(),
             dc_arithmetic_tables: self.dc_arithmetic_tables.clone(),
             spectral_selection: (self.start_of_spectral_selection, self.end_of_spectral_selection),
@@ -509,20 +528,37 @@ impl<R: Read + Seek> JpegDecoder<R> {
             vertical_sampling_factor: self.vertical_sampling_factor,
             restart_interval: self.restart_interval,
             comments: self.comments.clone(),
+            scans: self.scans.iter().map(|scan| ScanInfo {
+                start_spectral: scan.start_spectral,
+                end_spectral: scan.end_spectral,
+                successive_high: scan.successive_high,
+                successive_low: scan.successive_low,
+                components: scan.components.clone(),
+                dc_tables: scan.dc_tables.clone(),
+                ac_tables: scan.ac_tables.clone(),
+                data_length: scan.data.len() as u64,
+            }).collect(),
         }
     }
 
-    fn read_com(&mut self) -> Result<(), Error> {
-        // Read marker length (2 bytes)
-        let length = self.reader.read_bits(16)? as usize - 2; // Subtract length field size
+    fn skip_unknown_marker_segment(&mut self) -> Result<(), Error> {
+        let length = self.reader.read_u16()? as usize;
 
-        // Read comment text
-        let mut comment_bytes = Vec::with_capacity(length);
-        for _ in 0..length {
-            comment_bytes.push(self.reader.read_bits(8)? as u8);
+        for _ in 0..(length - 2) {
+            self.reader.read_u8()?;
         }
 
-        // Try to convert to UTF-8, fallback to lossy conversion if invalid
+        Ok(())
+    }
+
+    fn read_com(&mut self) -> Result<(), Error> {
+        let length = self.reader.read_u16()?;
+
+        let mut comment_bytes = Vec::new();
+        for _ in 0..length {
+            comment_bytes.push(self.reader.read_u8()?);
+        }
+
         let text = String::from_utf8_lossy(&comment_bytes).to_string();
 
         self.comments.push(text);
@@ -531,10 +567,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn read_app0_jfif(&mut self) -> Result<(), Error> {
-        // Skip marker length (2 bytes)
         let length = self.reader.read_u16()?;
 
-        // Read JFIF identifier (5 bytes)
         let mut identifier = Vec::new();
         for _ in 0..5 {
             identifier.push(self.reader.read_u8()?);
@@ -543,23 +577,19 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let identifier = String::from_utf8_lossy(&identifier).to_string();
 
         if identifier != "JFIF\0" {
-            return Err(Error::new(ErrorKind::InvalidData, "Invalid JFIF signature"));
+            log_warn!("Invalid JFIF identifier in APP0, might not be a JFIF header: {}", identifier);
         }
 
-        // Read version
         let version_major = self.reader.read_bits(8)? as u8;
         let version_minor = self.reader.read_bits(8)? as u8;
 
-        // Read density information
         let density_units = self.reader.read_bits(8)? as u8;
         let x_density = self.reader.read_bits(16)? as u16;
         let y_density = self.reader.read_bits(16)? as u16;
 
-        // Read thumbnail dimensions
         let thumbnail_width = self.reader.read_bits(8)? as u8;
         let thumbnail_height = self.reader.read_bits(8)? as u8;
 
-        // Read thumbnail data if present
         let thumbnail_size = thumbnail_width * thumbnail_height * 3; // RGB data
         let mut thumbnail_data = Vec::new();
 
@@ -581,15 +611,25 @@ impl<R: Read + Seek> JpegDecoder<R> {
             thumbnail_data,
         });
 
+        if length != 16 + thumbnail_size as u16 {
+            log_warn!("Invalid JFIF segment length, expected {}, got {}", 16 + thumbnail_size, length);
+        }
+
         Ok(())
     }
 
     fn read_app1_exif(&mut self) -> Result<(), Error> {
-        // Skip marker length (2 bytes)
-        self.reader.read_bits(16)? as usize;
+        let length = self.reader.read_u16()?;
+
+        for _ in 0..(length - 2) {
+            self.reader.read_u8()?;
+        }
+
+        // TODO actually implement this
+        return Ok(());
 
         // Read Exif identifier (6 bytes)
-        let mut identifier = Vec::new();
+        /*let mut identifier = Vec::new();
         for _ in 0..6 {
             identifier.push(self.reader.read_bits(8)? as u8);
         }
@@ -630,9 +670,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 } else if forty_two.swap_bytes() == 42 {
                     ByteOrder::BigEndian
                 } else {
-                    // Something is very wrong, let's warn and assume little-endian
-                    eprintln!("Invalid 42 constant in Exif header, assuming little-endian byte order");
-                    ByteOrder::LittleEndian
+                    // Something is very wrong, let's warn and assume big-endian
+                    log_warn!("Invalid 42 constant in Exif header, assuming big-endian byte order");
+                    ByteOrder::BigEndian
                 }
             }
         };
@@ -640,14 +680,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
         // Read first IFD offset
         let first_ifd_offset = match byte_order {
             ByteOrder::LittleEndian => self.reader.read_bits(32)?,
-            ByteOrder::BigEndian => self.reader.read_bits(32)?.swap_bytes(),
+            ByteOrder::BigEndian => {
+                let offset = self.reader.read_bits(32)?;
+                offset.swap_bytes()
+            }
         };
 
         // Read IFD entries
         let mut ifd_entries = Vec::new();
 
         // Seek to first IFD
-        self.reader.seek(std::io::SeekFrom::Start(first_ifd_offset as u64))?;
+        //self.reader.seek(std::io::SeekFrom::Current(first_ifd_offset as i64))?;
 
         // Read number of IFD entries
         let num_entries = match byte_order {
@@ -656,7 +699,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         };
 
         // Read each IFD entry
-        for _ in 0..num_entries {
+        // TODO - Read all IFD entries
+        for _ in 0..0 {
             let tag = match byte_order {
                 ByteOrder::LittleEndian => self.reader.read_u16()?,
                 ByteOrder::BigEndian => self.reader.read_u16()?.swap_bytes(),
@@ -692,40 +736,50 @@ impl<R: Read + Seek> JpegDecoder<R> {
             ifd_entries,
         });
 
-        Ok(())
+        Ok(())*/
     }
 
-    fn read_sof_info(&mut self) -> Result<(), Error> {
-        // Skip marker length (2 bytes)
-        self.reader.read_bits(16)?;
+    fn read_start_of_frame(&mut self) -> Result<(), Error> {
+        let length = self.reader.read_u16()?;
 
-        // Read precision (1 byte)
-        self.precision = self.reader.read_bits(8)? as u8;
+        log_debug!("SOF marker length: {}", length);
 
-        // Read height and width (2 bytes each)
-        self.height = self.reader.read_bits(16)?;
-        self.width = self.reader.read_bits(16)?;
+        self.precision = self.reader.read_u8()?;
+
+        log_debug!("Precision: {}", self.precision);
+
+        self.height = self.reader.read_u16()? as u32;
+        self.width = self.reader.read_u16()? as u32;
+
+        log_debug!("Image dimensions: {}x{}", self.width, self.height);
 
         if self.height == 0 || self.width == 0 {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid image dimensions"));
         }
 
+        // TODO rename them, they are not MCu dimensions, but dimensions of the image in MCUs
         self.mcu_width = (self.width + 7) / 8;
         self.mcu_height = (self.height + 7) / 8;
         self.mcu_r_width = self.mcu_width;
         self.mcu_r_height = self.mcu_height;
 
-        // Read number of components (1 byte)
-        self.component_count = self.reader.read_bits(8)? as u8;
+        self.component_count = self.reader.read_u8()?;
 
-        // Read component info
+        log_debug!("Number of components: {}", self.component_count);
+
+        if self.component_count > 4 || self.component_count == 0 {
+            log_warn!("Invalid number of components in SOF marker: {}, assuming 3", self.component_count);
+            self.component_count = 3;
+        }
+
         self.components.clear();
+
         for _ in 0..self.component_count {
-            let id = self.reader.read_bits(8)? as u8;
-            let sampling_factors = self.reader.read_bits(8)? as u8;
+            let id = self.reader.read_u8()?;
+            let sampling_factors = self.reader.read_u8()?;
             let horizontal_sampling_factor = (sampling_factors >> 4) & 0xF;
             let vertical_sampling_factor = sampling_factors & 0xF;
-            let quantization_table_id = self.reader.read_bits(8)? as u8;
+            let quantization_table_id = self.reader.read_u8()?;
 
             if id == 1 {
                 if horizontal_sampling_factor == 2 && self.mcu_width % 2 == 1 {
@@ -750,39 +804,41 @@ impl<R: Read + Seek> JpegDecoder<R> {
             });
         }
 
+        if length != 8 + 3 * self.component_count as u16 {
+            log_warn!("Invalid SOF marker length, expected {}, got {}", 8 + 3 * self.component_count, length);
+        }
+
         Ok(())
     }
 
     fn read_restart_interval(&mut self) -> Result<(), Error> {
-        // Skip marker length (2 bytes)
-        self.reader.read_bits(16)?;
+        self.reader.read_u16()?;
 
-        // Read restart interval (2 bytes)
-        self.restart_interval = self.reader.read_bits(16)? as u16;
+        self.restart_interval = self.reader.read_u16()?;
 
         Ok(())
     }
 
     fn read_quantization_table(&mut self) -> Result<(), Error> {
-        let mut table_length = self.reader.read_bits(16)? as i16;
-        table_length -= 2; // Subtract 2 bytes for the length field itself
+        let mut table_length = self.reader.read_u16()? as i16;
+        table_length -= 2;
 
         while table_length > 0 {
             let mut table = Vec::new();
-            let table_spec = self.reader.read_bits(8)?;
-            let id = (table_spec & 0x0F) as u8;
-            let precision = ((table_spec >> 4) & 0x0F) as u8;
+            let table_spec = self.reader.read_u8()?;
+            let id = table_spec & 0x0F;
+            let precision = (table_spec >> 4) & 0x0F;
 
             table_length -= 1;
 
             if precision == 0 {
                 for _ in 0..64 {
-                    table.push(self.reader.read_bits(8)? as u16);
+                    table.push(self.reader.read_u8()? as u16);
                 }
                 table_length -= 64;
             } else {
                 for _ in 0..64 {
-                    table.push(self.reader.read_bits(16)? as u16);
+                    table.push(self.reader.read_u16()?);
                 }
                 table_length -= 128;
             }
@@ -809,9 +865,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn read_huffman_table(&mut self) -> Result<(), Error> {
-        let mut table_length = self.reader.read_bits(16)? as i16;
+        let mut segment_length = self.reader.read_bits(16)? as i16;
 
-        while table_length > 0 {
+        while segment_length > 0 {
             let table_spec = self.reader.read_bits(8)?;
             let id = (table_spec & 0x0F) as u8;
             let class = ((table_spec >> 4) & 0x0F) as u8;
@@ -835,9 +891,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 table.push(self.reader.read_bits(8)? as u8);
             }
 
-            table_length -= 2 + 1 + 1 + 16 + total_symbols as i16;
+            segment_length -= 2 + 1 + 1 + 16 + total_symbols as i16;
 
-            let huffman_table = HuffmanTable {
+            let mut huffman_table = HuffmanTable {
                 id,
                 class,
                 offsets,
@@ -845,9 +901,34 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 codes: vec![0; 162],
             };
 
+            // Generate codes
+            let mut code = 0;
+            for i in 0..16 {
+                for k in huffman_table.offsets[i]..huffman_table.offsets[i + 1] {
+                    huffman_table.codes[k as usize] = code;
+                    code += 1;
+                }
+
+                code <<= 1;
+            }
+
+            // We either replace the table, if we already have one with the same ID,
+            // or we add a new one
             match class {
-                0 => self.dc_huffman_tables.push(huffman_table),
-                1 => self.ac_huffman_tables.push(huffman_table),
+                0 => {
+                    if let Some(existing_table) = self.dc_huffman_tables.iter_mut().find(|t| t.id == id) {
+                        *existing_table = huffman_table;
+                    } else {
+                        self.dc_huffman_tables.push(huffman_table);
+                    }
+                }
+                1 => {
+                    if let Some(existing_table) = self.ac_huffman_tables.iter_mut().find(|t| t.id == id) {
+                        *existing_table = huffman_table;
+                    } else {
+                        self.ac_huffman_tables.push(huffman_table);
+                    }
+                }
                 _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid Huffman table class")),
             }
         }
@@ -908,47 +989,48 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
-    fn read_sos_info(&mut self) -> Result<(), Error> {
-        // Read marker length (2 bytes)
-        let length = self.reader.read_bits(16)?;
+    fn read_start_of_scan(&mut self) -> Result<(), Error> {
+        let length = self.reader.read_u16()?;
 
-        // Read number of components in scan
-        let scan_component_count = self.reader.read_bits(8)? as u8;
+        log_debug!("SOS marker length: {}", length);
 
-        // Read component info
+        let scan_component_count = self.reader.read_u8()?;
+
+        log_debug!("Number of components in scan: {}", scan_component_count);
+
+        let mut scan_components = Vec::new();
         for _ in 0..scan_component_count {
-            let component_selector = self.reader.read_bits(8)? as u8;
+            let component_selector = self.reader.read_u8()?;
+            let table_selectors = self.reader.read_u8()?;
 
-            let color_component = self.components.iter_mut()
-                .find(|c| c.id == component_selector)
-                .ok_or(Error::new(ErrorKind::InvalidData, "Invalid component selector"))?;
+            // Create scan component with table selections
+            scan_components.push(ScanComponent {
+                component_id: component_selector,
+                dc_table_selector: (table_selectors >> 4) & 0x0F,
+                ac_table_selector: table_selectors & 0x0F,
+            });
 
-            let table_selectors = self.reader.read_bits(8)? as u8;
-            let ac_table_selector = table_selectors & 0xF;
-            let dc_table_selector = (table_selectors >> 4) & 0xF;
-
-            color_component.dc_table_selector = dc_table_selector;
-            color_component.ac_table_selector = ac_table_selector;
+            // Update component info if it exists
+            if let Some(color_component) = self.components.iter_mut()
+                .find(|c| c.id == component_selector) {
+                color_component.dc_table_selector = (table_selectors >> 4) & 0x0F;
+                color_component.ac_table_selector = table_selectors & 0x0F;
+            }
         }
 
-        // Read spectral selection start and end
-        self.start_of_spectral_selection = self.reader.read_bits(8)? as u8;
-        self.end_of_spectral_selection = self.reader.read_bits(8)? as u8;
+        // Read spectral selection and successive approximation
+        let start_spectral = self.reader.read_u8()?;
+        let end_spectral = self.reader.read_u8()?;
+        let successive_approx = self.reader.read_u8()?;
+        let successive_high = (successive_approx >> 4) & 0x0F;
+        let successive_low = successive_approx & 0x0F;
 
-        // Read successive approximation bit positions
-        let successive_approximation = self.reader.read_bits(8)? as u8;
-        self.successive_approximation_high = (successive_approximation >> 4) & 0xF;
-        self.successive_approximation_low = successive_approximation & 0xF;
-
-        if length != 2 + 1 + scan_component_count as u32 * 2 + 3 {
-            return Err(Error::new(ErrorKind::InvalidData, "Invalid SOS segment length"));
+        if length != 6 + (2 * scan_component_count as u16) {
+            log_warn!("Invalid SOS marker length, expected {}, got {}", 6 + (2 * scan_component_count as u16), length);
         }
 
-        Ok(())
-    }
-
-    fn read_sos_bitstream(&mut self) -> Result<(), Error> {
-        let mut current_byte = self.reader.read_bits(8)? as u8;
+        let mut current_byte = self.reader.read_u8()?;
+        let mut scan_data = Vec::new();
 
         loop {
             // This can be either a marker or literal data
@@ -974,42 +1056,79 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         continue;
                     }
 
-                    // Invalid marker
-                    return Err(Error::new(ErrorKind::InvalidData, "Invalid marker found in bitstream"));
+                    // Next marker is found, so it should be the end of the scan,
+                    // seek back to the marker and break
+                    self.reader.seek(SeekFrom::Current(-2))?;
+                    break;
                 }
 
                 // This is a stuffed byte
                 if next_byte == 0x00 {
-                    self.data.push(current_byte);
+                    scan_data.push(current_byte);
 
                     current_byte = self.reader.read_bits(8)? as u8;
                     continue;
                 }
             } else {
-                self.data.push(current_byte);
+                scan_data.push(current_byte);
                 current_byte = self.reader.read_bits(8)? as u8;
             }
         }
 
+        // Create new scan with currently active tables
+        let scan = ScanData {
+            start_spectral,
+            end_spectral,
+            successive_high,
+            successive_low,
+            components: scan_components,
+            // Clone current tables for this scan
+            // If tables are empty, use tables from previous scan
+            // TODO now we always have current tables, so this can be removed
+            dc_tables: match self.dc_huffman_tables.is_empty() {
+                true => match self.scans.last() {
+                    Some(scan) => scan.dc_tables.clone(),
+                    None => Vec::new(),
+                }
+                false => self.dc_huffman_tables.clone(),
+            },
+            ac_tables: match self.ac_huffman_tables.is_empty() {
+                true => match self.scans.last() {
+                    Some(scan) => scan.ac_tables.clone(),
+                    None => Vec::new(),
+                }
+                false => self.ac_huffman_tables.clone(),
+            },
+            data: scan_data,
+        };
+
+        self.scans.push(scan);
+
+
         Ok(())
     }
 
-    fn get_next_symbol(&mut self, reader: &mut BitReader<Cursor<Vec<u8>>>, table: &HuffmanTable) -> Result<u8, Error> {
+    fn get_next_symbol(&self, reader: &mut BitReader<Cursor<Vec<u8>>>, table: &HuffmanTable) -> Result<u8, Error> {
         let mut code = 0;
 
         for i in 0..16 {
-            let bit = reader.read_bits(1)?;
+            let bit = reader.read_bit().unwrap_or_else(|_| {
+                log_warn!("Failed to read bit from bit reader, replacing with 0");
+                false
+            }) as u32;
+
             code = (code << 1) | bit;
 
-            for j in table.offsets[i]..table.offsets[i + 1] {
-                if table.codes[j as usize] == code {
-                    return Ok(table.symbols[j as usize]);
+            for j in table.offsets[i] as usize..table.offsets[i + 1] as usize {
+                if table.codes[j] == code {
+                    return Ok(table.symbols[j]);
                 }
             }
         }
 
+        log_warn!("Invalid Huffman code: {}, replacing with 0", code);
 
-        Err(Error::new(ErrorKind::InvalidData, "Invalid Huffman code"))
+        Ok(0)
     }
 
     fn decode_mcu(&mut self, reader: &mut BitReader<Cursor<Vec<u8>>>, mcu_component: &mut Vec<i32>, dc_table: &HuffmanTable, ac_table: &HuffmanTable, previous_dc: &mut i32) -> Result<(), Error> {
@@ -1020,12 +1139,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
             coefficient -= (1 << length) - 1;
         }
 
-        mcu_component[0] = coefficient as i32 + *previous_dc;
+        mcu_component[0] = coefficient + *previous_dc;
         *previous_dc = mcu_component[0];
 
         let mut i = 1;
         while i < 64 {
-            let symbol = self.get_next_symbol(reader, ac_table)?;
+            let symbol = self.get_next_symbol(reader, ac_table).unwrap_or_else(|_| {
+                log_warn!("Failed to get next AC symbol during baseline decoding, replacing with 0");
+                0
+            });
 
             if symbol == 0 {
                 for _ in i..64 {
@@ -1036,15 +1158,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
 
             let mut zero_count = symbol >> 4;
-            let coefficient_length = (symbol & 0xF) as u8;
-            coefficient = 0;
+            let mut coefficient_length = symbol & 0xF;
 
             if symbol == 0xF0 {
                 zero_count = 16;
             }
 
             if i + zero_count as usize >= 64 {
-                return Err(Error::new(ErrorKind::InvalidData, "Invalid AC coefficient"));
+                log_warn!("Invalid zero count in AC coefficient: {}, clamping to 64", zero_count);
+                zero_count = zero_count.min(64 - i as u8).max(0);
             }
 
             for _ in 0..zero_count {
@@ -1053,7 +1175,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
 
             if coefficient_length > 10 {
-                return Err(Error::new(ErrorKind::InvalidData, "Invalid AC coefficient length"));
+                log_warn!("Invalid coefficient length: {}, replacing with 0", coefficient_length);
+                coefficient_length = 0;
             }
 
             if coefficient_length != 0 {
@@ -1063,7 +1186,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     coefficient -= (1 << coefficient_length) - 1;
                 }
 
-                mcu_component[ZIGZAG_MAP[i] as usize] = coefficient as i32;
+                mcu_component[ZIGZAG_MAP[i] as usize] = coefficient;
                 i += 1;
             }
         }
@@ -1071,45 +1194,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
-    fn create_huffman_codes(&mut self) {
-        for table in &mut self.dc_huffman_tables {
-            let mut code = 0;
-            for i in 0..16 {
-                for k in table.offsets[i]..table.offsets[i + 1] {
-                    table.codes[k as usize] = code;
-                    code += 1;
-                }
-
-                code <<= 1;
-            }
-        }
-
-        for table in &mut self.ac_huffman_tables {
-            let mut code = 0;
-            for i in 0..16 {
-                for k in table.offsets[i]..table.offsets[i + 1] {
-                    table.codes[k as usize] = code;
-                    code += 1;
-                }
-
-                code <<= 1;
-            }
-        }
-    }
-
-    fn decode_huffman(&mut self) -> Result<Vec<MCU>, Error> {
-        let mut mcus = Vec::new();
-
-        mcus.resize((self.mcu_r_height * self.mcu_r_width) as usize, MCU {
-            y: vec![0; 64],
-            cb: vec![0; 64],
-            cr: vec![0; 64],
-        });
-
-        self.create_huffman_codes();
-
+    fn decode_huffman(&mut self, mcus: &mut Vec<MCU>) -> Result<(), Error> {
         // TODO: cloning this is very inefficient
-        let mut reader = BitReader::new(Cursor::new(self.data.clone()));
+        let mut reader = BitReader::new(Cursor::new(self.scans[0].data.clone()));
 
         let mut previous_dc = [0i32; 3];
         let restart_interval = self.restart_interval * self.horizontal_sampling_factor as u16 * self.vertical_sampling_factor as u16;
@@ -1124,8 +1211,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 for i in 0..self.component_count {
                     for v in 0..self.components[i as usize].vertical_sampling_factor {
                         for h in 0..self.components[i as usize].horizontal_sampling_factor {
-                            let dc_table = self.dc_huffman_tables[self.components[i as usize].dc_table_selector as usize].clone();
-                            let ac_table = self.ac_huffman_tables[self.components[i as usize].ac_table_selector as usize].clone();
+                            // TODO it's ok for tables to be missing here since there are no guarantees that all of them are used in decode_mcu
+                            let dc_table = self.scans[0].dc_tables[self.scans[0].components[i as usize].dc_table_selector as usize].clone();
+                            let ac_table = match self.scans[0].ac_tables.get(self.scans[0].components[i as usize].ac_table_selector as usize) {
+                                Some(table) => table.clone(),
+                                None => {
+                                    log_warn!("Invalid AC table index: {}, skipping", self.scans[0].components[i as usize].ac_table_selector);
+                                    continue;
+                                }
+                            };
 
                             let mcu_index = ((y + v as u32) * self.mcu_r_width + x + h as u32) as usize;
                             let mcu_component = match i {
@@ -1142,7 +1236,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        Ok(mcus)
+        Ok(())
     }
 
     fn dequantize(&self, mcus: &mut Vec<MCU>) -> Result<(), Error> {
@@ -1428,42 +1522,400 @@ impl<R: Read + Seek> JpegDecoder<R> {
         pixels
     }
 
+    fn decode_scans(&mut self, mcus: &mut Vec<MCU>) -> Result<(), Error> {
+        for scan in &self.scans {
+            // TODO don't clone the data, it's ridiculous
+            let mut reader = BitReader::new(Cursor::new(scan.data.clone()));
+            let mut previous_dc = [0i32; 3];
+            let mut skips = 0;
+
+            let luminance_only = scan.components.len() == 1 && scan.components[0].component_id == 1;
+            let y_step = if luminance_only { 1 } else { self.vertical_sampling_factor };
+            let x_step = if luminance_only { 1 } else { self.horizontal_sampling_factor };
+            let restart_interval = self.restart_interval as u8 * x_step * y_step;
+
+            for y in (0..self.mcu_height).step_by(y_step as usize) {
+                for x in (0..self.mcu_width).step_by(x_step as usize) {
+                    if restart_interval > 0 &&
+                        (y * self.mcu_r_width + x) % restart_interval as u32 == 0 {
+                        previous_dc = [0; 3];
+                        reader.clear_buffer();
+                    }
+
+                    for scan_component in &scan.components {
+                        // Find main component info from scan component
+                        let component_info = match self.components.iter()
+                            .find(|c| c.id == scan_component.component_id) {
+                            Some(c) => c,
+                            None => {
+                                log_warn!("Component not found for scan component: {}", scan_component.component_id);
+                                continue;
+                            }
+                        };
+
+                        let v_samp = if luminance_only { 1 } else { component_info.vertical_sampling_factor };
+                        let h_samp = if luminance_only { 1 } else { component_info.horizontal_sampling_factor };
+
+                        for v in 0..v_samp {
+                            for h in 0..h_samp {
+                                // Calculate MCU index properly accounting for sampling factors
+                                let mcu_index = ((y + v as u32) * self.mcu_r_width +
+                                    x + h as u32) as usize;
+
+                                if mcu_index >= mcus.len() {
+                                    log_warn!("MCU index out of bounds: {}", mcu_index);
+                                    continue;
+                                }
+
+                                let component_data = match scan_component.component_id {
+                                    1 => &mut mcus[mcu_index].y,
+                                    2 => &mut mcus[mcu_index].cb,
+                                    3 => &mut mcus[mcu_index].cr,
+                                    _ => {
+                                        log_warn!("Invalid component ID: {}", scan_component.component_id);
+                                        continue;
+                                    }
+                                };
+
+                                let comp_idx = (scan_component.component_id - 1) as usize;
+
+                                // Process DC coefficient
+                                if scan.start_spectral == 0 {
+                                    if scan.successive_high == 0 {
+                                        // First DC scan
+                                        let dc_table = match scan.dc_tables.get(scan_component.dc_table_selector as usize) {
+                                            Some(t) => t,
+                                            None => {
+                                                log_warn!("DC table not found: {}", scan_component.dc_table_selector);
+                                                continue;
+                                            }
+                                        };
+
+                                        let length = self.get_next_symbol(&mut reader, dc_table)?;
+
+                                        if length > 11 {
+                                            log_warn!("Invalid DC coefficient length (>11): {}", length);
+                                            continue;
+                                        }
+
+                                        let bits = match reader.read_bits(length) {
+                                            Ok(b) => b,
+                                            Err(e) => {
+                                                log_warn!("Failed to read DC coefficient bits: {}", e);
+                                                continue;
+                                            }
+                                        };
+
+                                        let mut value = bits as i32;
+
+                                        if length != 0 && value < (1 << (length - 1)) {
+                                            value -= (1 << length) - 1;
+                                        }
+
+                                        value += previous_dc[comp_idx];
+                                        previous_dc[comp_idx] = value;
+                                        component_data[0] = value << scan.successive_low;
+                                    } else {
+                                        // Refining DC scan
+                                        let bit = match reader.read_bits(1) {
+                                            Ok(b) => b,
+                                            Err(e) => {
+                                                log_warn!("Failed to read DC coefficient bit: {}", e);
+                                                continue;
+                                            }
+                                        };
+
+                                        component_data[0] |= (bit as i32) << scan.successive_low;
+                                    }
+                                }
+
+                                // Process AC coefficients
+                                if scan.end_spectral > 0 {
+                                    if scan.successive_high == 0 {
+                                        // First AC scan
+                                        if skips > 0 {
+                                            skips -= 1;
+                                            continue;
+                                        }
+
+                                        let ac_table = match scan.ac_tables.get(scan_component.ac_table_selector as usize) {
+                                            Some(t) => t,
+                                            None => {
+                                                log_warn!("AC table not found: {}", scan_component.ac_table_selector);
+                                                continue;
+                                            }
+                                        };
+
+                                        let mut k = scan.start_spectral as usize;
+                                        while k <= scan.end_spectral as usize {
+                                            let s = match self.get_next_symbol(&mut reader, ac_table) {
+                                                Ok(s) => s,
+                                                Err(e) => {
+                                                    log_warn!("Failed to read AC coefficient symbol: {}", e);
+                                                    break;
+                                                }
+                                            };
+
+                                            let num_zeros = s >> 4;
+                                            let length = s & 0xF;
+
+                                            if length != 0 {
+                                                if k + num_zeros as usize > 63 {
+                                                    log_warn!("Zero run-length exceeded spectral selection: {}", k + num_zeros as usize);
+                                                    break;
+                                                }
+
+                                                for _ in 0..num_zeros {
+                                                    component_data[ZIGZAG_MAP[k] as usize] = 0;
+                                                    k += 1;
+                                                }
+
+                                                if length > 10 {
+                                                    log_warn!("Invalid AC coefficient length (>10): {}", length);
+                                                    break;
+                                                }
+
+                                                let bits = match reader.read_bits(length) {
+                                                    Ok(b) => b,
+                                                    Err(e) => {
+                                                        log_warn!("Failed to read AC coefficient bits: {}", e);
+                                                        break;
+                                                    }
+                                                };
+
+                                                let mut value = bits as i32;
+
+                                                if value < (1 << (length - 1)) {
+                                                    value -= (1 << length) - 1;
+                                                }
+
+                                                let zigzag_idx = ZIGZAG_MAP[k] as usize;
+                                                component_data[zigzag_idx] = value << scan.successive_low;
+                                                k += 1;
+                                            } else {
+                                                if num_zeros == 15 {
+                                                    if k + num_zeros as usize > scan.end_spectral as usize {
+                                                        log_warn!("Zero run-length exceeded spectral selection: {}", k + num_zeros as usize);
+                                                        break;
+                                                    }
+
+                                                    for _ in 0..num_zeros {
+                                                        component_data[ZIGZAG_MAP[k] as usize] = 0;
+                                                        k += 1;
+                                                    }
+                                                } else {
+                                                    skips = (1 << num_zeros) - 1;
+                                                    let extra_skips = reader.read_bits(num_zeros).unwrap_or_else(|e| {
+                                                        log_warn!("Failed to read extra skips: {}", e);
+                                                        0
+                                                    });
+
+                                                    skips += extra_skips;
+                                                    break;
+                                                }
+
+                                                k += 1;
+                                            }
+                                        }
+                                    } else {
+                                        // Refining AC scan
+                                        let positive = 1 << scan.successive_low;
+                                        let negative = -1 << scan.successive_low;
+                                        let mut k = scan.start_spectral as usize;
+
+                                        if skips == 0 {
+                                            let ac_table = match scan.ac_tables.get(scan_component.ac_table_selector as usize) {
+                                                Some(t) => t,
+                                                None => {
+                                                    log_warn!("AC table not found: {}", scan_component.ac_table_selector);
+                                                    continue;
+                                                }
+                                            };
+
+                                            while k <= scan.end_spectral as usize {
+                                                let symbol = match self.get_next_symbol(&mut reader, ac_table) {
+                                                    Ok(s) => s,
+                                                    Err(e) => {
+                                                        log_warn!("Failed to read AC coefficient symbol: {}", e);
+                                                        break;
+                                                    }
+                                                };
+
+                                                let mut num_zeros = symbol >> 4;
+                                                let length = symbol & 0xF;
+                                                let mut coeff = 0;
+
+                                                if length != 0 {
+                                                    if length != 1 {
+                                                        log_warn!("Invalid AC coefficient length (refining): {}", length);
+                                                        break;
+                                                    }
+
+                                                    coeff = match reader.read_bits(1) {
+                                                        Ok(b) => match b {
+                                                            0 => negative,
+                                                            1 => positive,
+                                                            _ => unreachable!()
+                                                        },
+                                                        Err(e) => {
+                                                            log_warn!("Failed to read AC coefficient bit (refining): {}", e);
+                                                            break;
+                                                        }
+                                                    };
+                                                } else {
+                                                    if num_zeros != 15 {
+                                                        skips = 1 << num_zeros;
+                                                        let extra_skips = reader.read_bits(num_zeros).unwrap_or_else(|e| {
+                                                            log_warn!("Failed to read extra skips (refining): {}", e);
+                                                            0
+                                                        });
+
+                                                        skips += extra_skips;
+                                                        break;
+                                                    }
+                                                }
+
+                                                loop {
+                                                    if component_data[ZIGZAG_MAP[k] as usize] != 0 {
+                                                        match reader.read_bits(1) {
+                                                            Ok(b) => {
+                                                                if b == 1 {
+                                                                    if component_data[ZIGZAG_MAP[k] as usize] & positive == 0 {
+                                                                        if component_data[ZIGZAG_MAP[k] as usize] >= 0 {
+                                                                            component_data[ZIGZAG_MAP[k] as usize] += positive;
+                                                                        } else {
+                                                                            component_data[ZIGZAG_MAP[k] as usize] += negative;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                log_warn!("Failed to read AC coefficient bit (refining): {}", e);
+                                                                break;
+                                                            }
+                                                        }
+                                                    } else {
+                                                        if num_zeros == 0 {
+                                                            break;
+                                                        }
+                                                        num_zeros -= 1;
+                                                    }
+
+                                                    k += 1;
+
+                                                    if k > scan.end_spectral as usize {
+                                                        break;
+                                                    }
+                                                }
+
+                                                if coeff != 0 && k <= scan.end_spectral as usize {
+                                                    component_data[ZIGZAG_MAP[k] as usize] = coeff;
+                                                }
+
+                                                k += 1;
+                                            }
+                                        }
+
+                                        if skips > 0 {
+                                            while k <= scan.end_spectral as usize {
+                                                if component_data[ZIGZAG_MAP[k] as usize] != 0 {
+                                                    match reader.read_bits(1) {
+                                                        Ok(b) => {
+                                                            if b == 1 {
+                                                                if component_data[ZIGZAG_MAP[k] as usize] & positive == 0 {
+                                                                    if component_data[ZIGZAG_MAP[k] as usize] >= 0 {
+                                                                        component_data[ZIGZAG_MAP[k] as usize] += positive;
+                                                                    } else {
+                                                                        component_data[ZIGZAG_MAP[k] as usize] += negative;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            log_warn!("Failed to read AC coefficient bit: {}", e);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+
+                                                k += 1;
+                                            }
+
+                                            skips -= 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn decode(&mut self) -> Result<Vec<u8>, Error> {
         while let Ok(marker) = self.reader.next_marker(&JPEG_MARKERS) {
             match marker {
                 Some(marker) => {
-                    //log_info!("Found marker: {:?} {}");
-                    //println!("Found marker: {:?}", marker);
+                    log_debug!("Found marker: {:?}", marker);
+
                     match marker {
                         JpegMarker::SOI => {}
                         JpegMarker::COM => self.read_com()?,
                         JpegMarker::APP0 => self.read_app0_jfif()?,
                         JpegMarker::APP1 => self.read_app1_exif()?,
-                        JpegMarker::SOF0 => self.read_sof_info()?,
+                        JpegMarker::SOF0 => self.read_start_of_frame()?,
+                        JpegMarker::SOF2 => {
+                            self.mode = JpegMode::Progressive;
+                            self.read_start_of_frame()?;
+                        }
                         JpegMarker::DRI => self.read_restart_interval()?,
                         JpegMarker::DQT => self.read_quantization_table()?,
-                        JpegMarker::DHT => self.read_huffman_table()?,
+                        JpegMarker::DHT => {
+                            self.read_huffman_table()?;
+                        }
                         JpegMarker::DAC => self.read_dac()?,
                         JpegMarker::SOS => {
-                            self.read_sos_info()?;
-                            self.read_sos_bitstream()?;
+                            self.read_start_of_scan()?;
                         }
                         JpegMarker::EOI => {
                             break;
                         }
                         _ => {
-                            println!("Unhandled marker found: {:?}", marker);
+                            log_warn!("Unhandled marker found: {:?}", marker);
+                            self.skip_unknown_marker_segment()?;
                         }
                     }
                 }
                 None => {
-                    println!("No more markers found");
+                    log_debug!("End of file reached");
                     break;
                 }
             }
         }
 
-        let mut mcus = self.decode_huffman()?;
+        let mut mcus = Vec::new();
+        mcus.resize((self.mcu_r_height * self.mcu_r_width) as usize, MCU {
+            y: vec![0; 64],
+            cb: vec![0; 64],
+            cr: vec![0; 64],
+        });
+
+        log_debug!("Number of scans: {}", self.scans.len());
+        log_debug!("Number of MCUs: {}", mcus.len());
+
+        match &self.mode {
+            JpegMode::Progressive => {
+                self.decode_scans(&mut mcus)?;
+            }
+            JpegMode::Baseline => {
+                self.decode_huffman(&mut mcus)?;
+            }
+            _ => unimplemented!("Unsupported JPEG mode"),
+        }
+
         self.dequantize(&mut mcus)?;
         self.inverse_dct(&mut mcus)?;
         self.ycbcr_to_rgb(&mut mcus)?;

@@ -19,7 +19,7 @@ impl<R: Read + Seek> BitReader<R> {
     }
 
     /// Reads a single bit from the bitstream.
-    /// 
+    ///
     /// # Returns
     /// - `true` if the bit is 1, `false` if the bit is 0
     /// - `std::io::Error` if an I/O error occurs
@@ -36,10 +36,10 @@ impl<R: Read + Seek> BitReader<R> {
     }
 
     /// Reads `n` bits from the bitstream.
-    /// 
+    ///
     /// # Parameters
     /// - `n`: The number of bits to read
-    /// 
+    ///
     /// # Returns
     /// - The value of the bits read
     /// - `std::io::Error` if an I/O error occurs
@@ -50,25 +50,25 @@ impl<R: Read + Seek> BitReader<R> {
         }
         Ok(result)
     }
-    
+
     /// Reads a single byte from the bitstream.
-    /// 
+    ///
     /// # Returns
     /// - The byte read
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_u8(&mut self) -> Result<u8, std::io::Error> {
         self.read_bits(8).map(|b| b as u8)
     }
-    
+
     /// Reads a single 16-bit value from the bitstream.
-    /// 
+    ///
     /// # Returns
     /// - The 16-bit value read
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_u16(&mut self) -> Result<u16, std::io::Error> {
         self.read_bits(16).map(|b| b as u16)
     }
-    
+
     /// Clears the current bit buffer.
     pub fn clear_buffer(&mut self) {
         self.bits_in_buffer = 0;
@@ -106,10 +106,10 @@ impl<R: Read + Seek> BitReader<R> {
 
     /// Searches for the next known marker in the bitstream.
     /// If marker is found, cursor is positioned right after the marker.
-    /// 
+    ///
     /// # Parameters
     /// - `known_markers`: A list of known markers to search for
-    /// 
+    ///
     /// # Returns
     /// - `Some(marker)` if a marker is found, `None` otherwise
     /// - `None` if the end of the bitstream is reached
@@ -147,36 +147,53 @@ impl<R: Read + Seek> BitReader<R> {
             }
         }
     }
-    
+
     /// Seeks to a specific position in the bitstream.
-    /// 
+    ///
     /// # Parameters
     /// - `pos`: The position to seek to
-    /// 
+    ///
     /// # Returns
     /// - The new position in the bitstream
     /// - `std::io::Error` if an I/O error occurs
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, std::io::Error> {
         self.reader.seek(pos)
     }
-    
+
+    /// Peeks at the next `n` bytes in the bitstream without consuming them.
+    /// The cursor is not moved.
+    ///
+    /// # Parameters
+    /// - `n`: The number of bytes to peek
+    ///
+    /// # Returns
+    /// - A vector of bytes containing the next `n` bytes in the bitstream
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn peek_bytes(&mut self, n: usize) -> Result<Vec<u8>, std::io::Error> {
+        let mut bytes = vec![0; n];
+        self.reader.read_exact(&mut bytes)?;
+        self.reader.seek(SeekFrom::Current(-(n as i64)))?;
+
+        Ok(bytes)
+    }
+
     /// Reads the remaining bits in the bitstream and returns them as a vector of bytes,
     /// not including the current buffer. The buffer is cleared after reading.
-    /// 
+    ///
     /// # Returns
     /// - A vector of bytes containing the remaining bits in the bitstream
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_to_end(&mut self) -> Result<Vec<u8>, std::io::Error> {
         let mut bytes = Vec::new();
-        
+
         self.reader.read_to_end(&mut bytes)?;
         self.clear_buffer();
-        
+
         Ok(bytes)
     }
-    
+
     /// Resets the bitreader to the start of the bitstream and clears the buffer.
-    /// 
+    ///
     /// # Returns
     /// - `std::io::Error` if an I/O error occurs
     /// - `Ok(())` if the operation is successful
