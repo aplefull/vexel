@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 use std::fmt::{Debug};
 use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
-use crate::{log_debug, log_warn};
+use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use crate::utils::info_display::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::utils::types::ByteOrder;
@@ -323,6 +323,19 @@ const ZIGZAG_MAP: [u8; 64] = [
     53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
+// Table K.1 from JPEG specification
+#[rustfmt::skip]
+const DEFAULT_QUANTIZATION_TABLE: [u16; 64] = [
+    16, 11, 10, 16, 24, 40, 51, 61,
+    12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56,
+    14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77,
+    24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101,
+    72, 92, 95, 98, 112, 100, 103, 99,
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum JpegMode {
     Baseline,
@@ -436,6 +449,18 @@ pub struct ScanComponent {
     pub component_id: u8,
     pub dc_table_selector: u8,
     pub ac_table_selector: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Predictor {
+    NoPrediction = 0,
+    Ra = 1,
+    Rb = 2,
+    Rc = 3,
+    RaRbRc1 = 4,
+    RaRbRc2 = 5,
+    RaRbRc3 = 6,
+    RaRb = 7,
 }
 
 pub struct JpegDecoder<R: Read + Seek> {
@@ -555,7 +580,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let length = self.reader.read_u16()?;
 
         let mut comment_bytes = Vec::new();
-        for _ in 0..length {
+        for _ in 0..length - 2 {
             comment_bytes.push(self.reader.read_u8()?);
         }
 
@@ -747,6 +772,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.precision = self.reader.read_u8()?;
 
         log_debug!("Precision: {}", self.precision);
+
+        if self.mode == JpegMode::Lossless {
+            if self.precision < 2 || self.precision > 16 {
+                log_warn!("Invalid precision for lossless jpeg mode: {}, clamping", self.precision);
+                self.precision = self.precision.clamp(2, 16);
+            }
+        }
 
         self.height = self.reader.read_u16()? as u32;
         self.width = self.reader.read_u16()? as u32;
@@ -1855,7 +1887,259 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
-    pub fn decode(&mut self) -> Result<Vec<u8>, Error> {
+    fn decode_differences(&mut self, scan: &ScanData) -> Result<Vec<Vec<i32>>, Error> {
+        let mut reader = BitReader::new(Cursor::new(scan.data.clone()));
+
+        let mut differences: Vec<Vec<i32>> = vec![vec![]; scan.components.len()];
+
+        let width = self.width as usize;
+        let height = self.height as usize;
+
+        for diffs in &mut differences {
+            diffs.reserve(width * height);
+        }
+
+        // TODO handle restarts
+        for _ in 0..height {
+            for _ in 0..width {
+                for (i, scan_component) in scan.components.iter().enumerate() {
+                    let dc_table = match scan.dc_tables.get(scan_component.dc_table_selector as usize) {
+                        Some(table) => table,
+                        None => {
+                            log_warn!("No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.", i);
+                            &HuffmanTable {
+                                class: 0,
+                                id: 0,
+                                offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
+                                symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                                codes: vec![
+                                    0b000,
+                                    0b010,
+                                    0b011,
+                                    0b100,
+                                    0b101,
+                                    0b110,
+                                    0b1110,
+                                    0b11110,
+                                    0b111110,
+                                    0b1111110,
+                                    0b11111110,
+                                    0b111111110,
+                                ],
+                            }
+                        }
+                    };
+
+                    let bits_to_read = self.get_next_symbol(&mut reader, dc_table)?;
+
+                    let diff = match bits_to_read {
+                        0 => 0,
+                        1..=15 => {
+                            let additional_bits = reader.read_bits(bits_to_read)? as i32;
+
+                            if additional_bits < (1 << (bits_to_read - 1)) {
+                                additional_bits + (-1 << bits_to_read) + 1
+                            } else {
+                                additional_bits
+                            }
+                        }
+                        16 => 32768,
+                        _ => {
+                            log_warn!("Invalid difference: {}", bits_to_read);
+                            0
+                        }
+                    };
+
+                    differences[i].push(diff);
+                }
+            }
+        }
+
+        Ok(differences)
+    }
+
+    fn predict(
+        ra: i32,
+        rb: i32,
+        rc: i32,
+        predictor: Predictor,
+        point_transform: u8,
+        input_precision: u8,
+        x: usize,
+        y: usize,
+    ) -> i32 {
+        // TODO handle restarts as well
+        if x == 0 && y == 0 {
+            if input_precision > point_transform + 1 {
+                1 << (input_precision - point_transform - 1)
+            } else {
+                0
+            }
+        } else if y == 0 {
+            ra
+        } else if x == 0 {
+            rb
+        } else {
+            match predictor {
+                Predictor::NoPrediction => 0,
+                Predictor::Ra => ra,
+                Predictor::Rb => rb,
+                Predictor::Rc => rc,
+                Predictor::RaRbRc1 => ra + rb - rc,
+                Predictor::RaRbRc2 => ra + ((rb - rc) >> 1),
+                Predictor::RaRbRc3 => rb + ((ra - rc) >> 1),
+                Predictor::RaRb => (ra + rb) / 2,
+            }
+        }
+    }
+
+    fn reconstruct_samples(
+        &self,
+        differences: Vec<Vec<i32>>,
+        predictor: Predictor,
+        point_transform: u8,
+    ) -> Result<Vec<Vec<u16>>, Error> {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let components_count = differences.len();
+
+        let mut samples = vec![vec![0u16; width * height]; components_count];
+
+        if predictor == Predictor::Ra {
+            for component_index in 0..components_count {
+                let default_prediction = 1 << (self.precision - point_transform - 1);
+
+                let first_diff = differences[component_index][0];
+                samples[component_index][0] = (((default_prediction + first_diff) & 0xFFFF) as u16) << point_transform;
+
+                for y in 1..height {
+                    let diff = differences[component_index][y * width];
+                    let rb = samples[component_index][(y - 1) * width] as i32;
+                    samples[component_index][y * width] = (((rb + diff) & 0xFFFF) as u16) << point_transform;
+                }
+
+                for y in 0..height {
+                    for x in 1..width {
+                        let index = y * width + x;
+                        let diff = differences[component_index][index];
+                        let ra = samples[component_index][index - 1] as i32;
+
+                        samples[component_index][index] = (((ra + diff) & 0xFFFF) as u16) << point_transform;
+                    }
+                }
+            }
+        } else {
+            for y in 0..height {
+                for x in 0..width {
+                    for component_index in 0..components_count {
+                        let index = y * width + x;
+                        let diff = differences[component_index][index];
+
+                        let ra = if x > 0 { samples[component_index][index - 1] as i32 } else { 0 };
+                        let rb = if y > 0 { samples[component_index][(y - 1) * width + x] as i32 } else { 0 };
+                        let rc = if x > 0 && y > 0 { samples[component_index][(y - 1) * width + (x - 1)] as i32 } else { 0 };
+
+                        let prediction = Self::predict(
+                            ra, rb, rc,
+                            predictor.clone(),
+                            point_transform,
+                            self.precision,
+                            x, y,
+                        );
+
+                        samples[component_index][index] = (((prediction + diff) & 0xFFFF) as u16) << point_transform;
+                    }
+                }
+            }
+        }
+
+        Ok(samples)
+    }
+
+    fn samples_to_image(&self, samples: Vec<Vec<u16>>) -> Result<Image, Error> {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let components_count = samples.len();
+
+        let mut output: Vec<u16> = Vec::new();
+
+        for y in 0..height {
+            for x in 0..width {
+                let pixel_pos = y * width + x;
+                
+                for component_index in 0..components_count {
+                    let sample = samples[component_index][pixel_pos];
+                    output.push(sample);
+                }
+            }
+        }
+
+        if components_count == 1 {
+            let frames = if self.precision <= 8 {
+                let precision_correction = 8 - self.precision;
+                let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
+
+                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::L8(pixels), 0)])
+            } else {
+                let precision_correction = 16 - self.precision;
+                let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
+
+                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::L16(pixels), 0)])
+            };
+
+            Ok(Image::new(width as u32, height as u32, if self.precision <= 8 { PixelFormat::L8 } else { PixelFormat::L16 }, frames))
+        } else {
+            let frames = if self.precision <= 8 {
+                let precision_correction = 8 - self.precision;
+                let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
+
+                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::RGB8(pixels), 0)])
+            } else {
+                let precision_correction = 16 - self.precision;
+                let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
+
+                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::RGB16(pixels), 0)])
+            };
+
+            Ok(Image::new(width as u32, height as u32, if self.precision <= 8 { PixelFormat::RGB8 } else { PixelFormat::RGB16 }, frames))
+        }
+    }
+
+    fn decode_lossless(&mut self) -> Result<Image, Error> {
+        // TODO there can be multiple scans in lossless mode somehow
+        let scan = match self.scans.first() {
+            Some(s) => s.clone(),
+            None => return Err(Error::new(ErrorKind::InvalidData, "No scan data found"))
+        };
+
+        let differences = self.decode_differences(&scan)?;
+
+        let point_transform = self.successive_approximation_low;
+        let predictor = match scan.start_spectral {
+            0 => Predictor::NoPrediction,
+            1 => Predictor::Ra,
+            2 => Predictor::Rb,
+            3 => Predictor::Rc,
+            4 => Predictor::RaRbRc1,
+            5 => Predictor::RaRbRc2,
+            6 => Predictor::RaRbRc3,
+            7 => Predictor::RaRb,
+            _ => {
+                log_warn!("Invalid predictor selection: {}", scan.start_spectral);
+                Predictor::NoPrediction
+            }
+        };
+
+        let samples = self.reconstruct_samples(
+            differences,
+            predictor,
+            point_transform,
+        )?;
+
+        self.samples_to_image(samples)
+    }
+
+    pub fn decode(&mut self) -> Result<Image, Error> {
         while let Ok(marker) = self.reader.next_marker(&JPEG_MARKERS) {
             match marker {
                 Some(marker) => {
@@ -1869,6 +2153,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         JpegMarker::SOF0 => self.read_start_of_frame()?,
                         JpegMarker::SOF2 => {
                             self.mode = JpegMode::Progressive;
+                            self.read_start_of_frame()?;
+                        }
+                        JpegMarker::SOF3 => {
+                            self.mode = JpegMode::Lossless;
                             self.read_start_of_frame()?;
                         }
                         JpegMarker::DRI => self.read_restart_interval()?,
@@ -1913,6 +2201,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
             JpegMode::Baseline => {
                 self.decode_huffman(&mut mcus)?;
             }
+            JpegMode::Lossless => {
+                let image = self.decode_lossless()?;
+                return Ok(image);
+            }
             _ => unimplemented!("Unsupported JPEG mode"),
         }
 
@@ -1922,6 +2214,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let pixels = self.mcu_to_pixels(&mcus);
 
-        Ok(pixels)
+        let frames = Vec::from([ImageFrame::new(self.width, self.height, PixelData::RGB8(pixels), 0)]);
+        Ok(Image::new(self.width, self.height, PixelFormat::RGB8, frames))
     }
 }

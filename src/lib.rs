@@ -24,7 +24,19 @@ fn add_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
 }
 
 fn u16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
-    values.iter().map(|v| (*v / 256) as u8).collect()
+    let max_val = values.iter().max().unwrap_or(&0);
+    let min_val = values.iter().min().unwrap_or(&0);
+
+    if max_val == min_val {
+        return values.iter().map(|_| (*min_val >> 8) as u8).collect();
+    }
+    
+    values.iter()
+        .map(|&p| {
+            let scaled = (255.0 * (p - min_val) as f32 / (max_val - min_val) as f32) as u8;
+            scaled
+        })
+        .collect()
 }
 
 fn f32_to_u8_rgb(values: Vec<f32>) -> Vec<u8> {
@@ -40,7 +52,22 @@ fn l8_to_u8_rgb(values: Vec<u8>) -> Vec<u8> {
 }
 
 fn l16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
-    values.iter().map(|v| (*v / 256) as u8).flat_map(|v| Vec::from([v, v, v])).collect()
+    let max_val = values.iter().max().unwrap_or(&0);
+    let min_val = values.iter().min().unwrap_or(&0);
+
+    if max_val == min_val {
+        let gray_value = (*min_val >> 8) as u8;
+        return values.iter()
+            .flat_map(|_| [gray_value, gray_value, gray_value])
+            .collect();
+    }
+
+    values.iter()
+        .flat_map(|&p| {
+            let gray = (255.0 * (p - min_val) as f32 / (max_val - min_val) as f32) as u8;
+            [gray, gray, gray]
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -327,26 +354,9 @@ impl<R: Read + Seek> Vexel<R> {
     pub fn decode(&mut self) -> Result<Image, Error> {
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
-                let pixels = jpeg_decoder.decode()?;
-                let frames = Vec::from(
-                    [
-                        ImageFrame::new(
-                            jpeg_decoder.width(),
-                            jpeg_decoder.height(),
-                            PixelData::RGB8(pixels),
-                            0,
-                        )
-                    ]
-                );
-
-                Ok(
-                    Image::new(
-                        jpeg_decoder.width(),
-                        jpeg_decoder.height(),
-                        PixelFormat::RGB8,
-                        frames,
-                    )
-                )
+                let image = jpeg_decoder.decode()?;
+                
+                Ok(image)
             }
 
             Decoders::JpegLs(jpeg_ls_decoder) => {
