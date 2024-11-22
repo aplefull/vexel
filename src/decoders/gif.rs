@@ -3,7 +3,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
 use crate::bitreader::BitReader;
-use crate::{Image, ImageFrame, PixelData, PixelFormat};
+use crate::{log_warn, Image, ImageFrame, PixelData, PixelFormat};
 
 pub struct FrameInfo {
     pub left: u32,
@@ -38,13 +38,16 @@ pub struct GifDecoder<R: Read + Seek> {
     frames: Vec<FrameInfo>,
     comments: Vec<String>,
     app_extensions: Vec<ApplicationExtension>,
+    plain_text_extensions: Vec<PlainTextExtension>,
     reader: BitReader<R>,
 }
 
 #[derive(Debug)]
 pub struct ApplicationExtension {
-    pub identifier: Vec<u8>,
-    pub auth_code: Vec<u8>,
+    pub loop_count: Option<u16>,
+    pub buffer_size: Option<u8>,
+    pub identifier: String,
+    pub auth_code: String,
     pub data: Vec<u8>,
 }
 
@@ -55,6 +58,19 @@ pub struct GraphicsControlExtension {
     transparency: bool,
     delay: u16,
     transparent_color_index: u8,
+}
+
+#[derive(Debug)]
+pub struct PlainTextExtension {
+    pub left: u16,
+    pub top: u16,
+    pub width: u16,
+    pub height: u16,
+    pub cell_width: u8,
+    pub cell_height: u8,
+    pub foreground_color: u8,
+    pub background_color: u8,
+    pub text: String,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -125,6 +141,7 @@ impl<R: Read + Seek> GifDecoder<R> {
             frames: Vec::new(),
             comments: Vec::new(),
             app_extensions: Vec::new(),
+            plain_text_extensions: Vec::new(),
             reader: BitReader::new(reader),
         }
     }
@@ -146,22 +163,22 @@ impl<R: Read + Seek> GifDecoder<R> {
         self.version = String::from_utf8(version.to_be_bytes().to_vec()).unwrap();
 
         // Read canvas width and height
-        self.canvas_width = (self.reader.read_bits(16)? as u16).swap_bytes() as u32;
-        self.canvas_height = (self.reader.read_bits(16)? as u16).swap_bytes() as u32;
+        self.canvas_width = (self.reader.read_u16()?).swap_bytes() as u32;
+        self.canvas_height = (self.reader.read_u16()?).swap_bytes() as u32;
 
         // Read the packed fields
-        let packed_fields = self.reader.read_bits(8)?;
+        let packed_fields = self.reader.read_u8()?;
 
         self.global_color_table_flag = (packed_fields & 0b10000000) != 0;
-        self.color_resolution = ((packed_fields & 0b01110000) >> 4) as u8;
+        self.color_resolution = ((packed_fields & 0b01110000) >> 4);
         self.sort_flag = (packed_fields & 0b00001000) != 0;
-        self.size_of_global_color_table = (packed_fields & 0b00000111) as u8;
+        self.size_of_global_color_table = (packed_fields & 0b00000111);
 
         // Read the background color index
-        self.background_color_index = self.reader.read_bits(8)? as u8;
+        self.background_color_index = self.reader.read_u8()?;
 
         // Read the pixel aspect ratio
-        self.pixel_aspect_ratio = self.reader.read_bits(8)? as u8;
+        self.pixel_aspect_ratio = self.reader.read_u8()?;
 
         Ok(())
     }
@@ -175,14 +192,14 @@ impl<R: Read + Seek> GifDecoder<R> {
         let table_size = num_entries * 3;
 
         for _ in 0..table_size {
-            self.global_color_table.push(self.reader.read_bits(8)? as u8);
+            self.global_color_table.push(self.reader.read_u8()?);
         }
 
         Ok(())
     }
 
     fn read_application_extension(&mut self) -> Result<(), std::io::Error> {
-        let block_size = self.reader.read_bits(8)? as u8;
+        let block_size = self.reader.read_u8()?;
         if block_size != 11 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -190,33 +207,127 @@ impl<R: Read + Seek> GifDecoder<R> {
             ));
         }
 
-        // Read application identifier (8 bytes) and authentication code (3 bytes)
         let mut identifier = Vec::with_capacity(8);
         let mut auth_code = Vec::with_capacity(3);
 
         for _ in 0..8 {
-            identifier.push(self.reader.read_bits(8)? as u8);
+            identifier.push(self.reader.read_u8()?);
         }
         for _ in 0..3 {
-            auth_code.push(self.reader.read_bits(8)? as u8);
+            auth_code.push(self.reader.read_u8()?);
+        }
+
+        if identifier == b"NETSCAPE" && auth_code == b"2.0" {
+            loop {
+                let sub_block_size = self.reader.read_u8()?;
+                if sub_block_size == 0 {
+                    break;
+                }
+                
+                let mut app_extension = ApplicationExtension {
+                    loop_count: None,
+                    buffer_size: None,
+                    identifier: String::from_utf8_lossy(identifier.as_slice()).to_string(),
+                    auth_code: String::from_utf8_lossy(auth_code.as_slice()).to_string(),
+                    data: Vec::new(),
+                };
+
+                let block_id = self.reader.read_u8()?;
+                match block_id {
+                    1 => {
+                        let count = self.reader.read_u16()?;
+                        app_extension.loop_count = Some(count);
+                        
+                        // Skip remaining bytes in sub-block
+                        for _ in 0..(sub_block_size - 3) {
+                            self.reader.read_u8()?;
+                        }
+                    }
+                    2 => {
+                        for _ in 0..(sub_block_size - 1) {
+                            let buffer_size = self.reader.read_u8()?;
+                            app_extension.buffer_size = Some(buffer_size);
+                        }
+                    }
+                    _ => {
+                        log_warn!("Skipping unknown Netscape extension block: {:#04x}", block_id);
+                        
+                        for _ in 0..(sub_block_size - 1) {
+                            self.reader.read_u8()?;
+                        }
+                    }
+                }
+            }
         }
 
         // Read application data
         let mut data = Vec::new();
         loop {
-            let sub_block_size = self.reader.read_bits(8)? as usize;
+            let sub_block_size = self.reader.read_u8()? as usize;
+            
             if sub_block_size == 0 {
                 break;
             }
+            
             for _ in 0..sub_block_size {
-                data.push(self.reader.read_bits(8)? as u8);
+                data.push(self.reader.read_u8()?);
             }
         }
 
         self.app_extensions.push(ApplicationExtension {
-            identifier,
-            auth_code,
+            loop_count: None,
+            buffer_size: None,
+            identifier: String::from_utf8_lossy(identifier.as_slice()).to_string(),
+            auth_code: String::from_utf8_lossy(auth_code.as_slice()).to_string(),
             data,
+        });
+
+        Ok(())
+    }
+
+    fn read_plain_text_extension(&mut self) -> Result<(), std::io::Error> {
+        let block_size = self.reader.read_u8()?;
+        if block_size != 12 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid plain text extension block size",
+            ));
+        }
+
+        let left = self.reader.read_u16()?.swap_bytes();
+        let top = self.reader.read_u16()?.swap_bytes();
+        let width = self.reader.read_u16()?.swap_bytes();
+        let height = self.reader.read_u16()?.swap_bytes();
+        let cell_width = self.reader.read_u8()?;
+        let cell_height = self.reader.read_u8()?;
+        let foreground_color = self.reader.read_u8()?;
+        let background_color = self.reader.read_u8()?;
+
+        let mut text = String::new();
+        loop {
+            let sub_block_size = self.reader.read_u8()? as usize;
+            if sub_block_size == 0 {
+                break;
+            }
+
+            let mut block = Vec::with_capacity(sub_block_size);
+            for _ in 0..sub_block_size {
+                block.push(self.reader.read_u8()?);
+            }
+            
+            text.push_str(&String::from_utf8_lossy(&block));
+        }
+
+        self.plain_text_extensions.push(PlainTextExtension {
+            left,
+            top,
+            width,
+            height,
+            cell_width,
+            cell_height,
+            foreground_color,
+            background_color,
+            text,
         });
 
         Ok(())
@@ -224,14 +335,14 @@ impl<R: Read + Seek> GifDecoder<R> {
 
     fn read_comment_extension(&mut self) -> Result<(), std::io::Error> {
         loop {
-            let block_size = self.reader.read_bits(8)? as usize;
+            let block_size = self.reader.read_u8()?;
             if block_size == 0 {
                 break;
             }
 
-            let mut block = Vec::with_capacity(block_size);
+            let mut block = Vec::with_capacity(block_size as usize);
             for _ in 0..block_size {
-                let byte = self.reader.read_bits(8)? as u8;
+                let byte = self.reader.read_u8()?;
                 block.push(byte);
             }
 
@@ -245,8 +356,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         let mut current_gce: Option<GraphicsControlExtension> = None;
 
         loop {
-            // Read block type
-            let block_type = self.reader.read_bits(8)? as u8;
+            let block_type = self.reader.read_u8()?;
 
             match block_type {
                 // Image Separator (0x2C)
@@ -255,10 +365,8 @@ impl<R: Read + Seek> GifDecoder<R> {
                 }
                 // Extension Introducer (0x21)
                 0x21 => {
-                    // Read extension label
-                    let label = self.reader.read_bits(8)? as u8;
+                    let label = self.reader.read_u8()?;
                     match label {
-                        // Graphics Control Extension
                         0xF9 => {
                             current_gce = Some(self.read_graphics_control_extension()?);
                         }
@@ -268,17 +376,20 @@ impl<R: Read + Seek> GifDecoder<R> {
                         0xFF => {
                             self.read_application_extension()?;
                         }
-                        // TODO handle plain text extension
-                        // Other extensions - skip them
+                        0x01 => {
+                            self.read_plain_text_extension()?;
+                        }
                         _ => {
+                            log_warn!("Skipping unknown extension: {:#04x}", label);
+                            
                             loop {
-                                let block_size = self.reader.read_bits(8)? as usize;
+                                let block_size = self.reader.read_u8()? as usize;
                                 if block_size == 0 {
                                     break;
                                 }
                                 // Skip block data
                                 for _ in 0..block_size {
-                                    self.reader.read_bits(8)?;
+                                    self.reader.read_u8()?;
                                 }
                             }
                         }
@@ -289,10 +400,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                     break;
                 }
                 _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Unknown block type: {:#04x}", block_type),
-                    ));
+                    log_warn!("Skipping unknown block type: {:#04x}", block_type);
                 }
             }
         }
@@ -302,10 +410,10 @@ impl<R: Read + Seek> GifDecoder<R> {
 
     fn read_frame(&mut self, gce: Option<GraphicsControlExtension>) -> Result<(), std::io::Error> {
         let mut frame = FrameInfo {
-            left: (self.reader.read_bits(16)? as u16).swap_bytes() as u32,
-            top: (self.reader.read_bits(16)? as u16).swap_bytes() as u32,
-            width: (self.reader.read_bits(16)? as u16).swap_bytes() as u32,
-            height: (self.reader.read_bits(16)? as u16).swap_bytes() as u32,
+            left: self.reader.read_u16()?.swap_bytes() as u32,
+            top: self.reader.read_u16()?.swap_bytes() as u32,
+            width: self.reader.read_u16()?.swap_bytes() as u32,
+            height: self.reader.read_u16()?.swap_bytes() as u32,
             local_color_table_flag: false,
             interlace_flag: false,
             sort_flag: false,
@@ -319,7 +427,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         };
 
         // Read packed fields
-        let packed_fields = self.reader.read_bits(8)? as u8;
+        let packed_fields = self.reader.read_u8()?;
         frame.local_color_table_flag = (packed_fields & 0b10000000) != 0;
         frame.interlace_flag = (packed_fields & 0b01000000) != 0;
         frame.sort_flag = (packed_fields & 0b00100000) != 0;
@@ -329,23 +437,23 @@ impl<R: Read + Seek> GifDecoder<R> {
         if frame.local_color_table_flag {
             let table_size = 3 * (1 << (frame.size_of_local_color_table + 1));
             for _ in 0..table_size {
-                frame.local_color_table.push(self.reader.read_bits(8)? as u8);
+                frame.local_color_table.push(self.reader.read_u8()?);
             }
         }
 
         // Read LZW minimum code size
-        frame.lzw_minimum_code_size = self.reader.read_bits(8)? as u8;
+        frame.lzw_minimum_code_size = self.reader.read_u8()?;
 
         // Read image data blocks
         loop {
-            let block_size = self.reader.read_bits(8)? as usize;
+            let block_size = self.reader.read_u8()? as usize;
             if block_size == 0 {
                 break;
             }
 
             // Read block data
             for _ in 0..block_size {
-                frame.data.push(self.reader.read_bits(8)? as u8);
+                frame.data.push(self.reader.read_u8()?);
             }
         }
 
@@ -361,7 +469,7 @@ impl<R: Read + Seek> GifDecoder<R> {
 
     fn read_graphics_control_extension(&mut self) -> Result<GraphicsControlExtension, std::io::Error> {
         // Read block size (should be 4)
-        let block_size = self.reader.read_bits(8)? as u8;
+        let block_size = self.reader.read_u8()?;
         if block_size != 4 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -370,7 +478,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         }
 
         // Read packed field
-        let packed = self.reader.read_bits(8)? as u8;
+        let packed = self.reader.read_u8()?;
         let disposal_method = match (packed >> 2) & 0x07 {
             0 => DisposalMethod::None,
             2 => DisposalMethod::Background,
@@ -382,13 +490,13 @@ impl<R: Read + Seek> GifDecoder<R> {
         let transparency = (packed & 0x01) != 0;
 
         // Read delay time
-        let delay = (self.reader.read_bits(16)? as u16).swap_bytes();
+        let delay = (self.reader.read_u16()?).swap_bytes();
 
         // Read transparent color index
-        let transparent_color_index = self.reader.read_bits(8)? as u8;
+        let transparent_color_index = self.reader.read_u8()?;
 
         // Read block terminator
-        let terminator = self.reader.read_bits(8)? as u8;
+        let terminator = self.reader.read_u8()?;
         if terminator != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -512,6 +620,53 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(result)
     }
 
+    fn deinterlace(width: u32, height: u32, data: &[u8]) -> Vec<u8> {
+        let mut result = vec![0; data.len()];
+
+        // GIF interlacing passes:
+        // Pass 1: Starting at row 0, every 8th row
+        // Pass 2: Starting at row 4, every 8th row
+        // Pass 3: Starting at row 2, every 4th row
+        // Pass 4: Starting at row 1, every 2nd row
+
+        let mut source_pos = 0;
+
+        // Pass 1 - every 8th row, starting at row 0
+        for y in (0..height).step_by(8) {
+            let row_start = (y * width * 4) as usize;
+            let row_end = row_start + (width * 4) as usize;
+            result[row_start..row_end].copy_from_slice(&data[source_pos..source_pos + (width * 4) as usize]);
+            source_pos += (width * 4) as usize;
+        }
+
+        // Pass 2 - every 8th row, starting at row 4
+        for y in (4..height).step_by(8) {
+            let row_start = (y * width * 4) as usize;
+            let row_end = row_start + (width * 4) as usize;
+            result[row_start..row_end].copy_from_slice(&data[source_pos..source_pos + (width * 4) as usize]);
+            source_pos += (width * 4) as usize;
+        }
+
+        // Pass 3 - every 4th row, starting at row 2
+        for y in (2..height).step_by(4) {
+            let row_start = (y * width * 4) as usize;
+            let row_end = row_start + (width * 4) as usize;
+            result[row_start..row_end].copy_from_slice(&data[source_pos..source_pos + (width * 4) as usize]);
+            source_pos += (width * 4) as usize;
+        }
+
+        // Pass 4 - every 2nd row, starting at row 1
+        for y in (1..height).step_by(2) {
+            let row_start = (y * width * 4) as usize;
+            let row_end = row_start + (width * 4) as usize;
+            result[row_start..row_end].copy_from_slice(&data[source_pos..source_pos + (width * 4) as usize]);
+            source_pos += (width * 4) as usize;
+        }
+
+        result
+    }
+
+
     fn decode_frame(&self, frame: &FrameInfo) -> Result<Vec<u8>, std::io::Error> {
         let indices = self.decompress_lzw(frame)?;
         let mut image_data = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
@@ -545,13 +700,37 @@ impl<R: Read + Seek> GifDecoder<R> {
 
     fn compose_frame(&self, frame_index: usize, previous_canvas: Option<&Vec<u8>>) -> Result<Vec<u8>, std::io::Error> {
         let frame = &self.frames[frame_index];
-        let frame_pixels = self.decode_frame(frame)?;
+        let mut frame_pixels = self.decode_frame(frame)?;
+
+        if frame.interlace_flag {
+            frame_pixels = Self::deinterlace(frame.width, frame.height, &frame_pixels);
+        }
 
         // Create a new canvas with the full GIF dimensions
         let canvas_size = (self.width * self.height * 4) as usize;
+
         let mut canvas = match (frame.disposal_method, previous_canvas) {
             (DisposalMethod::Previous, Some(prev)) => prev.clone(),
             (DisposalMethod::None, Some(prev)) => prev.clone(),
+            (DisposalMethod::Background, _) => {
+                let mut canvas = vec![0; canvas_size];
+
+                if !self.global_color_table.is_empty() {
+                    let bg_index = self.background_color_index as usize * 3;
+                    let bg_color = [
+                        self.global_color_table[bg_index],
+                        self.global_color_table[bg_index + 1],
+                        self.global_color_table[bg_index + 2],
+                        255
+                    ];
+                    
+                    for pixel in canvas.chunks_mut(4) {
+                        pixel.copy_from_slice(&bg_color);
+                    }
+                }
+                
+                canvas
+            }
             _ => vec![0; canvas_size],
         };
 
