@@ -3,7 +3,8 @@ use std::fmt;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
 use crate::bitreader::BitReader;
-use crate::{log_warn, Image, ImageFrame, PixelData, PixelFormat};
+use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
+use crate::utils::traits::{SafeAccess, SafeMapAccess};
 
 pub struct FrameInfo {
     pub left: u32,
@@ -163,16 +164,16 @@ impl<R: Read + Seek> GifDecoder<R> {
         self.version = String::from_utf8(version.to_be_bytes().to_vec()).unwrap();
 
         // Read canvas width and height
-        self.canvas_width = (self.reader.read_u16()?).swap_bytes() as u32;
-        self.canvas_height = (self.reader.read_u16()?).swap_bytes() as u32;
+        self.canvas_width = self.reader.read_u16()?.swap_bytes() as u32;
+        self.canvas_height = self.reader.read_u16()?.swap_bytes() as u32;
 
         // Read the packed fields
         let packed_fields = self.reader.read_u8()?;
 
         self.global_color_table_flag = (packed_fields & 0b10000000) != 0;
-        self.color_resolution = ((packed_fields & 0b01110000) >> 4);
+        self.color_resolution = (packed_fields & 0b01110000) >> 4;
         self.sort_flag = (packed_fields & 0b00001000) != 0;
-        self.size_of_global_color_table = (packed_fields & 0b00000111);
+        self.size_of_global_color_table = packed_fields & 0b00000111;
 
         // Read the background color index
         self.background_color_index = self.reader.read_u8()?;
@@ -183,28 +184,31 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_global_color_table(&mut self) -> Result<(), std::io::Error> {
+    fn read_global_color_table(&mut self) {
         if !self.global_color_table_flag {
-            return Ok(());
+            return;
         }
 
         let num_entries = 1 << (self.size_of_global_color_table + 1);
         let table_size = num_entries * 3;
 
         for _ in 0..table_size {
-            self.global_color_table.push(self.reader.read_u8()?);
+            let bit = match self.reader.read_u8() {
+                Ok(bit) => bit,
+                Err(e) => {
+                    log_warn!("Error reading global color table: {:?}", e);
+                    continue;
+                }
+            };
+            
+            self.global_color_table.push(bit);
         }
-
-        Ok(())
     }
 
     fn read_application_extension(&mut self) -> Result<(), std::io::Error> {
         let block_size = self.reader.read_u8()?;
         if block_size != 11 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid application extension block size",
-            ));
+            log_warn!("Invalid application extension block size: {}", block_size);
         }
 
         let mut identifier = Vec::with_capacity(8);
@@ -250,37 +254,39 @@ impl<R: Read + Seek> GifDecoder<R> {
                         }
                     }
                     _ => {
-                        log_warn!("Skipping unknown Netscape extension block: {:#04x}", block_id);
+                        log_debug!("Skipping unknown Netscape extension block: {:#04x}", block_id);
                         
                         for _ in 0..(sub_block_size - 1) {
                             self.reader.read_u8()?;
                         }
                     }
                 }
+                
+                self.app_extensions.push(app_extension);
             }
+        } else {
+            // Read application data
+            let mut data = Vec::new();
+            loop {
+                let sub_block_size = self.reader.read_u8()? as usize;
+                
+                if sub_block_size == 0 {
+                    break;
+                }
+                
+                for _ in 0..sub_block_size {
+                    data.push(self.reader.read_u8()?);
+                }
+            }
+    
+            self.app_extensions.push(ApplicationExtension {
+                loop_count: None,
+                buffer_size: None,
+                identifier: String::from_utf8_lossy(identifier.as_slice()).to_string(),
+                auth_code: String::from_utf8_lossy(auth_code.as_slice()).to_string(),
+                data,
+            });
         }
-
-        // Read application data
-        let mut data = Vec::new();
-        loop {
-            let sub_block_size = self.reader.read_u8()? as usize;
-            
-            if sub_block_size == 0 {
-                break;
-            }
-            
-            for _ in 0..sub_block_size {
-                data.push(self.reader.read_u8()?);
-            }
-        }
-
-        self.app_extensions.push(ApplicationExtension {
-            loop_count: None,
-            buffer_size: None,
-            identifier: String::from_utf8_lossy(identifier.as_slice()).to_string(),
-            auth_code: String::from_utf8_lossy(auth_code.as_slice()).to_string(),
-            data,
-        });
 
         Ok(())
     }
@@ -288,10 +294,7 @@ impl<R: Read + Seek> GifDecoder<R> {
     fn read_plain_text_extension(&mut self) -> Result<(), std::io::Error> {
         let block_size = self.reader.read_u8()?;
         if block_size != 12 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid plain text extension block size",
-            ));
+            log_warn!("Invalid plain text extension block size: {}", block_size);
         }
 
         let left = self.reader.read_u16()?.swap_bytes();
@@ -376,9 +379,9 @@ impl<R: Read + Seek> GifDecoder<R> {
                         0xFF => {
                             self.read_application_extension()?;
                         }
-                        0x01 => {
+                        /*0x01 => {
                             self.read_plain_text_extension()?;
-                        }
+                        }*/
                         _ => {
                             log_warn!("Skipping unknown extension: {:#04x}", label);
                             
@@ -400,7 +403,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                     break;
                 }
                 _ => {
-                    log_warn!("Skipping unknown block type: {:#04x}", block_type);
+                    
                 }
             }
         }
@@ -471,10 +474,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         // Read block size (should be 4)
         let block_size = self.reader.read_u8()?;
         if block_size != 4 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid graphics control extension block size",
-            ));
+            log_warn!("Invalid graphics control extension block size: {}", block_size);
         }
 
         // Read packed field
@@ -498,10 +498,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         // Read block terminator
         let terminator = self.reader.read_u8()?;
         if terminator != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid graphics control extension terminator",
-            ));
+            log_warn!("Invalid graphics control extension block terminator: {}", terminator);
         }
 
         Ok(GraphicsControlExtension {
@@ -546,7 +543,14 @@ impl<R: Read + Seek> GifDecoder<R> {
                 }
 
                 let bit_pos = *pos % 8;
-                let bit = (bits[byte_pos] >> bit_pos) & 1;
+                let bit = match bits.get(byte_pos) {
+                    Some(byte) => (byte >> bit_pos) & 1,
+                    None => {
+                        log_warn!("Invalid LZW code read position: {} (byte_pos: {}, bit_pos: {})", *pos, byte_pos, bit_pos);
+                        continue;
+                    },
+                };
+                
                 code |= (bit as u16) << current_bit;
 
                 *pos += 1;
@@ -580,18 +584,18 @@ impl<R: Read + Seek> GifDecoder<R> {
 
             if let Some(prev) = prev_code {
                 if code < next_code {
-                    let mut output = dictionary[&code].clone();
+                    let output = dictionary.get_safe(&code)?.clone();
                     result.extend(&output);
 
                     if next_code < 4096 {
-                        let mut new_sequence = dictionary[&prev].clone();
-                        new_sequence.push(output[0]);
+                        let mut new_sequence = dictionary.get_safe(&prev)?.clone();
+                        new_sequence.push(*output.get_safe(0)?);
                         dictionary.insert(next_code, new_sequence);
                         next_code += 1;
                     }
                 } else if code == next_code {
-                    let mut output = dictionary[&prev].clone();
-                    output.push(output[0]);
+                    let mut output = dictionary.get_safe(&prev)?.clone();
+                    output.push(*output.get_safe(0)?);
                     result.extend(&output);
 
                     if next_code < 4096 {
@@ -599,10 +603,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                         next_code += 1;
                     }
                 } else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Invalid LZW code",
-                    ));
+                    log_warn!("Invalid LZW code: {}", code);
                 }
             } else {
                 if let Some(sequence) = dictionary.get(&code) {
@@ -628,44 +629,39 @@ impl<R: Read + Seek> GifDecoder<R> {
         // Pass 2: Starting at row 4, every 8th row
         // Pass 3: Starting at row 2, every 4th row
         // Pass 4: Starting at row 1, every 2nd row
+        
+        let passes = [
+            (0, 8),
+            (4, 8),
+            (2, 4),
+            (1, 2),
+        ];
 
         let mut source_pos = 0;
 
-        // Pass 1 - every 8th row, starting at row 0
-        for y in (0..height).step_by(8) {
-            let row_start = (y * width * 4) as usize;
-            let row_end = row_start + (width * 4) as usize;
-            result[row_start..row_end].copy_from_slice(&data[source_pos..source_pos + (width * 4) as usize]);
-            source_pos += (width * 4) as usize;
-        }
+        for pass in passes.iter() {
+            for y in (pass.0..height).step_by(pass.1) {
+                let row_start = (y * width * 4) as usize;
+                let row_end = row_start + (width * 4) as usize;
+                let source_pos_to = source_pos + (width * 4) as usize;
 
-        // Pass 2 - every 8th row, starting at row 4
-        for y in (4..height).step_by(8) {
-            let row_start = (y * width * 4) as usize;
-            let row_end = row_start + (width * 4) as usize;
-            result[row_start..row_end].copy_from_slice(&data[source_pos..source_pos + (width * 4) as usize]);
-            source_pos += (width * 4) as usize;
-        }
+                if let Ok(source_slice) = data.get_range_safe(source_pos..source_pos_to) {
+                    if result.check_range(row_start..row_end).is_err() {
+                        log_warn!("Row end out of bounds: {} (len {})", row_end, result.len());
+                        continue;
+                    }
+                    
+                    result[row_start..row_end].copy_from_slice(source_slice);
+                } else {
+                    log_warn!("Failed to get source slice for row {}", y);
+                }
 
-        // Pass 3 - every 4th row, starting at row 2
-        for y in (2..height).step_by(4) {
-            let row_start = (y * width * 4) as usize;
-            let row_end = row_start + (width * 4) as usize;
-            result[row_start..row_end].copy_from_slice(&data[source_pos..source_pos + (width * 4) as usize]);
-            source_pos += (width * 4) as usize;
+                source_pos += (width * 4) as usize;
+            }
         }
-
-        // Pass 4 - every 2nd row, starting at row 1
-        for y in (1..height).step_by(2) {
-            let row_start = (y * width * 4) as usize;
-            let row_end = row_start + (width * 4) as usize;
-            result[row_start..row_end].copy_from_slice(&data[source_pos..source_pos + (width * 4) as usize]);
-            source_pos += (width * 4) as usize;
-        }
-
+       
         result
     }
-
 
     fn decode_frame(&self, frame: &FrameInfo) -> Result<Vec<u8>, std::io::Error> {
         let indices = self.decompress_lzw(frame)?;
@@ -688,9 +684,9 @@ impl<R: Read + Seek> GifDecoder<R> {
             }
 
             if color_index + 2 < color_table.len() {
-                image_data.push(color_table[color_index]);
-                image_data.push(color_table[color_index + 1]);
-                image_data.push(color_table[color_index + 2]);
+                image_data.push(*color_table.get_safe(color_index)?);
+                image_data.push(*color_table.get_safe(color_index + 1)?);
+                image_data.push(*color_table.get_safe(color_index + 2)?);
                 image_data.push(255);
             }
         }
@@ -699,7 +695,7 @@ impl<R: Read + Seek> GifDecoder<R> {
     }
 
     fn compose_frame(&self, frame_index: usize, previous_canvas: Option<&Vec<u8>>) -> Result<Vec<u8>, std::io::Error> {
-        let frame = &self.frames[frame_index];
+        let frame = self.frames.get_safe(frame_index)?;
         let mut frame_pixels = self.decode_frame(frame)?;
 
         if frame.interlace_flag {
@@ -718,9 +714,9 @@ impl<R: Read + Seek> GifDecoder<R> {
                 if !self.global_color_table.is_empty() {
                     let bg_index = self.background_color_index as usize * 3;
                     let bg_color = [
-                        self.global_color_table[bg_index],
-                        self.global_color_table[bg_index + 1],
-                        self.global_color_table[bg_index + 2],
+                        *self.global_color_table.get_safe(bg_index)?,
+                        *self.global_color_table.get_safe(bg_index + 1)?,
+                        *self.global_color_table.get_safe(bg_index + 2)?,
                         255
                     ];
                     
@@ -757,9 +753,14 @@ impl<R: Read + Seek> GifDecoder<R> {
                 let canvas_pixel_index = ((canvas_y * self.width + canvas_x) * 4) as usize;
 
                 // Only copy non-transparent pixels
-                if frame_pixels[frame_pixel_index + 3] > 0 {
+                if *frame_pixels.get_safe(frame_pixel_index + 3)? > 0 {
+                    if canvas.check_range(canvas_pixel_index..canvas_pixel_index + 4).is_err() {
+                        log_warn!("Canvas pixel index out of bounds: {} (len {})", canvas_pixel_index, canvas.len());
+                        continue;
+                    }
+                    
                     canvas[canvas_pixel_index..canvas_pixel_index + 4]
-                        .copy_from_slice(&frame_pixels[frame_pixel_index..frame_pixel_index + 4]);
+                        .copy_from_slice(frame_pixels.get_range_safe(frame_pixel_index..frame_pixel_index + 4)?);
                 }
             }
         }
@@ -768,16 +769,41 @@ impl<R: Read + Seek> GifDecoder<R> {
     }
 
     pub fn decode(&mut self) -> Result<Image, std::io::Error> {
-        self.read_header()?;
-        self.read_global_color_table()?;
-        self.read_frames()?;
+        match self.read_header() {
+            Ok(_) => {}
+            Err(e) => {
+                log_warn!("Error reading header, this might be critical! Error: {:?}", e);
+            }
+        };
+        
+        self.read_global_color_table();
+        
+        match self.read_frames() {
+            Ok(_) => {}
+            Err(e) => {
+                log_warn!("Error reading frames, this might be critical! Error: {:?}", e);
+            }
+        };
 
         let mut decoded_frames = Vec::new();
         let mut previous_canvas: Option<Vec<u8>> = None;
 
         for frame_index in 0..self.frames.len() {
-            let frame = &self.frames[frame_index];
-            let canvas = self.compose_frame(frame_index, previous_canvas.as_ref())?;
+            let frame = match self.frames.get(frame_index) {
+                Some(frame) => frame,
+                None => {
+                    log_warn!("Frame index out of bounds: {}", frame_index);
+                    continue;
+                }
+            };
+            
+            let canvas = match self.compose_frame(frame_index, previous_canvas.as_ref()) {
+                Ok(canvas) => canvas,
+                Err(e) => {
+                    log_warn!("Error composing frame. Skipping frame {}. Error: {:?}", frame_index, e);
+                    continue;
+                }
+            };
 
             previous_canvas = match frame.disposal_method {
                 DisposalMethod::None | DisposalMethod::Previous => Some(canvas.clone()),
