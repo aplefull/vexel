@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 use std::fmt::{Debug};
 use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
-use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
+use crate::{log_debug, log_error, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use crate::utils::info_display::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::utils::types::ByteOrder;
@@ -344,6 +344,12 @@ pub enum JpegMode {
     Lossless,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum JpegCodingMethod {
+    Huffman,
+    Arithmetic,
+}
+
 #[derive(Debug, Clone)]
 pub struct QuantizationTable {
     pub id: u8,
@@ -463,6 +469,324 @@ pub enum Predictor {
     RaRb = 7,
 }
 
+// Table H.3 – Statistical model for lossless coding
+#[derive(Debug, Clone)]
+struct LosslessStateContext {
+    // First 100 bins (25 sets of 4) for zero/sign coding
+    // Based on 5x5 classification of Da,Db differences
+    sign_zero_contexts: [[ContextState; 4]; 25], // 25 sets of S0,SS,SP,SN
+
+    // Two sets of 29 bins for magnitude coding
+    magnitude_contexts_low: MagnitudeContext,  // For smaller values
+    magnitude_contexts_high: MagnitudeContext, // For larger values
+}
+
+#[derive(Debug, Clone)]
+struct MagnitudeContext {
+    x_bins: [ContextState; 15], // X1-X15 for magnitude categories
+    m_bins: [ContextState; 15],  // M2-M15 for magnitude bits
+}
+
+#[derive(Debug, Clone)]
+struct ContextState {
+    index: u8,       // Index into probability estimation table
+    mps: bool,  // Sense of most probable symbol
+}
+
+struct ArithmeticDecoder {
+    // Main registers for arithmetic decoding
+    a: u32,         // Probability interval, kept in range 0x8000..=0xFFFF
+    sa: u16,        // Shortened version of A register
+    c: u32,         // Code register, contains bit stream being decoded
+    sc: u16,        // Shortened version of C register
+    ct: u32,        // Count of available bits in code register
+
+    // Probability estimation state for each context
+    context_states: Vec<ContextState>,
+
+    reader: BitReader<Cursor<Vec<u8>>>,
+}
+
+impl ArithmeticDecoder {
+    const QE_VALUE: [u16; 114] = [
+        0x5a1d, 0x2586, 0x1114, 0x080b, 0x03d8, 0x01da, 0x00e5, 0x006f,
+        0x0036, 0x001a, 0x000d, 0x0006, 0x0003, 0x0001, 0x5a7f, 0x3f25,
+        0x2cf2, 0x207c, 0x17b9, 0x1182, 0x0cef, 0x09a1, 0x072f, 0x055c,
+        0x0406, 0x0303, 0x0240, 0x01b1, 0x0144, 0x00f5, 0x00b7, 0x008a,
+        0x0068, 0x004e, 0x003b, 0x002c, 0x5ae1, 0x484c, 0x3a0d, 0x2ef1,
+        0x261f, 0x1f33, 0x19a8, 0x1518, 0x1177, 0x0e74, 0x0bfb, 0x09f8,
+        0x0861, 0x0706, 0x05cd, 0x04de, 0x040f, 0x0363, 0x02d4, 0x025c,
+        0x01f8, 0x01a4, 0x0160, 0x0125, 0x00f6, 0x00cb, 0x00ab, 0x008f,
+        0x5b12, 0x4d04, 0x412c, 0x37d8, 0x2fe8, 0x293c, 0x2379, 0x1edf,
+        0x1aa9, 0x174e, 0x1424, 0x119c, 0x0f6b, 0x0d51, 0x0bb6, 0x0a40,
+        0x5832, 0x4d1c, 0x438e, 0x3bdd, 0x34ee, 0x2eae, 0x299a, 0x2516,
+        0x5570, 0x4ca9, 0x44d9, 0x3e22, 0x3824, 0x32b4, 0x2e17, 0x56a8,
+        0x4f46, 0x47e5, 0x41cf, 0x3c3d, 0x375e, 0x5231, 0x4c0f, 0x4639,
+        0x415e, 0x5627, 0x50e7, 0x4b85, 0x5597, 0x504f, 0x5a10, 0x5522,
+        0x59eb, 0x5a1d
+    ];
+
+    const QE_SWITCH: [bool; 114] = [
+        true, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, true, false,
+        false, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false,
+        false, false, false, false, true, false, false, false,
+        false, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false,
+        true, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false,
+        true, false, false, false, false, false, false, false,
+        true, false, false, false, false, false, false, true,
+        false, false, false, false, false, false, false, false,
+        false, true, false, false, false, false, true, false,
+        true, false
+    ];
+
+    const QE_NEXT_MPS: [u8; 114] = [
+        1, 2, 3, 4, 5, 6, 7, 8,
+        9, 10, 11, 12, 13, 13, 15, 16,
+        17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31, 32,
+        33, 34, 35, 9, 37, 38, 39, 40,
+        41, 42, 43, 44, 45, 46, 47, 48,
+        49, 50, 51, 52, 53, 54, 55, 56,
+        57, 58, 59, 60, 61, 62, 63, 32,
+        65, 66, 67, 68, 69, 70, 71, 72,
+        73, 74, 75, 76, 77, 78, 79, 48,
+        81, 82, 83, 84, 85, 86, 87, 71,
+        89, 90, 91, 92, 93, 94, 86, 96,
+        97, 98, 99, 100, 93, 102, 103, 104,
+        99, 106, 107, 103, 109, 107, 111, 109,
+        111, 113
+    ];
+
+    const QE_NEXT_LPS: [u8; 114] = [
+        1, 14, 16, 18, 20, 23, 25, 28,
+        30, 33, 35, 9, 10, 12, 15, 36,
+        38, 39, 40, 42, 43, 45, 46, 48,
+        49, 51, 52, 54, 56, 57, 59, 60,
+        62, 63, 32, 33, 37, 64, 65, 67,
+        68, 69, 70, 72, 73, 74, 75, 77,
+        78, 79, 48, 50, 50, 51, 52, 53,
+        54, 55, 56, 57, 58, 59, 61, 61,
+        65, 80, 81, 82, 83, 84, 86, 87,
+        87, 72, 72, 74, 74, 75, 77, 77,
+        80, 88, 89, 90, 91, 92, 93, 86,
+        88, 95, 96, 97, 99, 99, 93, 95,
+        101, 102, 103, 104, 99, 105, 106, 107,
+        103, 105, 108, 109, 110, 111, 110, 112,
+        112, 113
+    ];
+
+    fn new(reader: BitReader<Cursor<Vec<u8>>>) -> Self {
+        Self {
+            a: 0,
+            sa: 0,
+            c: 0,
+            sc: 0,
+            ct: 0,
+            context_states: vec![ContextState { index: 0, mps: false }; 114],
+            reader,
+        }
+    }
+
+    fn init(&mut self) {
+        self.a = 0x10000;
+        self.c = 0;
+        self.ct = 0;
+
+        self.byte_in();
+
+        self.c = self.c << 8;
+
+        self.byte_in();
+
+        self.c = self.c << 8;
+
+        self.ct = 0;
+        self.sc = (self.c >> 16) as u16;
+        self.sa = self.a as u16;
+    }
+
+    fn cond_lps_exchange(&mut self, s: usize) -> bool {
+        let qe = Self::QE_VALUE[self.context_states[s].index as usize];
+
+        if self.sa < qe {
+            // D = MPS(S)
+            let d = self.context_states[s].mps;
+            // Cx = Cx – A
+            self.c = self.c.wrapping_sub((self.sa as u32) << 16);
+            // A = Qe(S)
+            self.sa = qe;
+
+            // Estimate_Qe(S)_after_MPS
+            self.estimate_qe_after_mps(s);
+
+            d
+        } else {
+            // D = 1 – MPS(S)
+            let d = !self.context_states[s].mps;
+            // Cx = Cx – A
+            self.c = self.c.wrapping_sub((self.sa as u32) << 16);
+            // A = Qe(S)
+            self.sa = qe;
+
+            //Estimate_Qe(S)_after_LPS
+            self.estimate_qe_after_lps(s);
+
+            d
+        }
+    }
+
+    fn cond_mps_exchange(&mut self, s: usize) -> bool {
+        let qe = Self::QE_VALUE[self.context_states[s].index as usize];
+
+        if self.sa < qe {
+            // D = 1 – MPS(S)
+            let d = !self.context_states[s].mps;
+
+            // Estimate_Qe(S)_after_LPS
+            self.estimate_qe_after_lps(s);
+
+            d
+        } else {
+            //  D = MPS(S)
+            let d = self.context_states[s].mps;
+
+            //Estimate_Qe(S)_after_MPS
+            self.estimate_qe_after_mps(s);
+
+            d
+        }
+    }
+
+    fn estimate_qe_after_mps(&mut self, s: usize) {
+        // I = Index(S)
+        let i = self.context_states[s].index;
+        // I = Next_Index_MPS(I)
+        let i = Self::QE_NEXT_MPS[i as usize];
+        // Index(S) = I
+        self.context_states[s].index = i;
+        // Qe(S) = Qe_Value(I)
+        // Note: This value can be looked up when needed rather than stored
+    }
+
+    fn estimate_qe_after_lps(&mut self, s: usize) {
+        // I = Index(S)
+        let i = self.context_states[s].index;
+
+        if Self::QE_SWITCH[i as usize] {
+            //MPS(S) = 1 – MPS(S)
+            self.context_states[s].mps = !self.context_states[s].mps;
+        }
+
+        // I = Next_Index_LPS(I)
+        let i = Self::QE_NEXT_LPS[i as usize];
+
+        // Index(S) = I
+        self.context_states[s].index = i;
+
+        // Qe(S) = Qe_Value(I)
+        // Note: This value can be looked up when needed rather than stored
+    }
+
+    fn renorm_d(&mut self) {
+        loop {
+            if self.ct == 0 {
+                self.byte_in();
+                self.ct = 8;
+            }
+
+            self.sa <<= 1;
+            self.c <<= 1;
+            self.ct -= 1;
+
+            if self.a < 0x8000 {
+                continue;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn decode(&mut self, s: usize) -> bool {
+        // Get probability estimate for this context
+        let qe = Self::QE_VALUE[self.context_states[s].index as usize];
+
+        log_debug!("MPS: {} Qe: {:04X} A: {:04X} C: {:08X} CT: {}",
+            self.context_states[s].mps as usize, qe, self.a, self.c, self.ct);
+
+        // Subtract Qe from current interval
+        self.sa = self.sa.wrapping_sub(qe);
+
+        // Compare code register with new interval
+        let d = if self.sc < self.sa {
+            // MPS path
+            if self.a < 0x8000 {
+                // MPS conditional exchange needed
+                let d = self.cond_mps_exchange(s);
+                self.renorm_d();
+                d
+            } else {
+                // Just return MPS
+                self.context_states[s].mps
+            }
+        } else {
+            // LPS path - always needs exchange and renormalization
+            let d = self.cond_lps_exchange(s);
+            self.renorm_d();
+            d
+        };
+
+        self.sc = (self.c >> 16) as u16;
+        d
+    }
+
+    fn byte_in(&mut self) {
+        match self.reader.read_u8() {
+            Ok(b) => {
+                if b == 0xFF {
+                    match self.reader.read_u8() {
+                        Ok(0x00) => self.c |= 0xFF00,
+                        Ok(_) => (),
+                        Err(_) => ()
+                    }
+                } else {
+                    self.c += (b as u32) << 8;
+                }
+            }
+            Err(e) => {
+                log_error!("Error reading byte: {:?}", e);
+            }
+        }
+    }
+}
+
+// Function to test arithmetic decoder
+fn run_test_sequence() {
+    let test_data = vec![
+        0x65, 0x5B, 0x51, 0x44,
+        0xF7, 0x96, 0x9D, 0x51,
+        0x78, 0x55, 0xBF, 0xFF,
+        0x00, 0xFC, 0x51, 0x84,
+        0xC7, 0xCE, 0xF9, 0x39,
+        0x00, 0x28, 0x7D, 0x46,
+        0x70, 0x8E, 0xCB, 0xC0,
+        0xF6, 0xFF, 0xD9, 0x00,
+    ];
+    println!("Test data: {:?}", test_data);
+    let reader = BitReader::new(Cursor::new(test_data));
+    let mut decoder = ArithmeticDecoder::new(reader);
+    decoder.init();
+
+    for i in 1..100 {
+        let d = decoder.decode(i);
+        println!("{}: {}", i, d as usize);
+    }
+}
+
 pub struct JpegDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
@@ -470,6 +794,7 @@ pub struct JpegDecoder<R: Read + Seek> {
     exif_header: Option<ExifHeader>,
     comments: Vec<String>,
     mode: JpegMode,
+    coding_method: JpegCodingMethod,
     quantization_tables: Vec<QuantizationTable>,
     ac_huffman_tables: Vec<HuffmanTable>,
     dc_huffman_tables: Vec<HuffmanTable>,
@@ -504,6 +829,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             jfif_header: None,
             exif_header: None,
             mode: JpegMode::Baseline,
+            coding_method: JpegCodingMethod::Huffman,
             mcu_width: 0,
             mcu_height: 0,
             mcu_r_width: 0,
@@ -969,21 +1295,18 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn read_dac(&mut self) -> Result<(), Error> {
-        // Read length of DAC segment (includes the length bytes)
-        let mut data_length = self.reader.read_bits(16)? as usize - 2;
+        let mut data_length = self.reader.read_u16()?;
+        data_length -= 2;
 
         let mut ac_tables = Vec::new();
         let mut dc_tables = Vec::new();
 
-        // Read tables while we have data
         while data_length > 0 {
-            // Read table class and identifier
-            let table_info = self.reader.read_bits(8)? as u8;
-            let table_class = (table_info >> 4) & 0x0F;  // Upper 4 bits
-            let identifier = table_info & 0x0F;         // Lower 4 bits
+            let table_info = self.reader.read_u8()?;
+            let table_class = (table_info >> 4) & 0x0F;
+            let identifier = table_info & 0x0F;
 
-            // Read conditioning values
-            let value = self.reader.read_bits(8)? as u8;
+            let value = self.reader.read_u8()?;
 
             // For DC tables (class 0), the value represents:
             // - Lower 4 bits: Conditioning length (Li)
@@ -992,7 +1315,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let (value, length) = if table_class == 0 {
                 ((value >> 4) & 0x0F, value & 0x0F)
             } else {
-                (value, 0) // AC tables don't use length
+                (value, 0)
             };
 
             let ac_value = ArithmeticCodingValue {
@@ -1009,7 +1332,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
             match table_class {
                 0 => dc_tables.push(table),
                 1 => ac_tables.push(table),
-                _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid DAC table class")),
+                _ => {
+                    log_warn!("Invalid arithmetic coding table class: {}, ignoring the table", table_class);
+                }
             }
 
             data_length -= 2;
@@ -1064,46 +1389,92 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut current_byte = self.reader.read_u8()?;
         let mut scan_data = Vec::new();
 
-        loop {
-            // This can be either a marker or literal data
-            if current_byte == 0xFF {
-                let next_byte = self.reader.read_bits(8)? as u8;
+        // We need to preserve zero bytes in case of arithmetic coding,
+        // so just push all bytes until we reach a marker
+        if self.coding_method == JpegCodingMethod::Arithmetic {
+            loop {
+                if current_byte == 0xFF {
+                    let next_byte = self.reader.read_bits(8)? as u8;
 
-                // This is a marker
-                if next_byte != 0x00 {
-                    // End of image marker
-                    if next_byte == (JpegMarker::EOI.to_u16() & 0xFF) as u8 {
+                    // This is a marker
+                    if next_byte != 0x00 {
+                        // End of image marker
+                        if next_byte == (JpegMarker::EOI.to_u16() & 0xFF) as u8 {
+                            break;
+                        }
+
+                        // Restart marker
+                        if next_byte >= (JpegMarker::RST0.to_u16() & 0xFF) as u8 && next_byte <= (JpegMarker::RST7.to_u16() & 0xFF) as u8 {
+                            current_byte = self.reader.read_bits(8)? as u8;
+                            continue;
+                        }
+
+                        // Another FF
+                        if next_byte == 0xFF {
+                            current_byte = next_byte;
+                            continue;
+                        }
+
+                        // Next marker is found, so it should be the end of the scan,
+                        // seek back to the marker and break
+                        self.reader.seek(SeekFrom::Current(-2))?;
                         break;
                     }
 
-                    // Restart marker
-                    if next_byte >= (JpegMarker::RST0.to_u16() & 0xFF) as u8 && next_byte <= (JpegMarker::RST7.to_u16() & 0xFF) as u8 {
+                    if next_byte == 0x00 {
+                        scan_data.push(current_byte);
+                        scan_data.push(next_byte);
+
                         current_byte = self.reader.read_bits(8)? as u8;
                         continue;
                     }
+                } else {
+                    scan_data.push(current_byte);
+                    current_byte = self.reader.read_bits(8)? as u8;
+                }
+            }
+        } else {
+            loop {
+                // This can be either a marker or literal data
+                if current_byte == 0xFF {
+                    let next_byte = self.reader.read_bits(8)? as u8;
 
-                    // Another FF
-                    if next_byte == 0xFF {
-                        current_byte = next_byte;
-                        continue;
+                    // This is a marker
+                    if next_byte != 0x00 {
+                        // End of image marker
+                        if next_byte == (JpegMarker::EOI.to_u16() & 0xFF) as u8 {
+                            break;
+                        }
+
+                        // Restart marker
+                        if next_byte >= (JpegMarker::RST0.to_u16() & 0xFF) as u8 && next_byte <= (JpegMarker::RST7.to_u16() & 0xFF) as u8 {
+                            current_byte = self.reader.read_bits(8)? as u8;
+                            continue;
+                        }
+
+                        // Another FF
+                        if next_byte == 0xFF {
+                            current_byte = next_byte;
+                            continue;
+                        }
+
+                        // Next marker is found, so it should be the end of the scan,
+                        // seek back to the marker and break
+                        self.reader.seek(SeekFrom::Current(-2))?;
+                        break;
                     }
 
-                    // Next marker is found, so it should be the end of the scan,
-                    // seek back to the marker and break
-                    self.reader.seek(SeekFrom::Current(-2))?;
-                    break;
-                }
+                    // This is a stuffed byte
+                    if next_byte == 0x00 {
+                        scan_data.push(current_byte);
 
-                // This is a stuffed byte
-                if next_byte == 0x00 {
+                        current_byte = self.reader.read_bits(8)? as u8;
+                        continue;
+                    }
+                } else {
                     scan_data.push(current_byte);
-
                     current_byte = self.reader.read_bits(8)? as u8;
-                    continue;
                 }
-            } else {
-                scan_data.push(current_byte);
-                current_byte = self.reader.read_bits(8)? as u8;
             }
         }
 
@@ -2066,7 +2437,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         for y in 0..height {
             for x in 0..width {
                 let pixel_pos = y * width + x;
-                
+
                 for component_index in 0..components_count {
                     let sample = samples[component_index][pixel_pos];
                     output.push(sample);
@@ -2157,6 +2528,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         }
                         JpegMarker::SOF3 => {
                             self.mode = JpegMode::Lossless;
+                            self.read_start_of_frame()?;
+                        }
+                        JpegMarker::SOF11 => {
+                            self.mode = JpegMode::Lossless;
+                            self.coding_method = JpegCodingMethod::Arithmetic;
                             self.read_start_of_frame()?;
                         }
                         JpegMarker::DRI => self.read_restart_interval()?,
