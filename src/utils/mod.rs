@@ -5,3 +5,5 @@ pub mod logger;
 pub mod info_display;
 pub mod types;
 pub mod traits;
+pub mod icc;
+pub mod error;
