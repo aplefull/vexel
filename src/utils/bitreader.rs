@@ -7,6 +7,7 @@ pub struct BitReader<R: Read + Seek> {
     reader: R,
     buffer: u32,
     bits_in_buffer: u8,
+    little_endian: bool,
 }
 
 impl<R: Read + Seek> BitReader<R> {
@@ -15,6 +16,17 @@ impl<R: Read + Seek> BitReader<R> {
             reader,
             buffer: 0,
             bits_in_buffer: 0,
+            little_endian: false,
+        }
+    }
+
+    /// Creates a new BitReader with little-endian byte order.
+    pub fn with_le(reader: R) -> Self {
+        BitReader {
+            reader,
+            buffer: 0,
+            bits_in_buffer: 0,
+            little_endian: true,
         }
     }
 
@@ -32,7 +44,11 @@ impl<R: Read + Seek> BitReader<R> {
         }
 
         self.bits_in_buffer -= 1;
-        Ok(((self.buffer >> self.bits_in_buffer) & 1) != 0)
+        if self.little_endian {
+            Ok(((self.buffer >> (7 - self.bits_in_buffer)) & 1) != 0)
+        } else {
+            Ok(((self.buffer >> self.bits_in_buffer) & 1) != 0)
+        }
     }
 
     /// Reads `n` bits from the bitstream.
@@ -45,8 +61,14 @@ impl<R: Read + Seek> BitReader<R> {
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_bits(&mut self, n: u8) -> Result<u32, std::io::Error> {
         let mut result = 0;
-        for _ in 0..n {
-            result = (result << 1) | (self.read_bit()? as u32);
+        if self.little_endian {
+            for i in 0..n {
+                result = result | ((self.read_bit()? as u32) << i);
+            }
+        } else {
+            for _ in 0..n {
+                result = (result << 1) | (self.read_bit()? as u32);
+            }
         }
         Ok(result)
     }
@@ -66,7 +88,36 @@ impl<R: Read + Seek> BitReader<R> {
     /// - The 16-bit value read
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_u16(&mut self) -> Result<u16, std::io::Error> {
-        self.read_bits(16).map(|b| b as u16)
+        if self.little_endian {
+            let low = self.read_u8()? as u16;
+            let high = self.read_u8()? as u16;
+            Ok((high << 8) | low)
+        } else {
+            let high = self.read_u8()? as u16;
+            let low = self.read_u8()? as u16;
+            Ok((high << 8) | low)
+        }
+    }
+
+    /// Reads a single 32-bit value from the bitstream.
+    ///
+    /// # Returns
+    /// - The 32-bit value read
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read_u32(&mut self) -> Result<u32, std::io::Error> {
+        if self.little_endian {
+            let b0 = self.read_u8()? as u32;
+            let b1 = self.read_u8()? as u32;
+            let b2 = self.read_u8()? as u32;
+            let b3 = self.read_u8()? as u32;
+            Ok(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+        } else {
+            let b0 = self.read_u8()? as u32;
+            let b1 = self.read_u8()? as u32;
+            let b2 = self.read_u8()? as u32;
+            let b3 = self.read_u8()? as u32;
+            Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+        }
     }
 
     /// Clears the current bit buffer.
@@ -177,6 +228,20 @@ impl<R: Read + Seek> BitReader<R> {
         Ok(bytes)
     }
 
+    /// Returns number of bytes left in the bitstream.
+    /// The cursor is not moved.
+    /// 
+    /// # Returns
+    /// - The number of bytes left in the bitstream
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn bytes_left(&mut self) -> Result<u64, std::io::Error> {
+        let current_pos = self.reader.seek(SeekFrom::Current(0))?;
+        let end_pos = self.reader.seek(SeekFrom::End(0))?;
+        self.reader.seek(SeekFrom::Start(current_pos))?;
+
+        Ok(end_pos - current_pos)
+    }
+    
     /// Reads the remaining bits in the bitstream and returns them as a vector of bytes,
     /// not including the current buffer. The buffer is cleared after reading.
     ///
@@ -187,6 +252,23 @@ impl<R: Read + Seek> BitReader<R> {
         let mut bytes = Vec::new();
 
         self.reader.read_to_end(&mut bytes)?;
+        self.clear_buffer();
+
+        Ok(bytes)
+    }
+
+    /// Reads specified number of bytes from the bitstream and returns them as a vector of bytes,
+    /// not including the current buffer. The buffer is cleared after reading.
+    ///
+    /// # Parameters
+    /// - `n`: The number of bytes to read
+    ///
+    /// # Returns
+    /// - A vector of bytes containing the specified number of bytes in the bitstream
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>, std::io::Error> {
+        let mut bytes = vec![0; n];
+        self.reader.read_exact(&mut bytes)?;
         self.clear_buffer();
 
         Ok(bytes)

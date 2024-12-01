@@ -5,6 +5,7 @@ use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::jpeg::JpegDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
+use crate::decoders::bmp::BmpDecoder;
 
 pub use utils::{bitreader, writer, logger};
 
@@ -30,7 +31,7 @@ fn u16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
     if max_val == min_val {
         return values.iter().map(|_| (*min_val >> 8) as u8).collect();
     }
-    
+
     values.iter()
         .map(|&p| {
             let scaled = (255.0 * (p - min_val) as f32 / (max_val - min_val) as f32) as u8;
@@ -82,6 +83,7 @@ pub enum ImageFormat {
     NetPbmP5,
     NetPbmP6,
     NetPbmP7,
+    Bmp,
     Unknown,
 }
 
@@ -104,6 +106,7 @@ pub enum Decoders<R: Read + Seek> {
     JpegLs(JpegLsDecoder<R>),
     Gif(GifDecoder<R>),
     Netpbm(NetPbmDecoder<R>),
+    Bmp(BmpDecoder<R>),
     Unknown,
 }
 
@@ -119,6 +122,7 @@ pub enum PixelData {
     L8(Vec<u8>),
     L16(Vec<u16>),
     LA8(Vec<u8>),
+    LA16(Vec<u16>),
 }
 
 impl PixelData {
@@ -134,6 +138,7 @@ impl PixelData {
             PixelData::L8(_) => PixelFormat::L8,
             PixelData::L16(_) => PixelFormat::L16,
             PixelData::LA8(_) => PixelFormat::LA8,
+            PixelData::LA16(_) => PixelFormat::LA8,
         }
     }
 
@@ -149,6 +154,7 @@ impl PixelData {
             PixelData::L8(pixels) => PixelData::RGB8(l8_to_u8_rgb(pixels)),
             PixelData::LA8(pixels) => PixelData::RGB8(drop_transparency_channel(l8_to_u8_rgb(pixels))),
             PixelData::L16(pixels) => PixelData::RGB8(l16_to_u8_rgb(pixels)),
+            PixelData::LA16(pixels) => PixelData::RGB8(drop_transparency_channel(l16_to_u8_rgb(pixels))),
         }
     }
 
@@ -164,6 +170,7 @@ impl PixelData {
             PixelData::L8(pixels) => PixelData::RGBA8(add_transparency_channel(l8_to_u8_rgb(pixels))),
             PixelData::LA8(pixels) => PixelData::RGBA8(l8_to_u8_rgb(pixels)),
             PixelData::L16(pixels) => PixelData::RGBA8(add_transparency_channel(l16_to_u8_rgb(pixels))),
+            PixelData::LA16(pixels) => PixelData::RGBA8(l16_to_u8_rgb(pixels)),
         }
     }
 
@@ -265,6 +272,11 @@ impl Image {
         }
     }
 
+    pub fn from_pixels(width: u32, height: u32, pixels: PixelData) -> Image {
+        let frame = ImageFrame::new(width, height, pixels, 0);
+        Image::from_frame(frame)
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -342,6 +354,7 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::NetPbmP5 |
             ImageFormat::NetPbmP6 |
             ImageFormat::NetPbmP7 => Decoders::Netpbm(NetPbmDecoder::new(reader)),
+            ImageFormat::Bmp => Decoders::Bmp(BmpDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -355,7 +368,7 @@ impl<R: Read + Seek> Vexel<R> {
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
                 let image = jpeg_decoder.decode()?;
-                
+
                 Ok(image)
             }
 
@@ -394,6 +407,12 @@ impl<R: Read + Seek> Vexel<R> {
                 Ok(image)
             }
 
+            Decoders::Bmp(bmp_decoder) => {
+                let image = bmp_decoder.decode()?;
+
+                Ok(image)
+            }
+
             Decoders::Unknown => Err(Error::new(ErrorKind::InvalidData, "Unknown image format")),
         }
     }
@@ -401,7 +420,7 @@ impl<R: Read + Seek> Vexel<R> {
     pub fn get_format(&self) -> ImageFormat {
         self.format.clone()
     }
-    
+
     pub fn get_image_info(&mut self) -> ImageInfo {
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
@@ -447,6 +466,12 @@ impl<R: Read + Seek> Vexel<R> {
                 b'7' => return Ok(ImageFormat::NetPbmP7),
                 _ => {}
             }
+        }
+
+        // BMP
+        match &header[0..2] {
+            b"BM" | b"BA" | b"CI" | b"CP" | b"IC" | b"PT" => return Ok(ImageFormat::Bmp),
+            _ => {}
         }
 
         Ok(ImageFormat::Unknown)
