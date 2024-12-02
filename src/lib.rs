@@ -13,6 +13,7 @@ use std::fmt::{Debug};
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path};
+use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info_display::ImageInfo;
 
 // TODO move these somewhere
@@ -364,7 +365,7 @@ impl<R: Read + Seek> Vexel<R> {
         })
     }
 
-    pub fn decode(&mut self) -> Result<Image, Error> {
+    pub fn decode(&mut self) -> VexelResult<Image> {
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
                 let image = jpeg_decoder.decode()?;
@@ -413,7 +414,7 @@ impl<R: Read + Seek> Vexel<R> {
                 Ok(image)
             }
 
-            Decoders::Unknown => Err(Error::new(ErrorKind::InvalidData, "Unknown image format")),
+            Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
         }
     }
 

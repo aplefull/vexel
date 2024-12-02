@@ -1,9 +1,11 @@
 use std::fmt::Debug;
 use std::io::{Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
-use crate::{log_warn, Image};
+use crate::{log_error, log_warn, Image, PixelData};
+use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::traits::SafeAccess;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum BitmapCompression {
     BiRgb = 0,
     BiRle8 = 1,
@@ -97,13 +99,12 @@ impl DibHeader {
     fn compression(&self) -> BitmapCompression {
         match self {
             DibHeader::Core(_) => BitmapCompression::BiRgb,
-            /*DibHeader::OS2V2(h) => h.compression,
+            DibHeader::OS2V2(h) => h.compression,
             DibHeader::Info(h) => h.compression,
             DibHeader::V2(h) => h.info.compression,
             DibHeader::V3(h) => h.v2.info.compression,
             DibHeader::V4(h) => h.v3.v2.info.compression,
-            DibHeader::V5(h) => h.v4.v3.v2.info.compression,*/
-            _ => BitmapCompression::BiRgb,
+            DibHeader::V5(h) => h.v4.v3.v2.info.compression,
         }
     }
 }
@@ -266,7 +267,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.height
     }
 
-    fn read_file_header(&mut self) -> Result<(), std::io::Error> {
+    fn read_file_header(&mut self) -> VexelResult<()> {
         let signature = self.reader.read_u16()?;
 
         match signature {
@@ -293,7 +294,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         Ok(())
     }
 
-    fn read_info_header(&mut self) -> Result<(), std::io::Error> {
+    fn read_info_header(&mut self) -> VexelResult<()> {
         let header_size = self.reader.read_u32()?;
 
         self.dib_header = match header_size {
@@ -342,16 +343,16 @@ impl<R: Read + Seek> BmpDecoder<R> {
         }
 
         if self.width <= 0 || self.height <= 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Invalid image dimensions: {}x{}", self.width, self.height),
-            ));
+            return Err(VexelError::InvalidDimensions {
+                width: self.width,
+                height: self.height,
+            });
         }
 
         Ok(())
     }
 
-    fn read_bitmap_core_header(&mut self) -> Result<BitmapCoreHeader, std::io::Error> {
+    fn read_bitmap_core_header(&mut self) -> VexelResult<BitmapCoreHeader> {
         Ok(BitmapCoreHeader {
             width: self.reader.read_u16()?,
             height: self.reader.read_u16()?,
@@ -360,7 +361,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         })
     }
 
-    fn read_os2_v2_header(&mut self) -> Result<OS22XBitmapHeader, std::io::Error> {
+    fn read_os2_v2_header(&mut self) -> VexelResult<OS22XBitmapHeader> {
         Ok(OS22XBitmapHeader {
             width: self.reader.read_u32()? as i32,
             height: self.reader.read_u32()? as i32,
@@ -383,7 +384,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         })
     }
 
-    fn read_bitmap_info_header(&mut self) -> Result<BitmapInfoHeader, std::io::Error> {
+    fn read_bitmap_info_header(&mut self) -> VexelResult<BitmapInfoHeader> {
         Ok(BitmapInfoHeader {
             width: self.reader.read_u32()? as i32,
             height: self.reader.read_u32()? as i32,
@@ -398,7 +399,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         })
     }
 
-    fn read_v2_header(&mut self) -> Result<BitmapV2InfoHeader, std::io::Error> {
+    fn read_v2_header(&mut self) -> VexelResult<BitmapV2InfoHeader> {
         Ok(BitmapV2InfoHeader {
             info: self.read_bitmap_info_header()?,
             red_mask: self.reader.read_u32()?,
@@ -407,14 +408,14 @@ impl<R: Read + Seek> BmpDecoder<R> {
         })
     }
 
-    fn read_v3_header(&mut self) -> Result<BitmapV3InfoHeader, std::io::Error> {
+    fn read_v3_header(&mut self) -> VexelResult<BitmapV3InfoHeader> {
         Ok(BitmapV3InfoHeader {
             v2: self.read_v2_header()?,
             alpha_mask: self.reader.read_u32()?,
         })
     }
 
-    fn read_v4_header(&mut self) -> Result<BitmapV4Header, std::io::Error> {
+    fn read_v4_header(&mut self) -> VexelResult<BitmapV4Header> {
         Ok(BitmapV4Header {
             v3: self.read_v3_header()?,
             cs_type: self.reader.read_u32()?,
@@ -425,7 +426,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         })
     }
 
-    fn read_v5_header(&mut self) -> Result<BitmapV5Header, std::io::Error> {
+    fn read_v5_header(&mut self) -> VexelResult<BitmapV5Header> {
         Ok(BitmapV5Header {
             v4: self.read_v4_header()?,
             intent: self.reader.read_u32()?,
@@ -435,7 +436,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         })
     }
 
-    fn read_color_space(&mut self) -> Result<ColorSpace, std::io::Error> {
+    fn read_color_space(&mut self) -> VexelResult<ColorSpace> {
         Ok(ColorSpace {
             ciexyz_red: self.read_ciexyz()?,
             ciexyz_green: self.read_ciexyz()?,
@@ -443,7 +444,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         })
     }
 
-    fn read_ciexyz(&mut self) -> Result<CIEXYZ, std::io::Error> {
+    fn read_ciexyz(&mut self) -> VexelResult<CIEXYZ> {
         Ok(CIEXYZ {
             x: self.reader.read_u32()? as i32,
             y: self.reader.read_u32()? as i32,
@@ -451,7 +452,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         })
     }
 
-    fn read_color_table(&mut self) -> Result<(), std::io::Error> {
+    fn read_color_table(&mut self) -> VexelResult<()> {
         if self.dib_header.bits_per_pixel() <= 8 {
             let num_colors = if self.dib_header.colors_used() > 0 {
                 self.dib_header.colors_used()
@@ -477,7 +478,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         Ok(())
     }
 
-    fn read_pixel_data(&mut self) -> Result<(), std::io::Error> {
+    fn read_pixel_data(&mut self) -> VexelResult<()> {
         self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
 
         let row_size = ((self.dib_header.bits_per_pixel() as u32 * self.width + 31) / 32) * 4;
@@ -498,7 +499,17 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
         for y in 0..(height as usize / 2) {
             let top_row_start = y * row_size;
-            let bottom_row_start = ((height as usize - 1 - y) * row_size);
+            let bottom_row_start = (height as usize - 1 - y) * row_size;
+            
+            if data.check_range(top_row_start..top_row_start + row_size).is_err() {
+                log_warn!("Invalid top row range: {}..{}", top_row_start, top_row_start + row_size);
+                continue;
+            }
+            
+            if data.check_range(bottom_row_start..bottom_row_start + row_size).is_err() {
+                log_warn!("Invalid bottom row range: {}..{}", bottom_row_start, bottom_row_start + row_size);
+                continue;
+            }
 
             temp_row.copy_from_slice(&data[top_row_start..top_row_start + row_size]);
 
@@ -508,7 +519,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         }
     }
 
-    fn decode_rle8(&mut self) -> Result<(), std::io::Error> {
+    fn decode_rle8(&mut self) -> VexelResult<()> {
         let mut decoded = vec![0u8; (self.width * self.height) as usize];
         let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
         let mut x = 0;
@@ -543,6 +554,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
                             if x < self.width {
                                 let pos = (y * self.width + x) as usize;
                                 if pos < decoded.len() {
+                                    if pos >= decoded.len() {
+                                        log_warn!("Invalid pixel position: {}", pos);
+                                        break;
+                                    }
+
                                     decoded[pos] = reader.read_u8()?;
                                 }
                                 x += 1;
@@ -560,6 +576,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     if x < self.width {
                         let pos = (y * self.width + x) as usize;
                         if pos < decoded.len() {
+                            if pos >= decoded.len() {
+                                log_warn!("Invalid pixel position: {}", pos);
+                                break;
+                            }
+
                             decoded[pos] = value;
                         }
                         x += 1;
@@ -573,13 +594,13 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 y += 1;
             }
         }
-        
+
         self.data = decoded;
 
         Ok(())
     }
 
-    fn decode_rle4(&mut self) -> Result<(), std::io::Error> {
+    fn decode_rle4(&mut self) -> VexelResult<()> {
         let mut decoded = vec![0u8; (self.width * self.height) as usize];
         let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
         let mut x = 0;
@@ -624,6 +645,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
                                     let pos = (y * self.width + x) as usize;
                                     if pos < decoded.len() {
+                                        if pos >= decoded.len() {
+                                            log_warn!("Invalid pixel position: {}", pos);
+                                            break;
+                                        }
+
                                         decoded[pos] = pixel;
                                     }
                                     x += 1;
@@ -645,6 +671,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     if x < self.width {
                         let pos = (y * self.width + x) as usize;
                         if pos < decoded.len() {
+                            if pos >= decoded.len() {
+                                log_warn!("Invalid pixel position: {}", pos);
+                                break;
+                            }
+                            
                             decoded[pos] = if i % 2 == 0 { high } else { low };
                         }
                         x += 1;
@@ -660,26 +691,23 @@ impl<R: Read + Seek> BmpDecoder<R> {
         }
 
         self.data = decoded;
-        
+
         Ok(())
     }
 
-    fn decode_jpeg(&self) -> Result<Image, std::io::Error> {
+    fn decode_jpeg(&self) -> VexelResult<Image> {
         // TODO: Implement JPEG decompression
         unimplemented!("JPEG compression not yet implemented");
     }
 
-    fn decode_png(&self) -> Result<Image, std::io::Error> {
+    fn decode_png(&self) -> VexelResult<Image> {
         // TODO: Implement PNG decompression
         unimplemented!("PNG compression not yet implemented");
     }
 
-    fn decode_1bit_image(&self) -> Result<Image, std::io::Error> {
+    fn decode_1bit_image(&self) -> Image {
         if self.color_table.len() < 2 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid color table for 1-bit image",
-            ));
+            log_warn!("Invalid color table for 1-bit image");
         }
 
         let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
@@ -697,9 +725,22 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 let bit_offset = 7 - (x % 8);
 
                 if byte_index < self.data.len() {
-                    let byte = self.data[byte_index];
+                    let byte = self.data.get_safe(byte_index).unwrap_or_else(|e| {
+                        log_warn!("Error reading pixel data: {}", e);
+                        &0
+                    });
+
                     let pixel_value = (byte >> bit_offset) & 1;
-                    let color = &self.color_table[pixel_value as usize];
+                    let color = self.color_table.get_safe(pixel_value as usize).unwrap_or_else(|e| {
+                        log_warn!("Error reading color table: {}", e);
+
+                        &ColorEntry {
+                            red: 0,
+                            green: 0,
+                            blue: 0,
+                            reserved: 0,
+                        }
+                    });
 
                     image_data.push(color.red);
                     image_data.push(color.green);
@@ -712,20 +753,16 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Ok(Image::from_frame(crate::ImageFrame::new(
+        Image::from_pixels(
             self.width,
             self.height,
-            crate::PixelData::RGB8(image_data),
-            0,
-        )))
+            PixelData::RGB8(image_data),
+        )
     }
 
-    fn decode_4bit_image(&self) -> Result<Image, std::io::Error> {
+    fn decode_4bit_image(&self) -> Image {
         if self.color_table.len() < 16 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid color table for 4-bit image",
-            ));
+            log_warn!("Invalid color table for 4-bit image");
         }
 
         let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
@@ -743,14 +780,28 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 let is_high_nibble = x % 2 == 0;
 
                 if byte_index < self.data.len() {
-                    let byte = self.data[byte_index];
+                    let byte = *self.data.get_safe(byte_index).unwrap_or_else(|e| {
+                        log_warn!("Error reading pixel data: {}", e);
+                        &0
+                    });
+
                     let pixel_value = if is_high_nibble {
                         (byte >> 4) & 0x0F
                     } else {
                         byte & 0x0F
                     };
 
-                    let color = &self.color_table[pixel_value as usize];
+                    let color = self.color_table.get_safe(pixel_value as usize).unwrap_or_else(|e| {
+                        log_warn!("Error reading color table: {}", e);
+
+                        &ColorEntry {
+                            red: 0,
+                            green: 0,
+                            blue: 0,
+                            reserved: 0,
+                        }
+                    });
+
                     image_data.push(color.red);
                     image_data.push(color.green);
                     image_data.push(color.blue);
@@ -762,20 +813,16 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Ok(Image::from_frame(crate::ImageFrame::new(
+        Image::from_pixels(
             self.width,
             self.height,
-            crate::PixelData::RGB8(image_data),
-            0,
-        )))
+            PixelData::RGB8(image_data),
+        )
     }
 
-    fn decode_8bit_image(&self) -> Result<Image, std::io::Error> {
+    fn decode_8bit_image(&self) -> Image {
         if self.color_table.len() < 256 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid color table for 8-bit image",
-            ));
+            log_warn!("Invalid color table for 8-bit image");
         }
 
         let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
@@ -792,8 +839,21 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 let byte_index = row_start + x;
 
                 if byte_index < self.data.len() {
-                    let pixel_value = self.data[byte_index];
-                    let color = &self.color_table[pixel_value as usize];
+                    let pixel_value = *self.data.get_safe(byte_index).unwrap_or_else(|e| {
+                        log_warn!("Error reading pixel data: {}", e);
+                        &0
+                    });
+
+                    let color = self.color_table.get_safe(pixel_value as usize).unwrap_or_else(|e| {
+                        log_warn!("Error reading color table: {}", e);
+
+                        &ColorEntry {
+                            red: 0,
+                            green: 0,
+                            blue: 0,
+                            reserved: 0,
+                        }
+                    });
 
                     image_data.push(color.red);
                     image_data.push(color.green);
@@ -806,15 +866,14 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Ok(Image::from_frame(crate::ImageFrame::new(
+        Image::from_pixels(
             self.width,
             self.height,
-            crate::PixelData::RGB8(image_data),
-            0,
-        )))
+            PixelData::RGB8(image_data),
+        )
     }
 
-    fn decode_16bit_image(&self) -> Result<Image, std::io::Error> {
+    fn decode_16bit_image(&self) -> Image {
         let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
         let bytes_per_row = ((self.width * 16 + 31) / 32) * 4;
         let row_padding = bytes_per_row - (self.width * 2);
@@ -826,7 +885,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
         for _ in 0..self.height {
             // Process each pixel in the row
             for _ in 0..self.width {
-                let pixel = reader.read_u16()?;
+                let pixel = reader.read_u16().unwrap_or_else(|e| {
+                    log_error!("Error reading pixel data: {}", e);
+                    0
+                });
 
                 // Extract color components (5-5-5 format)
                 // Red: bits 10-14 (5 bits)
@@ -844,7 +906,14 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
             // Skip row padding
             if row_padding > 0 {
-                reader.seek(SeekFrom::Current(row_padding as i64))?;
+                match reader.seek(SeekFrom::Current(row_padding as i64)) {
+                    Err(e) => {
+                        log_error!("Error skipping row padding: {}", e);
+                    }
+                    Ok(_) => {
+                        continue;
+                    }
+                }
             }
         }
 
@@ -852,15 +921,14 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Ok(Image::from_frame(crate::ImageFrame::new(
+        Image::from_pixels(
             self.width,
             self.height,
-            crate::PixelData::RGB8(image_data),
-            0,
-        )))
+            PixelData::RGB8(image_data),
+        )
     }
 
-    fn decode_24bit_image(&self) -> Result<Image, std::io::Error> {
+    fn decode_24bit_image(&self) -> Image {
         let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
         let bytes_per_row = ((self.width * 24 + 31) / 32) * 4;
         let row_padding = bytes_per_row - (self.width * 3);
@@ -873,9 +941,20 @@ impl<R: Read + Seek> BmpDecoder<R> {
             // Process each pixel in the row
             for _ in 0..self.width {
                 // Read BGR values (BMP stores in BGR order)
-                let b = reader.read_u8()?;
-                let g = reader.read_u8()?;
-                let r = reader.read_u8()?;
+                let b = reader.read_u8().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                });
+
+                let g = reader.read_u8().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                });
+
+                let r = reader.read_u8().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                });
 
                 // Store in RGB order
                 image_data.push(r);
@@ -885,7 +964,14 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
             // Skip row padding
             if row_padding > 0 {
-                reader.seek(SeekFrom::Current(row_padding as i64))?;
+                match reader.seek(SeekFrom::Current(row_padding as i64)) {
+                    Err(e) => {
+                        log_error!("Error skipping row padding: {}", e);
+                    }
+                    Ok(_) => {
+                        continue;
+                    }
+                };
             }
         }
 
@@ -893,15 +979,14 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Ok(Image::from_frame(crate::ImageFrame::new(
+        Image::from_pixels(
             self.width,
             self.height,
-            crate::PixelData::RGB8(image_data),
-            0,
-        )))
+            PixelData::RGB8(image_data),
+        )
     }
 
-    fn decode_32bit_image(&self) -> Result<Image, std::io::Error> {
+    fn decode_32bit_image(&self) -> Image {
         let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
         let bytes_per_row = ((self.width * 32 + 31) / 32) * 4;
         let row_padding = bytes_per_row - (self.width * 4);
@@ -914,10 +999,25 @@ impl<R: Read + Seek> BmpDecoder<R> {
             // Process each pixel in the row
             for _ in 0..self.width {
                 // Read BGRA values (BMP stores in BGRA order)
-                let b = reader.read_u8()?;
-                let g = reader.read_u8()?;
-                let r = reader.read_u8()?;
-                let a = reader.read_u8()?;
+                let b = reader.read_u8().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                });
+
+                let g = reader.read_u8().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                });
+
+                let r = reader.read_u8().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                });
+
+                let a = reader.read_u8().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                });
 
                 // Store in RGBA order
                 image_data.push(r);
@@ -928,19 +1028,29 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
             // Skip row padding
             if row_padding > 0 {
-                reader.seek(SeekFrom::Current(row_padding as i64))?;
+                match reader.seek(SeekFrom::Current(row_padding as i64)) {
+                    Err(e) => {
+                        log_error!("Error skipping row padding: {}", e);
+                    }
+                    Ok(_) => {
+                        continue;
+                    }
+                }
             }
         }
 
-        Ok(Image::from_frame(crate::ImageFrame::new(
+        if self.dib_header.height() > 0 {
+            Self::flip_v(&mut image_data, self.width, self.height, 4);
+        }
+
+        Image::from_pixels(
             self.width,
             self.height,
-            crate::PixelData::RGBA8(image_data),
-            0,
-        )))
+            PixelData::RGBA8(image_data),
+        )
     }
 
-    fn decode_64bit_image(&self) -> Result<Image, std::io::Error> {
+    fn decode_64bit_image(&self) -> Image {
         let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
         let bytes_per_row = ((self.width * 64 + 31) / 32) * 4;
         let row_padding = bytes_per_row - (self.width * 8);
@@ -953,37 +1063,85 @@ impl<R: Read + Seek> BmpDecoder<R> {
             // Process each pixel in the row
             for _ in 0..self.width {
                 // Read BGRA values (each channel is 16 bits)
-                let b = (reader.read_u16()? >> 8) as u8; // Take most significant 8 bits
-                let g = (reader.read_u16()? >> 8) as u8;
-                let r = (reader.read_u16()? >> 8) as u8;
-                let a = (reader.read_u16()? >> 8) as u8;
+                let b = reader.read_u16().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                }) >> 8;
+
+                let g = reader.read_u16().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                }) >> 8;
+
+                let r = reader.read_u16().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                }) >> 8;
+
+                let a = reader.read_u16().unwrap_or_else(|e| {
+                    log_warn!("Error reading pixel data: {}", e);
+                    0
+                }) >> 8;
 
                 // Store in RGBA order
-                image_data.push(r);
-                image_data.push(g);
-                image_data.push(b);
-                image_data.push(a);
+                image_data.push(r as u8);
+                image_data.push(g as u8);
+                image_data.push(b as u8);
+                image_data.push(a as u8);
             }
 
             // Skip row padding
             if row_padding > 0 {
-                reader.seek(SeekFrom::Current(row_padding as i64))?;
+                match reader.seek(SeekFrom::Current(row_padding as i64)) {
+                    Err(e) => {
+                        log_error!("Error skipping row padding: {}", e);
+                    }
+                    Ok(_) => {
+                        continue;
+                    }
+                }
             }
         }
 
-        Ok(Image::from_frame(crate::ImageFrame::new(
+        if self.dib_header.height() > 0 {
+            Self::flip_v(&mut image_data, self.width, self.height, 4);
+        }
+
+        Image::from_pixels(
             self.width,
             self.height,
-            crate::PixelData::RGBA8(image_data),
-            0,
-        )))
+            PixelData::RGBA8(image_data),
+        )
     }
 
-    pub fn decode(&mut self) -> Result<Image, std::io::Error> {
-        self.read_file_header()?;
-        self.read_info_header()?;
-        self.read_color_table()?;
-        self.read_pixel_data()?;
+    pub fn decode(&mut self) -> VexelResult<Image> {
+        match self.read_file_header() {
+            Err(e) => {
+                log_error!("Error reading file header. This might be critical! Error: {}", e);
+            }
+            Ok(_) => (),
+        };
+
+        match self.read_info_header() {
+            Err(e) => {
+                log_error!("Error reading info header. This might be critical! Error: {}", e);
+            }
+            Ok(_) => (),
+        };
+
+        match self.read_color_table() {
+            Err(e) => {
+                log_error!("Error reading color table. This might be critical! Error: {}", e);
+            }
+            Ok(_) => (),
+        };
+
+        match self.read_pixel_data() {
+            Err(e) => {
+                log_error!("Error reading pixel data. This might be critical! Error: {}", e);
+            }
+            Ok(_) => (),
+        };
 
         match self.dib_header.compression() {
             BitmapCompression::BiRgb => (),
@@ -991,30 +1149,26 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 if self.dib_header.bits_per_pixel() != 8 {
                     log_warn!("Invalid bit depth for RLE8 compression: {}", self.dib_header.bits_per_pixel());
                 }
-                
+
                 self.decode_rle8()?;
-            },
+            }
             BitmapCompression::BiRle4 => {
                 if self.dib_header.bits_per_pixel() != 4 {
                     log_warn!("Invalid bit depth for RLE4 compression: {}", self.dib_header.bits_per_pixel());
                 }
 
                 self.decode_rle4()?;
-            },
+            }
             BitmapCompression::BiJpeg => {
                 return self.decode_jpeg();
-            },
+            }
             BitmapCompression::BiPng => {
                 return self.decode_png();
-            },
+            }
             _ => {
                 // TODO: Implement other compression types
                 log_warn!("Unsupported compression type: {:?}", self.dib_header.compression());
             }
-        }
-
-        if self.dib_header.compression() != BitmapCompression::BiRgb {
-            log_warn!("Unsupported compression type: {:?}", self.dib_header.compression());
         }
 
         let image = match self.dib_header.bits_per_pixel() {
@@ -1031,6 +1185,6 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }
         };
 
-        Ok(image?)
+        Ok(image)
     }
 }
