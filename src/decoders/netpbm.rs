@@ -308,7 +308,6 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
     fn decode_ascii_pixmap(&mut self) -> Result<PixelData, std::io::Error> {
         let mut image_data: Vec<u8> = Vec::new();
-
         for _ in 0..self.height {
             for _ in 0..self.width {
                 let r = self.read_ascii_number()?.clamp(0, self.max_value);
@@ -381,7 +380,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                     let r = reader.read_u8()?.clamp(0, self.max_value as u8);
                     let g = reader.read_u8()?.clamp(0, self.max_value as u8);
                     let b = reader.read_u8()?.clamp(0, self.max_value as u8);
-                    
+
                     image_data.push(Self::scale_to_8bit(r as u32, self.max_value));
                     image_data.push(Self::scale_to_8bit(g as u32, self.max_value));
                     image_data.push(Self::scale_to_8bit(b as u32, self.max_value));
@@ -409,7 +408,187 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn decode_pam(&self) -> Result<PixelData, std::io::Error> {
-        unimplemented!("PAM decoding is not implemented yet");
+        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+
+        // Validate required fields
+        if self.depth == 0 || self.max_value == 0 || self.max_value > 65535 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid PAM parameters",
+            ));
+        }
+
+        let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
+
+        match (&self.tuple_type, self.depth) {
+            // BLACKANDWHITE format (1 channel, maxval must be 1)
+            (Some(TupleType::BlackAndWhite), 1) => {
+                if self.max_value != 1 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "BLACKANDWHITE tuple type requires maxval of 1",
+                    ));
+                }
+
+                let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
+                for _ in 0..self.height {
+                    for _ in 0..self.width {
+                        let value = reader.read_u8()?;
+                        image_data.push(value & 1); // Ensure value is 0 or 1
+                    }
+                }
+                Ok(PixelData::L1(image_data))
+            }
+
+            // GRAYSCALE format (1 channel)
+            (Some(TupleType::Grayscale), 1) => {
+                if bits_per_sample == 8 {
+                    let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
+                    for _ in 0..self.height {
+                        for _ in 0..self.width {
+                            let value = reader.read_u8()?;
+                            image_data.push(Self::scale_to_8bit(value as u32, self.max_value));
+                        }
+                    }
+                    Ok(PixelData::L8(image_data))
+                } else {
+                    let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
+                    for _ in 0..self.height {
+                        for _ in 0..self.width {
+                            let value = reader.read_u16()?;
+                            image_data.push(Self::scale_to_16bit(value as u32, self.max_value));
+                        }
+                    }
+                    Ok(PixelData::L16(image_data))
+                }
+            }
+
+            // RGB format (3 channels)
+            (Some(TupleType::RGB), 3) => {
+                if bits_per_sample == 8 {
+                    let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
+                    for _ in 0..self.height {
+                        for _ in 0..self.width {
+                            let r = reader.read_u8()?;
+                            let g = reader.read_u8()?;
+                            let b = reader.read_u8()?;
+
+                            image_data.push(Self::scale_to_8bit(r as u32, self.max_value));
+                            image_data.push(Self::scale_to_8bit(g as u32, self.max_value));
+                            image_data.push(Self::scale_to_8bit(b as u32, self.max_value));
+                        }
+                    }
+                    Ok(PixelData::RGB8(image_data))
+                } else {
+                    let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
+                    for _ in 0..self.height {
+                        for _ in 0..self.width {
+                            let r = reader.read_u16()?;
+                            let g = reader.read_u16()?;
+                            let b = reader.read_u16()?;
+
+                            image_data.push(Self::scale_to_16bit(r as u32, self.max_value));
+                            image_data.push(Self::scale_to_16bit(g as u32, self.max_value));
+                            image_data.push(Self::scale_to_16bit(b as u32, self.max_value));
+                        }
+                    }
+                    Ok(PixelData::RGB16(image_data))
+                }
+            }
+
+            // BLACKANDWHITE_ALPHA format (2 channels)
+            (Some(TupleType::BlackAndWhiteAlpha), 2) => {
+                if self.max_value != 1 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "BLACKANDWHITE_ALPHA tuple type requires maxval of 1 for color channel",
+                    ));
+                }
+
+                let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
+                for _ in 0..self.height {
+                    for _ in 0..self.width {
+                        let value = reader.read_u8()?;
+                        let alpha = reader.read_u8()?;
+                        image_data.push(value & 1); // Ensure value is 0 or 1
+                        image_data.push(Self::scale_to_8bit(alpha as u32, self.max_value));
+                    }
+                }
+                Ok(PixelData::LA8(image_data))
+            }
+
+            // GRAYSCALE_ALPHA format (2 channels)
+            (Some(TupleType::GrayscaleAlpha), 2) => {
+                if bits_per_sample == 8 {
+                    let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
+                    for _ in 0..self.height {
+                        for _ in 0..self.width {
+                            let gray = reader.read_u8()?;
+                            let alpha = reader.read_u8()?;
+
+                            image_data.push(Self::scale_to_8bit(gray as u32, self.max_value));
+                            image_data.push(Self::scale_to_8bit(alpha as u32, self.max_value));
+                        }
+                    }
+                    Ok(PixelData::LA8(image_data))
+                } else {
+                    let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
+                    for _ in 0..self.height {
+                        for _ in 0..self.width {
+                            let gray = reader.read_u16()?;
+                            let alpha = reader.read_u16()?;
+
+                            image_data.push(Self::scale_to_16bit(gray as u32, self.max_value));
+                            image_data.push(Self::scale_to_16bit(alpha as u32, self.max_value));
+                        }
+                    }
+                    Ok(PixelData::LA16(image_data))
+                }
+            }
+
+            // RGB_ALPHA format (4 channels)
+            (Some(TupleType::RGBAlpha), 4) => {
+                if bits_per_sample == 8 {
+                    let mut image_data = Vec::with_capacity((self.width * self.height * 4) as usize);
+                    for _ in 0..self.height {
+                        for _ in 0..self.width {
+                            let r = reader.read_u8()?;
+                            let g = reader.read_u8()?;
+                            let b = reader.read_u8()?;
+                            let a = reader.read_u8()?;
+
+                            image_data.push(Self::scale_to_8bit(r as u32, self.max_value));
+                            image_data.push(Self::scale_to_8bit(g as u32, self.max_value));
+                            image_data.push(Self::scale_to_8bit(b as u32, self.max_value));
+                            image_data.push(Self::scale_to_8bit(a as u32, self.max_value));
+                        }
+                    }
+                    Ok(PixelData::RGBA8(image_data))
+                } else {
+                    let mut image_data = Vec::with_capacity((self.width * self.height * 4) as usize);
+                    for _ in 0..self.height {
+                        for _ in 0..self.width {
+                            let r = reader.read_u16()?;
+                            let g = reader.read_u16()?;
+                            let b = reader.read_u16()?;
+                            let a = reader.read_u16()?;
+
+                            image_data.push(Self::scale_to_16bit(r as u32, self.max_value));
+                            image_data.push(Self::scale_to_16bit(g as u32, self.max_value));
+                            image_data.push(Self::scale_to_16bit(b as u32, self.max_value));
+                            image_data.push(Self::scale_to_16bit(a as u32, self.max_value));
+                        }
+                    }
+                    Ok(PixelData::RGBA16(image_data))
+                }
+            }
+
+            // Invalid combination of tuple type and depth
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid combination of tuple type and depth",
+            )),
+        }
     }
 
     pub fn decode(&mut self) -> Result<Image, std::io::Error> {
