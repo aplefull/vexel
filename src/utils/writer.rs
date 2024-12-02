@@ -54,6 +54,10 @@ pub fn write_ppm(output_path: &str, width: u32, height: u32, pixels: &Vec<u8>) -
     for y in 0..height {
         for x in 0..width {
             let pixel_index = ((y * width + x) * 3) as usize;
+            if pixel_index + 2 >= pixels.len() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Pixel index out of bounds while writing PPM file"));
+            }
+            
             let r = pixels[pixel_index];
             let g = pixels[pixel_index + 1];
             let b = pixels[pixel_index + 2];
