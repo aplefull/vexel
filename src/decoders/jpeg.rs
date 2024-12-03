@@ -494,100 +494,110 @@ struct ContextState {
 }
 
 struct ArithmeticDecoder {
-    // Main registers for arithmetic decoding
     a: u32,         // Probability interval, kept in range 0x8000..=0xFFFF
-    sa: u16,        // Shortened version of A register
     c: u32,         // Code register, contains bit stream being decoded
-    sc: u16,        // Shortened version of C register
     ct: u32,        // Count of available bits in code register
+    cx: u32,        // Most significant bits of code register
 
-    // Probability estimation state for each context
-    context_states: Vec<ContextState>,
+    state_table: Vec<u8>,    // State transition table
+    mps_table: Vec<u8>,   // MPS table
+    max_context: usize,   // Maximum context size
+
+    current_mps: u8,             // Current MPS symbol
+    next_mps: u8,        // Next MPS value
+    current_state: u8,          // Current state
+    next_state: u8,         // Next state
+    qe: u16,             // Current probability
 
     reader: BitReader<Cursor<Vec<u8>>>,
 }
 
 impl ArithmeticDecoder {
-    const QE_VALUE: [u16; 114] = [
-        0x5a1d, 0x2586, 0x1114, 0x080b, 0x03d8, 0x01da, 0x00e5, 0x006f,
-        0x0036, 0x001a, 0x000d, 0x0006, 0x0003, 0x0001, 0x5a7f, 0x3f25,
-        0x2cf2, 0x207c, 0x17b9, 0x1182, 0x0cef, 0x09a1, 0x072f, 0x055c,
-        0x0406, 0x0303, 0x0240, 0x01b1, 0x0144, 0x00f5, 0x00b7, 0x008a,
-        0x0068, 0x004e, 0x003b, 0x002c, 0x5ae1, 0x484c, 0x3a0d, 0x2ef1,
-        0x261f, 0x1f33, 0x19a8, 0x1518, 0x1177, 0x0e74, 0x0bfb, 0x09f8,
-        0x0861, 0x0706, 0x05cd, 0x04de, 0x040f, 0x0363, 0x02d4, 0x025c,
-        0x01f8, 0x01a4, 0x0160, 0x0125, 0x00f6, 0x00cb, 0x00ab, 0x008f,
-        0x5b12, 0x4d04, 0x412c, 0x37d8, 0x2fe8, 0x293c, 0x2379, 0x1edf,
-        0x1aa9, 0x174e, 0x1424, 0x119c, 0x0f6b, 0x0d51, 0x0bb6, 0x0a40,
-        0x5832, 0x4d1c, 0x438e, 0x3bdd, 0x34ee, 0x2eae, 0x299a, 0x2516,
-        0x5570, 0x4ca9, 0x44d9, 0x3e22, 0x3824, 0x32b4, 0x2e17, 0x56a8,
-        0x4f46, 0x47e5, 0x41cf, 0x3c3d, 0x375e, 0x5231, 0x4c0f, 0x4639,
-        0x415e, 0x5627, 0x50e7, 0x4b85, 0x5597, 0x504f, 0x5a10, 0x5522,
-        0x59eb, 0x5a1d
+    const QE_VALUE: [u16; 113] = [
+        0x5a1d, 0x2586, 0x1114, 0x080b, 0x03d8,
+        0x01da, 0x0015, 0x006f, 0x0036, 0x001a,
+        0x000d, 0x0006, 0x0003, 0x0001, 0x5a7f,
+        0x3f25, 0x2cf2, 0x207c, 0x17b9, 0x1182,
+        0x0cef, 0x09a1, 0x072f, 0x055c, 0x0406,
+        0x0303, 0x0240, 0x01b1, 0x0144, 0x00f5,
+        0x00b7, 0x008a, 0x0068, 0x004e, 0x003b,
+        0x002c, 0x5ae1, 0x484c, 0x3a0d, 0x2ef1,
+        0x261f, 0x1f33, 0x19a8, 0x1518, 0x1177,
+        0x0e74, 0x0bfb, 0x09f8, 0x0861, 0x0706,
+        0x05cd, 0x04de, 0x040f, 0x0363, 0x02d4,
+        0x025c, 0x01f8, 0x01a4, 0x0160, 0x0125,
+        0x00f6, 0x00cb, 0x00ab, 0x008f, 0x5b12,
+        0x4d04, 0x412c, 0x37d8, 0x2fe8, 0x293c,
+        0x2379, 0x1edf, 0x1aa9, 0x174e, 0x1424,
+        0x119c, 0x0f6b, 0x0d51, 0x0bb6, 0x0a40,
+        0x5832, 0x4d1c, 0x438e, 0x3bdd, 0x34ee,
+        0x2eae, 0x299a, 0x2516, 0x5570, 0x4ca9,
+        0x44d9, 0x3e22, 0x3824, 0x32b4, 0x2e17,
+        0x56a8, 0x4f46, 0x47e5, 0x41cf, 0x3c3d,
+        0x375e, 0x5231, 0x4c0f, 0x4639, 0x415e,
+        0x5627, 0x50e7, 0x4b85, 0x5597, 0x504f,
+        0x5a10, 0x5522, 0x59eb
     ];
 
-    const QE_SWITCH: [bool; 114] = [
-        true, false, false, false, false, false, false, false,
-        false, false, false, false, false, false, true, false,
-        false, false, false, false, false, false, false, false,
-        false, false, false, false, false, false, false, false,
-        false, false, false, false, true, false, false, false,
-        false, false, false, false, false, false, false, false,
-        false, false, false, false, false, false, false, false,
-        false, false, false, false, false, false, false, false,
-        true, false, false, false, false, false, false, false,
-        false, false, false, false, false, false, false, false,
-        true, false, false, false, false, false, false, false,
-        true, false, false, false, false, false, false, true,
-        false, false, false, false, false, false, false, false,
-        false, true, false, false, false, false, true, false,
-        true, false
+    const QE_NEXT_LPS: [u8; 113] = [
+        1, 14, 16, 18, 20, 23, 25, 28, 30, 33,
+        35, 9, 10, 12, 15, 36, 38, 39, 40, 42,
+        43, 45, 46, 48, 49, 51, 52, 54, 56, 57,
+        59, 60, 62, 63, 32, 33, 37, 64, 65, 67,
+        68, 69, 70, 72, 73, 74, 75, 77, 78, 79,
+        48, 50, 50, 51, 52, 53, 54, 55, 56, 57,
+        58, 59, 61, 61, 65, 80, 81, 82, 83, 84,
+        86, 87, 87, 72, 72, 74, 74, 75, 77, 77,
+        80, 88, 89, 90, 91, 92, 93, 86, 88, 95,
+        96, 97, 99, 99, 93, 95, 101, 102, 103, 104,
+        99, 105, 106, 107, 103, 105, 108, 109, 110, 111,
+        110, 112, 112
     ];
 
-    const QE_NEXT_MPS: [u8; 114] = [
-        1, 2, 3, 4, 5, 6, 7, 8,
-        9, 10, 11, 12, 13, 13, 15, 16,
-        17, 18, 19, 20, 21, 22, 23, 24,
-        25, 26, 27, 28, 29, 30, 31, 32,
-        33, 34, 35, 9, 37, 38, 39, 40,
-        41, 42, 43, 44, 45, 46, 47, 48,
-        49, 50, 51, 52, 53, 54, 55, 56,
-        57, 58, 59, 60, 61, 62, 63, 32,
-        65, 66, 67, 68, 69, 70, 71, 72,
-        73, 74, 75, 76, 77, 78, 79, 48,
-        81, 82, 83, 84, 85, 86, 87, 71,
-        89, 90, 91, 92, 93, 94, 86, 96,
-        97, 98, 99, 100, 93, 102, 103, 104,
-        99, 106, 107, 103, 109, 107, 111, 109,
-        111, 113
+    const QE_NEXT_MPS: [u8; 113] = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        11, 12, 13, 13, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+        31, 32, 33, 34, 35, 9, 37, 38, 39, 40,
+        41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+        51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
+        61, 62, 63, 32, 65, 66, 67, 68, 69, 70,
+        71, 72, 73, 74, 75, 76, 77, 78, 79, 48,
+        81, 82, 83, 84, 85, 86, 87, 71, 89, 90,
+        91, 92, 93, 94, 86, 96, 97, 98, 99, 100,
+        93, 102, 103, 104, 99, 106, 107, 103, 109, 107,
+        111, 109, 111
     ];
 
-    const QE_NEXT_LPS: [u8; 114] = [
-        1, 14, 16, 18, 20, 23, 25, 28,
-        30, 33, 35, 9, 10, 12, 15, 36,
-        38, 39, 40, 42, 43, 45, 46, 48,
-        49, 51, 52, 54, 56, 57, 59, 60,
-        62, 63, 32, 33, 37, 64, 65, 67,
-        68, 69, 70, 72, 73, 74, 75, 77,
-        78, 79, 48, 50, 50, 51, 52, 53,
-        54, 55, 56, 57, 58, 59, 61, 61,
-        65, 80, 81, 82, 83, 84, 86, 87,
-        87, 72, 72, 74, 74, 75, 77, 77,
-        80, 88, 89, 90, 91, 92, 93, 86,
-        88, 95, 96, 97, 99, 99, 93, 95,
-        101, 102, 103, 104, 99, 105, 106, 107,
-        103, 105, 108, 109, 110, 111, 110, 112,
-        112, 113
+    const QE_SWITCH: [u8; 113] = [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 0, 0, 0, 0, 0, 0, 1, 0,
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+        1, 0, 1
     ];
 
     fn new(reader: BitReader<Cursor<Vec<u8>>>) -> Self {
         Self {
             a: 0,
-            sa: 0,
             c: 0,
-            sc: 0,
             ct: 0,
-            context_states: vec![ContextState { index: 0, mps: false }; 114],
+            cx: 0,
+            state_table: vec![0; 4096],
+            mps_table: vec![0; 4096],
+            max_context: 4096,
+            current_mps: 0,
+            next_mps: 0,
+            current_state: 0,
+            next_state: 0,
+            qe: 0,
             reader,
         }
     }
@@ -598,150 +608,114 @@ impl ArithmeticDecoder {
         self.ct = 0;
 
         self.byte_in();
-
         self.c = self.c << 8;
-
         self.byte_in();
-
         self.c = self.c << 8;
 
         self.ct = 0;
-        self.sc = (self.c >> 16) as u16;
-        self.sa = self.a as u16;
+        self.cx = (self.c & 0xffff0000) >> 16;
+
     }
 
-    fn cond_lps_exchange(&mut self, s: usize) -> bool {
-        let qe = Self::QE_VALUE[self.context_states[s].index as usize];
+    fn cond_lps_exchange(&mut self) -> u8 {
+        let d;
 
-        if self.sa < qe {
-            // D = MPS(S)
-            let d = self.context_states[s].mps;
-            // Cx = Cx – A
-            self.c = self.c.wrapping_sub((self.sa as u32) << 16);
-            // A = Qe(S)
-            self.sa = qe;
+        if self.a < self.qe as u32 {
+            d = self.current_mps;
+            self.cx = self.cx.wrapping_sub(self.a);
+            let c_low = self.c & 0x0000ffff;
+            self.c = ((self.cx) << 16) + c_low;
+            self.a = self.qe as u32;
+            self.next_state = Self::QE_NEXT_MPS[self.current_state as usize];
+        } else {
+            d = 1 - self.current_mps;
+            self.cx = self.cx.wrapping_sub(self.a);
+            let c_low = self.c & 0x0000ffff;
+            self.c = ((self.cx) << 16) + c_low;
+            self.a = self.qe as u32;
 
-            // Estimate_Qe(S)_after_MPS
-            self.estimate_qe_after_mps(s);
+            if Self::QE_SWITCH[self.current_state as usize] == 1 {
+                self.next_mps = 1 - self.current_mps;
+            }
+            self.next_state = Self::QE_NEXT_LPS[self.current_state as usize];
+        }
 
+        d
+    }
+
+    fn cond_mps_exchange(&mut self) -> u8 {
+        if self.a < self.qe as u32 {
+            let d = 1 - self.current_mps;
+            if Self::QE_SWITCH[self.current_state as usize] == 1 {
+                self.next_mps = 1 - self.current_mps;
+            }
+            self.next_state = Self::QE_NEXT_LPS[self.current_state as usize];
             d
         } else {
-            // D = 1 – MPS(S)
-            let d = !self.context_states[s].mps;
-            // Cx = Cx – A
-            self.c = self.c.wrapping_sub((self.sa as u32) << 16);
-            // A = Qe(S)
-            self.sa = qe;
-
-            //Estimate_Qe(S)_after_LPS
-            self.estimate_qe_after_lps(s);
-
+            let d = self.current_mps;
+            self.next_state = Self::QE_NEXT_MPS[self.current_state as usize];
             d
         }
-    }
-
-    fn cond_mps_exchange(&mut self, s: usize) -> bool {
-        let qe = Self::QE_VALUE[self.context_states[s].index as usize];
-
-        if self.sa < qe {
-            // D = 1 – MPS(S)
-            let d = !self.context_states[s].mps;
-
-            // Estimate_Qe(S)_after_LPS
-            self.estimate_qe_after_lps(s);
-
-            d
-        } else {
-            //  D = MPS(S)
-            let d = self.context_states[s].mps;
-
-            //Estimate_Qe(S)_after_MPS
-            self.estimate_qe_after_mps(s);
-
-            d
-        }
-    }
-
-    fn estimate_qe_after_mps(&mut self, s: usize) {
-        // I = Index(S)
-        let i = self.context_states[s].index;
-        // I = Next_Index_MPS(I)
-        let i = Self::QE_NEXT_MPS[i as usize];
-        // Index(S) = I
-        self.context_states[s].index = i;
-        // Qe(S) = Qe_Value(I)
-        // Note: This value can be looked up when needed rather than stored
-    }
-
-    fn estimate_qe_after_lps(&mut self, s: usize) {
-        // I = Index(S)
-        let i = self.context_states[s].index;
-
-        if Self::QE_SWITCH[i as usize] {
-            //MPS(S) = 1 – MPS(S)
-            self.context_states[s].mps = !self.context_states[s].mps;
-        }
-
-        // I = Next_Index_LPS(I)
-        let i = Self::QE_NEXT_LPS[i as usize];
-
-        // Index(S) = I
-        self.context_states[s].index = i;
-
-        // Qe(S) = Qe_Value(I)
-        // Note: This value can be looked up when needed rather than stored
     }
 
     fn renorm_d(&mut self) {
-        loop {
+        while self.a < 0x8000 {
             if self.ct == 0 {
                 self.byte_in();
                 self.ct = 8;
             }
-
-            self.sa <<= 1;
+            self.a <<= 1;
             self.c <<= 1;
             self.ct -= 1;
+        }
 
+        self.cx = (self.c & 0xffff0000) >> 16;
+    }
+
+    fn decode_symbol(&mut self) -> u8 {
+        self.a = self.a.wrapping_sub(self.qe as u32);
+
+        if self.cx < self.a {
             if self.a < 0x8000 {
-                continue;
+                let d = self.cond_mps_exchange();
+                self.renorm_d();
+                d
             } else {
-                break;
+                self.current_mps
             }
+        } else {
+            let d = self.cond_lps_exchange();
+            self.renorm_d();
+            d
         }
     }
 
     fn decode(&mut self, s: usize) -> bool {
-        // Get probability estimate for this context
-        let qe = Self::QE_VALUE[self.context_states[s].index as usize];
+        if s >= self.max_context {
+            let new_size = self.max_context * 2;
+            let mut new_st = vec![0; new_size];
+            let mut new_mps = vec![0; new_size];
 
-        log_debug!("MPS: {} Qe: {:04X} A: {:04X} C: {:08X} CT: {}",
-            self.context_states[s].mps as usize, qe, self.a, self.c, self.ct);
+            new_st[..self.max_context].copy_from_slice(&self.state_table);
+            new_mps[..self.max_context].copy_from_slice(&self.mps_table);
 
-        // Subtract Qe from current interval
-        self.sa = self.sa.wrapping_sub(qe);
+            self.max_context = new_size;
+            self.state_table = new_st;
+            self.mps_table = new_mps;
+        }
 
-        // Compare code register with new interval
-        let d = if self.sc < self.sa {
-            // MPS path
-            if self.a < 0x8000 {
-                // MPS conditional exchange needed
-                let d = self.cond_mps_exchange(s);
-                self.renorm_d();
-                d
-            } else {
-                // Just return MPS
-                self.context_states[s].mps
-            }
-        } else {
-            // LPS path - always needs exchange and renormalization
-            let d = self.cond_lps_exchange(s);
-            self.renorm_d();
-            d
-        };
+        self.next_state = self.state_table[s];
+        self.current_state = self.state_table[s];
+        self.next_mps = self.mps_table[s];
+        self.current_mps = self.mps_table[s];
+        self.qe = Self::QE_VALUE[self.state_table[s] as usize];
 
-        self.sc = (self.c >> 16) as u16;
-        d
+        let ret_val = self.decode_symbol();
+
+        self.state_table[s] = self.next_state;
+        self.mps_table[s] = self.next_mps;
+
+        ret_val != 0
     }
 
     fn byte_in(&mut self) {
@@ -776,14 +750,18 @@ fn run_test_sequence() {
         0x70, 0x8E, 0xCB, 0xC0,
         0xF6, 0xFF, 0xD9, 0x00,
     ];
+
+    let expected = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0];
+
     println!("Test data: {:?}", test_data);
     let reader = BitReader::new(Cursor::new(test_data));
     let mut decoder = ArithmeticDecoder::new(reader);
     decoder.init();
 
-    for i in 1..100 {
-        let d = decoder.decode(i);
+    for i in 0..expected.len() {
+        let d = decoder.decode(0);
         println!("{}: {}", i, d as usize);
+        assert_eq!(d as usize, expected[i]);
     }
 }
 
@@ -2590,7 +2568,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let pixels = self.mcu_to_pixels(&mcus);
 
-        let frames = Vec::from([ImageFrame::new(self.width, self.height, PixelData::RGB8(pixels), 0)]);
-        Ok(Image::new(self.width, self.height, PixelFormat::RGB8, frames))
+        Ok(Image::from_pixels(self.width, self.height, PixelData::RGB8(pixels)))
     }
 }
