@@ -6,6 +6,7 @@ use crate::decoders::gif::GifDecoder;
 use crate::decoders::jpeg::JpegDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::bmp::BmpDecoder;
+use crate::decoders::png::PngDecoder;
 
 pub use utils::{bitreader, writer, logger};
 
@@ -53,6 +54,10 @@ fn l8_to_u8_rgb(values: Vec<u8>) -> Vec<u8> {
     values.iter().map(|v| *v).flat_map(|v| Vec::from([v, v, v])).collect()
 }
 
+fn la8_to_u8_rgba(values: Vec<u8>) -> Vec<u8> {
+    values.chunks_exact(2).map(|chunk| Vec::from([chunk[0], chunk[0], chunk[0], chunk[1]])).flatten().collect()
+}
+
 fn l16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
     let max_val = values.iter().max().unwrap_or(&0);
     let min_val = values.iter().min().unwrap_or(&0);
@@ -72,11 +77,40 @@ fn l16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
         .collect()
 }
 
+fn la16_to_u8_rgba(values: Vec<u16>) -> Vec<u8> {
+    let lum_values: Vec<&u16> = values.iter()
+        .step_by(2)
+        .collect();
+
+    let max_val = lum_values.iter().max().unwrap_or(&&0);
+    let min_val = lum_values.iter().min().unwrap_or(&&0);
+
+    if max_val == min_val {
+        return values.chunks(2)
+            .flat_map(|chunk| {
+                let gray = (*min_val >> 8) as u8;
+                let alpha = (chunk[1] >> 8) as u8;
+                [gray, gray, gray, alpha]
+            })
+            .collect();
+    }
+
+    values.chunks(2)
+        .flat_map(|chunk| {
+            let gray = (255.0 * (chunk[0] - *min_val) as f32 / (*max_val - *min_val) as f32) as u8;
+            let alpha = (chunk[1] >> 8) as u8;
+            [gray, gray, gray, alpha]
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageFormat {
     Jpeg,
     JpegLs,
+    Png,
     Gif,
+    Bmp,
     NetPbmP1,
     NetPbmP2,
     NetPbmP3,
@@ -84,11 +118,10 @@ pub enum ImageFormat {
     NetPbmP5,
     NetPbmP6,
     NetPbmP7,
-    Bmp,
     Unknown,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PixelFormat {
     RGB8,
     RGBA8,
@@ -100,14 +133,16 @@ pub enum PixelFormat {
     L8,
     L16,
     LA8,
+    LA16,
 }
 
 pub enum Decoders<R: Read + Seek> {
     Jpeg(JpegDecoder<R>),
     JpegLs(JpegLsDecoder<R>),
+    Png(PngDecoder<R>),
     Gif(GifDecoder<R>),
-    Netpbm(NetPbmDecoder<R>),
     Bmp(BmpDecoder<R>),
+    Netpbm(NetPbmDecoder<R>),
     Unknown,
 }
 
@@ -139,7 +174,7 @@ impl PixelData {
             PixelData::L8(_) => PixelFormat::L8,
             PixelData::L16(_) => PixelFormat::L16,
             PixelData::LA8(_) => PixelFormat::LA8,
-            PixelData::LA16(_) => PixelFormat::LA8,
+            PixelData::LA16(_) => PixelFormat::LA16,
         }
     }
 
@@ -169,9 +204,9 @@ impl PixelData {
             PixelData::RGBA32F(pixels) => PixelData::RGBA8(f32_to_u8_rgb(pixels)),
             PixelData::L1(pixels) => PixelData::RGBA8(add_transparency_channel(l1_to_u8_rgb(pixels))),
             PixelData::L8(pixels) => PixelData::RGBA8(add_transparency_channel(l8_to_u8_rgb(pixels))),
-            PixelData::LA8(pixels) => PixelData::RGBA8(l8_to_u8_rgb(pixels)),
+            PixelData::LA8(pixels) => PixelData::RGBA8(la8_to_u8_rgba(pixels)),
             PixelData::L16(pixels) => PixelData::RGBA8(add_transparency_channel(l16_to_u8_rgb(pixels))),
-            PixelData::LA16(pixels) => PixelData::RGBA8(l16_to_u8_rgb(pixels)),
+            PixelData::LA16(pixels) => PixelData::RGBA8(la16_to_u8_rgba(pixels)),
         }
     }
 
@@ -179,12 +214,176 @@ impl PixelData {
         match self {
             PixelData::RGB8(pixels) => pixels,
             PixelData::RGBA8(pixels) => pixels,
-            _ => panic!("as_bytes() should only be called on RGB8 or RGBA8 pixel data"),
+            PixelData::RGB16(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        pixels.as_ptr() as *const u8,
+                        pixels.len() * 2,
+                    )
+                }
+            }
+            PixelData::RGBA16(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        pixels.as_ptr() as *const u8,
+                        pixels.len() * 2,
+                    )
+                }
+            }
+            PixelData::RGB32F(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        pixels.as_ptr() as *const u8,
+                        pixels.len() * 4,
+                    )
+                }
+            }
+            PixelData::RGBA32F(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        pixels.as_ptr() as *const u8,
+                        pixels.len() * 4,
+                    )
+                }
+            }
+            PixelData::L1(pixels) => pixels,
+            PixelData::L8(pixels) => pixels,
+            PixelData::L16(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        pixels.as_ptr() as *const u8,
+                        pixels.len() * 2,
+                    )
+                }
+            }
+            PixelData::LA8(pixels) => pixels,
+            PixelData::LA16(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        pixels.as_ptr() as *const u8,
+                        pixels.len() * 2,
+                    )
+                }
+            }
+        }
+    }
+
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        match self {
+            PixelData::RGB8(pixels) => pixels,
+            PixelData::RGBA8(pixels) => pixels,
+            PixelData::RGB16(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        pixels.as_mut_ptr() as *mut u8,
+                        pixels.len() * 2,
+                    )
+                }
+            }
+            PixelData::RGBA16(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        pixels.as_mut_ptr() as *mut u8,
+                        pixels.len() * 2,
+                    )
+                }
+            }
+            PixelData::RGB32F(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        pixels.as_mut_ptr() as *mut u8,
+                        pixels.len() * 4,
+                    )
+                }
+            }
+            PixelData::RGBA32F(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        pixels.as_mut_ptr() as *mut u8,
+                        pixels.len() * 4,
+                    )
+                }
+            }
+            PixelData::L1(pixels) => pixels,
+            PixelData::L8(pixels) => pixels,
+            PixelData::L16(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        pixels.as_mut_ptr() as *mut u8,
+                        pixels.len() * 2,
+                    )
+                }
+            }
+            PixelData::LA8(pixels) => pixels,
+            PixelData::LA16(pixels) => {
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        pixels.as_mut_ptr() as *mut u8,
+                        pixels.len() * 2,
+                    )
+                }
+            }
+        }
+    }
+
+    // Used as a last resort to correct the number of pixels in the image
+    // in case something went wrong during decoding
+    pub fn correct_pixels(&mut self, width: u32, height: u32) -> () {
+        let components_per_pixel = match self {
+            PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) => 3,
+            PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) => 4,
+            PixelData::L1(_) | PixelData::L8(_) | PixelData::L16(_) => 1,
+            PixelData::LA8(_) | PixelData::LA16(_) => 2,
+        };
+
+        let expected_len = (width * height) as usize * components_per_pixel;
+
+        match self {
+            PixelData::RGB8(pixels) => correct_vec(pixels, expected_len, 3),
+            PixelData::RGBA8(pixels) => correct_vec(pixels, expected_len, 4),
+            PixelData::RGB16(pixels) => correct_vec(pixels, expected_len, 3),
+            PixelData::RGBA16(pixels) => correct_vec(pixels, expected_len, 4),
+            PixelData::RGB32F(pixels) => correct_vec(pixels, expected_len, 3),
+            PixelData::RGBA32F(pixels) => correct_vec(pixels, expected_len, 4),
+            PixelData::L1(pixels) => correct_vec(pixels, expected_len, 1),
+            PixelData::L8(pixels) => correct_vec(pixels, expected_len, 1),
+            PixelData::L16(pixels) => correct_vec(pixels, expected_len, 1),
+            PixelData::LA8(pixels) => correct_vec(pixels, expected_len, 2),
+            PixelData::LA16(pixels) => correct_vec(pixels, expected_len, 2),
+        }
+
+        fn correct_vec<T: Clone + Default>(pixels: &mut Vec<T>, expected_len: usize, components_per_pixel: usize) {
+            let current_len = pixels.len();
+
+            if current_len == expected_len {
+                return;
+            }
+
+            if current_len > expected_len {
+                log_warn!(
+                    "Truncating excess pixels. Received from decoder: {}, Expected: {}",
+                    current_len / components_per_pixel,
+                    expected_len / components_per_pixel
+                );
+
+                pixels.truncate(expected_len);
+            } else {
+                log_warn!(
+                    "Adding missing pixels. Received from decoder: {}, Expected: {}",
+                    current_len / components_per_pixel,
+                    expected_len / components_per_pixel
+                );
+
+                let default_pixel = vec![T::default(); components_per_pixel];
+                while pixels.len() < expected_len {
+                    pixels.extend(default_pixel.iter().cloned());
+                }
+            }
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImageFrame {
     width: u32,
     height: u32,
@@ -231,6 +430,10 @@ impl ImageFrame {
         }
     }
 
+    pub fn as_rgb8(&self) -> Vec<u8> {
+        self.pixels.clone().into_rgb8().as_bytes().to_vec()
+    }
+
     pub fn into_rgba8(self) -> ImageFrame {
         ImageFrame {
             width: self.width,
@@ -239,6 +442,10 @@ impl ImageFrame {
             delay: self.delay,
         }
     }
+
+    pub fn as_rgba8(&self) -> Vec<u8> {
+        self.pixels.clone().into_rgba8().as_bytes().to_vec()
+    }
 }
 
 #[derive(Debug)]
@@ -246,6 +453,7 @@ pub struct Image {
     width: u32,
     height: u32,
     pixel_format: PixelFormat,
+    // TODO make it a getter
     pub frames: Vec<ImageFrame>,
 }
 
@@ -261,6 +469,15 @@ impl Image {
             height,
             pixel_format,
             frames,
+        }
+    }
+
+    pub fn default() -> Image {
+        Image {
+            width: 0,
+            height: 0,
+            pixel_format: PixelFormat::RGB8,
+            frames: Vec::new(),
         }
     }
 
@@ -309,9 +526,25 @@ impl Image {
         Image::new(self.width, self.height, PixelFormat::RGB8, new_frames)
     }
 
+    /// Converts the image to RGBA8 format, consuming the original image.
+    ///
+    /// This method converts all frames to RGBA8 format, while `as_rgba8` returns
+    /// vector of the first frame's pixels, converted to RGBA8 format without
+    /// modifying the original image
+    pub fn into_rgba8(mut self) -> Image {
+        let new_frames = self.frames.drain(..).map(|frame| frame.into_rgba8()).collect();
+
+        Image::new(self.width, self.height, PixelFormat::RGBA8, new_frames)
+    }
+
     /// Returns the first frame's pixels as a vector of RGB8 bytes
     pub fn as_rgb8(&self) -> Vec<u8> {
         self.pixels().into_rgb8().as_bytes().to_vec()
+    }
+
+    /// Returns the first frame's pixels as a vector of RGBA8 bytes
+    pub fn as_rgba8(&self) -> Vec<u8> {
+        self.pixels().into_rgba8().as_bytes().to_vec()
     }
 }
 
@@ -338,6 +571,15 @@ impl Vexel<File> {
 
         writer::write_ppm(path, width, height, &pixels.to_vec())
     }
+
+    pub fn write_pam<P: AsRef<Path>>(path: P, image: Image) -> Result<(), Error> {
+        let path = match path.as_ref().to_str() {
+            Some(path) => path,
+            None => return Err(Error::new(ErrorKind::InvalidData, "Invalid path")),
+        };
+
+        writer::write_pam(path, image)
+    }
 }
 
 impl<R: Read + Seek> Vexel<R> {
@@ -356,6 +598,7 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::NetPbmP6 |
             ImageFormat::NetPbmP7 => Decoders::Netpbm(NetPbmDecoder::new(reader)),
             ImageFormat::Bmp => Decoders::Bmp(BmpDecoder::new(reader)),
+            ImageFormat::Png => Decoders::Png(PngDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -394,6 +637,12 @@ impl<R: Read + Seek> Vexel<R> {
                         frames,
                     )
                 )
+            }
+
+            Decoders::Png(png_decoder) => {
+                let image = png_decoder.decode()?;
+
+                Ok(image)
             }
 
             Decoders::Gif(gif_decoder) => {
@@ -450,6 +699,11 @@ impl<R: Read + Seek> Vexel<R> {
             return Ok(ImageFormat::Jpeg);
         }
 
+        // PNG
+        if header.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+            return Ok(ImageFormat::Png);
+        }
+
         // GIF87a and GIF89a
         if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
             return Ok(ImageFormat::Gif);
@@ -475,6 +729,39 @@ impl<R: Read + Seek> Vexel<R> {
             _ => {}
         }
 
+        // If all else fails, let's try harder and pray that we get the right format
+        Vexel::try_guess_format_harder(reader)
+    }
+
+    fn try_guess_format_harder(reader: &mut R) -> Result<ImageFormat, Error> {
+        const HEADER_SIZE: usize = 48;
+        let mut header = [0u8; HEADER_SIZE];
+        let mut read_pos = 0;
+
+        while read_pos < HEADER_SIZE {
+            match reader.read(&mut header[read_pos..]) {
+                Ok(0) | Err(_) => {
+                    for i in read_pos..HEADER_SIZE {
+                        header[i] = 0;
+                    }
+                }
+                Ok(n) => read_pos += n,
+            }
+        }
+
+        reader.seek(SeekFrom::Start(0))?;
+
+        // PNG
+        let header_str = String::from_utf8_lossy(&header).to_lowercase();
+        let chunks = [
+            "png", "ihdr", "idat", "iend"
+        ];
+
+        if chunks.iter().any(|chunk| header_str.contains(chunk)) {
+            return Ok(ImageFormat::Png);
+        }
+
+        // We tried
         Ok(ImageFormat::Unknown)
     }
 }

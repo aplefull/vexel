@@ -38,5 +38,11 @@ impl From<io::Error> for VexelError {
     }
 }
 
+impl From<String> for VexelError {
+    fn from(error: String) -> Self {
+        VexelError::Custom(error)
+    }
+}
+
 // Result type alias for Vexel operations
 pub type VexelResult<T> = Result<T, VexelError>;

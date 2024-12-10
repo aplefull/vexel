@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use crate::utils::marker::Marker;
 
-#[derive(Debug)]
 pub struct BitReader<R: Read + Seek> {
     reader: R,
     buffer: u32,
@@ -120,6 +119,15 @@ impl<R: Read + Seek> BitReader<R> {
         }
     }
 
+    /// Reads the exact number of bytes required to fill the buffer.
+    ///
+    /// # Returns
+    /// - `Ok(())` if the operation is successful
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), std::io::Error> {
+        self.reader.read_exact(buf)
+    }
+
     /// Clears the current bit buffer.
     pub fn clear_buffer(&mut self) {
         self.bits_in_buffer = 0;
@@ -230,7 +238,7 @@ impl<R: Read + Seek> BitReader<R> {
 
     /// Returns number of bytes left in the bitstream.
     /// The cursor is not moved.
-    /// 
+    ///
     /// # Returns
     /// - The number of bytes left in the bitstream
     /// - `std::io::Error` if an I/O error occurs
@@ -241,7 +249,7 @@ impl<R: Read + Seek> BitReader<R> {
 
         Ok(end_pos - current_pos)
     }
-    
+
     /// Reads the remaining bits in the bitstream and returns them as a vector of bytes,
     /// not including the current buffer. The buffer is cleared after reading.
     ///

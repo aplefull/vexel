@@ -3,3 +3,4 @@ pub mod netpbm;
 pub mod jpeg;
 pub mod gif;
 pub mod bmp;
+pub mod png;
