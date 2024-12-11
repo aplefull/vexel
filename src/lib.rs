@@ -566,14 +566,14 @@ impl Image {
 }
 
 impl Vexel<File> {
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    pub fn open<P: AsRef<Path>>(path: P) -> VexelResult<Self> {
         let file = File::open(path)?;
         Vexel::new(file)
     }
 }
 
 impl<R: Read + Seek> Vexel<R> {
-    pub fn new(mut reader: R) -> Result<Vexel<R>, Error> {
+    pub fn new(mut reader: R) -> VexelResult<Vexel<R>> {
         let format = Vexel::try_guess_format(&mut reader)?;
 
         let decoder = match format {
@@ -672,7 +672,7 @@ impl<R: Read + Seek> Vexel<R> {
         }
     }
 
-    fn try_guess_format(reader: &mut R) -> Result<ImageFormat, Error> {
+    fn try_guess_format(reader: &mut R) -> VexelResult<ImageFormat> {
         let mut header = [0u8; 12];
         reader.read_exact(&mut header)?;
         reader.seek(SeekFrom::Start(0))?;
@@ -723,7 +723,7 @@ impl<R: Read + Seek> Vexel<R> {
         Vexel::try_guess_format_harder(reader)
     }
 
-    fn try_guess_format_harder(reader: &mut R) -> Result<ImageFormat, Error> {
+    fn try_guess_format_harder(reader: &mut R) -> VexelResult<ImageFormat> {
         const HEADER_SIZE: usize = 48;
         let mut header = [0u8; HEADER_SIZE];
         let mut read_pos = 0;

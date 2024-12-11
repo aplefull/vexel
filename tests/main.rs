@@ -3,7 +3,9 @@ extern crate core;
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::path::{Path, PathBuf};
     use vexel::{bitreader::BitReader, Vexel};
+    use vexel::writer::Writer;
 
     const BASE_PATH: &str = "./tests/images/";
 
@@ -12,10 +14,9 @@ mod tests {
     }
 
     fn get_out_path(path: &str) -> String {
-        let ext = path.split('.').last().unwrap();
-        let path = path.replace(ext, "bmp");
+        let path = Path::new(path).with_extension("bmp");
 
-        format!("{}{}", BASE_PATH, path)
+        format!("{}{}", BASE_PATH, path.to_str().unwrap())
     }
 
     #[test]
@@ -97,7 +98,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-               // Vexel::write_bmp(get_out_path(PATH_JPEG_LOSSLESS), image.width(), image.height(), &image.as_rgb8())?;
+                // Vexel::write_bmp(get_out_path(PATH_JPEG_LOSSLESS), image.width(), image.height(), &image.as_rgb8())?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
@@ -140,6 +141,7 @@ mod tests {
                 assert!(false);
             }
         }
+
         Ok(())
     }
 
@@ -165,13 +167,32 @@ mod tests {
     #[test]
     pub fn test_bmp_decode() -> Result<(), Box<dyn std::error::Error>> {
         const PATH_BMP_1: &str = "bmp/test.bmp";
-        
+
         let mut decoder = Vexel::open(get_in_path(PATH_BMP_1))?;
         let path = PATH_BMP_1.replace(".bmp", ".ppm");
 
         match decoder.decode() {
             Ok(_) => {
                 //Vexel::write_ppm(path, image.width(), image.height(), &image.as_rgb8())?;
+            }
+            Err(e) => {
+                println!("Error decoding image: {:?}", e);
+                assert!(false);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_png_decode() -> Result<(), Box<dyn std::error::Error>> {
+        const PATH_PNG_1: &str = "png/342083299-7b50019a-7c6f-4625-99c2-f1e69de95b61.png";
+
+        let mut decoder = Vexel::open(get_in_path(PATH_PNG_1))?;
+
+        match decoder.decode() {
+            Ok(image) => {
+                Writer::write_webp(&PathBuf::from(get_out_path(PATH_PNG_1)), &image)?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);

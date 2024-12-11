@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::io::{Read, Seek};
 use crate::bitreader::BitReader;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
+use crate::utils::error::VexelResult;
 use crate::utils::traits::{SafeAccess, SafeMapAccess};
 
 pub struct FrameInfo {
@@ -155,7 +156,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         self.height
     }
 
-    fn read_header(&mut self) -> Result<(), std::io::Error> {
+    fn read_header(&mut self) -> VexelResult<()> {
         // Skip the magic number
         self.reader.read_bits(24)?;
 
@@ -205,7 +206,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         }
     }
 
-    fn read_application_extension(&mut self) -> Result<(), std::io::Error> {
+    fn read_application_extension(&mut self) -> VexelResult<()> {
         let block_size = self.reader.read_u8()?;
         if block_size != 11 {
             log_warn!("Invalid application extension block size: {}", block_size);
@@ -291,7 +292,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_plain_text_extension(&mut self) -> Result<(), std::io::Error> {
+    fn read_plain_text_extension(&mut self) -> VexelResult<()> {
         let block_size = self.reader.read_u8()?;
         if block_size != 12 {
             log_warn!("Invalid plain text extension block size: {}", block_size);
@@ -336,7 +337,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_comment_extension(&mut self) -> Result<(), std::io::Error> {
+    fn read_comment_extension(&mut self) -> VexelResult<()> {
         loop {
             let block_size = self.reader.read_u8()?;
             if block_size == 0 {
@@ -355,7 +356,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_frames(&mut self) -> Result<(), std::io::Error> {
+    fn read_frames(&mut self) -> VexelResult<()> {
         let mut current_gce: Option<GraphicsControlExtension> = None;
 
         loop {
@@ -411,7 +412,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_frame(&mut self, gce: Option<GraphicsControlExtension>) -> Result<(), std::io::Error> {
+    fn read_frame(&mut self, gce: Option<GraphicsControlExtension>) -> VexelResult<()> {
         let mut frame = FrameInfo {
             left: self.reader.read_u16()?.swap_bytes() as u32,
             top: self.reader.read_u16()?.swap_bytes() as u32,
@@ -470,7 +471,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_graphics_control_extension(&mut self) -> Result<GraphicsControlExtension, std::io::Error> {
+    fn read_graphics_control_extension(&mut self) -> VexelResult<GraphicsControlExtension> {
         // Read block size (should be 4)
         let block_size = self.reader.read_u8()?;
         if block_size != 4 {
@@ -511,7 +512,7 @@ impl<R: Read + Seek> GifDecoder<R> {
     }
 
     // TODO maybe use bitreader here as well
-    fn decompress_lzw(&self, frame: &FrameInfo) -> Result<Vec<u8>, std::io::Error> {
+    fn decompress_lzw(&self, frame: &FrameInfo) -> VexelResult<Vec<u8>> {
         let min_code_size = frame.lzw_minimum_code_size;
         let clear_code = 1 << min_code_size;
         let end_code = clear_code + 1;
@@ -663,7 +664,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         result
     }
 
-    fn decode_frame(&self, frame: &FrameInfo) -> Result<Vec<u8>, std::io::Error> {
+    fn decode_frame(&self, frame: &FrameInfo) -> VexelResult<Vec<u8>> {
         let indices = self.decompress_lzw(frame)?;
         let mut image_data = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
 
@@ -694,7 +695,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(image_data)
     }
 
-    fn compose_frame(&self, frame_index: usize, previous_canvas: Option<&Vec<u8>>) -> Result<Vec<u8>, std::io::Error> {
+    fn compose_frame(&self, frame_index: usize, previous_canvas: Option<&Vec<u8>>) -> VexelResult<Vec<u8>> {
         let frame = self.frames.get_safe(frame_index)?;
         let mut frame_pixels = self.decode_frame(frame)?;
 
@@ -768,7 +769,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(canvas)
     }
 
-    pub fn decode(&mut self) -> Result<Image, std::io::Error> {
+    pub fn decode(&mut self) -> VexelResult<Image> {
         match self.read_header() {
             Ok(_) => {}
             Err(e) => {

@@ -3,11 +3,12 @@ use std::io::{Write};
 use std::path::{Path, PathBuf};
 use webp::{Encoder};
 use crate::{Image, ImageFrame, PixelData};
+use crate::utils::error::{VexelError, VexelResult};
 
 pub struct Writer {}
 
 impl Writer {
-    pub fn write_webp(output_path: &PathBuf, image: &Image) -> Result<(), std::io::Error> {
+    pub fn write_webp(output_path: &PathBuf, image: &Image) -> VexelResult<()> {
         Writer::validate_pixel_count(&image)?;
 
         let width = image.width();
@@ -34,7 +35,7 @@ impl Writer {
         Ok(())
     }
 
-    pub fn write_frames(output_path: &str, image: &Image) -> Result<(), std::io::Error> {
+    pub fn write_frames(output_path: &str, image: &Image) -> VexelResult<()> {
         for (i, frame) in image.frames().iter().enumerate() {
             let output_dir = Path::new(output_path).parent().unwrap();
             let output_file_name = Path::new(output_path).file_stem().unwrap().to_str().unwrap();
@@ -46,7 +47,7 @@ impl Writer {
         Ok(())
     }
 
-    pub fn write_ppm(output_path: &PathBuf, image: &Image) -> Result<(), std::io::Error> {
+    pub fn write_ppm(output_path: &PathBuf, image: &Image) -> VexelResult<()> {
         Writer::validate_pixel_count(&image)?;
 
         let mut file = File::create(output_path)?;
@@ -82,7 +83,7 @@ impl Writer {
         Ok(())
     }
 
-    pub fn write_pam(output_path: &PathBuf, image: &Image) -> Result<(), std::io::Error> {
+    pub fn write_pam(output_path: &PathBuf, image: &Image) -> VexelResult<()> {
         Writer::validate_pixel_count(&image)?;
 
         let width = image.width();
@@ -158,7 +159,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_single_frame(output_path: &str, frame: &ImageFrame) -> Result<(), std::io::Error> {
+    fn write_single_frame(output_path: &str, frame: &ImageFrame) -> VexelResult<()> {
         let width = frame.width();
         let height = frame.height();
 
@@ -182,7 +183,7 @@ impl Writer {
         Ok(())
     }
 
-    fn validate_pixel_count(image: &Image) -> Result<(), std::io::Error> {
+    fn validate_pixel_count(image: &Image) -> VexelResult<()> {
         let width = image.width();
         let height = image.height();
         let has_alpha = image.has_alpha();
@@ -196,17 +197,14 @@ impl Writer {
         let actual_size = pixels.len() as u32;
 
         if expected_size != actual_size {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Invalid pixel data size for {}x{} image with {} channels: expected {} pixels, got {}",
-                    width,
-                    height,
-                    if has_alpha { "RGBA" } else { "RGB" },
-                    expected_size,
-                    actual_size
-                ),
-            ));
+            return Err(VexelError::Custom(format!(
+                "Invalid pixel data size for {}x{} image with {} channels: expected {} pixels, got {}",
+                width,
+                height,
+                if has_alpha { "RGBA" } else { "RGB" },
+                expected_size,
+                actual_size
+            )));
         }
         Ok(())
     }
