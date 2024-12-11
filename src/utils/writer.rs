@@ -1,69 +1,213 @@
 use std::fs::File;
 use std::io::{Write};
+use std::path::{Path, PathBuf};
+use webp::{Encoder};
+use crate::{Image, ImageFrame, PixelData};
 
-pub fn write_bmp(output_path: &str, width: u32, height: u32, pixels: &Vec<u8>) -> Result<(), std::io::Error> {
-    let mut file = File::create(output_path)?;
+pub struct Writer {}
 
-    let padding_size = width % 4;
-    let size: u32 = 14 + 12 + 40 + width * height * 3 + padding_size * height;
-    let row_size = width * 3;
-    let padded_row_size = row_size + padding_size;
-    let pixel_array_size = padded_row_size * height;
-    let header_size = 14 + 40;
+impl Writer {
+    pub fn write_webp(output_path: &PathBuf, image: &Image) -> Result<(), std::io::Error> {
+        Writer::validate_pixel_count(&image)?;
 
-    // BMP File Header (14 bytes)
-    file.write_all(b"BM")?; // BM
-    file.write_all(&(size as u32).to_le_bytes())?; // File size
-    file.write_all(&[0; 4])?; // Reserved
-    file.write_all(&(header_size as u32).to_le_bytes())?; // Offset to pixel array
+        let width = image.width();
+        let height = image.height();
 
-    // DIB Header (40 bytes)
-    file.write_all(&[40, 0, 0, 0])?; // DIB header size
-    file.write_all(&(width as i32).to_le_bytes())?; // Image width
-    file.write_all(&(height as i32).to_le_bytes())?; // Image height
-    file.write_all(&[1, 0])?; // Planes
-    file.write_all(&[24, 0])?; // Bits per pixel
-    file.write_all(&[0; 4])?; // Compression method (none)
-    file.write_all(&(pixel_array_size as u32).to_le_bytes())?; // Image size
-    file.write_all(&[0; 16])?; // Remaining DIB header fields (set to 0)
+        let mut encoder = webp_animation::prelude::Encoder::new((width, height)).unwrap();
 
-    let padding = [0u8; 3]; // Max padding is 3 bytes
-    for y in (0..height).rev() {
-        for x in 0..width {
-            let pixel_index = ((y * width + x) * 3) as usize;
-            let r = pixels[pixel_index];
-            let g = pixels[pixel_index + 1];
-            let b = pixels[pixel_index + 2];
-            file.write_all(&[b, g, r])?; // BMP stores pixels as BGR
-        }
+        let mut timestamp_ms = 0i32;
+        image.frames().iter().try_for_each(|frame| {
+            let rgba_data = &frame.as_rgba8();
+            // webp_animation requires that every new frame has a timestamp greater than the previous one
+            let delta = if frame.delay() == 0 { 1 } else { frame.delay() as i32 };
+            timestamp_ms = timestamp_ms + delta;
 
-        // Write padding
-        file.write_all(&padding[..padding_size as usize])?;
+            encoder.add_frame(rgba_data, timestamp_ms).unwrap();
+
+            Ok::<(), std::io::Error>(())
+        })?;
+
+        let data = encoder.finalize(timestamp_ms).unwrap();
+
+        std::fs::write(output_path, data)?;
+
+        Ok(())
     }
 
-    Ok(())
-}
+    pub fn write_frames(output_path: &str, image: &Image) -> Result<(), std::io::Error> {
+        for (i, frame) in image.frames().iter().enumerate() {
+            let output_dir = Path::new(output_path).parent().unwrap();
+            let output_file_name = Path::new(output_path).file_stem().unwrap().to_str().unwrap();
+            let output_path = output_dir.join(format!("{}_frame_{}.webp", output_file_name, i));
 
-pub fn write_ppm(output_path: &str, width: u32, height: u32, pixels: &Vec<u8>) -> Result<(), std::io::Error> {
-    let mut file = File::create(output_path)?;
+            Writer::write_single_frame(&output_path.to_str().unwrap(), frame)?;
+        }
 
-    file.write_all(b"P6\n")?;
-    file.write_all(format!("{} {}\n", width, height).as_bytes())?;
-    file.write_all(b"255\n")?; // Max color value
+        Ok(())
+    }
 
-    for y in 0..height {
-        for x in 0..width {
-            let pixel_index = ((y * width + x) * 3) as usize;
-            if pixel_index + 2 >= pixels.len() {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Pixel index out of bounds while writing PPM file"));
+    pub fn write_ppm(output_path: &PathBuf, image: &Image) -> Result<(), std::io::Error> {
+        Writer::validate_pixel_count(&image)?;
+
+        let mut file = File::create(output_path)?;
+        let width = image.width();
+        let height = image.height();
+        let pixels = if image.has_alpha() {
+            image.as_rgba8()
+        } else {
+            image.as_rgb8()
+        };
+
+        file.write_all(b"P6\n")?;
+        file.write_all(format!("{} {}\n", width, height).as_bytes())?;
+        file.write_all(b"255\n")?;
+
+        for y in 0..height {
+            for x in 0..width {
+                let pixel_index = ((y * width + x) * if image.has_alpha() { 4 } else { 3 }) as usize;
+
+                let r = pixels[pixel_index];
+                let g = pixels[pixel_index + 1];
+                let b = pixels[pixel_index + 2];
+
+                if image.has_alpha() {
+                    let a = pixels[pixel_index + 3];
+                    file.write_all(&[r, g, b, a])?;
+                } else {
+                    file.write_all(&[r, g, b])?;
+                }
             }
-            
-            let r = pixels[pixel_index];
-            let g = pixels[pixel_index + 1];
-            let b = pixels[pixel_index + 2];
-            file.write_all(&[r, g, b])?;
         }
+
+        Ok(())
     }
 
-    Ok(())
+    pub fn write_pam(output_path: &PathBuf, image: &Image) -> Result<(), std::io::Error> {
+        Writer::validate_pixel_count(&image)?;
+
+        let width = image.width();
+        let height = image.height();
+
+        let mut file = File::create(output_path)?;
+
+        file.write_all(b"P7\n")?;
+        file.write_all(format!("WIDTH {}\n", width).as_bytes())?;
+        file.write_all(format!("HEIGHT {}\n", height).as_bytes())?;
+
+        match &image.pixels() {
+            PixelData::RGB8(pixels) => {
+                file.write_all(b"DEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n")?;
+                file.write_all(pixels)?;
+            }
+            PixelData::RGBA8(pixels) => {
+                file.write_all(b"DEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n")?;
+                file.write_all(pixels)?;
+            }
+            PixelData::RGB16(pixels) => {
+                file.write_all(b"DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\nENDHDR\n")?;
+                for value in pixels {
+                    file.write_all(&value.to_be_bytes())?;
+                }
+            }
+            PixelData::RGBA16(pixels) => {
+                file.write_all(b"DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n")?;
+                for value in pixels {
+                    file.write_all(&value.to_be_bytes())?;
+                }
+            }
+            PixelData::RGB32F(pixels) => {
+                file.write_all(b"DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\nENDHDR\n")?;
+                for &value in pixels {
+                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
+                    file.write_all(&value16.to_be_bytes())?;
+                }
+            }
+            PixelData::RGBA32F(pixels) => {
+                file.write_all(b"DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n")?;
+                for &value in pixels {
+                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
+                    file.write_all(&value16.to_be_bytes())?;
+                }
+            }
+            PixelData::L1(pixels) => {
+                file.write_all(b"DEPTH 1\nMAXVAL 1\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
+                file.write_all(pixels)?;
+            }
+            PixelData::L8(pixels) => {
+                file.write_all(b"DEPTH 1\nMAXVAL 255\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
+                file.write_all(pixels)?;
+            }
+            PixelData::L16(pixels) => {
+                file.write_all(b"DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
+                for value in pixels {
+                    file.write_all(&value.to_be_bytes())?;
+                }
+            }
+            PixelData::LA8(pixels) => {
+                file.write_all(b"DEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
+                file.write_all(pixels)?;
+            }
+            PixelData::LA16(pixels) => {
+                file.write_all(b"DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
+                for value in pixels {
+                    file.write_all(&value.to_be_bytes())?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn write_single_frame(output_path: &str, frame: &ImageFrame) -> Result<(), std::io::Error> {
+        let width = frame.width();
+        let height = frame.height();
+
+        let data = if frame.has_alpha() {
+            frame.as_rgba8()
+        } else {
+            frame.as_rgb8()
+        };
+
+        let encoder = if frame.has_alpha() {
+            Encoder::from_rgba(data.as_slice(), width, height)
+        } else {
+            Encoder::from_rgb(data.as_slice(), width, height)
+        };
+
+        let webp_data = encoder.encode_lossless();
+
+        let mut file = File::create(output_path)?;
+        file.write_all(&webp_data)?;
+
+        Ok(())
+    }
+
+    fn validate_pixel_count(image: &Image) -> Result<(), std::io::Error> {
+        let width = image.width();
+        let height = image.height();
+        let has_alpha = image.has_alpha();
+        let pixels = if has_alpha {
+            image.as_rgba8()
+        } else {
+            image.as_rgb8()
+        };
+
+        let expected_size = width * height * if has_alpha { 4 } else { 3 };
+        let actual_size = pixels.len() as u32;
+
+        if expected_size != actual_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid pixel data size for {}x{} image with {} channels: expected {} pixels, got {}",
+                    width,
+                    height,
+                    if has_alpha { "RGBA" } else { "RGB" },
+                    expected_size,
+                    actual_size
+                ),
+            ));
+        }
+        Ok(())
+    }
 }

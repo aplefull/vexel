@@ -12,7 +12,7 @@ pub use utils::{bitreader, writer, logger};
 
 use std::fmt::{Debug};
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
+use std::io::{Error, Read, Seek, SeekFrom};
 use std::path::{Path};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info_display::ImageInfo;
@@ -420,6 +420,13 @@ impl ImageFrame {
     pub fn pixel_format(&self) -> PixelFormat {
         self.pixels.pixel_format()
     }
+    
+    pub fn has_alpha(&self) -> bool {
+        match self.pixels {
+            PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::LA8(_) | PixelData::LA16(_) => true,
+            _ => false,
+        }
+    }
 
     pub fn into_rgb8(self) -> ImageFrame {
         ImageFrame {
@@ -453,8 +460,7 @@ pub struct Image {
     width: u32,
     height: u32,
     pixel_format: PixelFormat,
-    // TODO make it a getter
-    pub frames: Vec<ImageFrame>,
+    frames: Vec<ImageFrame>,
 }
 
 pub struct Vexel<R: Read + Seek> {
@@ -514,6 +520,17 @@ impl Image {
             PixelData::RGB8(Vec::new())
         }
     }
+    
+    pub fn has_alpha(&self) -> bool {
+        match self.pixel_format {
+            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::LA8 | PixelFormat::LA16 => true,
+            _ => false,
+        }
+    }
+    
+    pub fn frames(&self) -> &Vec<ImageFrame> {
+        &self.frames
+    }
 
     /// Converts the image to RGB8 format, consuming the original image.
     ///
@@ -552,33 +569,6 @@ impl Vexel<File> {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let file = File::open(path)?;
         Vexel::new(file)
-    }
-
-    pub fn write_bmp<P: AsRef<Path>>(path: P, width: u32, height: u32, pixels: &[u8]) -> Result<(), Error> {
-        let path = match path.as_ref().to_str() {
-            Some(path) => path,
-            None => return Err(Error::new(ErrorKind::InvalidData, "Invalid path")),
-        };
-
-        writer::write_bmp(path, width, height, &pixels.to_vec())
-    }
-
-    pub fn write_ppm<P: AsRef<Path>>(path: P, width: u32, height: u32, pixels: &[u8]) -> Result<(), Error> {
-        let path = match path.as_ref().to_str() {
-            Some(path) => path,
-            None => return Err(Error::new(ErrorKind::InvalidData, "Invalid path")),
-        };
-
-        writer::write_ppm(path, width, height, &pixels.to_vec())
-    }
-
-    pub fn write_pam<P: AsRef<Path>>(path: P, image: Image) -> Result<(), Error> {
-        let path = match path.as_ref().to_str() {
-            Some(path) => path,
-            None => return Err(Error::new(ErrorKind::InvalidData, "Invalid path")),
-        };
-
-        writer::write_pam(path, image)
     }
 }
 
@@ -760,6 +750,8 @@ impl<R: Read + Seek> Vexel<R> {
         if chunks.iter().any(|chunk| header_str.contains(chunk)) {
             return Ok(ImageFormat::Png);
         }
+        
+        // TODO other formats
 
         // We tried
         Ok(ImageFormat::Unknown)
