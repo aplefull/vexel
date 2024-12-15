@@ -1,8 +1,9 @@
 use std::cmp::PartialEq;
 use std::fmt::Debug;
-use std::io::{Read, Seek};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
-use crate::{Image, ImageFrame, PixelData};
+use crate::{log_error, log_warn, Image, PixelData};
+use crate::utils::error::{VexelError, VexelResult};
 
 #[derive(Debug, Clone, PartialEq)]
 enum NetpbmFormat {
@@ -36,19 +37,6 @@ pub struct NetPbmDecoder<R: Read + Seek> {
     reader: BitReader<R>,
 }
 
-impl<R: Read + Seek> Debug for NetPbmDecoder<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NetpbmDecoder")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("max_value", &self.max_value)
-            .field("depth", &self.depth)
-            .field("format", &self.format)
-            .field("tuple_type", &self.tuple_type)
-            .finish()
-    }
-}
-
 impl<R: Read + Seek> NetPbmDecoder<R> {
     pub fn new(reader: R) -> Self {
         Self {
@@ -79,12 +67,11 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         ((value as f32 * 65535.0 / max_value as f32).round() as u32).min(65535) as u16
     }
 
-    fn skip_whitespace_and_comments(reader: &mut BitReader<R>) -> Result<(), std::io::Error> {
+    fn skip_whitespace_and_comments<T: Read + Seek>(reader: &mut BitReader<T>) -> VexelResult<()> {
         loop {
             let byte = reader.read_u8()?;
             match byte {
                 b'#' => {
-                    // Skip until newline
                     loop {
                         let b = reader.read_u8()?;
                         if b == b'\n' {
@@ -94,8 +81,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                 }
                 b' ' | b'\t' | b'\n' | b'\r' => continue,
                 _ => {
-                    // Put back the non-whitespace byte
-                    reader.seek(std::io::SeekFrom::Current(-1))?;
+                    reader.seek(SeekFrom::Current(-1))?;
                     break;
                 }
             }
@@ -104,7 +90,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         Ok(())
     }
 
-    fn read_decimal(reader: &mut BitReader<R>) -> Result<u32, std::io::Error> {
+    fn read_decimal<T: Read + Seek>(reader: &mut BitReader<T>) -> VexelResult<u32> {
         let mut number = 0u32;
         let mut has_digits = false;
 
@@ -113,38 +99,41 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             match byte {
                 b'0'..=b'9' => {
                     has_digits = true;
-                    number = number
+                    number = match number
                         .checked_mul(10)
-                        .and_then(|n| n.checked_add((byte - b'0') as u32))
-                        .ok_or_else(|| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, "Number too large")
-                        })?;
+                        .and_then(|n| n.checked_add((byte - b'0') as u32)) {
+                        Some(n) => n,
+                        None => {
+                            log_warn!("Number is too large: {} + {}", number, (byte - b'0') as u32);
+
+                            number
+                        }
+                    };
                 }
                 _ => {
-                    // Put back the non-digit byte
-                    reader.seek(std::io::SeekFrom::Current(-1))?;
+                    reader.seek(SeekFrom::Current(-1))?;
                     break;
                 }
             }
         }
 
         if !has_digits {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Expected decimal number",
-            ));
+            log_warn!("No digits found in decimal number");
+
+            return Ok(0);
         }
 
         Ok(number)
     }
 
-    fn read_pam_tuple(&mut self) -> Result<(String, String), std::io::Error> {
+    fn read_pam_tuple(&mut self) -> VexelResult<(String, String)> {
         let mut key = String::new();
         let mut value = String::new();
         let mut reading_key = true;
 
         loop {
             let byte = self.reader.read_u8()?;
+
             match byte {
                 b'\n' => break,
                 b' ' | b'\t' if reading_key => {
@@ -163,8 +152,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         Ok((key.trim().to_string(), value.trim().to_string()))
     }
 
-    fn read_header(&mut self) -> Result<(), std::io::Error> {
-        // Read magic number
+    fn read_header(&mut self) -> VexelResult<()> {
         let magick = self.reader.read_bits(16)? as u16;
 
         let format = match magick {
@@ -175,7 +163,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             0x5035 => NetpbmFormat::P5,
             0x5036 => NetpbmFormat::P6,
             0x5037 => NetpbmFormat::P7,
-            _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid magic number")),
+            _ => {
+                log_warn!("Invalid magic number: {}", magick);
+                NetpbmFormat::P6
+            }
         };
 
         self.format = Some(format.clone());
@@ -188,42 +179,42 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         Ok(())
     }
 
-    fn read_standard_header(&mut self, format: NetpbmFormat) -> Result<(), std::io::Error> {
-        // Skip whitespace and comments after magic number
+    fn read_standard_header(&mut self, format: NetpbmFormat) -> VexelResult<()> {
         Self::skip_whitespace_and_comments(&mut self.reader)?;
 
-        // Read width
         self.width = Self::read_decimal(&mut self.reader)?;
+
         Self::skip_whitespace_and_comments(&mut self.reader)?;
 
-        // Read height
         self.height = Self::read_decimal(&mut self.reader)?;
 
-        // Read max value for formats that have it
         match format {
             NetpbmFormat::P1 | NetpbmFormat::P4 => {
                 self.max_value = 1;
             }
             _ => {
                 Self::skip_whitespace_and_comments(&mut self.reader)?;
+
                 self.max_value = Self::read_decimal(&mut self.reader)?;
 
-                if self.max_value == 0 || self.max_value > 65535 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Invalid max value",
-                    ));
+                if self.max_value == 0 {
+                    log_warn!("Invalid MAXVAL value: {}", self.max_value);
+                    self.max_value = 255;
+                }
+                
+                if self.max_value > 65535 {
+                    log_warn!("Invalid MAXVAL value: {}", self.max_value);
+                    self.max_value = 65535;
                 }
             }
         }
 
-        // Skip single whitespace character that must come before raster
         self.reader.read_u8()?;
 
         Ok(())
     }
 
-    fn read_pam_header(&mut self) -> Result<(), std::io::Error> {
+    fn read_pam_header(&mut self) -> VexelResult<()> {
         loop {
             Self::skip_whitespace_and_comments(&mut self.reader)?;
 
@@ -231,17 +222,21 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
             match key.as_str() {
                 "ENDHDR" => break,
-                "WIDTH" => self.width = value.parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid WIDTH value")
+                "WIDTH" => self.width = value.parse::<u32>().or_else(|_| {
+                    log_warn!("Invalid WIDTH value: {}", value);
+                    Ok::<u32, VexelError>(0)
                 })?,
-                "HEIGHT" => self.height = value.parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid HEIGHT value")
+                "HEIGHT" => self.height = value.parse::<u32>().or_else(|_| {
+                    log_warn!("Invalid HEIGHT value: {}", value);
+                    Ok::<u32, VexelError>(0)
                 })?,
-                "DEPTH" => self.depth = value.parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid DEPTH value")
+                "DEPTH" => self.depth = value.parse::<u8>().or_else(|_| {
+                    log_warn!("Invalid DEPTH value: {}", value);
+                    Ok::<u8, VexelError>(3)
                 })?,
-                "MAXVAL" => self.max_value = value.parse().map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid MAXVAL value")
+                "MAXVAL" => self.max_value = value.parse().or_else(|_| {
+                    log_warn!("Invalid MAXVAL value: {}", value);
+                    Ok::<u32, VexelError>(255)
                 })?,
                 "TUPLTYPE" => {
                     self.tuple_type = Some(match value.as_str() {
@@ -252,81 +247,118 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                         "GRAYSCALE_ALPHA" => TupleType::GrayscaleAlpha,
                         "RGB_ALPHA" => TupleType::RGBAlpha,
                         _ => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "Invalid TUPLTYPE",
-                            ))
+                            log_warn!("Invalid TUPLTYPE value: {}", value);
+                            TupleType::RGB
                         }
                     });
                 }
-                _ => {} // Ignore unknown keys
+                _ => {}
             }
         }
+
+        if self.width == 0 || self.height == 0 {
+            return Err(VexelError::InvalidDimensions {
+                width: self.width,
+                height: self.height,
+            });
+        };
 
         Ok(())
     }
 
-    fn read_data(&mut self) -> Result<(), std::io::Error> {
+    fn read_data(&mut self) -> VexelResult<()> {
         self.data = self.reader.read_to_end()?;
 
         Ok(())
     }
 
-    fn read_ascii_number(&mut self) -> Result<u32, std::io::Error> {
-        Self::skip_whitespace_and_comments(&mut self.reader)?;
+    fn read_ascii_number<T: Read + Seek>(reader: &mut BitReader<T>) -> VexelResult<u32> {
+        Self::skip_whitespace_and_comments(reader)?;
 
-        Ok(Self::read_decimal(&mut self.reader)?)
+        Ok(Self::read_decimal(reader)?)
     }
 
-    fn decode_ascii_bitmap(&mut self) -> Result<PixelData, std::io::Error> {
+    fn decode_ascii_bitmap(&mut self) -> VexelResult<PixelData> {
         let mut image_data: Vec<u8> = Vec::new();
+        let mut reader = BitReader::new(Cursor::new(&self.data));
 
         for _ in 0..self.height {
             for _ in 0..self.width {
-                let value = self.read_ascii_number()?.clamp(0, self.max_value);
+                let value = match Self::read_ascii_number(&mut reader) {
+                    Ok(v) => v.clamp(0, self.max_value),
+                    Err(e) => {
+                        log_warn!("Error reading ASCII number: {:?}", e);
+                        0
+                    }
+                };
 
-                image_data.push(value as u8);
+
+                image_data.push(!(value as u8) & 1);
             }
         }
 
         Ok(PixelData::L1(image_data))
     }
 
-    fn decode_ascii_graymap(&mut self) -> Result<PixelData, std::io::Error> {
-        let mut image_data: Vec<u8> = Vec::new();
+    fn decode_ascii_graymap(&mut self) -> VexelResult<PixelData> {
+        let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
+        let mut reader = BitReader::new(Cursor::new(&self.data));
 
-        for _ in 0..self.height {
-            for _ in 0..self.width {
-                let value = self.read_ascii_number()?.clamp(0, self.max_value);
+        let pixel_count = (self.width * self.height) as usize;
+        let values: Vec<_> = (0..pixel_count)
+            .map(|_| {
+                Self::read_ascii_number(&mut reader)
+                    .map(|v| v.clamp(0, self.max_value))
+                    .unwrap_or_else(|e| {
+                        log_warn!("Error reading ASCII number: {:?}", e);
+                        0
+                    })
+            })
+            .collect();
 
-                image_data.push(Self::scale_to_8bit(value, self.max_value));
-            }
+        if bits_per_sample == 8 {
+            Ok(PixelData::L8(values.iter()
+                .map(|&v| Self::scale_to_8bit(v, self.max_value))
+                .collect()))
+        } else {
+            Ok(PixelData::L16(values.iter()
+                .map(|&v| Self::scale_to_16bit(v, self.max_value))
+                .collect()))
         }
-
-        Ok(PixelData::RGB8(image_data))
     }
 
-    fn decode_ascii_pixmap(&mut self) -> Result<PixelData, std::io::Error> {
-        let mut image_data: Vec<u8> = Vec::new();
-        for _ in 0..self.height {
-            for _ in 0..self.width {
-                let r = self.read_ascii_number()?.clamp(0, self.max_value);
-                let g = self.read_ascii_number()?.clamp(0, self.max_value);
-                let b = self.read_ascii_number()?.clamp(0, self.max_value);
+    fn decode_ascii_pixmap(&mut self) -> VexelResult<PixelData> {
+        let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
+        let mut reader = BitReader::new(Cursor::new(&self.data));
 
-                image_data.push(Self::scale_to_8bit(r, self.max_value));
-                image_data.push(Self::scale_to_8bit(g, self.max_value));
-                image_data.push(Self::scale_to_8bit(b, self.max_value));
-            }
+        let pixel_count = (self.width * self.height) as usize;
+        let values: Vec<_> = (0..pixel_count * 3)
+            .map(|_| {
+                Self::read_ascii_number(&mut reader)
+                    .map(|v| v.clamp(0, self.max_value))
+                    .unwrap_or_else(|e| {
+                        log_warn!("Error reading ASCII number: {:?}", e);
+                        0
+                    })
+            })
+            .collect();
+
+
+        if bits_per_sample == 8 {
+            Ok(PixelData::RGB8(values.iter()
+                .map(|&v| Self::scale_to_8bit(v, self.max_value))
+                .collect()))
+        } else {
+            Ok(PixelData::RGB16(values.iter()
+                .map(|&v| Self::scale_to_16bit(v, self.max_value))
+                .collect()))
         }
-
-        Ok(PixelData::RGB8(image_data))
     }
 
-    fn decode_binary_bitmap(&mut self) -> Result<PixelData, std::io::Error> {
+    fn decode_binary_bitmap(&mut self) -> VexelResult<PixelData> {
         let mut image_data: Vec<u8> = Vec::new();
 
-        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+        let mut reader = BitReader::new(Cursor::new(&self.data));
 
         for _ in 0..self.height {
             for _ in 0..self.width {
@@ -337,10 +369,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         Ok(PixelData::L1(image_data))
     }
 
-    fn decode_binary_graymap(&mut self) -> Result<PixelData, std::io::Error> {
+    fn decode_binary_graymap(&mut self) -> VexelResult<PixelData> {
         let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
 
-        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+        let mut reader = BitReader::new(Cursor::new(&self.data));
 
         if bits_per_sample == 8 {
             let mut image_data = Vec::new();
@@ -367,10 +399,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         Ok(PixelData::L16(image_data))
     }
 
-    fn decode_binary_pixmap(&mut self) -> Result<PixelData, std::io::Error> {
+    fn decode_binary_pixmap(&mut self) -> VexelResult<PixelData> {
         let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
 
-        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+        let mut reader = BitReader::new(Cursor::new(&self.data));
 
         if bits_per_sample == 8 {
             let mut image_data = Vec::new();
@@ -407,15 +439,19 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         Ok(PixelData::RGB16(image_data))
     }
 
-    fn decode_pam(&self) -> Result<PixelData, std::io::Error> {
-        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+    fn decode_pam(&mut self) -> VexelResult<PixelData> {
+        let mut reader = BitReader::new(Cursor::new(&self.data));
 
-        // Validate required fields
-        if self.depth == 0 || self.max_value == 0 || self.max_value > 65535 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid PAM parameters",
-            ));
+        if self.depth == 0 {
+            self.depth = 3;
+        }
+        
+        if self.max_value == 0 {
+            self.max_value = 255;
+        }
+
+        if self.max_value > 65535 {
+          self.max_value = 65535;  
         }
 
         let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
@@ -424,17 +460,15 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             // BLACKANDWHITE format (1 channel, maxval must be 1)
             (Some(TupleType::BlackAndWhite), 1) => {
                 if self.max_value != 1 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "BLACKANDWHITE tuple type requires maxval of 1",
-                    ));
+                    log_warn!("BLACKANDWHITE tuple type requires maxval of 1 for color channel, found: {}", self.max_value);
+                    self.max_value = 1;
                 }
 
                 let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
                 for _ in 0..self.height {
                     for _ in 0..self.width {
                         let value = reader.read_u8()?;
-                        image_data.push(value & 1); // Ensure value is 0 or 1
+                        image_data.push(value & 1);
                     }
                 }
                 Ok(PixelData::L1(image_data))
@@ -450,6 +484,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             image_data.push(Self::scale_to_8bit(value as u32, self.max_value));
                         }
                     }
+
                     Ok(PixelData::L8(image_data))
                 } else {
                     let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
@@ -459,6 +494,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             image_data.push(Self::scale_to_16bit(value as u32, self.max_value));
                         }
                     }
+
                     Ok(PixelData::L16(image_data))
                 }
             }
@@ -478,6 +514,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             image_data.push(Self::scale_to_8bit(b as u32, self.max_value));
                         }
                     }
+
                     Ok(PixelData::RGB8(image_data))
                 } else {
                     let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
@@ -492,6 +529,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             image_data.push(Self::scale_to_16bit(b as u32, self.max_value));
                         }
                     }
+
                     Ok(PixelData::RGB16(image_data))
                 }
             }
@@ -499,10 +537,8 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             // BLACKANDWHITE_ALPHA format (2 channels)
             (Some(TupleType::BlackAndWhiteAlpha), 2) => {
                 if self.max_value != 1 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "BLACKANDWHITE_ALPHA tuple type requires maxval of 1 for color channel",
-                    ));
+                    log_warn!("BLACKANDWHITE_ALPHA tuple type requires maxval of 1 for color channel, found: {}", self.max_value);
+                    self.max_value = 1;
                 }
 
                 let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
@@ -510,10 +546,11 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                     for _ in 0..self.width {
                         let value = reader.read_u8()?;
                         let alpha = reader.read_u8()?;
-                        image_data.push(value & 1); // Ensure value is 0 or 1
+                        image_data.push(value & 1);
                         image_data.push(Self::scale_to_8bit(alpha as u32, self.max_value));
                     }
                 }
+
                 Ok(PixelData::LA8(image_data))
             }
 
@@ -530,6 +567,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             image_data.push(Self::scale_to_8bit(alpha as u32, self.max_value));
                         }
                     }
+
                     Ok(PixelData::LA8(image_data))
                 } else {
                     let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
@@ -542,6 +580,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             image_data.push(Self::scale_to_16bit(alpha as u32, self.max_value));
                         }
                     }
+
                     Ok(PixelData::LA16(image_data))
                 }
             }
@@ -563,6 +602,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             image_data.push(Self::scale_to_8bit(a as u32, self.max_value));
                         }
                     }
+
                     Ok(PixelData::RGBA8(image_data))
                 } else {
                     let mut image_data = Vec::with_capacity((self.width * self.height * 4) as usize);
@@ -579,23 +619,24 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             image_data.push(Self::scale_to_16bit(a as u32, self.max_value));
                         }
                     }
+
                     Ok(PixelData::RGBA16(image_data))
                 }
             }
 
-            // Invalid combination of tuple type and depth
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid combination of tuple type and depth",
-            )),
+            _ => {
+                // TODO
+                log_error!("Invalid combination of tuple type and depth: {:?}, {}", self.tuple_type, self.depth);
+                panic!("Invalid combination of tuple type and depth");
+            },
         }
     }
 
-    pub fn decode(&mut self) -> Result<Image, std::io::Error> {
+    pub fn decode(&mut self) -> VexelResult<Image> {
         self.read_header()?;
         self.read_data()?;
 
-        let image_data = match self.format {
+        let mut pixel_data = match self.format {
             Some(NetpbmFormat::P1) => self.decode_ascii_bitmap()?,
             Some(NetpbmFormat::P2) => self.decode_ascii_graymap()?,
             Some(NetpbmFormat::P3) => self.decode_ascii_pixmap()?,
@@ -603,14 +644,14 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             Some(NetpbmFormat::P5) => self.decode_binary_graymap()?,
             Some(NetpbmFormat::P6) => self.decode_binary_pixmap()?,
             Some(NetpbmFormat::P7) => self.decode_pam()?,
-            None => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Format not set")),
+            None => {
+                log_warn!("Format not set before decoding, assuming binary pixmap (P6)");
+                self.decode_binary_pixmap()?
+            },
         };
 
-        Ok(Image::from_frame(ImageFrame::new(
-            self.width,
-            self.height,
-            image_data,
-            0,
-        )))
+        pixel_data.correct_pixels(self.width, self.height);
+        
+        Ok(Image::from_pixels(self.width, self.height, pixel_data))
     }
 }

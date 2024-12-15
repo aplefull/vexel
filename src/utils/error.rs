@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io;
+use std::num::ParseIntError;
 
 #[derive(Debug)]
 pub enum VexelError {
@@ -44,5 +45,16 @@ impl From<String> for VexelError {
     }
 }
 
-// Result type alias for Vexel operations
+impl From<&str> for VexelError {
+    fn from(error: &str) -> Self {
+        VexelError::Custom(error.to_string())
+    }
+}
+
+impl From<ParseIntError> for VexelError {
+    fn from(error: ParseIntError) -> Self {
+        VexelError::Custom(error.to_string())
+    }
+}
+
 pub type VexelResult<T> = Result<T, VexelError>;
