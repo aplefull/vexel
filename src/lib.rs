@@ -7,6 +7,7 @@ use crate::decoders::jpeg::JpegDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::png::PngDecoder;
+use crate::decoders::hdr::HdrDecoder;
 
 pub use utils::{bitreader, writer, logger};
 
@@ -118,6 +119,7 @@ pub enum ImageFormat {
     NetPbmP5,
     NetPbmP6,
     NetPbmP7,
+    Hdr,
     Unknown,
 }
 
@@ -143,6 +145,7 @@ pub enum Decoders<R: Read + Seek> {
     Gif(GifDecoder<R>),
     Bmp(BmpDecoder<R>),
     Netpbm(NetPbmDecoder<R>),
+    Hdr(HdrDecoder<R>),
     Unknown,
 }
 
@@ -589,6 +592,7 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::NetPbmP7 => Decoders::Netpbm(NetPbmDecoder::new(reader)),
             ImageFormat::Bmp => Decoders::Bmp(BmpDecoder::new(reader)),
             ImageFormat::Png => Decoders::Png(PngDecoder::new(reader)),
+            ImageFormat::Hdr => Decoders::Hdr(HdrDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -607,26 +611,9 @@ impl<R: Read + Seek> Vexel<R> {
             }
 
             Decoders::JpegLs(jpeg_ls_decoder) => {
-                let pixels = jpeg_ls_decoder.decode()?;
-                let frames = Vec::from(
-                    [
-                        ImageFrame::new(
-                            jpeg_ls_decoder.width(),
-                            jpeg_ls_decoder.height(),
-                            PixelData::RGB8(pixels),
-                            0,
-                        )
-                    ]
-                );
+                let image = jpeg_ls_decoder.decode()?;
 
-                Ok(
-                    Image::new(
-                        jpeg_ls_decoder.width(),
-                        jpeg_ls_decoder.height(),
-                        PixelFormat::RGB8,
-                        frames,
-                    )
-                )
+                Ok(image)
             }
 
             Decoders::Png(png_decoder) => {
@@ -649,6 +636,12 @@ impl<R: Read + Seek> Vexel<R> {
 
             Decoders::Bmp(bmp_decoder) => {
                 let image = bmp_decoder.decode()?;
+
+                Ok(image)
+            }
+            
+            Decoders::Hdr(hdr_decoder) => {
+                let image = hdr_decoder.decode()?;
 
                 Ok(image)
             }
@@ -679,7 +672,9 @@ impl<R: Read + Seek> Vexel<R> {
 
         // JPEG-LS
         if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
-            if header.windows(4).any(|window| window == [0xFF, 0xF7, 0x00, 0x0B]) {
+            // TODO
+            //if header.windows(4).any(|window| window == [0xFF, 0xF7, 0x00, 0x0B]) {
+            if header.windows(2).any(|window| window == [0xFF, 0xF7]) {
                 return Ok(ImageFormat::JpegLs);
             }
         }
@@ -717,6 +712,11 @@ impl<R: Read + Seek> Vexel<R> {
         match &header[0..2] {
             b"BM" | b"BA" | b"CI" | b"CP" | b"IC" | b"PT" => return Ok(ImageFormat::Bmp),
             _ => {}
+        }
+        
+        // HDR
+        if header.starts_with(b"#?RADIANCE") {
+            return Ok(ImageFormat::Hdr);
         }
 
         // If all else fails, let's try harder and pray that we get the right format
