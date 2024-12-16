@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use crate::utils::marker::Marker;
+use crate::utils::types::ByteOrder;
 
 pub struct BitReader<R: Read + Seek> {
     reader: R,
@@ -27,6 +28,24 @@ impl<R: Read + Seek> BitReader<R> {
             bits_in_buffer: 0,
             little_endian: true,
         }
+    }
+    
+    /// Sets the endianness of the BitReader.
+    /// 
+    /// # Parameters
+    /// - `byte_order`: The byte order to set
+    /// 
+    pub fn set_endianness(&mut self, byte_order: ByteOrder) {
+        self.little_endian = byte_order == ByteOrder::LittleEndian;
+    }
+    
+    /// Returns the current position in the bitstream.
+    /// 
+    /// # Returns
+    /// - The current position in the bitstream
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn stream_position(&mut self) -> Result<u64, std::io::Error> {
+        self.reader.stream_position()
     }
 
     /// Reads a single bit from the bitstream.

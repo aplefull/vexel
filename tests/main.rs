@@ -15,8 +15,8 @@ mod tests {
 
     fn get_out_path(path: &str, ext: Option<&str>) -> PathBuf {
         let path = Path::new(path).with_extension(ext.unwrap_or("webp"));
-        let out_path = Path::new(BASE_PATH).join(path).canonicalize().unwrap();
-        
+        let out_path = Path::new(BASE_PATH).join(path);
+
         out_path
     }
 
@@ -211,6 +211,25 @@ mod tests {
         match decoder.decode() {
             Ok(image) => {
                 Writer::write_webp(&get_out_path(PATH_HDR_1, None), &image)?;
+            }
+            Err(e) => {
+                println!("Error decoding image: {:?}", e);
+                assert!(false);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_tiff_decode() -> Result<(), Box<dyn std::error::Error>> {
+        const PATH_TIFF_1: &str = "tiff/file_example_TIFF_10MB.tiff";
+
+        let mut decoder = Vexel::open(get_in_path(PATH_TIFF_1))?;
+
+        match decoder.decode() {
+            Ok(image) => {
+                Writer::write_webp(&get_out_path(PATH_TIFF_1, None), &image)?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);

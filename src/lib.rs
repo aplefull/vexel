@@ -8,15 +8,22 @@ use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::hdr::HdrDecoder;
+use crate::decoders::tiff::TiffDecoder;
 
 pub use utils::{bitreader, writer, logger};
 
 use std::fmt::{Debug};
 use std::fs::File;
-use std::io::{Error, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info_display::ImageInfo;
+
+macro_rules! impl_decode {
+    ($decoder:expr) => {
+        $decoder.decode()
+    };
+}
 
 // TODO move these somewhere
 fn drop_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
@@ -120,6 +127,7 @@ pub enum ImageFormat {
     NetPbmP6,
     NetPbmP7,
     Hdr,
+    Tiff,
     Unknown,
 }
 
@@ -146,6 +154,7 @@ pub enum Decoders<R: Read + Seek> {
     Bmp(BmpDecoder<R>),
     Netpbm(NetPbmDecoder<R>),
     Hdr(HdrDecoder<R>),
+    Tiff(TiffDecoder<R>),
     Unknown,
 }
 
@@ -593,6 +602,7 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::Bmp => Decoders::Bmp(BmpDecoder::new(reader)),
             ImageFormat::Png => Decoders::Png(PngDecoder::new(reader)),
             ImageFormat::Hdr => Decoders::Hdr(HdrDecoder::new(reader)),
+            ImageFormat::Tiff => Decoders::Tiff(TiffDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -604,48 +614,14 @@ impl<R: Read + Seek> Vexel<R> {
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         match &mut self.decoder {
-            Decoders::Jpeg(jpeg_decoder) => {
-                let image = jpeg_decoder.decode()?;
-
-                Ok(image)
-            }
-
-            Decoders::JpegLs(jpeg_ls_decoder) => {
-                let image = jpeg_ls_decoder.decode()?;
-
-                Ok(image)
-            }
-
-            Decoders::Png(png_decoder) => {
-                let image = png_decoder.decode()?;
-
-                Ok(image)
-            }
-
-            Decoders::Gif(gif_decoder) => {
-                let image = gif_decoder.decode()?;
-
-                Ok(image)
-            }
-
-            Decoders::Netpbm(netpbm_decoder) => {
-                let image = netpbm_decoder.decode()?;
-
-                Ok(image)
-            }
-
-            Decoders::Bmp(bmp_decoder) => {
-                let image = bmp_decoder.decode()?;
-
-                Ok(image)
-            }
-            
-            Decoders::Hdr(hdr_decoder) => {
-                let image = hdr_decoder.decode()?;
-
-                Ok(image)
-            }
-
+            Decoders::Jpeg(decoder) => impl_decode!(decoder),
+            Decoders::JpegLs(decoder) => impl_decode!(decoder),
+            Decoders::Png(decoder) => impl_decode!(decoder),
+            Decoders::Gif(decoder) => impl_decode!(decoder),
+            Decoders::Netpbm(decoder) => impl_decode!(decoder),
+            Decoders::Bmp(decoder) => impl_decode!(decoder),
+            Decoders::Hdr(decoder) => impl_decode!(decoder),
+            Decoders::Tiff(decoder) => impl_decode!(decoder),
             Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
         }
     }
@@ -717,6 +693,12 @@ impl<R: Read + Seek> Vexel<R> {
         // HDR
         if header.starts_with(b"#?RADIANCE") {
             return Ok(ImageFormat::Hdr);
+        }
+
+        // TIFF
+        if (header.starts_with(b"II") || header.starts_with(b"MM")) &&
+            ((header[2] == 42 && header[3] == 0) || (header[2] == 0 && header[3] == 42)) {
+            return Ok(ImageFormat::Tiff);
         }
 
         // If all else fails, let's try harder and pray that we get the right format
