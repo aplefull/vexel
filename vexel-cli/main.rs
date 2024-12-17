@@ -1,5 +1,3 @@
-extern crate vexel;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use vexel::Vexel;
@@ -31,7 +29,7 @@ struct Cli {
 
 fn get_files(path: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".."));
     let absolute_pattern = if Path::new(path).is_relative() {
         base_dir.join(path).to_string_lossy().into_owned()
     } else {
@@ -83,7 +81,7 @@ fn get_output_path(
     } else {
         // If no output directory specified, use the input file's directory
         file.parent()
-            .unwrap_or_else(|| Path::new("."))
+            .unwrap_or_else(|| Path::new(".."))
             .join(format!("{}.{}", file_stem, format))
     };
 

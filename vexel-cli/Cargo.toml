@@ -1,0 +1,15 @@
+[package]
+name = "vexel-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vexel"
+path = "main.rs"
+
+[dependencies]
+vexel = { path = "../vexel" }
+clap = { version = "4.5.20", features = ["derive"] }
+glob = "0.3.1"
+egui = "0.29.1"
+eframe = "0.29.1"

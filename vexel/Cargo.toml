@@ -1,0 +1,14 @@
+[package]
+name = "vexel"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "vexel"
+path = "lib.rs"
+
+[dependencies]
+flate2 = "1.0.35"
+image = "0.25.5"
+webp = "0.3.0"
+webp-animation = "0.9.0"

@@ -2,6 +2,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::io::{Cursor, Error, Read, Seek};
 use crate::bitreader::BitReader;
+use crate::{Image, PixelData};
 use crate::utils::error::VexelResult;
 use crate::utils::marker::Marker;
 
@@ -635,7 +636,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         (q1 * 81 + q2 * 9 + q3) as usize
     }
 
-    pub fn decode(&mut self) -> VexelResult<Vec<u8>> {
+    pub fn decode(&mut self) -> VexelResult<Image> {
         while let Ok(marker) = self.reader.next_marker(&JPEG_LS_MARKERS) {
             match marker {
                 Some(marker) => {
@@ -715,7 +716,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     // Run mode
                     loop {
                         let bit = reader.read_bit()?;
-                        
+
                         if bit {
                             let mut count = self.j[self.run_index as usize];
 
@@ -838,6 +839,6 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             (this_row, prev_row) = (prev_row, this_row);
         }
 
-        Ok(image)
+        Ok(Image::from_pixels(self.width, self.height, PixelData::RGB8(image)))
     }
 }
