@@ -7,7 +7,7 @@ use crate::utils::info::BmpInfo;
 use crate::utils::traits::SafeAccess;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum BitmapCompression {
+pub enum BitmapCompression {
     BiRgb = 0,
     BiRle8 = 1,
     BiRle4 = 2,
@@ -43,10 +43,10 @@ impl BitmapCompression {
 
 #[derive(Debug, Clone)]
 pub struct BitmapFileHeader {
-    file_size: u32,
-    reserved1: u16,
-    reserved2: u16,
-    pixel_offset: u32,
+    pub file_size: u32,
+    pub reserved1: u16,
+    pub reserved2: u16,
+    pub pixel_offset: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -111,102 +111,102 @@ impl DibHeader {
 }
 
 #[derive(Debug, Clone)]
-struct BitmapCoreHeader {
-    width: u16,
-    height: u16,
-    planes: u16,
-    bits_per_pixel: u16,
+pub struct BitmapCoreHeader {
+    pub width: u16,
+    pub height: u16,
+    pub planes: u16,
+    pub bits_per_pixel: u16,
 }
 
 #[derive(Debug, Clone)]
-struct OS22XBitmapHeader {
-    width: i32,
-    height: i32,
-    planes: u16,
-    bits_per_pixel: u16,
-    compression: BitmapCompression,
-    image_size: u32,
-    x_pixels_per_meter: i32,
-    y_pixels_per_meter: i32,
-    colors_used: u32,
-    important_colors: u32,
-    units: u16,
-    reserved: u16,
-    recording: u16,
-    rendering: u16,
-    size1: u32,
-    size2: u32,
-    color_encoding: u32,
-    identifier: u32,
+pub struct OS22XBitmapHeader {
+    pub width: i32,
+    pub height: i32,
+    pub planes: u16,
+    pub bits_per_pixel: u16,
+    pub compression: BitmapCompression,
+    pub image_size: u32,
+    pub x_pixels_per_meter: i32,
+    pub y_pixels_per_meter: i32,
+    pub colors_used: u32,
+    pub important_colors: u32,
+    pub units: u16,
+    pub reserved: u16,
+    pub recording: u16,
+    pub rendering: u16,
+    pub size1: u32,
+    pub size2: u32,
+    pub color_encoding: u32,
+    pub identifier: u32,
 }
 
 #[derive(Debug, Clone)]
-struct BitmapInfoHeader {
-    width: i32,
-    height: i32,
-    planes: u16,
-    bits_per_pixel: u16,
-    compression: BitmapCompression,
-    image_size: u32,
-    x_pixels_per_meter: i32,
-    y_pixels_per_meter: i32,
-    colors_used: u32,
-    important_colors: u32,
+pub struct BitmapInfoHeader {
+    pub width: i32,
+    pub height: i32,
+    pub planes: u16,
+    pub bits_per_pixel: u16,
+    pub compression: BitmapCompression,
+    pub image_size: u32,
+    pub x_pixels_per_meter: i32,
+    pub y_pixels_per_meter: i32,
+    pub colors_used: u32,
+    pub important_colors: u32,
 }
 
 #[derive(Debug, Clone)]
-struct BitmapV2InfoHeader {
-    info: BitmapInfoHeader,
-    red_mask: u32,
-    green_mask: u32,
-    blue_mask: u32,
+pub struct BitmapV2InfoHeader {
+    pub info: BitmapInfoHeader,
+    pub red_mask: u32,
+    pub green_mask: u32,
+    pub blue_mask: u32,
 }
 
 #[derive(Debug, Clone)]
-struct BitmapV3InfoHeader {
-    v2: BitmapV2InfoHeader,
-    alpha_mask: u32,
+pub struct BitmapV3InfoHeader {
+    pub v2: BitmapV2InfoHeader,
+    pub alpha_mask: u32,
 }
 
 #[derive(Debug, Clone)]
-struct BitmapV4Header {
-    v3: BitmapV3InfoHeader,
-    cs_type: u32,
-    endpoints: ColorSpace,
-    gamma_red: u32,
-    gamma_green: u32,
-    gamma_blue: u32,
+pub struct BitmapV4Header {
+    pub v3: BitmapV3InfoHeader,
+    pub cs_type: u32,
+    pub endpoints: ColorSpace,
+    pub gamma_red: u32,
+    pub gamma_green: u32,
+    pub gamma_blue: u32,
 }
 
 #[derive(Debug, Clone)]
-struct BitmapV5Header {
-    v4: BitmapV4Header,
-    intent: u32,
-    profile_data: u32,
-    profile_size: u32,
-    reserved: u32,
+pub struct BitmapV5Header {
+    pub v4: BitmapV4Header,
+    pub intent: u32,
+    pub profile_data: u32,
+    pub profile_size: u32,
+    pub reserved: u32,
 }
 
 #[derive(Debug, Clone)]
-struct ColorSpace {
-    ciexyz_red: CIEXYZ,
-    ciexyz_green: CIEXYZ,
-    ciexyz_blue: CIEXYZ,
+pub struct ColorSpace {
+    pub ciexyz_red: CIEXYZ,
+    pub ciexyz_green: CIEXYZ,
+    pub ciexyz_blue: CIEXYZ,
 }
 
 #[derive(Debug, Clone)]
-struct CIEXYZ {
-    x: i32,
-    y: i32,
-    z: i32,
+pub struct CIEXYZ {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
 }
 
 #[derive(Debug, Clone)]
 pub struct ColorEntry {
-    blue: u8,
-    green: u8,
-    red: u8,
-    reserved: u8,
+    pub blue: u8,
+    pub green: u8,
+    pub red: u8,
+    pub reserved: u8,
 }
 
 pub struct BmpDecoder<R: Read + Seek> {
@@ -217,18 +217,6 @@ pub struct BmpDecoder<R: Read + Seek> {
     color_table: Vec<ColorEntry>,
     data: Vec<u8>,
     reader: BitReader<R>,
-}
-
-impl<R: Read + Seek> Debug for BmpDecoder<R> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BmpDecoder")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("file_header", &self.file_header)
-            .field("info_header", &self.dib_header)
-            .field("data", &self.data.len())
-            .finish()
-    }
 }
 
 impl<R: Read + Seek> BmpDecoder<R> {

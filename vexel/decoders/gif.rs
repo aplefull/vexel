@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
 use crate::bitreader::BitReader;
@@ -57,11 +56,11 @@ pub struct ApplicationExtension {
 
 #[derive(Debug, Clone)]
 pub struct GraphicsControlExtension {
-    disposal_method: DisposalMethod,
-    user_input: bool,
-    transparency: bool,
-    delay: u16,
-    transparent_color_index: u8,
+    pub disposal_method: DisposalMethod,
+    pub user_input: bool,
+    pub transparency: bool,
+    pub delay: u16,
+    pub transparent_color_index: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -82,28 +81,6 @@ pub enum DisposalMethod {
     None,
     Background,
     Previous,
-}
-
-impl<R: Read + Seek> Debug for GifDecoder<R> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("JpegLsDecoder")
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("canvas_width", &self.canvas_width)
-            .field("canvas_height", &self.canvas_height)
-            .field("version", &self.version)
-            .field("global_color_table_flag", &self.global_color_table_flag)
-            .field("color_resolution", &self.color_resolution)
-            .field("sort_flag", &self.sort_flag)
-            .field("size_of_global_color_table", &self.size_of_global_color_table)
-            .field("background_color_index", &self.background_color_index)
-            .field("pixel_aspect_ratio", &self.pixel_aspect_ratio)
-            .field("global_color_table", &self.global_color_table)
-            .field("frames", &self.frames)
-            .field("comments", &self.comments)
-            .field("app_extensions", &self.app_extensions)
-            .finish()
-    }
 }
 
 impl<R: Read + Seek> GifDecoder<R> {

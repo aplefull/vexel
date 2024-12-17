@@ -6,4 +6,3 @@ pub mod info;
 pub mod types;
 pub mod traits;
 pub mod error;
-pub mod icc;

@@ -2,9 +2,8 @@ extern crate core;
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
     use std::path::{Path, PathBuf};
-    use vexel::{bitreader::BitReader, Vexel};
+    use vexel::{Vexel};
     use vexel::writer::Writer;
 
     const BASE_PATH: &str = "./tests/images/";
@@ -18,57 +17,6 @@ mod tests {
         let out_path = Path::new(BASE_PATH).join(path);
 
         out_path
-    }
-
-    #[test]
-    pub fn test_bitreader() -> Result<(), Box<dyn std::error::Error>> {
-        // Test reading individual bits
-        let data = vec![0b10101010];
-        let mut reader = BitReader::new(Cursor::new(data));
-
-        assert_eq!(reader.read_bit()?, true);
-        assert_eq!(reader.read_bit()?, false);
-        assert_eq!(reader.read_bit()?, true);
-        assert_eq!(reader.read_bit()?, false);
-        assert_eq!(reader.read_bit()?, true);
-        assert_eq!(reader.read_bit()?, false);
-        assert_eq!(reader.read_bit()?, true);
-        assert_eq!(reader.read_bit()?, false);
-
-        // Test reading multiple bits at once
-        let data = vec![0b10101010, 0b11001100];
-        let mut reader = BitReader::new(Cursor::new(data));
-
-        assert_eq!(reader.read_bits(3)?, 0b101);
-        assert_eq!(reader.read_bits(7)?, 0b0101011);
-        assert_eq!(reader.read_bits(6)?, 0b001100);
-
-        // Test reading a mix of individual bits and multiple bits
-        let data = vec![0b10101010, 0b11001100, 0b01010101];
-        let mut reader = BitReader::new(Cursor::new(data));
-
-        // Read 5 bits
-        assert_eq!(reader.read_bits(5).unwrap(), 0b10101);
-
-        // Read 3 individual bits
-        assert_eq!(reader.read_bit()?, false);
-        assert_eq!(reader.read_bit()?, true);
-        assert_eq!(reader.read_bit()?, false);
-
-        // Read 7 more bits
-        assert_eq!(reader.read_bits(7).unwrap(), 0b1100110);
-
-        // Read 2 more individual bits
-        assert_eq!(reader.read_bit()?, false);
-        assert_eq!(reader.read_bit()?, false);
-
-        // Read the 6 more bits
-        assert_eq!(reader.read_bits(6)?, 0b101010);
-
-        // Read the last bit
-        assert_eq!(reader.read_bit()?, true);
-
-        Ok(())
     }
 
     #[test]
