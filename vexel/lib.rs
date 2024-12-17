@@ -9,15 +9,15 @@ use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::hdr::HdrDecoder;
 use crate::decoders::tiff::TiffDecoder;
+use crate::utils::info::ImageInfo;
+use crate::utils::error::{VexelError, VexelResult};
 
-pub use utils::{bitreader, writer, logger};
+pub use utils::{bitreader, logger};
 
-use std::fmt::{Debug};
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path};
-use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::ImageInfo;
+use std::path::Path;
 
 macro_rules! impl_decode {
     ($decoder:expr) => {

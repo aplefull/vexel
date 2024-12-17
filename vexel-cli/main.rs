@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use vexel::Vexel;
+use vexel::{Image, PixelData, Vexel};
 use clap::Parser;
 use glob::glob;
-use vexel::writer::Writer;
 use egui;
 use eframe;
 use egui::ViewportBuilder;
+use writer::{Writer, WriterImage, WriterImageFrame, WriterPixelData};
 
 #[derive(Parser, Debug)]
 #[clap(name = "vexel")]
@@ -88,6 +88,27 @@ fn get_output_path(
     Ok(output_path)
 }
 
+fn image_to_writer_image(image: &Image) -> WriterImage {
+    let mut frames = Vec::new();
+
+    for frame in image.frames() {
+        frames.push(WriterImageFrame {
+            width: frame.width(),
+            height: frame.height(),
+            has_alpha: frame.has_alpha(),
+            delay: frame.delay(),
+            pixels: if frame.has_alpha() { frame.as_rgba8() } else { frame.as_rgb8() },
+        });
+    }
+
+    WriterImage {
+        width: image.width(),
+        height: image.height(),
+        has_alpha: image.has_alpha(),
+        frames,
+    }
+}
+
 fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("File: {}", file.display());
 
@@ -113,19 +134,33 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     }
 
     println!("Writing to: {}", output_path.display());
-
+    let writer_image = image_to_writer_image(&image);
     match format {
         "pam" => {
-            Writer::write_pam(&output_path, &image)?;
+            let pixel_data = match image.pixels() {
+                PixelData::RGB8(data) => WriterPixelData::RGB8(data),
+                PixelData::RGBA8(data) => WriterPixelData::RGBA8(data),
+                PixelData::RGB16(data) => WriterPixelData::RGB16(data),
+                PixelData::RGBA16(data) => WriterPixelData::RGBA16(data),
+                PixelData::RGB32F(data) => WriterPixelData::RGB32F(data),
+                PixelData::RGBA32F(data) => WriterPixelData::RGBA32F(data),
+                PixelData::L1(data) => WriterPixelData::L1(data),
+                PixelData::L8(data) => WriterPixelData::L8(data),
+                PixelData::L16(data) => WriterPixelData::L16(data),
+                PixelData::LA8(data) => WriterPixelData::LA8(data),
+                PixelData::LA16(data) => WriterPixelData::LA16(data),
+            };
+
+            Writer::write_pam(&output_path, image.width(), image.height(), &pixel_data)?;
         }
         "ppm" => {
-            Writer::write_ppm(&output_path, &image)?;
+            Writer::write_ppm(&output_path, &writer_image)?;
         }
         "webp" => {
-            Writer::write_webp(&output_path, &image)?;
+            Writer::write_webp(&output_path, &writer_image)?;
         }
         _ => {
-            Writer::write_webp(&output_path, &image)?;
+            Writer::write_webp(&output_path, &writer_image)?;
         }
     }
 

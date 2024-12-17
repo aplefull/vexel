@@ -9,6 +9,7 @@ path = "main.rs"
 
 [dependencies]
 vexel = { path = "../vexel" }
+writer = { path = "../writer" }
 clap = { version = "4.5.20", features = ["derive"] }
 glob = "0.3.1"
 egui = "0.29.1"

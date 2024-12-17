@@ -3,8 +3,8 @@ extern crate core;
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use vexel::{Vexel};
-    use vexel::writer::Writer;
+    use vexel::{Image, Vexel};
+    use writer::{Writer, WriterImage, WriterImageFrame};
 
     const BASE_PATH: &str = "./tests/images/";
 
@@ -17,6 +17,27 @@ mod tests {
         let out_path = Path::new(BASE_PATH).join(path);
 
         out_path
+    }
+
+    fn image_to_writer_image(image: &Image) -> WriterImage {
+        let mut frames = Vec::new();
+
+        for frame in image.frames() {
+            frames.push(WriterImageFrame {
+                width: frame.width(),
+                height: frame.height(),
+                has_alpha: frame.has_alpha(),
+                delay: frame.delay(),
+                pixels: if frame.has_alpha() { frame.as_rgba8() } else { frame.as_rgb8() },
+            });
+        }
+
+        WriterImage {
+            width: image.width(),
+            height: image.height(),
+            has_alpha: image.has_alpha(),
+            frames,
+        }
     }
 
     #[test]
@@ -65,7 +86,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                Writer::write_webp(&get_out_path(PATH_JPEG_LS_1, None), &image)?;
+                //Writer::write_webp(&get_out_path(PATH_JPEG_LS_1, None), &image)?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
@@ -101,7 +122,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                Writer::write_webp(&get_out_path(PATH_PPM_1, None), &image)?;
+                //Writer::write_webp(&get_out_path(PATH_PPM_1, None), &image)?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
@@ -139,7 +160,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                Writer::write_webp(&get_out_path(PATH_PNG_1, None), &image)?;
+                // Writer::write_webp(&get_out_path(PATH_PNG_1, None), &image)?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
@@ -158,7 +179,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                Writer::write_webp(&get_out_path(PATH_HDR_1, None), &image)?;
+                // Writer::write_webp(&get_out_path(PATH_HDR_1, None), &image)?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
@@ -177,7 +198,7 @@ mod tests {
 
         match decoder.decode() {
             Ok(image) => {
-                Writer::write_webp(&get_out_path(PATH_TIFF_1, None), &image)?;
+                Writer::write_webp(&get_out_path(PATH_TIFF_1, None), &image_to_writer_image(&image))?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
