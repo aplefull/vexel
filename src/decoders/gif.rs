@@ -5,9 +5,11 @@ use std::io::{Read, Seek};
 use crate::bitreader::BitReader;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use crate::utils::error::VexelResult;
+use crate::utils::info::GifInfo;
 use crate::utils::traits::{SafeAccess, SafeMapAccess};
 
-pub struct FrameInfo {
+#[derive(Debug, Clone)]
+pub struct GifFrameInfo {
     pub left: u32,
     pub top: u32,
     pub width: u32,
@@ -37,14 +39,14 @@ pub struct GifDecoder<R: Read + Seek> {
     background_color_index: u8,
     pixel_aspect_ratio: u8,
     global_color_table: Vec<u8>,
-    frames: Vec<FrameInfo>,
+    frames: Vec<GifFrameInfo>,
     comments: Vec<String>,
     app_extensions: Vec<ApplicationExtension>,
     plain_text_extensions: Vec<PlainTextExtension>,
     reader: BitReader<R>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApplicationExtension {
     pub loop_count: Option<u16>,
     pub buffer_size: Option<u8>,
@@ -53,7 +55,7 @@ pub struct ApplicationExtension {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GraphicsControlExtension {
     disposal_method: DisposalMethod,
     user_input: bool,
@@ -62,7 +64,7 @@ pub struct GraphicsControlExtension {
     transparent_color_index: u8,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlainTextExtension {
     pub left: u16,
     pub top: u16,
@@ -80,27 +82,6 @@ pub enum DisposalMethod {
     None,
     Background,
     Previous,
-}
-
-impl Debug for FrameInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FrameInfo")
-            .field("left", &self.left)
-            .field("top", &self.top)
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("local_color_table_flag", &self.local_color_table_flag)
-            .field("interlace_flag", &self.interlace_flag)
-            .field("sort_flag", &self.sort_flag)
-            .field("size_of_local_color_table", &self.size_of_local_color_table)
-            .field("local_color_table", &self.local_color_table)
-            .field("lzw_minimum_code_size", &self.lzw_minimum_code_size)
-            .field("transparent_index", &self.transparent_index)
-            .field("disposal_method", &self.disposal_method)
-            .field("delay", &self.delay)
-            .field("data", &self.data.iter().len())
-            .finish()
-    }
 }
 
 impl<R: Read + Seek> Debug for GifDecoder<R> {
@@ -156,6 +137,27 @@ impl<R: Read + Seek> GifDecoder<R> {
         self.height
     }
 
+    pub fn get_info(&self) -> GifInfo {
+        GifInfo {
+            width: self.width,
+            height: self.height,
+            canvas_width: self.canvas_width,
+            canvas_height: self.canvas_height,
+            version: self.version.clone(),
+            global_color_table_flag: self.global_color_table_flag,
+            color_resolution: self.color_resolution,
+            sort_flag: self.sort_flag,
+            size_of_global_color_table: self.size_of_global_color_table,
+            background_color_index: self.background_color_index,
+            pixel_aspect_ratio: self.pixel_aspect_ratio,
+            global_color_table: self.global_color_table.clone(),
+            frames: self.frames.clone(),
+            comments: self.comments.clone(),
+            app_extensions: self.app_extensions.clone(),
+            plain_text_extensions: self.plain_text_extensions.clone(),
+        }
+    }
+
     fn read_header(&mut self) -> VexelResult<()> {
         // Skip the magic number
         self.reader.read_bits(24)?;
@@ -201,7 +203,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                     continue;
                 }
             };
-            
+
             self.global_color_table.push(bit);
         }
     }
@@ -228,7 +230,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                 if sub_block_size == 0 {
                     break;
                 }
-                
+
                 let mut app_extension = ApplicationExtension {
                     loop_count: None,
                     buffer_size: None,
@@ -242,7 +244,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                     1 => {
                         let count = self.reader.read_u16()?;
                         app_extension.loop_count = Some(count);
-                        
+
                         // Skip remaining bytes in sub-block
                         for _ in 0..(sub_block_size - 3) {
                             self.reader.read_u8()?;
@@ -256,13 +258,13 @@ impl<R: Read + Seek> GifDecoder<R> {
                     }
                     _ => {
                         log_debug!("Skipping unknown Netscape extension block: {:#04x}", block_id);
-                        
+
                         for _ in 0..(sub_block_size - 1) {
                             self.reader.read_u8()?;
                         }
                     }
                 }
-                
+
                 self.app_extensions.push(app_extension);
             }
         } else {
@@ -270,16 +272,16 @@ impl<R: Read + Seek> GifDecoder<R> {
             let mut data = Vec::new();
             loop {
                 let sub_block_size = self.reader.read_u8()? as usize;
-                
+
                 if sub_block_size == 0 {
                     break;
                 }
-                
+
                 for _ in 0..sub_block_size {
                     data.push(self.reader.read_u8()?);
                 }
             }
-    
+
             self.app_extensions.push(ApplicationExtension {
                 loop_count: None,
                 buffer_size: None,
@@ -318,7 +320,7 @@ impl<R: Read + Seek> GifDecoder<R> {
             for _ in 0..sub_block_size {
                 block.push(self.reader.read_u8()?);
             }
-            
+
             text.push_str(&String::from_utf8_lossy(&block));
         }
 
@@ -385,7 +387,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                         }*/
                         _ => {
                             log_warn!("Skipping unknown extension: {:#04x}", label);
-                            
+
                             loop {
                                 let block_size = self.reader.read_u8()? as usize;
                                 if block_size == 0 {
@@ -403,9 +405,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                 0x3B => {
                     break;
                 }
-                _ => {
-                    
-                }
+                _ => {}
             }
         }
 
@@ -413,7 +413,7 @@ impl<R: Read + Seek> GifDecoder<R> {
     }
 
     fn read_frame(&mut self, gce: Option<GraphicsControlExtension>) -> VexelResult<()> {
-        let mut frame = FrameInfo {
+        let mut frame = GifFrameInfo {
             left: self.reader.read_u16()?.swap_bytes() as u32,
             top: self.reader.read_u16()?.swap_bytes() as u32,
             width: self.reader.read_u16()?.swap_bytes() as u32,
@@ -512,7 +512,7 @@ impl<R: Read + Seek> GifDecoder<R> {
     }
 
     // TODO maybe use bitreader here as well
-    fn decompress_lzw(&self, frame: &FrameInfo) -> VexelResult<Vec<u8>> {
+    fn decompress_lzw(&self, frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
         let min_code_size = frame.lzw_minimum_code_size;
         let clear_code = 1 << min_code_size;
         let end_code = clear_code + 1;
@@ -549,9 +549,9 @@ impl<R: Read + Seek> GifDecoder<R> {
                     None => {
                         log_warn!("Invalid LZW code read position: {} (byte_pos: {}, bit_pos: {})", *pos, byte_pos, bit_pos);
                         continue;
-                    },
+                    }
                 };
-                
+
                 code |= (bit as u16) << current_bit;
 
                 *pos += 1;
@@ -630,7 +630,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         // Pass 2: Starting at row 4, every 8th row
         // Pass 3: Starting at row 2, every 4th row
         // Pass 4: Starting at row 1, every 2nd row
-        
+
         let passes = [
             (0, 8),
             (4, 8),
@@ -651,7 +651,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                         log_warn!("Row end out of bounds: {} (len {})", row_end, result.len());
                         continue;
                     }
-                    
+
                     result[row_start..row_end].copy_from_slice(source_slice);
                 } else {
                     log_warn!("Failed to get source slice for row {}", y);
@@ -660,11 +660,11 @@ impl<R: Read + Seek> GifDecoder<R> {
                 source_pos += (width * 4) as usize;
             }
         }
-       
+
         result
     }
 
-    fn decode_frame(&self, frame: &FrameInfo) -> VexelResult<Vec<u8>> {
+    fn decode_frame(&self, frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
         let indices = self.decompress_lzw(frame)?;
         let mut image_data = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
 
@@ -720,12 +720,12 @@ impl<R: Read + Seek> GifDecoder<R> {
                         *self.global_color_table.get_safe(bg_index + 2)?,
                         255
                     ];
-                    
+
                     for pixel in canvas.chunks_mut(4) {
                         pixel.copy_from_slice(&bg_color);
                     }
                 }
-                
+
                 canvas
             }
             _ => vec![0; canvas_size],
@@ -759,7 +759,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                         log_warn!("Canvas pixel index out of bounds: {} (len {})", canvas_pixel_index, canvas.len());
                         continue;
                     }
-                    
+
                     canvas[canvas_pixel_index..canvas_pixel_index + 4]
                         .copy_from_slice(frame_pixels.get_range_safe(frame_pixel_index..frame_pixel_index + 4)?);
                 }
@@ -776,9 +776,9 @@ impl<R: Read + Seek> GifDecoder<R> {
                 log_warn!("Error reading header, this might be critical! Error: {:?}", e);
             }
         };
-        
+
         self.read_global_color_table();
-        
+
         match self.read_frames() {
             Ok(_) => {}
             Err(e) => {
@@ -797,7 +797,7 @@ impl<R: Read + Seek> GifDecoder<R> {
                     continue;
                 }
             };
-            
+
             let canvas = match self.compose_frame(frame_index, previous_canvas.as_ref()) {
                 Ok(canvas) => canvas,
                 Err(e) => {

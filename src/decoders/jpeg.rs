@@ -3,7 +3,8 @@ use std::fmt::{Debug};
 use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
 use crate::{log_debug, log_error, log_warn, Image, ImageFrame, PixelData, PixelFormat};
-use crate::utils::info_display::JpegInfo;
+use crate::utils::error::VexelResult;
+use crate::utils::info::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::utils::types::ByteOrder;
 
@@ -840,7 +841,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.height
     }
 
-    pub fn get_data(&self) -> JpegInfo {
+    pub fn get_info(&self) -> JpegInfo {
         JpegInfo {
             width: self.width,
             height: self.height,
@@ -2488,7 +2489,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.samples_to_image(samples)
     }
 
-    pub fn decode(&mut self) -> Result<Image, Error> {
+    pub fn decode(&mut self) -> VexelResult<Image> {
         while let Ok(marker) = self.reader.next_marker(&JPEG_MARKERS) {
             match marker {
                 Some(marker) => {

@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path};
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info_display::ImageInfo;
+use crate::utils::info::ImageInfo;
 
 macro_rules! impl_decode {
     ($decoder:expr) => {
@@ -432,7 +432,7 @@ impl ImageFrame {
     pub fn pixel_format(&self) -> PixelFormat {
         self.pixels.pixel_format()
     }
-    
+
     pub fn has_alpha(&self) -> bool {
         match self.pixels {
             PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::LA8(_) | PixelData::LA16(_) => true,
@@ -532,14 +532,14 @@ impl Image {
             PixelData::RGB8(Vec::new())
         }
     }
-    
+
     pub fn has_alpha(&self) -> bool {
         match self.pixel_format {
             PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::LA8 | PixelFormat::LA16 => true,
             _ => false,
         }
     }
-    
+
     pub fn frames(&self) -> &Vec<ImageFrame> {
         &self.frames
     }
@@ -630,12 +630,32 @@ impl<R: Read + Seek> Vexel<R> {
         self.format.clone()
     }
 
-    pub fn get_image_info(&mut self) -> ImageInfo {
+    pub fn get_info(&mut self) -> ImageInfo {
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
-                let image_data = jpeg_decoder.get_data();
+                let image_data = jpeg_decoder.get_info();
 
                 ImageInfo::Jpeg(image_data)
+            }
+            Decoders::Png(png_decoder) => {
+                let image_data = png_decoder.get_info();
+
+                ImageInfo::Png(image_data)
+            }
+            Decoders::Bmp(bmp_decoder) => {
+                let image_data = bmp_decoder.get_info();
+
+                ImageInfo::Bmp(image_data)
+            }
+            Decoders::Gif(gif_decoder) => {
+                let image_data = gif_decoder.get_info();
+
+                ImageInfo::Gif(image_data)
+            }
+            Decoders::Netpbm(netpbm_decoder) => {
+                let image_data = netpbm_decoder.get_info();
+
+                ImageInfo::Netpbm(image_data)
             }
             _ => unimplemented!(),
         }
@@ -689,7 +709,7 @@ impl<R: Read + Seek> Vexel<R> {
             b"BM" | b"BA" | b"CI" | b"CP" | b"IC" | b"PT" => return Ok(ImageFormat::Bmp),
             _ => {}
         }
-        
+
         // HDR
         if header.starts_with(b"#?RADIANCE") {
             return Ok(ImageFormat::Hdr);
@@ -732,7 +752,7 @@ impl<R: Read + Seek> Vexel<R> {
         if chunks.iter().any(|chunk| header_str.contains(chunk)) {
             return Ok(ImageFormat::Png);
         }
-        
+
         // TODO other formats
 
         // We tried

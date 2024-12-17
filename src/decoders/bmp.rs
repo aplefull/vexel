@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
 use crate::{log_error, log_warn, Image, PixelData};
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::BmpInfo;
 use crate::utils::traits::SafeAccess;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,16 +41,16 @@ impl BitmapCompression {
     }
 }
 
-#[derive(Debug)]
-struct BitmapFileHeader {
+#[derive(Debug, Clone)]
+pub struct BitmapFileHeader {
     file_size: u32,
     reserved1: u16,
     reserved2: u16,
     pixel_offset: u32,
 }
 
-#[derive(Debug)]
-enum DibHeader {
+#[derive(Debug, Clone)]
+pub enum DibHeader {
     Core(BitmapCoreHeader),
     OS2V2(OS22XBitmapHeader),
     Info(BitmapInfoHeader),
@@ -109,7 +110,7 @@ impl DibHeader {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BitmapCoreHeader {
     width: u16,
     height: u16,
@@ -117,7 +118,7 @@ struct BitmapCoreHeader {
     bits_per_pixel: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct OS22XBitmapHeader {
     width: i32,
     height: i32,
@@ -139,7 +140,7 @@ struct OS22XBitmapHeader {
     identifier: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BitmapInfoHeader {
     width: i32,
     height: i32,
@@ -153,7 +154,7 @@ struct BitmapInfoHeader {
     important_colors: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BitmapV2InfoHeader {
     info: BitmapInfoHeader,
     red_mask: u32,
@@ -161,13 +162,13 @@ struct BitmapV2InfoHeader {
     blue_mask: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BitmapV3InfoHeader {
     v2: BitmapV2InfoHeader,
     alpha_mask: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BitmapV4Header {
     v3: BitmapV3InfoHeader,
     cs_type: u32,
@@ -177,7 +178,7 @@ struct BitmapV4Header {
     gamma_blue: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BitmapV5Header {
     v4: BitmapV4Header,
     intent: u32,
@@ -186,22 +187,22 @@ struct BitmapV5Header {
     reserved: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ColorSpace {
     ciexyz_red: CIEXYZ,
     ciexyz_green: CIEXYZ,
     ciexyz_blue: CIEXYZ,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CIEXYZ {
     x: i32,
     y: i32,
     z: i32,
 }
 
-#[derive(Debug)]
-struct ColorEntry {
+#[derive(Debug, Clone)]
+pub struct ColorEntry {
     blue: u8,
     green: u8,
     red: u8,
@@ -265,6 +266,16 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn get_info(&self) -> BmpInfo {
+        BmpInfo {
+            width: self.width,
+            height: self.height,
+            file_header: self.file_header.clone(),
+            dib_header: self.dib_header.clone(),
+            color_table: self.color_table.clone(),
+        }
     }
 
     fn read_file_header(&mut self) -> VexelResult<()> {
@@ -500,12 +511,12 @@ impl<R: Read + Seek> BmpDecoder<R> {
         for y in 0..(height as usize / 2) {
             let top_row_start = y * row_size;
             let bottom_row_start = (height as usize - 1 - y) * row_size;
-            
+
             if data.check_range(top_row_start..top_row_start + row_size).is_err() {
                 log_warn!("Invalid top row range: {}..{}", top_row_start, top_row_start + row_size);
                 continue;
             }
-            
+
             if data.check_range(bottom_row_start..bottom_row_start + row_size).is_err() {
                 log_warn!("Invalid bottom row range: {}..{}", bottom_row_start, bottom_row_start + row_size);
                 continue;
@@ -675,7 +686,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
                                 log_warn!("Invalid pixel position: {}", pos);
                                 break;
                             }
-                            
+
                             decoded[pos] = if i % 2 == 0 { high } else { low };
                         }
                         x += 1;

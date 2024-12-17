@@ -4,6 +4,7 @@ use flate2::read::ZlibDecoder;
 use crate::bitreader::BitReader;
 use crate::{log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::PngInfo;
 use crate::utils::traits::SafeAccess;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -182,13 +183,6 @@ impl CrcCalculator {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RGB {
-    r: u8,
-    g: u8,
-    b: u8,
-}
-
 #[derive(Debug, Clone)]
 pub enum PngText {
     Basic {
@@ -263,7 +257,7 @@ pub struct PngDecoder<R: Read + Seek> {
     compression_method: CompressionMethod,
     has_filters: bool,
     interlace: bool,
-    palette: Option<Vec<RGB>>,
+    palette: Option<Vec<[u8; 3]>>,
     idat_data: Vec<u8>,
     gamma: Option<f32>,
     transparency: Option<TransparencyData>,
@@ -316,6 +310,32 @@ impl<R: Read + Seek> PngDecoder<R> {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn get_info(&self) -> PngInfo {
+        PngInfo {
+            width: self.width,
+            height: self.height,
+            bit_depth: self.bit_depth,
+            color_type: self.color_type,
+            compression_method: self.compression_method,
+            has_filters: self.has_filters,
+            interlace: self.interlace,
+            palette: self.palette.clone(),
+            gamma: self.gamma,
+            transparency: self.transparency.clone(),
+            background: self.background.clone(),
+            rendering_intent: self.rendering_intent,
+            chromaticities: self.chromaticities,
+            suggested_palettes: self.suggested_palettes.clone(),
+            physical_dimensions: self.physical_dimensions.clone(),
+            significant_bits: self.significant_bits.clone(),
+            histogram: self.histogram.clone(),
+            modification_time: self.modification_time.clone(),
+            text_chunks: self.text_chunks.clone(),
+            frames: self.frames.clone(),
+            actl_info: self.actl_info.clone(),
+        }
     }
 
     fn read_ihdr(&mut self) -> VexelResult<()> {
@@ -403,7 +423,7 @@ impl<R: Read + Seek> PngDecoder<R> {
             let g = self.reader.read_u8()?;
             let b = self.reader.read_u8()?;
 
-            palette.push(RGB { r, g, b });
+            palette.push([r, g, b]);
         }
 
         self.palette = Some(palette);
@@ -1330,12 +1350,12 @@ impl<R: Read + Seek> PngDecoder<R> {
         match self.bit_depth {
             8 => {
                 for &index in input {
-                    let color = palette.get(index as usize).unwrap_or(&RGB { r: 0, g: 0, b: 0 });
+                    let color = palette.get(index as usize).unwrap_or(&[0, 0, 0]);
                     if has_trans {
                         let alpha = trans.as_ref().unwrap().get(index as usize).unwrap_or(&255);
-                        output.extend_from_slice(&[color.r, color.g, color.b, *alpha]);
+                        output.extend_from_slice(&[color[0], color[1], color[2], *alpha]);
                     } else {
-                        output.extend_from_slice(&[color.r, color.g, color.b]);
+                        output.extend_from_slice(&[color[0], color[1], color[2]]);
                     }
                 }
             }
@@ -1353,13 +1373,13 @@ impl<R: Read + Seek> PngDecoder<R> {
                         }
 
                         let index = (byte >> (shift * bits_per_pixel)) & mask;
-                        let color = palette.get(index as usize).unwrap_or(&RGB { r: 0, g: 0, b: 0 });
+                        let color = palette.get(index as usize).unwrap_or(&[0, 0, 0]);
 
                         if has_trans {
                             let alpha = trans.as_ref().unwrap().get(index as usize).unwrap_or(&255);
-                            output.extend_from_slice(&[color.r, color.g, color.b, *alpha]);
+                            output.extend_from_slice(&[color[0], color[1], color[2], *alpha]);
                         } else {
-                            output.extend_from_slice(&[color.r, color.g, color.b]);
+                            output.extend_from_slice(&[color[0], color[1], color[2]]);
                         }
 
                         pixel_count += 1;

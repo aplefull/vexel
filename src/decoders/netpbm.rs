@@ -4,9 +4,10 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
 use crate::{log_error, log_warn, Image, PixelData};
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::NetpbmInfo;
 
 #[derive(Debug, Clone, PartialEq)]
-enum NetpbmFormat {
+pub enum NetpbmFormat {
     P1, // ASCII bitmap
     P2, // ASCII graymap
     P3, // ASCII pixmap
@@ -17,7 +18,7 @@ enum NetpbmFormat {
 }
 
 #[derive(Debug, Clone)]
-enum TupleType {
+pub enum TupleType {
     BlackAndWhite,
     Grayscale,
     RGB,
@@ -57,6 +58,17 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+    
+    pub fn get_info(&self) -> NetpbmInfo {
+        NetpbmInfo {
+            width: self.width,
+            height: self.height,
+            max_value: self.max_value,
+            depth: self.depth,
+            format: self.format.clone(),
+            tuple_type: self.tuple_type.clone(),
+        }
     }
 
     fn scale_to_8bit(value: u32, max_value: u32) -> u8 {
@@ -201,7 +213,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                     log_warn!("Invalid MAXVAL value: {}", self.max_value);
                     self.max_value = 255;
                 }
-                
+
                 if self.max_value > 65535 {
                     log_warn!("Invalid MAXVAL value: {}", self.max_value);
                     self.max_value = 65535;
@@ -445,13 +457,13 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         if self.depth == 0 {
             self.depth = 3;
         }
-        
+
         if self.max_value == 0 {
             self.max_value = 255;
         }
 
         if self.max_value > 65535 {
-          self.max_value = 65535;  
+            self.max_value = 65535;
         }
 
         let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
@@ -628,7 +640,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                 // TODO
                 log_error!("Invalid combination of tuple type and depth: {:?}, {}", self.tuple_type, self.depth);
                 panic!("Invalid combination of tuple type and depth");
-            },
+            }
         }
     }
 
@@ -647,11 +659,11 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             None => {
                 log_warn!("Format not set before decoding, assuming binary pixmap (P6)");
                 self.decode_binary_pixmap()?
-            },
+            }
         };
 
         pixel_data.correct_pixels(self.width, self.height);
-        
+
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
     }
 }
