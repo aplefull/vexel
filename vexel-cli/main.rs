@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use vexel::{Image, PixelData, Vexel};
 use clap::Parser;
 use glob::glob;
@@ -167,23 +168,73 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn display_image(width: u32, height: u32, buffer: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
     struct App {
         texture: Option<egui::TextureHandle>,
-        image_data: egui::ColorImage,
+        frames: Vec<egui::ColorImage>,
+        current_frame: usize,
+        last_frame_time: Instant,
+        frame_delays: Vec<u32>,
     }
 
     impl App {
-        fn new(width: u32, height: u32, buffer: &[u8]) -> Self {
-            // Convert RGBA buffer to ColorImage
-            let image_data = egui::ColorImage::from_rgba_unmultiplied(
-                [width as usize, height as usize],
-                buffer,
-            );
+        fn new(image: &Image) -> Self {
+            let mut frames = Vec::new();
+            let mut frame_delays = Vec::new();
+
+            for frame in image.frames() {
+                let buffer = if frame.has_alpha() {
+                    frame.as_rgba8()
+                } else {
+                    let rgb = frame.as_rgb8();
+                    let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
+                    for i in (0..rgb.len()).step_by(3) {
+                        rgba.extend_from_slice(&[rgb[i], rgb[i + 1], rgb[i + 2], 255]);
+                    }
+
+                    rgba
+                };
+
+                frames.push(egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width() as usize, frame.height() as usize],
+                    &buffer,
+                ));
+
+                frame_delays.push((frame.delay() * 10).max(17));
+            }
 
             Self {
                 texture: None,
-                image_data,
+                frames,
+                current_frame: 0,
+                last_frame_time: Instant::now(),
+                frame_delays,
+            }
+        }
+
+        fn update_frame(&mut self, ctx: &egui::Context) {
+            if self.frames.len() <= 1 {
+                return;
+            }
+
+            let elapsed = self.last_frame_time.elapsed().as_millis() as u32;
+            let current_delay = self.frame_delays[self.current_frame];
+
+            if elapsed >= current_delay {
+                self.current_frame = (self.current_frame + 1) % self.frames.len();
+                self.last_frame_time = Instant::now();
+
+                // Update texture with new frame
+                if let Some(texture) = &mut self.texture {
+                    texture.set(self.frames[self.current_frame].clone(), egui::TextureOptions::default());
+                }
+
+                // Request a repaint
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(
+                    (current_delay - elapsed) as u64
+                ));
             }
         }
     }
@@ -197,23 +248,23 @@ fn display_image(width: u32, height: u32, buffer: &[u8]) -> Result<(), Box<dyn s
             if self.texture.is_none() {
                 self.texture = Some(ctx.load_texture(
                     "image",
-                    self.image_data.clone(),
+                    self.frames[0].clone(),
                     egui::TextureOptions::default(),
                 ));
             }
 
+            // Update animation frame
+            self.update_frame(ctx);
+
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(texture) = &self.texture {
                     let available_size = ui.available_size();
-
                     let image_aspect = texture.aspect_ratio();
                     let window_aspect = available_size.x / available_size.y;
 
                     let display_size = if window_aspect > image_aspect {
-                        // Window is wider than the image - fit to height
                         egui::vec2(available_size.y * image_aspect, available_size.y)
                     } else {
-                        // Window is taller than the image - fit to width
                         egui::vec2(available_size.x, available_size.x / image_aspect)
                     };
 
@@ -239,12 +290,11 @@ fn display_image(width: u32, height: u32, buffer: &[u8]) -> Result<(), Box<dyn s
     eframe::run_native(
         "Vexel",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new(width, height, buffer)))),
+        Box::new(|_cc| Ok(Box::new(App::new(image)))),
     )?;
 
     Ok(())
 }
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let files = get_files(&cli.path);
@@ -257,24 +307,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.gui {
         let mut decoder = Vexel::open(&files[0])?;
         let image = decoder.decode()?;
-        let buffer = if image.has_alpha() {
-            image.as_rgba8()
-        } else {
-            let rgb = image.as_rgb8();
 
-            let mut buffer = Vec::new();
-
-            for i in (0..rgb.len()).step_by(3) {
-                buffer.push(rgb[i]);
-                buffer.push(rgb[i + 1]);
-                buffer.push(rgb[i + 2]);
-                buffer.push(255);
-            }
-
-            buffer
-        };
-
-        display_image(image.width(), image.height(), &buffer)?;
+        display_image(&image)?;
 
         return Ok(());
     }

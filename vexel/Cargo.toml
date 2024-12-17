@@ -10,6 +10,3 @@ path = "lib.rs"
 [dependencies]
 writer = {path = "../writer"}
 flate2 = "1.0.35"
-image = "0.25.5"
-webp = "0.3.0"
-webp-animation = "0.9.0"
