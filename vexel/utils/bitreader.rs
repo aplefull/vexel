@@ -29,18 +29,18 @@ impl<R: Read + Seek> BitReader<R> {
             little_endian: true,
         }
     }
-    
+
     /// Sets the endianness of the BitReader.
-    /// 
+    ///
     /// # Parameters
     /// - `byte_order`: The byte order to set
-    /// 
+    ///
     pub fn set_endianness(&mut self, byte_order: ByteOrder) {
         self.little_endian = byte_order == ByteOrder::LittleEndian;
     }
-    
+
     /// Returns the current position in the bitstream.
-    /// 
+    ///
     /// # Returns
     /// - The current position in the bitstream
     /// - `std::io::Error` if an I/O error occurs
@@ -97,7 +97,9 @@ impl<R: Read + Seek> BitReader<R> {
     /// - The byte read
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_u8(&mut self) -> Result<u8, std::io::Error> {
-        self.read_bits(8).map(|b| b as u8)
+        let mut byte = [0u8; 1];
+        self.reader.read_exact(&mut byte)?;
+        Ok(byte[0])
     }
 
     /// Reads a single 16-bit value from the bitstream.

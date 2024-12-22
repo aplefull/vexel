@@ -16,7 +16,7 @@ pub use utils::{bitreader, logger};
 
 use std::fmt::Debug;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 macro_rules! impl_decode {
@@ -578,9 +578,9 @@ impl Image {
 }
 
 impl Vexel<File> {
-    pub fn open<P: AsRef<Path>>(path: P) -> VexelResult<Self> {
+    pub fn open<P: AsRef<Path>>(path: P) -> VexelResult<Vexel<BufReader<File>>> {
         let file = File::open(path)?;
-        Vexel::new(file)
+        Vexel::new(BufReader::new(file))
     }
 }
 
@@ -662,12 +662,12 @@ impl<R: Read + Seek> Vexel<R> {
     }
 
     fn try_guess_format(reader: &mut R) -> VexelResult<ImageFormat> {
-        let mut header = [0u8; 12];
+        let mut header = [0u8; 18];
         reader.read_exact(&mut header)?;
         reader.seek(SeekFrom::Start(0))?;
 
         // JPEG-LS
-        if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        if header.starts_with(&[0xFF, 0xD8]) {
             // TODO
             //if header.windows(4).any(|window| window == [0xFF, 0xF7, 0x00, 0x0B]) {
             if header.windows(2).any(|window| window == [0xFF, 0xF7]) {
@@ -676,7 +676,7 @@ impl<R: Read + Seek> Vexel<R> {
         }
 
         // JPEG
-        if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        if header.starts_with(&[0xFF, 0xD8]) {
             return Ok(ImageFormat::Jpeg);
         }
 
@@ -721,12 +721,31 @@ impl<R: Read + Seek> Vexel<R> {
             return Ok(ImageFormat::Tiff);
         }
 
+        // TGA
+        // Targa does not have a magic number, so we have to check the header manually
+        let image_type = header[2];
+        let color_map_type = header[1];
+
+        let valid_image_type = matches!(image_type, 0 | 1 | 2 | 3 | 9 | 10 | 11 | 32 | 33);
+        let valid_color_map = matches!(color_map_type, 0 | 1);
+
+        let pixel_depth = header[16];
+        let valid_depth = matches!(pixel_depth, 1 | 4 | 8 | 15 | 16 | 24 | 32);
+
+        let descriptor = header[17];
+        let valid_descriptor = (descriptor & 0xC0) == 0;
+
+        if valid_image_type && valid_color_map && valid_depth && valid_descriptor {
+            return Ok(ImageFormat::Tga);
+        }
+
         // If all else fails, let's try harder and pray that we get the right format
         Vexel::try_guess_format_harder(reader)
     }
 
     fn try_guess_format_harder(reader: &mut R) -> VexelResult<ImageFormat> {
         const HEADER_SIZE: usize = 48;
+        const FOOTER_SIZE: usize = 12;
         let mut header = [0u8; HEADER_SIZE];
         let mut read_pos = 0;
 
@@ -740,6 +759,10 @@ impl<R: Read + Seek> Vexel<R> {
                 Ok(n) => read_pos += n,
             }
         }
+        
+        let mut footer = [0u8; FOOTER_SIZE];
+        reader.seek(SeekFrom::End(-(FOOTER_SIZE as i64)))?;
+        reader.read_exact(&mut footer)?;
 
         reader.seek(SeekFrom::Start(0))?;
 
@@ -748,9 +771,14 @@ impl<R: Read + Seek> Vexel<R> {
         let chunks = [
             "png", "ihdr", "idat", "iend"
         ];
-
+        
         if chunks.iter().any(|chunk| header_str.contains(chunk)) {
             return Ok(ImageFormat::Png);
+        }
+
+        // JPEG
+        if footer.ends_with(&[0xFF, 0xD9]) {
+            return Ok(ImageFormat::Jpeg);
         }
 
         // TODO other formats

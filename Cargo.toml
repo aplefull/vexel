@@ -5,3 +5,6 @@ members = [
     "vexel-cli",
     "writer"
 ]
+
+[profile.release]
+debug=1
