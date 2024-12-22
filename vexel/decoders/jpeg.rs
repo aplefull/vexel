@@ -1600,6 +1600,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn decode_mcu(&mut self, reader: &mut BitReader<Cursor<Vec<u8>>>, mcu_component: &mut [i32], dc_table: &HuffmanTable, ac_table: &HuffmanTable, previous_dc: &mut i32) -> VexelResult<()> {
         let length = self.get_next_symbol(reader, dc_table)?;
+
+        let max_length = if self.precision > 8 { 12 } else { 11 };
+        if length > max_length {
+            log_warn!("Invalid DC coefficient length (>{}): {}", max_length, length);
+            return Ok(());
+        }
+
         let mut coefficient = reader.read_bits(length)? as i32;
 
         if length != 0 && coefficient < (1 << (length - 1)) {
@@ -1612,13 +1619,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut i = 1;
         while i < 64 {
             let symbol = self.get_next_symbol(reader, ac_table).unwrap_or_else(|_| {
-                log_warn!("Failed to get next AC symbol during baseline decoding, replacing with 0");
+                log_warn!("Failed to get next AC symbol during decoding, replacing with 0");
                 0
             });
 
             if symbol == 0 {
-                for _ in i..64 {
-                    mcu_component[ZIGZAG_MAP[i] as usize] = 0;
+                for j in i..64 {
+                    mcu_component[ZIGZAG_MAP[j] as usize] = 0;
                 }
 
                 return Ok(());
@@ -1629,12 +1636,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
             if symbol == 0xF0 {
                 zero_count = 16;
+                coefficient_length = 0;
             }
-
+            
             if i + zero_count as usize >= 64 {
-                log_warn!("Sum of zero count and current index of mcu value exceeds 64, clamping");
-                i = i.min(64);
-                zero_count = zero_count.min(64 - i as u8 - 1).max(0);
+                log_warn!("Sum of zero count and current index of mcu value exceeds 64");
+                for j in i..64 {
+                    mcu_component[ZIGZAG_MAP[j] as usize] = 0;
+                }
+                return Ok(());
             }
 
             for _ in 0..zero_count {
@@ -1642,7 +1652,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 i += 1;
             }
 
-            if coefficient_length > 10 {
+            // For 12-bit precision, maximum AC coefficient length is 16
+            let max_coefficient_length = if self.precision > 8 { 16 } else { 10 };
+            if coefficient_length > max_coefficient_length {
                 log_warn!("Invalid coefficient length: {}, replacing with 0", coefficient_length);
                 coefficient_length = 0;
             }
@@ -2427,11 +2439,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
                             let block_x = mcu_x * comp.horizontal_sampling_factor as u32 + h as u32;
                             let block_y = mcu_y * comp.vertical_sampling_factor as u32 + v as u32;
 
-                            if block_x >= planes[comp_idx].blocks_per_line {
-                                log_warn!("Block X out of bounds: {} {}", block_x, planes[comp_idx].blocks_per_line);
-                                continue;
-                            }
-
                             if comp_idx >= previous_dc.len() {
                                 log_warn!("Component is larger than previous DC buffer: {} {}", comp_idx, previous_dc.len());
                                 continue;
@@ -2506,6 +2513,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let s_5 = (5.0 / 16.0 * PI).cos() / 2.0;
         let s_6 = (6.0 / 16.0 * PI).cos() / 2.0;
         let s_7 = (7.0 / 16.0 * PI).cos() / 2.0;
+
+        let level_shift = if self.precision <= 8 {
+            128
+        } else {
+            2048
+        };
 
         // Process each component plane
         for plane in planes {
@@ -2652,14 +2665,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let b_6 = c_6 - c_7;
                     let b_7 = c_7;
 
-                    block[row * 8 + 0] = (b_0 + b_7 + 0.5) as i32;
-                    block[row * 8 + 1] = (b_1 + b_6 + 0.5) as i32;
-                    block[row * 8 + 2] = (b_2 + b_5 + 0.5) as i32;
-                    block[row * 8 + 3] = (b_3 + b_4 + 0.5) as i32;
-                    block[row * 8 + 4] = (b_3 - b_4 + 0.5) as i32;
-                    block[row * 8 + 5] = (b_2 - b_5 + 0.5) as i32;
-                    block[row * 8 + 6] = (b_1 - b_6 + 0.5) as i32;
-                    block[row * 8 + 7] = (b_0 - b_7 + 0.5) as i32;
+                    block[row * 8 + 0] = ((b_0 + b_7 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 1] = ((b_1 + b_6 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 2] = ((b_2 + b_5 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 3] = ((b_3 + b_4 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 4] = ((b_3 - b_4 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 5] = ((b_2 - b_5 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 6] = ((b_1 - b_6 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 7] = ((b_0 - b_7 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
                 }
             }
         }
@@ -2687,49 +2700,78 @@ impl<R: Read + Seek> JpegDecoder<R> {
     fn convert_colorspace(&self, planes: &[UpsampledPlane]) -> VexelResult<PixelData> {
         let mut pixels = Vec::with_capacity((self.width * self.height * 3) as usize);
 
-        fn get_pixel_from_planes(planes: &[UpsampledPlane], index: usize, x: u32, y: u32) -> i32 {
+        fn get_pixel_from_planes(planes: &[UpsampledPlane], index: usize, x: u32, y: u32) -> f32 {
             match planes.get(index) {
-                Some(plane) => plane.get_pixel(x, y).unwrap_or(0),
-                None => 0,
+                Some(plane) => plane.get_pixel(x, y).unwrap_or(0) as f32,
+                None => 0.0,
             }
         }
 
         if planes.len() == 1 {
-            for y in 0..self.height {
-                for x in 0..self.width {
-                    let y_val = planes[0].get_pixel(x, y).unwrap_or(0);
-                    let gray_val = y_val.clamp(0, 255) as u8;
-
-                    pixels.push(gray_val);
+            return if self.precision <= 8 {
+                for y in 0..self.height {
+                    for x in 0..self.width {
+                        let y_val = planes[0].get_pixel(x, y).unwrap_or(0);
+                        let gray_val = y_val.clamp(0, 255) as u8;
+                        pixels.push(gray_val);
+                    }
                 }
+                
+                Ok(PixelData::L8(pixels))
+            } else {
+                let mut pixels16 = Vec::with_capacity((self.width * self.height) as usize);
+                
+                for y in 0..self.height {
+                    for x in 0..self.width {
+                        let y_val = planes[0].get_pixel(x, y).unwrap_or(0);
+                        let gray_val = y_val.clamp(0, 4095) as u16;
+                        pixels16.push(gray_val);
+                    }
+                }
+                
+                Ok(PixelData::L16(pixels16))
             }
-
-            return Ok(PixelData::L8(pixels));
         }
 
         if planes.len() < 3 {
             log_warn!("Invalid number of planes for RGB conversion: {}.", planes.len());
         }
 
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let y_val = get_pixel_from_planes(planes, 0, x, y);
-                let cb_val = get_pixel_from_planes(planes, 1, x, y);
-                let cr_val = get_pixel_from_planes(planes, 2, x, y);
+        if self.precision <= 8 {
+            for y in 0..self.height {
+                for x in 0..self.width {
+                    let y_val = get_pixel_from_planes(planes, 0, x, y);
+                    let cb_val = get_pixel_from_planes(planes, 1, x, y);
+                    let cr_val = get_pixel_from_planes(planes, 2, x, y);
 
-                let y = y_val as f32;
-                let cb = cb_val as f32;
-                let cr = cr_val as f32;
+                    let r = (y_val + 1.402 * cr_val + 128.0).clamp(0.0, 255.0) as u8;
+                    let g = (y_val - 0.344136 * cb_val - 0.714136 * cr_val + 128.0).clamp(0.0, 255.0) as u8;
+                    let b = (y_val + 1.772 * cb_val + 128.0).clamp(0.0, 255.0) as u8;
 
-                let r = (y + 1.402 * cr + 128.0).clamp(0.0, 255.0) as u8;
-                let g = (y - 0.344136 * cb - 0.714136 * cr + 128.0).clamp(0.0, 255.0) as u8;
-                let b = (y + 1.772 * cb + 128.0).clamp(0.0, 255.0) as u8;
-
-                pixels.extend_from_slice(&[r, g, b]);
+                    pixels.extend_from_slice(&[r, g, b]);
+                }
             }
-        }
+            
+            Ok(PixelData::RGB8(pixels))
+        } else {
+            let mut pixels16 = Vec::with_capacity((self.width * self.height * 3) as usize);
+            
+            for y in 0..self.height {
+                for x in 0..self.width {
+                    let y_val = get_pixel_from_planes(planes, 0, x, y);
+                    let cb_val = get_pixel_from_planes(planes, 1, x, y);
+                    let cr_val = get_pixel_from_planes(planes, 2, x, y);
 
-        Ok(PixelData::RGB8(pixels))
+                    let r = (y_val + 1.402 * cr_val + 2048.0).clamp(0.0, 4095.0) as u16;
+                    let g = (y_val - 0.344136 * cb_val - 0.714136 * cr_val + 2048.0).clamp(0.0, 4095.0) as u16;
+                    let b = (y_val + 1.772 * cb_val + 2048.0).clamp(0.0, 4095.0) as u16;
+
+                    pixels16.extend_from_slice(&[r, g, b]);
+                }
+            }
+            
+            Ok(PixelData::RGB16(pixels16))
+        }
     }
 
     fn decode_baseline(&mut self) -> VexelResult<Image> {
@@ -2764,6 +2806,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
     }
+
+
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         while let Ok(marker) = self.reader.next_marker(&JPEG_MARKERS) {
@@ -2845,7 +2889,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 Ok(image)
             }
             JpegMode::ExtendedSequential => {
-                unimplemented!()
+                // TODO general decoding process is same as baseline, so this method can be used,
+                // but it would be nice to have a different name for this mode 
+                let image = self.decode_baseline()?;
+                Ok(image)
             }
             JpegMode::Progressive => {
                 let image = self.decode_progressive()?;
