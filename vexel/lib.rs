@@ -9,6 +9,7 @@ use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::hdr::HdrDecoder;
 use crate::decoders::tiff::TiffDecoder;
+use crate::decoders::tga::TgaDecoder;
 use crate::utils::info::ImageInfo;
 use crate::utils::error::{VexelError, VexelResult};
 
@@ -128,6 +129,7 @@ pub enum ImageFormat {
     NetPbmP7,
     Hdr,
     Tiff,
+    Tga,
     Unknown,
 }
 
@@ -155,6 +157,7 @@ pub enum Decoders<R: Read + Seek> {
     Netpbm(NetPbmDecoder<R>),
     Hdr(HdrDecoder<R>),
     Tiff(TiffDecoder<R>),
+    Tga(TgaDecoder<R>),
     Unknown,
 }
 
@@ -603,6 +606,7 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::Png => Decoders::Png(PngDecoder::new(reader)),
             ImageFormat::Hdr => Decoders::Hdr(HdrDecoder::new(reader)),
             ImageFormat::Tiff => Decoders::Tiff(TiffDecoder::new(reader)),
+            ImageFormat::Tga => Decoders::Tga(TgaDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -622,6 +626,7 @@ impl<R: Read + Seek> Vexel<R> {
             Decoders::Bmp(decoder) => impl_decode!(decoder),
             Decoders::Hdr(decoder) => impl_decode!(decoder),
             Decoders::Tiff(decoder) => impl_decode!(decoder),
+            Decoders::Tga(decoder) => impl_decode!(decoder),
             Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
         }
     }

@@ -6,3 +6,4 @@ pub mod bmp;
 pub mod png;
 pub mod hdr;
 pub mod tiff;
+pub mod tga;
