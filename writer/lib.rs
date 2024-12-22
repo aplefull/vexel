@@ -98,21 +98,21 @@ impl Writer {
 
      pub fn write_ppm(output_path: &PathBuf, image: &WriterImage) -> Result<(), Error> {
          Writer::validate_pixel_count(&image)?;
- 
+
          let mut file = File::create(output_path)?;
          let width = image.frames[0].width;
          let height = image.frames[0].height;
          let pixels = &image.frames[0].pixels;
          let has_alpha = image.frames[0].has_alpha;
-         
+
          file.write_all(b"P6\n")?;
          file.write_all(format!("{} {}\n", width, height).as_bytes())?;
          file.write_all(b"255\n")?;
-         
+
          for y in 0..height {
              for x in 0..width {
                  let pixel_index = ((y * width + x) * if has_alpha { 4 } else { 3 }) as usize;
- 
+
                  let r = pixels[pixel_index];
                  let g = pixels[pixel_index + 1];
                  let b = pixels[pixel_index + 2];
@@ -120,17 +120,17 @@ impl Writer {
                  file.write_all(&[r, g, b])?;
              }
          }
- 
+
          Ok(())
      }
-    
+
         pub fn write_pam(output_path: &PathBuf, width: u32, height: u32, pixel_data: &WriterPixelData) -> Result<(), Error> {
             let mut file = File::create(output_path)?;
-    
+
             file.write_all(b"P7\n")?;
             file.write_all(format!("WIDTH {}\n", width).as_bytes())?;
             file.write_all(format!("HEIGHT {}\n", height).as_bytes())?;
-    
+
             match pixel_data {
                 WriterPixelData::RGB8(pixels) => {
                     file.write_all(b"DEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n")?;
@@ -191,7 +191,7 @@ impl Writer {
                     }
                 }
             }
-    
+
             Ok(())
         }
 

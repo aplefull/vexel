@@ -2,11 +2,18 @@ extern crate core;
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf};
     use vexel::{Image, Vexel};
     use writer::{Writer, WriterImage, WriterImageFrame};
 
     const BASE_PATH: &str = "./tests/images/";
+
+    struct TestCase {
+        name: &'static str,
+        path: &'static str,
+        validation: Option<Box<dyn Fn(&Image)>>,
+        save: bool,
+    }
 
     fn get_in_path(path: &str) -> String {
         format!("{}{}", BASE_PATH, path)
@@ -40,165 +47,115 @@ mod tests {
         }
     }
 
-    #[test]
-    pub fn test_jpeg_decode() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH_JPEG_BASELINE: &str = "jpeg/cat.jpg";
-        const PATH_JPEG_LOSSLESS: &str = "jpeg/2x2_lossless.jpg";
-
-        let mut decoder = Vexel::open(get_in_path(PATH_JPEG_BASELINE))?;
+    fn test_decode(test_case: TestCase) -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = Vexel::open(get_in_path(test_case.path))?;
 
         match decoder.decode() {
             Ok(image) => {
-                let pixels = image.as_rgb8();
+                if let Some(validate) = test_case.validation {
+                    validate(&image);
+                }
 
-                assert_eq!(pixels.len(), 680 * 453 * 3);
-                assert_eq!(pixels[0], 25);
-                assert_eq!(pixels[10], 20);
-                assert_eq!(pixels[11111], 125);
-                assert_eq!(pixels[900000], 193);
+                if test_case.save {
+                    Writer::write_webp(
+                        &get_out_path(test_case.path, None),
+                        &image_to_writer_image(&image),
+                    )?;
+                }
+                
+                Ok(())
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
-                assert!(false);
+                panic!("Failed to decode {}", test_case.name);
             }
         }
+    }
 
-        decoder = Vexel::open(get_in_path(PATH_JPEG_LOSSLESS))?;
+    #[test]
+    fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
+        let test_cases = vec![
+            TestCase {
+                name: "JPEG Baseline",
+                path: "jpeg/cat.jpg",
+                validation: Some(Box::new(|image: &Image| {
+                    let pixels = image.as_rgb8();
+                    
+                    assert_eq!(pixels.len(), 680 * 453 * 3);
+                    assert_eq!(pixels[0], 25);
+                    assert_eq!(pixels[10], 20);
+                    assert_eq!(pixels[11111], 125);
+                    assert_eq!(pixels[900000], 193);
+                })),
+                save: false,
+            },
+            TestCase {
+                name: "JPEG Lossless",
+                path: "jpeg/2x2_lossless.jpg",
+                validation: None,
+                save: false,
+            },
+            TestCase {
+                name: "JPEG-LS",
+                path: "jpeg-ls/test_4x4.jls",
+                validation: None,
+                save: false,
+            },
+            TestCase {
+                name: "GIF",
+                path: "gif/animated.gif",
+                validation: None,
+                save: false,
+            },
+            TestCase {
+                name: "NetPBM",
+                path: "netpbm/P3_16bit.ppm",
+                validation: None,
+                save: false,
+            },
+            TestCase {
+                name: "BMP",
+                path: "bmp/test.bmp",
+                validation: None,
+                save: false,
+            },
+            TestCase {
+                name: "PNG",
+                path: "png/342083299-7b50019a-7c6f-4625-99c2-f1e69de95b61.png",
+                validation: None,
+                save: false,
+            },
+            TestCase {
+                name: "HDR",
+                path: "hdr/sample_HDR.hdr",
+                validation: None,
+                save: false,
+            },
+            TestCase {
+                name: "TIFF",
+                path: "tiff/file_example_TIFF_10MB.tiff",
+                validation: None,
+                save: true,
+            },
+        ];
 
-        match decoder.decode() {
-            Ok(_) => {
-                // Vexel::write_bmp(get_out_path(PATH_JPEG_LOSSLESS), image.width(), image.height(), &image.as_rgb8())?;
-            }
-            Err(e) => {
-                println!("Error decoding image: {:?}", e);
-                assert!(false);
-            }
+        for test_case in test_cases {
+            test_decode(test_case)?;
         }
 
         Ok(())
     }
-
+    
     #[test]
-    pub fn test_jls_decode() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH_JPEG_LS_1: &str = "jpeg-ls/test_4x4.jls";
+    // This test is used during development for convenience for any new image formats
+    pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
+        const PATH: &str = "";
 
-        let mut decoder = Vexel::open(get_in_path(PATH_JPEG_LS_1))?;
+        let mut decoder = Vexel::open(get_in_path(PATH))?;
 
         match decoder.decode() {
             Ok(image) => {
-                //Writer::write_webp(&get_out_path(PATH_JPEG_LS_1, None), &image)?;
-            }
-            Err(e) => {
-                println!("Error decoding image: {:?}", e);
-                assert!(false);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_gif_decode() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH_GIF_1: &str = "gif/animated.gif";
-
-        let mut decoder = Vexel::open(get_in_path(PATH_GIF_1))?;
-
-        match decoder.decode() {
-            Ok(_) => {}
-            Err(e) => {
-                println!("Error decoding image: {:?}", e);
-                assert!(false);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_netpbm_decode() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH_PPM_1: &str = "netpbm/P3_16bit.ppm";
-
-        let mut decoder = Vexel::open(get_in_path(PATH_PPM_1))?;
-
-        match decoder.decode() {
-            Ok(image) => {
-                //Writer::write_webp(&get_out_path(PATH_PPM_1, None), &image)?;
-            }
-            Err(e) => {
-                println!("Error decoding image: {:?}", e);
-                assert!(false);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_bmp_decode() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH_BMP_1: &str = "bmp/test.bmp";
-
-        let mut decoder = Vexel::open(get_in_path(PATH_BMP_1))?;
-
-        match decoder.decode() {
-            Ok(_) => {
-                //Vexel::write_ppm(path, image.width(), image.height(), &image.as_rgb8())?;
-            }
-            Err(e) => {
-                println!("Error decoding image: {:?}", e);
-                assert!(false);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_png_decode() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH_PNG_1: &str = "png/342083299-7b50019a-7c6f-4625-99c2-f1e69de95b61.png";
-
-        let mut decoder = Vexel::open(get_in_path(PATH_PNG_1))?;
-
-        match decoder.decode() {
-            Ok(image) => {
-                // Writer::write_webp(&get_out_path(PATH_PNG_1, None), &image)?;
-            }
-            Err(e) => {
-                println!("Error decoding image: {:?}", e);
-                assert!(false);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_hdr_decode() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH_HDR_1: &str = "hdr/sample_HDR.hdr";
-
-        let mut decoder = Vexel::open(get_in_path(PATH_HDR_1))?;
-
-        match decoder.decode() {
-            Ok(image) => {
-                // Writer::write_webp(&get_out_path(PATH_HDR_1, None), &image)?;
-            }
-            Err(e) => {
-                println!("Error decoding image: {:?}", e);
-                assert!(false);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_tiff_decode() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH_TIFF_1: &str = "tiff/file_example_TIFF_10MB.tiff";
-
-        let mut decoder = Vexel::open(get_in_path(PATH_TIFF_1))?;
-
-        match decoder.decode() {
-            Ok(image) => {
-                Writer::write_webp(&get_out_path(PATH_TIFF_1, None), &image_to_writer_image(&image))?;
+                Writer::write_webp(&get_out_path(PATH, None), &image_to_writer_image(&image))?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
