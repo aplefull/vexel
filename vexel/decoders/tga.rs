@@ -5,7 +5,7 @@ use crate::bitreader::BitReader;
 use crate::{Image, PixelData};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum ImageType {
+pub enum TgaImageType {
     #[default]
     NoImageData = 0,
     UncompressedColorMapped = 1,
@@ -18,34 +18,34 @@ pub enum ImageType {
     HuffmanQuadTree = 33,
 }
 
-impl TryFrom<u8> for ImageType {
+impl TryFrom<u8> for TgaImageType {
     type Error = VexelError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(ImageType::NoImageData),
-            1 => Ok(ImageType::UncompressedColorMapped),
-            2 => Ok(ImageType::UncompressedRGB),
-            3 => Ok(ImageType::UncompressedBW),
-            9 => Ok(ImageType::RLEColorMapped),
-            10 => Ok(ImageType::RLERGB),
-            11 => Ok(ImageType::RLEBlackWhite),
-            32 => Ok(ImageType::HuffmanColorMapped),
-            33 => Ok(ImageType::HuffmanQuadTree),
+            0 => Ok(TgaImageType::NoImageData),
+            1 => Ok(TgaImageType::UncompressedColorMapped),
+            2 => Ok(TgaImageType::UncompressedRGB),
+            3 => Ok(TgaImageType::UncompressedBW),
+            9 => Ok(TgaImageType::RLEColorMapped),
+            10 => Ok(TgaImageType::RLERGB),
+            11 => Ok(TgaImageType::RLEBlackWhite),
+            32 => Ok(TgaImageType::HuffmanColorMapped),
+            33 => Ok(TgaImageType::HuffmanQuadTree),
             _ => Err(VexelError::Custom(format!("Invalid image type: {}", value))),
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ColorMapSpec {
+pub struct TgaColorMapSpec {
     pub origin: u16,
     pub length: u16,
     pub entry_size: u8,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ImageSpec {
+pub struct TgaImageSpec {
     pub x_origin: u16,
     pub y_origin: u16,
     pub width: u16,
@@ -54,7 +54,7 @@ pub struct ImageSpec {
     pub descriptor: u8,
 }
 
-impl ImageSpec {
+impl TgaImageSpec {
     pub fn is_top_to_bottom(&self) -> bool {
         // Bit 5 of descriptor determines image origin
         // 0 = bottom left, 1 = top left
@@ -74,18 +74,18 @@ impl ImageSpec {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Header {
+pub struct TgaHeader {
     pub id_length: u8,
     pub color_map_type: u8,
-    pub image_type: ImageType,
-    pub color_map_spec: ColorMapSpec,
-    pub image_spec: ImageSpec,
+    pub image_type: TgaImageType,
+    pub color_map_spec: TgaColorMapSpec,
+    pub image_spec: TgaImageSpec,
 }
 
 pub struct TgaDecoder<R: Read + Seek> {
     width: u16,
     height: u16,
-    header: Header,
+    header: TgaHeader,
     color_map: Vec<[u8; 4]>,
     image_id: String,
     reader: BitReader<R>,
@@ -96,7 +96,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
         Self {
             width: 0,
             height: 0,
-            header: Header::default(),
+            header: TgaHeader::default(),
             color_map: Vec::new(),
             image_id: String::new(),
             reader: BitReader::with_le(reader),
@@ -106,17 +106,15 @@ impl<R: Read + Seek> TgaDecoder<R> {
     fn read_header(&mut self) -> VexelResult<()> {
         let id_length = self.reader.read_u8()?;
         let color_map_type = self.reader.read_u8()?;
-        let image_type = ImageType::try_from(self.reader.read_u8()?)?;
+        let image_type = TgaImageType::try_from(self.reader.read_u8()?)?;
 
-        // Color Map Specification
-        let color_map_spec = ColorMapSpec {
+        let color_map_spec = TgaColorMapSpec {
             origin: self.reader.read_u16()?,
             length: self.reader.read_u16()?,
             entry_size: self.reader.read_u8()?,
         };
 
-        // Image Specification
-        let image_spec = ImageSpec {
+        let image_spec = TgaImageSpec {
             x_origin: self.reader.read_u16()?,
             y_origin: self.reader.read_u16()?,
             width: self.reader.read_u16()?,
@@ -128,7 +126,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
         self.width = image_spec.width;
         self.height = image_spec.height;
 
-        self.header = Header {
+        self.header = TgaHeader {
             id_length,
             color_map_type,
             image_type,
@@ -408,19 +406,19 @@ impl<R: Read + Seek> TgaDecoder<R> {
         }
 
         let mut pixel_data = match self.header.image_type {
-            ImageType::UncompressedRGB | ImageType::UncompressedBW => {
+            TgaImageType::UncompressedRGB | TgaImageType::UncompressedBW => {
                 self.decode_uncompressed()?
             }
-            ImageType::RLERGB | ImageType::RLEBlackWhite => {
+            TgaImageType::RLERGB | TgaImageType::RLEBlackWhite => {
                 self.decode_rle()?
             }
-            ImageType::UncompressedColorMapped => {
+            TgaImageType::UncompressedColorMapped => {
                 self.decode_color_mapped(false)?
             }
-            ImageType::RLEColorMapped => {
+            TgaImageType::RLEColorMapped => {
                 self.decode_color_mapped(true)?
             }
-            ImageType::NoImageData => {
+            TgaImageType::NoImageData => {
                 return Err(VexelError::Custom("Image contains no data".into()));
             }
             _ => {
