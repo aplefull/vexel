@@ -1,17 +1,17 @@
-mod utils;
 mod decoders;
+mod utils;
 
-use crate::decoders::jpeg_ls::JpegLsDecoder;
-use crate::decoders::gif::GifDecoder;
-use crate::decoders::jpeg::JpegDecoder;
-use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::bmp::BmpDecoder;
-use crate::decoders::png::PngDecoder;
+use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
-use crate::decoders::tiff::TiffDecoder;
+use crate::decoders::jpeg::JpegDecoder;
+use crate::decoders::jpeg_ls::JpegLsDecoder;
+use crate::decoders::netpbm::NetPbmDecoder;
+use crate::decoders::png::PngDecoder;
 use crate::decoders::tga::TgaDecoder;
-use crate::utils::info::ImageInfo;
+use crate::decoders::tiff::TiffDecoder;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::ImageInfo;
 
 pub use utils::{bitreader, logger};
 
@@ -32,7 +32,11 @@ fn drop_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
 }
 
 fn add_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
-    pixels.chunks(3).map(|chunk| chunk.to_vec()).flat_map(|v| Vec::from([v[0], v[1], v[2], 255])).collect()
+    pixels
+        .chunks(3)
+        .map(|chunk| chunk.to_vec())
+        .flat_map(|v| Vec::from([v[0], v[1], v[2], 255]))
+        .collect()
 }
 
 fn u16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
@@ -43,7 +47,8 @@ fn u16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
         return values.iter().map(|_| (*min_val >> 8) as u8).collect();
     }
 
-    values.iter()
+    values
+        .iter()
         .map(|&p| {
             let scaled = (255.0 * (p - min_val) as f32 / (max_val - min_val) as f32) as u8;
             scaled
@@ -56,7 +61,11 @@ fn f32_to_u8_rgb(values: Vec<f32>) -> Vec<u8> {
 }
 
 fn l1_to_u8_rgb(values: Vec<u8>) -> Vec<u8> {
-    values.iter().map(|v| *v * 255).flat_map(|v| Vec::from([v, v, v])).collect()
+    values
+        .iter()
+        .map(|v| *v * 255)
+        .flat_map(|v| Vec::from([v, v, v]))
+        .collect()
 }
 
 fn l8_to_u8_rgb(values: Vec<u8>) -> Vec<u8> {
@@ -64,7 +73,11 @@ fn l8_to_u8_rgb(values: Vec<u8>) -> Vec<u8> {
 }
 
 fn la8_to_u8_rgba(values: Vec<u8>) -> Vec<u8> {
-    values.chunks_exact(2).map(|chunk| Vec::from([chunk[0], chunk[0], chunk[0], chunk[1]])).flatten().collect()
+    values
+        .chunks_exact(2)
+        .map(|chunk| Vec::from([chunk[0], chunk[0], chunk[0], chunk[1]]))
+        .flatten()
+        .collect()
 }
 
 fn l16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
@@ -73,12 +86,14 @@ fn l16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
 
     if max_val == min_val {
         let gray_value = (*min_val >> 8) as u8;
-        return values.iter()
+        return values
+            .iter()
             .flat_map(|_| [gray_value, gray_value, gray_value])
             .collect();
     }
 
-    values.iter()
+    values
+        .iter()
         .flat_map(|&p| {
             let gray = (255.0 * (p - min_val) as f32 / (max_val - min_val) as f32) as u8;
             [gray, gray, gray]
@@ -87,15 +102,14 @@ fn l16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
 }
 
 fn la16_to_u8_rgba(values: Vec<u16>) -> Vec<u8> {
-    let lum_values: Vec<&u16> = values.iter()
-        .step_by(2)
-        .collect();
+    let lum_values: Vec<&u16> = values.iter().step_by(2).collect();
 
     let max_val = lum_values.iter().max().unwrap_or(&&0);
     let min_val = lum_values.iter().min().unwrap_or(&&0);
 
     if max_val == min_val {
-        return values.chunks(2)
+        return values
+            .chunks(2)
             .flat_map(|chunk| {
                 let gray = (*min_val >> 8) as u8;
                 let alpha = (chunk[1] >> 8) as u8;
@@ -104,7 +118,8 @@ fn la16_to_u8_rgba(values: Vec<u16>) -> Vec<u8> {
             .collect();
     }
 
-    values.chunks(2)
+    values
+        .chunks(2)
         .flat_map(|chunk| {
             let gray = (255.0 * (chunk[0] - *min_val) as f32 / (*max_val - *min_val) as f32) as u8;
             let alpha = (chunk[1] >> 8) as u8;
@@ -229,57 +244,27 @@ impl PixelData {
         match self {
             PixelData::RGB8(pixels) => pixels,
             PixelData::RGBA8(pixels) => pixels,
-            PixelData::RGB16(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        pixels.as_ptr() as *const u8,
-                        pixels.len() * 2,
-                    )
-                }
-            }
-            PixelData::RGBA16(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        pixels.as_ptr() as *const u8,
-                        pixels.len() * 2,
-                    )
-                }
-            }
-            PixelData::RGB32F(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        pixels.as_ptr() as *const u8,
-                        pixels.len() * 4,
-                    )
-                }
-            }
-            PixelData::RGBA32F(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        pixels.as_ptr() as *const u8,
-                        pixels.len() * 4,
-                    )
-                }
-            }
+            PixelData::RGB16(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 2)
+            },
+            PixelData::RGBA16(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 2)
+            },
+            PixelData::RGB32F(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+            },
+            PixelData::RGBA32F(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+            },
             PixelData::L1(pixels) => pixels,
             PixelData::L8(pixels) => pixels,
-            PixelData::L16(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        pixels.as_ptr() as *const u8,
-                        pixels.len() * 2,
-                    )
-                }
-            }
+            PixelData::L16(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 2)
+            },
             PixelData::LA8(pixels) => pixels,
-            PixelData::LA16(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        pixels.as_ptr() as *const u8,
-                        pixels.len() * 2,
-                    )
-                }
-            }
+            PixelData::LA16(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 2)
+            },
         }
     }
 
@@ -287,57 +272,27 @@ impl PixelData {
         match self {
             PixelData::RGB8(pixels) => pixels,
             PixelData::RGBA8(pixels) => pixels,
-            PixelData::RGB16(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts_mut(
-                        pixels.as_mut_ptr() as *mut u8,
-                        pixels.len() * 2,
-                    )
-                }
-            }
-            PixelData::RGBA16(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts_mut(
-                        pixels.as_mut_ptr() as *mut u8,
-                        pixels.len() * 2,
-                    )
-                }
-            }
-            PixelData::RGB32F(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts_mut(
-                        pixels.as_mut_ptr() as *mut u8,
-                        pixels.len() * 4,
-                    )
-                }
-            }
-            PixelData::RGBA32F(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts_mut(
-                        pixels.as_mut_ptr() as *mut u8,
-                        pixels.len() * 4,
-                    )
-                }
-            }
+            PixelData::RGB16(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
+            },
+            PixelData::RGBA16(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
+            },
+            PixelData::RGB32F(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
+            },
+            PixelData::RGBA32F(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
+            },
             PixelData::L1(pixels) => pixels,
             PixelData::L8(pixels) => pixels,
-            PixelData::L16(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts_mut(
-                        pixels.as_mut_ptr() as *mut u8,
-                        pixels.len() * 2,
-                    )
-                }
-            }
+            PixelData::L16(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
+            },
             PixelData::LA8(pixels) => pixels,
-            PixelData::LA16(pixels) => {
-                unsafe {
-                    std::slice::from_raw_parts_mut(
-                        pixels.as_mut_ptr() as *mut u8,
-                        pixels.len() * 2,
-                    )
-                }
-            }
+            PixelData::LA16(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
+            },
         }
     }
 
@@ -438,7 +393,11 @@ impl ImageFrame {
 
     pub fn has_alpha(&self) -> bool {
         match self.pixels {
-            PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::LA8(_) | PixelData::LA16(_) => true,
+            PixelData::RGBA8(_)
+            | PixelData::RGBA16(_)
+            | PixelData::RGBA32F(_)
+            | PixelData::LA8(_)
+            | PixelData::LA16(_) => true,
             _ => false,
         }
     }
@@ -538,7 +497,9 @@ impl Image {
 
     pub fn has_alpha(&self) -> bool {
         match self.pixel_format {
-            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::LA8 | PixelFormat::LA16 => true,
+            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::LA8 | PixelFormat::LA16 => {
+                true
+            }
             _ => false,
         }
     }
@@ -595,13 +556,13 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::Jpeg => Decoders::Jpeg(JpegDecoder::new(reader)),
             ImageFormat::JpegLs => Decoders::JpegLs(JpegLsDecoder::new(reader)),
             ImageFormat::Gif => Decoders::Gif(GifDecoder::new(reader)),
-            ImageFormat::NetPbmP1 |
-            ImageFormat::NetPbmP2 |
-            ImageFormat::NetPbmP3 |
-            ImageFormat::NetPbmP4 |
-            ImageFormat::NetPbmP5 |
-            ImageFormat::NetPbmP6 |
-            ImageFormat::NetPbmP7 => Decoders::Netpbm(NetPbmDecoder::new(reader)),
+            ImageFormat::NetPbmP1
+            | ImageFormat::NetPbmP2
+            | ImageFormat::NetPbmP3
+            | ImageFormat::NetPbmP4
+            | ImageFormat::NetPbmP5
+            | ImageFormat::NetPbmP6
+            | ImageFormat::NetPbmP7 => Decoders::Netpbm(NetPbmDecoder::new(reader)),
             ImageFormat::Bmp => Decoders::Bmp(BmpDecoder::new(reader)),
             ImageFormat::Png => Decoders::Png(PngDecoder::new(reader)),
             ImageFormat::Hdr => Decoders::Hdr(HdrDecoder::new(reader)),
@@ -610,10 +571,7 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
-        Ok(Vexel {
-            decoder,
-            format,
-        })
+        Ok(Vexel { decoder, format })
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -721,8 +679,9 @@ impl<R: Read + Seek> Vexel<R> {
         }
 
         // TIFF
-        if (header.starts_with(b"II") || header.starts_with(b"MM")) &&
-            ((header[2] == 42 && header[3] == 0) || (header[2] == 0 && header[3] == 42)) {
+        if (header.starts_with(b"II") || header.starts_with(b"MM"))
+            && ((header[2] == 42 && header[3] == 0) || (header[2] == 0 && header[3] == 42))
+        {
             return Ok(ImageFormat::Tiff);
         }
 
@@ -764,7 +723,7 @@ impl<R: Read + Seek> Vexel<R> {
                 Ok(n) => read_pos += n,
             }
         }
-        
+
         let mut footer = [0u8; FOOTER_SIZE];
         reader.seek(SeekFrom::End(-(FOOTER_SIZE as i64)))?;
         reader.read_exact(&mut footer)?;
@@ -773,10 +732,8 @@ impl<R: Read + Seek> Vexel<R> {
 
         // PNG
         let header_str = String::from_utf8_lossy(&header).to_lowercase();
-        let chunks = [
-            "png", "ihdr", "idat", "iend"
-        ];
-        
+        let chunks = ["png", "ihdr", "idat", "iend"];
+
         if chunks.iter().any(|chunk| header_str.contains(chunk)) {
             return Ok(ImageFormat::Png);
         }

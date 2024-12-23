@@ -1,0 +1,5 @@
+max_width = 120
+hard_tabs = false
+match_arm_indentation = "diff"
+trailing_comma = "Always"
+struct_lit_single_line = true

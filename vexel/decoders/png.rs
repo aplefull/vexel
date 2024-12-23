@@ -1,40 +1,41 @@
-use std::fmt::Debug;
-use std::io::{Read, Seek, SeekFrom};
-use flate2::read::ZlibDecoder;
 use crate::bitreader::BitReader;
-use crate::{log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::icc::ICCProfile;
 use crate::utils::info::PngInfo;
 use crate::utils::traits::SafeAccess;
+use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
+use flate2::read::ZlibDecoder;
+use std::fmt::Debug;
+use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PngChunk {
     // Critical chunks
-    IHDR,  // Image header
-    PLTE,  // Palette
-    IDAT,  // Image data
-    IEND,  // End of image
+    IHDR, // Image header
+    PLTE, // Palette
+    IDAT, // Image data
+    IEND, // End of image
 
     // Ancillary chunks
-    TRNS,  // Transparency
-    CHRM,  // Chromaticity
-    GAMA,  // Gamma
-    ICCP,  // ICC Profile
-    SBIT,  // Significant bits
-    SRGB,  // Standard RGB
-    TEXT,  // Text
-    ZTXT,  // Compressed text
-    ITXT,  // International text
-    BKGD,  // Background color
-    PHYS,  // Physical dimensions
-    TIME,  // Last modification time
-    SPLT,  // Suggested palette
-    HIST,  // Palette histogram
+    TRNS, // Transparency
+    CHRM, // Chromaticity
+    GAMA, // Gamma
+    ICCP, // ICC Profile
+    SBIT, // Significant bits
+    SRGB, // Standard RGB
+    TEXT, // Text
+    ZTXT, // Compressed text
+    ITXT, // International text
+    BKGD, // Background color
+    PHYS, // Physical dimensions
+    TIME, // Last modification time
+    SPLT, // Suggested palette
+    HIST, // Palette histogram
 
     // Animation chunks
-    ACTL,  // Animation control
-    FCTL,  // Frame control
-    FDAT,  // Frame data
+    ACTL, // Animation control
+    FCTL, // Frame control
+    FDAT, // Frame data
 }
 
 fn get_chunk(chunk_type: &[u8; 4]) -> Option<PngChunk> {
@@ -260,6 +261,7 @@ pub struct PngDecoder<R: Read + Seek> {
     palette: Option<Vec<[u8; 3]>>,
     idat_data: Vec<u8>,
     gamma: Option<f32>,
+    icc_profile: Option<(String, ICCProfile)>,
     transparency: Option<TransparencyData>,
     background: Option<BackgroundData>,
     rendering_intent: Option<RenderingIntent>,
@@ -288,6 +290,7 @@ impl<R: Read + Seek> PngDecoder<R> {
             palette: None,
             idat_data: Vec::new(),
             gamma: None,
+            icc_profile: None,
             transparency: None,
             background: None,
             rendering_intent: None,
@@ -323,6 +326,7 @@ impl<R: Read + Seek> PngDecoder<R> {
             interlace: self.interlace,
             palette: self.palette.clone(),
             gamma: self.gamma,
+            icc_profile: self.icc_profile.clone(),
             transparency: self.transparency.clone(),
             background: self.background.clone(),
             rendering_intent: self.rendering_intent,
@@ -400,7 +404,10 @@ impl<R: Read + Seek> PngDecoder<R> {
         };
 
         if self.width == 0 || self.height == 0 {
-            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+            return Err(VexelError::InvalidDimensions {
+                width: self.width,
+                height: self.height,
+            });
         }
 
         Ok(())
@@ -447,6 +454,59 @@ impl<R: Read + Seek> PngDecoder<R> {
         }
 
         self.idat_data.extend(chunk_data);
+
+        Ok(())
+    }
+
+    fn read_iccp(&mut self) -> VexelResult<()> {
+        self.validate_chunk_crc()?;
+
+        let length = self.get_chunk_length()?;
+        let mut num_read = 0;
+
+        let mut profile_name_bytes = Vec::new();
+        loop {
+            let byte = self.reader.read_u8()?;
+            num_read += 1;
+
+            if byte == 0 {
+                break;
+            }
+
+            if !((byte >= 32 && byte <= 126) || byte >= 161) {
+                log_warn!("Invalid character in iCCP profile name: {}, replacing with space", byte);
+                profile_name_bytes.push(32);
+            } else {
+                profile_name_bytes.push(byte);
+            }
+
+            if profile_name_bytes.len() >= 79 {
+                log_warn!("iCCP profile name too long");
+                break;
+            }
+        }
+
+        let compression_method = self.reader.read_u8()?;
+        num_read += 1;
+
+        if compression_method != 0 {
+            log_warn!("Invalid compression method in iCCP chunk: {}", compression_method);
+        }
+
+        let mut compressed_profile = Vec::new();
+        while num_read < length {
+            compressed_profile.push(self.reader.read_u8()?);
+            num_read += 1;
+        }
+
+        let mut decoder = ZlibDecoder::new(&compressed_profile[..]);
+        let mut profile_data = Vec::new();
+        decoder.read_to_end(&mut profile_data)?;
+
+        let icc = ICCProfile::new(&*profile_data)?;
+        let profile_name = String::from_utf8_lossy(&profile_name_bytes).to_string();
+
+        self.icc_profile = Some((profile_name, icc));
 
         Ok(())
     }
@@ -499,14 +559,14 @@ impl<R: Read + Seek> PngDecoder<R> {
                     self.reader.read_u8()? as u16,
                     self.reader.read_u8()? as u16,
                     self.reader.read_u8()? as u16,
-                    self.reader.read_u8()? as u16
+                    self.reader.read_u8()? as u16,
                 )
             } else {
                 (
                     self.reader.read_u16()?,
                     self.reader.read_u16()?,
                     self.reader.read_u16()?,
-                    self.reader.read_u16()?
+                    self.reader.read_u16()?,
                 )
             };
             let frequency = self.reader.read_u16()?;
@@ -691,9 +751,7 @@ impl<R: Read + Seek> PngDecoder<R> {
         let unit = match unit_specifier {
             0 => PhysicalUnit::Unknown,
             1 => PhysicalUnit::Meter,
-            _ => {
-                PhysicalUnit::Unknown
-            }
+            _ => PhysicalUnit::Unknown,
         };
 
         self.physical_dimensions = Some(PhysicalDimensions {
@@ -719,7 +777,9 @@ impl<R: Read + Seek> PngDecoder<R> {
                     log_warn!("Invalid sBIT length for grayscale: {}", length);
                 }
 
-                SignificantBits::Grayscale { gray: self.reader.read_u8()? }
+                SignificantBits::Grayscale {
+                    gray: self.reader.read_u8()?,
+                }
             }
             ColorType::RGB => {
                 if length != 3 {
@@ -1026,10 +1086,7 @@ impl<R: Read + Seek> PngDecoder<R> {
             log_warn!("acTL chunk with zero frames");
         }
 
-        self.actl_info = Some(ActlChunk {
-            num_frames,
-            num_plays,
-        });
+        self.actl_info = Some(ActlChunk { num_frames, num_plays });
 
         Ok(())
     }
@@ -1048,12 +1105,18 @@ impl<R: Read + Seek> PngDecoder<R> {
         let mut blend_op = self.reader.read_u8()?;
 
         if x_offset + width > self.width {
-            log_warn!(format!("fcTL width would overflow actual image width, clamping: x_offset={}, width={}, image_width={}", x_offset, width, self.width));
+            log_warn!(format!(
+                "fcTL width would overflow actual image width, clamping: x_offset={}, width={}, image_width={}",
+                x_offset, width, self.width
+            ));
             width = self.width.saturating_sub(x_offset);
         }
 
         if y_offset + height > self.height {
-            log_warn!(format!("fcTL height would overflow actual image height, clamping: y_offset={}, height={}, image_height={}", y_offset, height, self.height));
+            log_warn!(format!(
+                "fcTL height would overflow actual image height, clamping: y_offset={}, height={}, image_height={}",
+                y_offset, height, self.height
+            ));
             height = self.height.saturating_sub(y_offset);
         }
 
@@ -1116,9 +1179,13 @@ impl<R: Read + Seek> PngDecoder<R> {
     }
 
     fn get_chunk_length(&mut self) -> VexelResult<u32> {
-        self.reader.seek(SeekFrom::Current(-8))?;
+        let current_pos = self.reader.stream_position()?;
+
+        self.reader.seek(SeekFrom::Start(current_pos - 8))?;
+
         let length = self.reader.read_u32()?;
-        self.reader.seek(SeekFrom::Current(4))?;
+
+        self.reader.seek(SeekFrom::Start(current_pos))?;
 
         Ok(length)
     }
@@ -1130,6 +1197,12 @@ impl<R: Read + Seek> PngDecoder<R> {
 
         let mut chunk_type = vec![0; 4];
         self.reader.read_exact(&mut chunk_type)?;
+
+        log_debug!(
+            "Chunk type: {:?}, Length: {}",
+            String::from_utf8_lossy(&chunk_type),
+            length
+        );
 
         let mut chunk_data = vec![0; length];
         self.reader.read_exact(&mut chunk_data)?;
@@ -1207,7 +1280,11 @@ impl<R: Read + Seek> PngDecoder<R> {
         }
 
         for i in bytes_per_pixel..src.len() {
-            if dst.get_safe(i).is_err() || src.get_safe(i).is_err() || prior.get_safe(i).is_err() || dst.get_safe(i - bytes_per_pixel).is_err() {
+            if dst.get_safe(i).is_err()
+                || src.get_safe(i).is_err()
+                || prior.get_safe(i).is_err()
+                || dst.get_safe(i - bytes_per_pixel).is_err()
+            {
                 log_warn!("Invalid range for average filter: {}", i);
                 break;
             }
@@ -1230,7 +1307,11 @@ impl<R: Read + Seek> PngDecoder<R> {
         }
 
         for i in bytes_per_pixel..src.len() {
-            if dst.get_safe(i).is_err() || src.get_safe(i).is_err() || prior.get_safe(i).is_err() || dst.get_safe(i - bytes_per_pixel).is_err() {
+            if dst.get_safe(i).is_err()
+                || src.get_safe(i).is_err()
+                || prior.get_safe(i).is_err()
+                || dst.get_safe(i - bytes_per_pixel).is_err()
+            {
                 log_warn!("Invalid range for paeth filter: {}", i);
                 break;
             }
@@ -1249,10 +1330,10 @@ impl<R: Read + Seek> PngDecoder<R> {
         let b = b as i16;
         let c = c as i16;
 
-        let p = a + b - c;        // Initial estimate
-        let pa = (p - a).abs();   // Distance to a
-        let pb = (p - b).abs();   // Distance to b
-        let pc = (p - c).abs();   // Distance to c
+        let p = a + b - c; // Initial estimate
+        let pa = (p - a).abs(); // Distance to a
+        let pb = (p - b).abs(); // Distance to b
+        let pc = (p - c).abs(); // Distance to c
 
         if pa <= pb && pa <= pc {
             a as u8
@@ -1275,7 +1356,11 @@ impl<R: Read + Seek> PngDecoder<R> {
 
         for (_, scanline) in data.chunks(scanline_bytes).enumerate() {
             if scanline.len() < scanline_bytes {
-                log_warn!("Invalid scanline length: {}, expected: {}", scanline.len(), scanline_bytes);
+                log_warn!(
+                    "Invalid scanline length: {}, expected: {}",
+                    scanline.len(),
+                    scanline_bytes
+                );
                 break;
             }
 
@@ -1302,7 +1387,11 @@ impl<R: Read + Seek> PngDecoder<R> {
             match filter_type {
                 FilterType::None => {
                     if decoded.len() != filtered.len() {
-                        log_warn!("Length mismatch for unfiltered scanline: {} != {}", decoded.len(), filtered.len());
+                        log_warn!(
+                            "Length mismatch for unfiltered scanline: {} != {}",
+                            decoded.len(),
+                            filtered.len()
+                        );
                         continue;
                     }
 
@@ -1389,7 +1478,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                     }
                 }
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         };
 
         if has_trans {
@@ -1399,71 +1488,17 @@ impl<R: Read + Seek> PngDecoder<R> {
         }
     }
 
-    // TODO remove after I confirm above version is actually correct
-    /* fn decode_indexed(&self, input: &[u8]) -> VexelResult<PixelData> {
-         let palette = match &self.palette {
-             Some(palette) => palette,
-             None => {
-                 log_warn!("No palette found for indexed color");
-                 &Vec::new()
-             }
-         };
-
-         let mut output = Vec::new();
-
-         match self.bit_depth {
-             8 => {
-                 for &index in input {
-                     let color = palette.get(index as usize).unwrap_or_else(|| &RGB { r: 0, g: 0, b: 0 });
-
-                     output.extend_from_slice(&[color.r, color.g, color.b]);
-                 }
-             }
-             1 | 2 | 4 => {
-                 let bits_per_pixel = self.bit_depth as usize;
-                 let pixels_per_byte = 8 / bits_per_pixel;
-                 let mask = (1 << bits_per_pixel) - 1;
-                 let width = self.width as usize;
-                 let mut pixel_count = 0;
-
-                 for (_, &byte) in input.iter().enumerate() {
-                     for shift in 0..pixels_per_byte {
-                         if pixel_count >= width {
-                             break;
-                         }
-
-                         let mask_shift = (pixels_per_byte - 1 - shift) * bits_per_pixel;
-                         let positioned_mask = mask << mask_shift;
-                         let extracted = (byte & positioned_mask) >> mask_shift;
-
-                         let color = palette.get(extracted as usize)
-                             .unwrap_or_else(|| &RGB { r: 0, g: 0, b: 0 });
-
-                         output.extend_from_slice(&[color.r, color.g, color.b]);
-                         pixel_count += 1;
-                     }
-
-                     if pixel_count >= width {
-                         pixel_count = 0;
-                     }
-                 }
-             }
-             _ => unreachable!()
-         }
-
-         Ok(PixelData::RGB8(output.to_vec()))
-     }*/
-
     fn decode_grayscale(&self, input: &[u8]) -> VexelResult<PixelData> {
         match self.bit_depth {
-            8 => {
-                Ok(PixelData::L8(input.to_vec()))
-            }
+            8 => Ok(PixelData::L8(input.to_vec())),
             16 => {
                 let mut output = Vec::with_capacity(input.len() / 2);
 
                 for gray in input.chunks_exact(2) {
-                    output.push(u16::from_be_bytes([*gray.get_safe(0).unwrap_or_else(|_| &0), *gray.get_safe(1).unwrap_or_else(|_| &0)]));
+                    output.push(u16::from_be_bytes([
+                        *gray.get_safe(0).unwrap_or_else(|_| &0),
+                        *gray.get_safe(1).unwrap_or_else(|_| &0),
+                    ]));
                 }
 
                 Ok(PixelData::L16(output))
@@ -1494,15 +1529,13 @@ impl<R: Read + Seek> PngDecoder<R> {
 
                 Ok(PixelData::L8(output))
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 
     fn decode_grayscale_alpha(&self, input: &[u8]) -> VexelResult<PixelData> {
         match self.bit_depth {
-            8 => {
-                Ok(PixelData::LA8(input.to_vec()))
-            }
+            8 => Ok(PixelData::LA8(input.to_vec())),
             16 => {
                 let mut output = Vec::with_capacity((input.len() / 4) * 2);
 
@@ -1514,7 +1547,11 @@ impl<R: Read + Seek> PngDecoder<R> {
                 Ok(PixelData::LA16(output))
             }
             _ => {
-                log_warn!("Invalid bit depth for grayscale alpha: {}, assuming 8 bits", self.bit_depth);
+                log_warn!(
+                    "Invalid bit depth for grayscale alpha: {}, assuming 8 bits",
+                    self.bit_depth
+                );
+
                 Ok(PixelData::LA8(input.to_vec()))
             }
         }
@@ -1522,9 +1559,7 @@ impl<R: Read + Seek> PngDecoder<R> {
 
     fn decode_rgb(&self, input: &[u8]) -> VexelResult<PixelData> {
         match self.bit_depth {
-            8 => {
-                Ok(PixelData::RGB8(input.to_vec()))
-            }
+            8 => Ok(PixelData::RGB8(input.to_vec())),
             16 => {
                 let mut output = Vec::with_capacity((input.len() / 6) * 3);
 
@@ -1545,9 +1580,7 @@ impl<R: Read + Seek> PngDecoder<R> {
 
     fn decode_rgba(&self, input: &[u8]) -> VexelResult<PixelData> {
         match self.bit_depth {
-            8 => {
-                Ok(PixelData::RGBA8(input.to_vec()))
-            }
+            8 => Ok(PixelData::RGBA8(input.to_vec())),
             16 => {
                 let mut output = Vec::with_capacity((input.len() / 8) * 4);
                 for rgba in input.chunks_exact(8) {
@@ -1583,8 +1616,10 @@ impl<R: Read + Seek> PngDecoder<R> {
         let mut data_offset = 0;
 
         for pass in 0..7 {
-            let pass_width = (width as usize + ADAM7_COL_DELTA[pass] - 1 - ADAM7_COL_START[pass]) / ADAM7_COL_DELTA[pass];
-            let pass_height = (height as usize + ADAM7_ROW_DELTA[pass] - 1 - ADAM7_ROW_START[pass]) / ADAM7_ROW_DELTA[pass];
+            let pass_width =
+                (width as usize + ADAM7_COL_DELTA[pass] - 1 - ADAM7_COL_START[pass]) / ADAM7_COL_DELTA[pass];
+            let pass_height =
+                (height as usize + ADAM7_ROW_DELTA[pass] - 1 - ADAM7_ROW_START[pass]) / ADAM7_ROW_DELTA[pass];
 
             if pass_width == 0 || pass_height == 0 {
                 continue;
@@ -1649,8 +1684,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                         let out_pos = (out_y * out_bytes) + (out_x * bytes_per_pixel);
                         let in_pos = unfiltered_idx + (col * bytes_per_pixel);
 
-                        if out_pos + bytes_per_pixel <= output.len() &&
-                            in_pos + bytes_per_pixel <= unfiltered.len() {
+                        if out_pos + bytes_per_pixel <= output.len() && in_pos + bytes_per_pixel <= unfiltered.len() {
                             output[out_pos..out_pos + bytes_per_pixel]
                                 .copy_from_slice(&unfiltered[in_pos..in_pos + bytes_per_pixel]);
                         }
@@ -1666,19 +1700,22 @@ impl<R: Read + Seek> PngDecoder<R> {
         Ok(output)
     }
 
-    fn compose_frame(&self, pixels: &PixelData, fctl: &FctlChunk, prev_frame: Option<PixelData>, dispose_op: u8, prev_fctl: Option<&FctlChunk>) -> VexelResult<PixelData> {
+    fn compose_frame(
+        &self,
+        pixels: &PixelData,
+        fctl: &FctlChunk,
+        prev_frame: Option<PixelData>,
+        dispose_op: u8,
+        prev_fctl: Option<&FctlChunk>,
+    ) -> VexelResult<PixelData> {
         // TODO maybe try to not convert to RGBA if possible
         let frame_pixels = pixels.clone().into_rgba8();
 
         let mut output = match (dispose_op, prev_frame) {
-            (_, None) => {
-                PixelData::RGBA8(vec![0; (self.width * self.height * 4) as usize])
-            }
+            (_, None) => PixelData::RGBA8(vec![0; (self.width * self.height * 4) as usize]),
 
             // DISPOSE_OP_NONE - keep previous frame as is
-            (0, Some(prev)) => {
-                prev.clone().into_rgba8()
-            }
+            (0, Some(prev)) => prev.clone().into_rgba8(),
 
             // DISPOSE_OP_BACKGROUND - clear previous frame's region to transparent
             (1, Some(prev)) => {
@@ -1691,10 +1728,10 @@ impl<R: Read + Seek> PngDecoder<R> {
                         for x in 0..prev_fctl.width {
                             let pixel_start = row_start + (x as usize * 4);
                             if pixel_start + 3 < output_data.len() {
-                                output_data[pixel_start] = 0;     
-                                output_data[pixel_start + 1] = 0; 
-                                output_data[pixel_start + 2] = 0; 
-                                output_data[pixel_start + 3] = 0; 
+                                output_data[pixel_start] = 0;
+                                output_data[pixel_start + 1] = 0;
+                                output_data[pixel_start + 2] = 0;
+                                output_data[pixel_start + 3] = 0;
                             }
                         }
                     }
@@ -1739,8 +1776,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                 let frame_pixel_start = frame_row_start + (x as usize * 4);
                 let output_pixel_start = output_row_start + (x as usize * 4);
 
-                if frame_pixel_start + 4 > frame_data.len() ||
-                    output_pixel_start + 4 > output_data.len() {
+                if frame_pixel_start + 4 > frame_data.len() || output_pixel_start + 4 > output_data.len() {
                     continue;
                 }
 
@@ -1751,7 +1787,8 @@ impl<R: Read + Seek> PngDecoder<R> {
                 } else {
                     // Alpha blend (Over)
                     let src_a = frame_data[frame_pixel_start + 3] as f32 / 255.0;
-                    if src_a > 0.0 {  // Only blend if source has some opacity
+                    if src_a > 0.0 {
+                        // Only blend if source has some opacity
                         let dst_a = output_data[output_pixel_start + 3] as f32 / 255.0;
                         let out_a = src_a + dst_a * (1.0 - src_a);
 
@@ -1778,16 +1815,24 @@ impl<R: Read + Seek> PngDecoder<R> {
         let mut prev_dispose_op = 0;
         let mut prev_fctl = None;
 
-        if self.frames.iter().filter(|f| f.fctl_info.width > 0 && f.fctl_info.height > 0 && !f.fdat.is_empty()).count() == 0 {
+        if self
+            .frames
+            .iter()
+            .filter(|f| f.fctl_info.width > 0 && f.fctl_info.height > 0 && !f.fdat.is_empty())
+            .count()
+            == 0
+        {
             return Err(VexelError::Custom("No valid frames found".into()));
         }
 
         for frame in self.frames.iter() {
             let fctl = &frame.fctl_info;
 
-            if fctl.width == 0 || fctl.height == 0 ||
-                fctl.x_offset + fctl.width > self.width ||
-                fctl.y_offset + fctl.height > self.height {
+            if fctl.width == 0
+                || fctl.height == 0
+                || fctl.x_offset + fctl.width > self.width
+                || fctl.y_offset + fctl.height > self.height
+            {
                 return Err(VexelError::Custom("Invalid frame dimensions".into()));
             }
 
@@ -1889,10 +1934,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                         PngChunk::ACTL => self.read_actl(),
                         PngChunk::FCTL => self.read_fctl(),
                         PngChunk::FDAT => self.read_fdat(),
-                        PngChunk::ICCP => {
-                            log_warn!("Ignoring ICCP chunk");
-                            Ok(())
-                        }
+                        PngChunk::ICCP => self.read_iccp(),
                         PngChunk::IEND => break,
                     };
 

@@ -104,13 +104,13 @@ impl Logger {
     pub fn log(level: LogLevel, message: impl Display) {
         let (level_str, color) = match level {
             LogLevel::Debug => ("DEBUG", BLUE),
-            LogLevel::Info => ("INFO ", GREEN),
-            LogLevel::Warning => ("WARN ", YELLOW),
+            LogLevel::Info => ("INFO", GREEN),
+            LogLevel::Warning => ("WARN", YELLOW),
             LogLevel::Error => ("ERROR", RED),
         };
 
         println!(
-            "{} [{}{:5}{}] {}",
+            "{} [{}{}{}] {}",
             Self::get_timestamp(),
             color,
             level_str,

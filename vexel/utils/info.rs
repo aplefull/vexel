@@ -3,12 +3,10 @@ use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtensio
 use crate::decoders::jpeg::{ArithmeticCodingTable, ExifHeader, JFIFHeader, QuantizationTable, ScanInfo};
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::{
-    ActlChunk, BackgroundData, Chromaticities,
-    ColorType, CompressionMethod, ImageTime,
-    PhysicalDimensions, PngFrame, PngText,
-    RenderingIntent, SignificantBits, SuggestedPalette,
-    TransparencyData,
+    ActlChunk, BackgroundData, Chromaticities, ColorType, CompressionMethod, ImageTime, PhysicalDimensions, PngFrame,
+    PngText, RenderingIntent, SignificantBits, SuggestedPalette, TransparencyData,
 };
+use crate::utils::icc::ICCProfile;
 
 #[derive(Debug)]
 pub enum ImageInfo {
@@ -50,6 +48,7 @@ pub struct PngInfo {
     pub interlace: bool,
     pub palette: Option<Vec<[u8; 3]>>,
     pub gamma: Option<f32>,
+    pub icc_profile: Option<(String, ICCProfile)>,
     pub transparency: Option<TransparencyData>,
     pub background: Option<BackgroundData>,
     pub rendering_intent: Option<RenderingIntent>,
