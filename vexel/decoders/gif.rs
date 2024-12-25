@@ -1,13 +1,12 @@
 use crate::bitreader::BitReader;
 use crate::utils::error::VexelResult;
 use crate::utils::info::GifInfo;
-use crate::utils::traits::{SafeAccess, SafeMapAccess};
-use crate::{log_debug, log_warn, time_block, time_fn, Image, ImageFrame, PixelData, PixelFormat};
+use crate::utils::traits::SafeAccess;
+use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
-use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct GifFrameInfo {
@@ -769,76 +768,57 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             }
         };
 
-        //let mut decoded_frames = Vec::new();
         let mut previous_canvas: Option<Vec<u8>> = None;
 
-        /*for frame in &self.frames {
-            let mut frame_pixels = self.decode_frame(frame)?;
-
-            if frame.interlace_flag {
-                frame_pixels = Self::deinterlace(frame.width, frame.height, &frame_pixels);
-            }
-
-            // TODO just modify existing frame data
-            decoded_frames.push(GifFrameInfo {
-                data: frame_pixels,
-                ..frame.clone()
-            });
-        }*/
-
-        let decoded_frames: Vec<GifFrameInfo> = time_block!("Decoding", {
-             self
-                .frames
-                .par_iter()
-                .map(|frame| {
-                    // Decode each frame
-                    let mut frame_pixels = match time_fn!(self.decode_frame(frame)) {
-                        Ok(pixels) => pixels,
-                        Err(e) => {
-                            log_warn!("Error decoding frame: {:?}", e);
-                            return Err(e);
-                        }
-                    };
-
-                    // Apply deinterlacing if needed
-                    if frame.interlace_flag {
-                        frame_pixels = time_fn!(Self::deinterlace(frame.width, frame.height, &frame_pixels));
+        let decoded_frames: Vec<GifFrameInfo> = self
+            .frames
+            .par_iter()
+            .map(|frame| {
+                // Decode each frame
+                let mut frame_pixels = match self.decode_frame(frame) {
+                    Ok(pixels) => pixels,
+                    Err(e) => {
+                        log_warn!("Error decoding frame: {:?}", e);
+                        return Err(e);
                     }
+                };
 
-                    // Create new frame with decoded pixels
-                    Ok(GifFrameInfo {
-                        data: frame_pixels,
-                        ..frame.clone()
-                    })
+                // Apply deinterlacing if needed
+                if frame.interlace_flag {
+                    frame_pixels = Self::deinterlace(frame.width, frame.height, &frame_pixels);
+                }
+
+                // Create new frame with decoded pixels
+                Ok(GifFrameInfo {
+                    data: frame_pixels,
+                    ..frame.clone()
                 })
-                .collect::<VexelResult<Vec<_>>>()?
-        });
+            })
+            .collect::<VexelResult<Vec<_>>>()?;
 
         let mut image_frames = Vec::new();
 
-        time_block!("Compositing", {
-            for (frame_index, frame) in decoded_frames.iter().enumerate() {
-                let canvas = match self.compose_frame(frame, previous_canvas.as_ref()) {
-                    Ok(canvas) => canvas,
-                    Err(e) => {
-                        log_warn!("Error composing frame. Skipping frame {}. Error: {:?}", frame_index, e);
-                        continue;
-                    }
-                };
+        for (frame_index, frame) in decoded_frames.iter().enumerate() {
+            let canvas = match self.compose_frame(frame, previous_canvas.as_ref()) {
+                Ok(canvas) => canvas,
+                Err(e) => {
+                    log_warn!("Error composing frame. Skipping frame {}. Error: {:?}", frame_index, e);
+                    continue;
+                }
+            };
 
-                previous_canvas = match frame.disposal_method {
-                    DisposalMethod::None | DisposalMethod::Previous => Some(canvas.clone()),
-                    DisposalMethod::Background => None,
-                };
+            previous_canvas = match frame.disposal_method {
+                DisposalMethod::None | DisposalMethod::Previous => Some(canvas.clone()),
+                DisposalMethod::Background => None,
+            };
 
-                image_frames.push(ImageFrame {
-                    width: self.width,
-                    height: self.height,
-                    pixels: PixelData::RGBA8(canvas),
-                    delay: frame.delay as u32,
-                });
-            }
-        });
+            image_frames.push(ImageFrame {
+                width: self.width,
+                height: self.height,
+                pixels: PixelData::RGBA8(canvas),
+                delay: frame.delay as u32,
+            });
+        }
 
         Ok(Image::new(self.width, self.height, PixelFormat::RGBA8, image_frames))
     }

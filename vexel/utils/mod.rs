@@ -3,6 +3,7 @@ pub mod error;
 pub mod icc;
 pub mod info;
 pub mod logger;
+pub mod macros;
 pub mod marker;
 pub mod traits;
 pub mod types;
