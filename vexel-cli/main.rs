@@ -1,12 +1,12 @@
+use clap::Parser;
+use eframe;
+use egui;
+use egui::ViewportBuilder;
+use glob::glob;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use vexel::{Image, PixelData, Vexel};
-use clap::Parser;
-use glob::glob;
-use egui;
-use eframe;
-use egui::ViewportBuilder;
 use writer::{Writer, WriterImage, WriterImageFrame, WriterPixelData};
 
 #[derive(Parser, Debug)]
@@ -26,6 +26,9 @@ struct Cli {
 
     #[arg(long)]
     info: bool,
+
+    #[arg(long, help = "Decode the image without writing to a file")]
+    void: bool,
 }
 
 fn get_files(path: &str) -> Vec<PathBuf> {
@@ -53,12 +56,9 @@ fn get_files(path: &str) -> Vec<PathBuf> {
     files
 }
 
-fn get_output_path(
-    file: &Path,
-    output_dir: Option<&str>,
-    format: &str,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let file_stem = file.file_stem()
+fn get_output_path(file: &Path, output_dir: Option<&str>, format: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let file_stem = file
+        .file_stem()
         .ok_or("Invalid file name")?
         .to_str()
         .ok_or("Invalid file stem")?;
@@ -98,7 +98,11 @@ fn image_to_writer_image(image: &Image) -> WriterImage {
             height: frame.height(),
             has_alpha: frame.has_alpha(),
             delay: frame.delay(),
-            pixels: if frame.has_alpha() { frame.as_rgba8() } else { frame.as_rgb8() },
+            pixels: if frame.has_alpha() {
+                frame.as_rgba8()
+            } else {
+                frame.as_rgb8()
+            },
         });
     }
 
@@ -114,6 +118,11 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     println!("File: {}", file.display());
 
     let mut decoder = Vexel::open(file)?;
+
+    if cli.void {
+        let _ = decoder.decode();
+        return Ok(());
+    }
 
     if cli.info {
         let _ = decoder.decode();
@@ -232,9 +241,7 @@ fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
                 // Request a repaint
                 ctx.request_repaint();
             } else {
-                ctx.request_repaint_after(Duration::from_millis(
-                    (current_delay - elapsed) as u64
-                ));
+                ctx.request_repaint_after(Duration::from_millis((current_delay - elapsed) as u64));
             }
         }
     }
@@ -246,11 +253,7 @@ fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
             ctx.set_visuals(visuals);
 
             if self.texture.is_none() {
-                self.texture = Some(ctx.load_texture(
-                    "image",
-                    self.frames[0].clone(),
-                    egui::TextureOptions::default(),
-                ));
+                self.texture = Some(ctx.load_texture("image", self.frames[0].clone(), egui::TextureOptions::default()));
             }
 
             // Update animation frame
@@ -287,11 +290,7 @@ fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    eframe::run_native(
-        "Vexel",
-        options,
-        Box::new(|_cc| Ok(Box::new(App::new(image)))),
-    )?;
+    eframe::run_native("Vexel", options, Box::new(|_cc| Ok(Box::new(App::new(image)))))?;
 
     Ok(())
 }
