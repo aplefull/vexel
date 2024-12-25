@@ -1,11 +1,13 @@
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::io::{Read, Seek};
 use crate::bitreader::BitReader;
-use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use crate::utils::error::VexelResult;
 use crate::utils::info::GifInfo;
 use crate::utils::traits::{SafeAccess, SafeMapAccess};
+use crate::{log_debug, log_warn, time_block, time_fn, Image, ImageFrame, PixelData, PixelFormat};
+use rayon::prelude::*;
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::io::{Read, Seek};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct GifFrameInfo {
@@ -83,7 +85,7 @@ pub enum DisposalMethod {
     Previous,
 }
 
-impl<R: Read + Seek> GifDecoder<R> {
+impl<R: Read + Seek + Sync> GifDecoder<R> {
     pub fn new(reader: R) -> Self {
         Self {
             width: 0,
@@ -401,9 +403,15 @@ impl<R: Read + Seek> GifDecoder<R> {
             size_of_local_color_table: 0,
             local_color_table: Vec::new(),
             lzw_minimum_code_size: 0,
-            transparent_index: gce.as_ref().filter(|gce| gce.transparency).map(|gce| gce.transparent_color_index),
-            disposal_method: gce.as_ref().map(|gce| gce.disposal_method).unwrap_or(DisposalMethod::None),
-            delay: gce.map(|gce| gce.delay).unwrap_or(0),
+            transparent_index: gce
+                .as_ref()
+                .filter(|gce| gce.transparency)
+                .map(|gce| gce.transparent_color_index),
+            disposal_method: gce
+                .as_ref()
+                .map(|gce| gce.disposal_method)
+                .unwrap_or(DisposalMethod::None),
+            delay: gce.map(|gce| gce.delay).unwrap_or(100),
             data: Vec::new(),
         };
 
@@ -433,9 +441,10 @@ impl<R: Read + Seek> GifDecoder<R> {
             }
 
             // Read block data
-            for _ in 0..block_size {
-                frame.data.push(self.reader.read_u8()?);
-            }
+            let mut buffer = vec![0; block_size];
+            self.reader.read_exact(&mut buffer)?;
+
+            frame.data.extend(buffer);
         }
 
         // Update decoder dimensions based on first frame
@@ -445,6 +454,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         }
 
         self.frames.push(frame);
+
         Ok(())
     }
 
@@ -468,7 +478,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         let transparency = (packed & 0x01) != 0;
 
         // Read delay time
-        let delay = (self.reader.read_u16()?).swap_bytes();
+        let delay = (self.reader.read_u16()?).swap_bytes() * 10;
 
         // Read transparent color index
         let transparent_color_index = self.reader.read_u8()?;
@@ -488,7 +498,6 @@ impl<R: Read + Seek> GifDecoder<R> {
         })
     }
 
-    // TODO maybe use bitreader here as well
     fn decompress_lzw(&self, frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
         let min_code_size = frame.lzw_minimum_code_size;
         let clear_code = 1 << min_code_size;
@@ -524,7 +533,12 @@ impl<R: Read + Seek> GifDecoder<R> {
                 let bit = match bits.get(byte_pos) {
                     Some(byte) => (byte >> bit_pos) & 1,
                     None => {
-                        log_warn!("Invalid LZW code read position: {} (byte_pos: {}, bit_pos: {})", *pos, byte_pos, bit_pos);
+                        log_warn!(
+                            "Invalid LZW code read position: {} (byte_pos: {}, bit_pos: {})",
+                            *pos,
+                            byte_pos,
+                            bit_pos
+                        );
                         continue;
                     }
                 };
@@ -562,18 +576,18 @@ impl<R: Read + Seek> GifDecoder<R> {
 
             if let Some(prev) = prev_code {
                 if code < next_code {
-                    let output = dictionary.get_safe(&code)?.clone();
+                    let output = dictionary.get(&code).unwrap_or(&Vec::new()).clone();
                     result.extend(&output);
 
                     if next_code < 4096 {
-                        let mut new_sequence = dictionary.get_safe(&prev)?.clone();
-                        new_sequence.push(*output.get_safe(0)?);
+                        let mut new_sequence = dictionary.get(&prev).unwrap_or(&Vec::new()).clone();
+                        new_sequence.push(*output.get(0).unwrap_or(&0));
                         dictionary.insert(next_code, new_sequence);
                         next_code += 1;
                     }
                 } else if code == next_code {
-                    let mut output = dictionary.get_safe(&prev)?.clone();
-                    output.push(*output.get_safe(0)?);
+                    let mut output = dictionary.get(&prev).unwrap_or(&Vec::new()).clone();
+                    output.push(*output.get(0).unwrap_or(&0));
                     result.extend(&output);
 
                     if next_code < 4096 {
@@ -608,12 +622,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         // Pass 3: Starting at row 2, every 4th row
         // Pass 4: Starting at row 1, every 2nd row
 
-        let passes = [
-            (0, 8),
-            (4, 8),
-            (2, 4),
-            (1, 2),
-        ];
+        let passes = [(0, 8), (4, 8), (2, 4), (1, 2)];
 
         let mut source_pos = 0;
 
@@ -662,9 +671,9 @@ impl<R: Read + Seek> GifDecoder<R> {
             }
 
             if color_index + 2 < color_table.len() {
-                image_data.push(*color_table.get_safe(color_index)?);
-                image_data.push(*color_table.get_safe(color_index + 1)?);
-                image_data.push(*color_table.get_safe(color_index + 2)?);
+                image_data.push(*color_table.get(color_index).unwrap_or(&0));
+                image_data.push(*color_table.get(color_index + 1).unwrap_or(&0));
+                image_data.push(*color_table.get(color_index + 2).unwrap_or(&0));
                 image_data.push(255);
             }
         }
@@ -672,14 +681,7 @@ impl<R: Read + Seek> GifDecoder<R> {
         Ok(image_data)
     }
 
-    fn compose_frame(&self, frame_index: usize, previous_canvas: Option<&Vec<u8>>) -> VexelResult<Vec<u8>> {
-        let frame = self.frames.get_safe(frame_index)?;
-        let mut frame_pixels = self.decode_frame(frame)?;
-
-        if frame.interlace_flag {
-            frame_pixels = Self::deinterlace(frame.width, frame.height, &frame_pixels);
-        }
-
+    fn compose_frame(&self, frame: &GifFrameInfo, previous_canvas: Option<&Vec<u8>>) -> VexelResult<Vec<u8>> {
         // Create a new canvas with the full GIF dimensions
         let canvas_size = (self.width * self.height * 4) as usize;
 
@@ -692,10 +694,10 @@ impl<R: Read + Seek> GifDecoder<R> {
                 if !self.global_color_table.is_empty() {
                     let bg_index = self.background_color_index as usize * 3;
                     let bg_color = [
-                        *self.global_color_table.get_safe(bg_index)?,
-                        *self.global_color_table.get_safe(bg_index + 1)?,
-                        *self.global_color_table.get_safe(bg_index + 2)?,
-                        255
+                        *self.global_color_table.get(bg_index).unwrap_or(&0),
+                        *self.global_color_table.get(bg_index + 1).unwrap_or(&0),
+                        *self.global_color_table.get(bg_index + 2).unwrap_or(&0),
+                        255,
                     ];
 
                     for pixel in canvas.chunks_mut(4) {
@@ -731,14 +733,18 @@ impl<R: Read + Seek> GifDecoder<R> {
                 let canvas_pixel_index = ((canvas_y * self.width + canvas_x) * 4) as usize;
 
                 // Only copy non-transparent pixels
-                if *frame_pixels.get_safe(frame_pixel_index + 3)? > 0 {
+                if *frame.data.get_safe(frame_pixel_index + 3)? > 0 {
                     if canvas.check_range(canvas_pixel_index..canvas_pixel_index + 4).is_err() {
-                        log_warn!("Canvas pixel index out of bounds: {} (len {})", canvas_pixel_index, canvas.len());
+                        log_warn!(
+                            "Canvas pixel index out of bounds: {} (len {})",
+                            canvas_pixel_index,
+                            canvas.len()
+                        );
                         continue;
                     }
 
                     canvas[canvas_pixel_index..canvas_pixel_index + 4]
-                        .copy_from_slice(frame_pixels.get_range_safe(frame_pixel_index..frame_pixel_index + 4)?);
+                        .copy_from_slice(frame.data.get_range_safe(frame_pixel_index..frame_pixel_index + 4)?);
                 }
             }
         }
@@ -763,39 +769,77 @@ impl<R: Read + Seek> GifDecoder<R> {
             }
         };
 
-        let mut decoded_frames = Vec::new();
+        //let mut decoded_frames = Vec::new();
         let mut previous_canvas: Option<Vec<u8>> = None;
 
-        for frame_index in 0..self.frames.len() {
-            let frame = match self.frames.get(frame_index) {
-                Some(frame) => frame,
-                None => {
-                    log_warn!("Frame index out of bounds: {}", frame_index);
-                    continue;
-                }
-            };
+        /*for frame in &self.frames {
+            let mut frame_pixels = self.decode_frame(frame)?;
 
-            let canvas = match self.compose_frame(frame_index, previous_canvas.as_ref()) {
-                Ok(canvas) => canvas,
-                Err(e) => {
-                    log_warn!("Error composing frame. Skipping frame {}. Error: {:?}", frame_index, e);
-                    continue;
-                }
-            };
+            if frame.interlace_flag {
+                frame_pixels = Self::deinterlace(frame.width, frame.height, &frame_pixels);
+            }
 
-            previous_canvas = match frame.disposal_method {
-                DisposalMethod::None | DisposalMethod::Previous => Some(canvas.clone()),
-                DisposalMethod::Background => None,
-            };
-
-            decoded_frames.push(ImageFrame {
-                width: self.width,
-                height: self.height,
-                pixels: PixelData::RGBA8(canvas),
-                delay: frame.delay as u32,
+            // TODO just modify existing frame data
+            decoded_frames.push(GifFrameInfo {
+                data: frame_pixels,
+                ..frame.clone()
             });
-        }
+        }*/
 
-        Ok(Image::new(self.width, self.height, PixelFormat::RGBA8, decoded_frames))
+        let decoded_frames: Vec<GifFrameInfo> = time_block!("Decoding", {
+             self
+                .frames
+                .par_iter()
+                .map(|frame| {
+                    // Decode each frame
+                    let mut frame_pixels = match time_fn!(self.decode_frame(frame)) {
+                        Ok(pixels) => pixels,
+                        Err(e) => {
+                            log_warn!("Error decoding frame: {:?}", e);
+                            return Err(e);
+                        }
+                    };
+
+                    // Apply deinterlacing if needed
+                    if frame.interlace_flag {
+                        frame_pixels = time_fn!(Self::deinterlace(frame.width, frame.height, &frame_pixels));
+                    }
+
+                    // Create new frame with decoded pixels
+                    Ok(GifFrameInfo {
+                        data: frame_pixels,
+                        ..frame.clone()
+                    })
+                })
+                .collect::<VexelResult<Vec<_>>>()?
+        });
+
+        let mut image_frames = Vec::new();
+
+        time_block!("Compositing", {
+            for (frame_index, frame) in decoded_frames.iter().enumerate() {
+                let canvas = match self.compose_frame(frame, previous_canvas.as_ref()) {
+                    Ok(canvas) => canvas,
+                    Err(e) => {
+                        log_warn!("Error composing frame. Skipping frame {}. Error: {:?}", frame_index, e);
+                        continue;
+                    }
+                };
+
+                previous_canvas = match frame.disposal_method {
+                    DisposalMethod::None | DisposalMethod::Previous => Some(canvas.clone()),
+                    DisposalMethod::Background => None,
+                };
+
+                image_frames.push(ImageFrame {
+                    width: self.width,
+                    height: self.height,
+                    pixels: PixelData::RGBA8(canvas),
+                    delay: frame.delay as u32,
+                });
+            }
+        });
+
+        Ok(Image::new(self.width, self.height, PixelFormat::RGBA8, image_frames))
     }
 }

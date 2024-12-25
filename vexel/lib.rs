@@ -548,7 +548,7 @@ impl Vexel<File> {
     }
 }
 
-impl<R: Read + Seek> Vexel<R> {
+impl<R: Read + Seek + Sync> Vexel<R> {
     pub fn new(mut reader: R) -> VexelResult<Vexel<R>> {
         let format = Vexel::try_guess_format(&mut reader)?;
 

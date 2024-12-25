@@ -10,3 +10,4 @@ path = "lib.rs"
 [dependencies]
 writer = {path = "../writer"}
 flate2 = "1.0.35"
+rayon = "1.10.0"
