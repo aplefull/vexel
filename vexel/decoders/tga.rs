@@ -1,8 +1,8 @@
+use crate::bitreader::BitReader;
+use crate::utils::error::{VexelError, VexelResult};
+use crate::{log_warn, Image, PixelData};
 use std::fmt::Debug;
 use std::io::{Read, Seek};
-use crate::utils::error::{VexelResult, VexelError};
-use crate::bitreader::BitReader;
-use crate::{Image, PixelData};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum TgaImageType {
@@ -178,9 +178,12 @@ impl<R: Read + Seek> TgaDecoder<R> {
                         let a = self.reader.read_u8()?;
                         [r, g, b, a]
                     }
-                    _ => return Err(VexelError::Custom(format!(
-                        "Unsupported color map entry size: {}", entry_size
-                    ))),
+                    _ => {
+                        return Err(VexelError::Custom(format!(
+                            "Unsupported color map entry size: {}",
+                            entry_size
+                        )))
+                    }
                 };
 
                 color_map.push(entry);
@@ -190,6 +193,20 @@ impl<R: Read + Seek> TgaDecoder<R> {
         }
 
         Ok(())
+    }
+
+    fn flip_pixels_vertical(pixels: &mut [u8], width: usize, height: usize, bytes_per_pixel: usize) {
+        let stride = width * bytes_per_pixel;
+        let rows = height / 2;
+
+        for row in 0..rows {
+            let top_start = row * stride;
+            let bottom_start = (height - 1 - row) * stride;
+
+            for i in 0..stride {
+                pixels.swap(top_start + i, bottom_start + i);
+            }
+        }
     }
 
     fn decode_pixel(&mut self, pixel_depth: u8) -> VexelResult<[u8; 4]> {
@@ -219,7 +236,12 @@ impl<R: Read + Seek> TgaDecoder<R> {
                 let a = self.reader.read_u8()?;
                 Ok([r, g, b, a])
             }
-            _ => Err(VexelError::Custom(format!("Unsupported pixel depth: {}", pixel_depth)))
+            _ => {
+                log_warn!("Invalid pixel depth: {}", pixel_depth);
+                
+                let v = self.reader.read_u8()?;
+                Ok([v, v, v, 255])
+            }
         }
     }
 
@@ -239,55 +261,29 @@ impl<R: Read + Seek> TgaDecoder<R> {
                 let pixel = self.decode_pixel(pixel_depth)?;
                 row.extend_from_slice(&pixel);
             }
+            
             if is_right_to_left {
                 // Reverse pixels in the row
                 let mut flipped_row = Vec::with_capacity(width * 4);
-                for pixel_idx in (0..row.len()).step_by(4) {
+                for pixel_idx in (0..row.len()).step_by(4).rev() {
                     flipped_row.extend_from_slice(&row[pixel_idx..pixel_idx + 4]);
                 }
                 row = flipped_row;
             }
+            
             pixel_rows.push(row);
         }
 
         // Flatten the 2D vector into the final pixel buffer
-        let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 4);
-        if is_top_to_bottom {
-            // Top-to-bottom: use rows in order
-            for row in &pixel_rows {
-                pixels.extend(row);
-            }
-        } else {
-            // Bottom-to-top: reverse row order
-            for row in pixel_rows.iter().rev() {
-                pixels.extend(row);
-            }
-        }
-
-        // Flatten the 2D vector into the final pixel buffer
-        let mut pixels: Vec<u8> = Vec::with_capacity(width * height * 4);
-        if is_top_to_bottom {
-            // Top-to-bottom: use rows in order
-            for row in &pixel_rows {
-                pixels.extend(row);
-            }
-        } else {
-            // Bottom-to-top: reverse row order
-            for row in pixel_rows.iter().rev() {
-                pixels.extend(row);
-            }
-        }
-
-        // Flatten the 2D vector into the final pixel buffer with proper orientation
         let mut pixels = Vec::with_capacity(width * height * 4);
         if is_top_to_bottom {
             // Top-to-bottom: use rows in order
-            for row in &pixel_rows {
+            for row in pixel_rows {
                 pixels.extend(row);
             }
         } else {
             // Bottom-to-top: reverse row order
-            for row in pixel_rows.iter().rev() {
+            for row in pixel_rows.into_iter().rev() {
                 pixels.extend(row);
             }
         }
@@ -300,8 +296,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
         let height = self.height as usize;
         let pixel_depth = self.header.image_spec.pixel_depth;
         let is_top_to_bottom = self.header.image_spec.is_top_to_bottom();
-        let is_right_to_left = self.header.image_spec.is_right_to_left();
-        
+
         let mut pixels = Vec::with_capacity(width * height * 4);
         let mut pixel_count = 0;
         let total_pixels = width * height;
@@ -329,6 +324,10 @@ impl<R: Read + Seek> TgaDecoder<R> {
                     }
                 }
             }
+        }
+
+        if !is_top_to_bottom {
+            Self::flip_pixels_vertical(&mut pixels, width, height, 4);
         }
 
         Ok(PixelData::RGBA8(pixels))
@@ -396,7 +395,6 @@ impl<R: Read + Seek> TgaDecoder<R> {
         // Read color map if present
         self.read_color_map()?;
 
-
         // Validate image dimensions
         if self.width == 0 || self.height == 0 {
             return Err(VexelError::InvalidDimensions {
@@ -406,32 +404,22 @@ impl<R: Read + Seek> TgaDecoder<R> {
         }
 
         let mut pixel_data = match self.header.image_type {
-            TgaImageType::UncompressedRGB | TgaImageType::UncompressedBW => {
+            TgaImageType::UncompressedRGB | TgaImageType::UncompressedBW => self.decode_uncompressed()?,
+            TgaImageType::RLERGB | TgaImageType::RLEBlackWhite => self.decode_rle()?,
+            TgaImageType::UncompressedColorMapped => self.decode_color_mapped(false)?,
+            TgaImageType::RLEColorMapped => self.decode_color_mapped(true)?,
+            TgaImageType::NoImageData => {
+                log_warn!("Header specifies no image data in TGA image, will attempt to decode as uncompressed");
                 self.decode_uncompressed()?
             }
-            TgaImageType::RLERGB | TgaImageType::RLEBlackWhite => {
-                self.decode_rle()?
-            }
-            TgaImageType::UncompressedColorMapped => {
-                self.decode_color_mapped(false)?
-            }
-            TgaImageType::RLEColorMapped => {
-                self.decode_color_mapped(true)?
-            }
-            TgaImageType::NoImageData => {
-                return Err(VexelError::Custom("Image contains no data".into()));
-            }
-            _ => {
-                return Err(VexelError::Custom("Unsupported image type".into()));
+            TgaImageType::HuffmanColorMapped | TgaImageType::HuffmanQuadTree => {
+                log_warn!("Header specifies Huffman coding in TGA image, which doesn't actually exist, treating as uncompressed");
+                self.decode_uncompressed()?
             }
         };
 
         pixel_data.correct_pixels(self.width as u32, self.height as u32);
 
-        Ok(Image::from_pixels(
-            self.width as u32,
-            self.height as u32,
-            pixel_data,
-        ))
+        Ok(Image::from_pixels(self.width as u32, self.height as u32, pixel_data))
     }
 }
