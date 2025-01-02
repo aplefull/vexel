@@ -1,5 +1,12 @@
 use std::fmt::Display;
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
+
+#[cfg(target_arch = "wasm32")]
+use web_sys::console;
+#[cfg(target_arch = "wasm32")]
+use js_sys::Date;
 
 const RESET: &str = "\x1b[0m";
 const BLUE: &str = "\x1b[34m";
@@ -87,12 +94,19 @@ impl Logger {
     }
 
     fn get_timestamp() -> String {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
+        #[cfg(target_arch = "wasm32")]
+        let (secs, millis) = {
+            let now = Date::now();
+            ((now / 1000.0) as u64, (now % 1000.0) as u32)
+        };
 
-        let secs = now.as_secs();
-        let millis = now.subsec_millis();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (secs, millis) = {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default();
+            (now.as_secs(), now.subsec_millis())
+        };
 
         let hours = (secs / 3600) % 24;
         let minutes = (secs / 60) % 60;
@@ -108,6 +122,9 @@ impl Logger {
             LogLevel::Warning => ("WARN", YELLOW),
             LogLevel::Error => ("ERROR", RED),
         };
+
+        #[cfg(target_arch = "wasm32")]
+        console::log_1(&format!("{} [{}] {}", Self::get_timestamp(), level_str, message).into());
 
         println!(
             "{} [{}{}{}] {}",

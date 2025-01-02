@@ -17,8 +17,9 @@ pub use utils::{bitreader, logger};
 
 use std::fmt::Debug;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
+use wasm_bindgen::prelude::wasm_bindgen;
 
 macro_rules! impl_decode {
     ($decoder:expr) => {
@@ -748,4 +749,51 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         // We tried
         Ok(ImageFormat::Unknown)
     }
+}
+
+#[wasm_bindgen]
+pub struct JsImage {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl JsImage {
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn data(&self) -> Vec<u8> {
+        self.data.clone()
+    }
+}
+
+#[wasm_bindgen(js_name = decodeImage)]
+pub fn decode_image(data: &[u8]) -> Result<JsImage, String> {
+    let cursor = Cursor::new(data);
+    let mut decoder = Vexel::new(cursor).map_err(|e| e.to_string())?;
+
+    let image = decoder.decode().map_err(|e| e.to_string())?;
+
+    Ok(JsImage {
+        width: image.width(),
+        height: image.height(),
+        data: image.as_rgba8(),
+    })
+}
+
+#[wasm_bindgen(js_name = tryGuessFormat)]
+pub fn try_guess_format(data: &[u8]) -> Result<String, String> {
+    let mut cursor = Cursor::new(data);
+    let format = Vexel::try_guess_format(&mut cursor).map_err(|e| e.to_string())?;
+
+    Ok(format!("{:?}", format))
 }
