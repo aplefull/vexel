@@ -9,5 +9,4 @@ name = "writer"
 path = "lib.rs"
 
 [dependencies]
-image = "0.25.5"
 webp = "0.3.0"
