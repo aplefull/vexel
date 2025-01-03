@@ -1,12 +1,13 @@
-use std::fmt::Debug;
-use std::io::{Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
-use crate::{log_error, log_warn, Image, PixelData};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::BmpInfo;
 use crate::utils::traits::SafeAccess;
+use crate::{log_error, log_warn, Image, PixelData};
+use serde::Serialize;
+use std::fmt::Debug;
+use std::io::{Read, Seek, SeekFrom};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum BitmapCompression {
     BiRgb = 0,
     BiRle8 = 1,
@@ -41,7 +42,7 @@ impl BitmapCompression {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BitmapFileHeader {
     pub file_size: u32,
     pub reserved1: u16,
@@ -49,7 +50,7 @@ pub struct BitmapFileHeader {
     pub pixel_offset: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum DibHeader {
     Core(BitmapCoreHeader),
     OS2V2(OS22XBitmapHeader),
@@ -110,7 +111,7 @@ impl DibHeader {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BitmapCoreHeader {
     pub width: u16,
     pub height: u16,
@@ -118,7 +119,7 @@ pub struct BitmapCoreHeader {
     pub bits_per_pixel: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OS22XBitmapHeader {
     pub width: i32,
     pub height: i32,
@@ -140,7 +141,7 @@ pub struct OS22XBitmapHeader {
     pub identifier: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BitmapInfoHeader {
     pub width: i32,
     pub height: i32,
@@ -154,7 +155,7 @@ pub struct BitmapInfoHeader {
     pub important_colors: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BitmapV2InfoHeader {
     pub info: BitmapInfoHeader,
     pub red_mask: u32,
@@ -162,13 +163,13 @@ pub struct BitmapV2InfoHeader {
     pub blue_mask: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BitmapV3InfoHeader {
     pub v2: BitmapV2InfoHeader,
     pub alpha_mask: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BitmapV4Header {
     pub v3: BitmapV3InfoHeader,
     pub cs_type: u32,
@@ -178,7 +179,7 @@ pub struct BitmapV4Header {
     pub gamma_blue: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BitmapV5Header {
     pub v4: BitmapV4Header,
     pub intent: u32,
@@ -187,21 +188,21 @@ pub struct BitmapV5Header {
     pub reserved: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ColorSpace {
     pub ciexyz_red: CIEXYZ,
     pub ciexyz_green: CIEXYZ,
     pub ciexyz_blue: CIEXYZ,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CIEXYZ {
     pub x: i32,
     pub y: i32,
     pub z: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ColorEntry {
     pub blue: u8,
     pub green: u8,
@@ -271,7 +272,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
         match signature {
             0x4D42 => (), // "BM" - Windows bitmap
-            0x4142 => (), // "BA" - OS/2 bitmap array  
+            0x4142 => (), // "BA" - OS/2 bitmap array
             0x4943 => (), // "CI" - OS/2 color icon
             0x5043 => (), // "CP" - OS/2 color pointer
             0x4349 => (), // "IC" - OS/2 icon
@@ -305,7 +306,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
             108 => DibHeader::V4(self.read_v4_header()?),
             124 => DibHeader::V5(self.read_v5_header()?),
             _ => {
-                log_warn!("Invalid DIB header size: {}, assuming 40 bytes. This may cause issues.", header_size);
+                log_warn!(
+                    "Invalid DIB header size: {}, assuming 40 bytes. This may cause issues.",
+                    header_size
+                );
                 DibHeader::Info(self.read_bitmap_info_header()?)
             }
         };
@@ -478,7 +482,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
     }
 
     fn read_pixel_data(&mut self) -> VexelResult<()> {
-        self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
+        self.reader
+            .seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
 
         let row_size = ((self.dib_header.bits_per_pixel() as u32 * self.width + 31) / 32) * 4;
         let data_size = row_size * self.height;
@@ -506,7 +511,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }
 
             if data.check_range(bottom_row_start..bottom_row_start + row_size).is_err() {
-                log_warn!("Invalid bottom row range: {}..{}", bottom_row_start, bottom_row_start + row_size);
+                log_warn!(
+                    "Invalid bottom row range: {}..{}",
+                    bottom_row_start,
+                    bottom_row_start + row_size
+                );
                 continue;
             }
 
@@ -636,11 +645,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
                             // Each byte contains two 4-bit pixels
                             for i in 0..2 {
                                 if pixels_remaining > 0 && x < self.width {
-                                    let pixel = if i == 0 {
-                                        (byte >> 4) & 0x0F
-                                    } else {
-                                        byte & 0x0F
-                                    };
+                                    let pixel = if i == 0 { (byte >> 4) & 0x0F } else { byte & 0x0F };
 
                                     let pos = (y * self.width + x) as usize;
                                     if pos < decoded.len() {
@@ -752,11 +757,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Image::from_pixels(
-            self.width,
-            self.height,
-            PixelData::RGB8(image_data),
-        )
+        Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_4bit_image(&self) -> Image {
@@ -812,11 +813,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Image::from_pixels(
-            self.width,
-            self.height,
-            PixelData::RGB8(image_data),
-        )
+        Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_8bit_image(&self) -> Image {
@@ -865,11 +862,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Image::from_pixels(
-            self.width,
-            self.height,
-            PixelData::RGB8(image_data),
-        )
+        Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_16bit_image(&self) -> Image {
@@ -920,11 +913,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Image::from_pixels(
-            self.width,
-            self.height,
-            PixelData::RGB8(image_data),
-        )
+        Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_24bit_image(&self) -> Image {
@@ -978,11 +967,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 3);
         }
 
-        Image::from_pixels(
-            self.width,
-            self.height,
-            PixelData::RGB8(image_data),
-        )
+        Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_32bit_image(&self) -> Image {
@@ -1042,11 +1027,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 4);
         }
 
-        Image::from_pixels(
-            self.width,
-            self.height,
-            PixelData::RGBA8(image_data),
-        )
+        Image::from_pixels(self.width, self.height, PixelData::RGBA8(image_data))
     }
 
     fn decode_64bit_image(&self) -> Image {
@@ -1106,11 +1087,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Self::flip_v(&mut image_data, self.width, self.height, 4);
         }
 
-        Image::from_pixels(
-            self.width,
-            self.height,
-            PixelData::RGBA8(image_data),
-        )
+        Image::from_pixels(self.width, self.height, PixelData::RGBA8(image_data))
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -1146,14 +1123,20 @@ impl<R: Read + Seek> BmpDecoder<R> {
             BitmapCompression::BiRgb => (),
             BitmapCompression::BiRle8 => {
                 if self.dib_header.bits_per_pixel() != 8 {
-                    log_warn!("Invalid bit depth for RLE8 compression: {}", self.dib_header.bits_per_pixel());
+                    log_warn!(
+                        "Invalid bit depth for RLE8 compression: {}",
+                        self.dib_header.bits_per_pixel()
+                    );
                 }
 
                 self.decode_rle8()?;
             }
             BitmapCompression::BiRle4 => {
                 if self.dib_header.bits_per_pixel() != 4 {
-                    log_warn!("Invalid bit depth for RLE4 compression: {}", self.dib_header.bits_per_pixel());
+                    log_warn!(
+                        "Invalid bit depth for RLE4 compression: {}",
+                        self.dib_header.bits_per_pixel()
+                    );
                 }
 
                 self.decode_rle4()?;
@@ -1179,7 +1162,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
             32 => self.decode_32bit_image(),
             64 => self.decode_64bit_image(),
             _ => {
-                log_warn!("Invalid bit depth: {}. Attempting to decode as 24bit.", self.dib_header.bits_per_pixel());
+                log_warn!(
+                    "Invalid bit depth: {}. Attempting to decode as 24bit.",
+                    self.dib_header.bits_per_pixel()
+                );
                 self.decode_24bit_image()
             }
         };

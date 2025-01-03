@@ -16,8 +16,8 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub enum ImageInfo {
     Jpeg(JpegInfo),
     Png(PngInfo),
-    /*Bmp(BmpInfo),
-    Gif(GifInfo),
+    Bmp(BmpInfo),
+    /*Gif(GifInfo),
     Netpbm(NetpbmInfo),*/
 }
 
@@ -74,7 +74,8 @@ pub struct PngInfo {
     pub actl_info: Option<ActlChunk>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct BmpInfo {
     pub width: u32,
     pub height: u32,
