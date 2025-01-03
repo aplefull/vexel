@@ -4,10 +4,11 @@ use crate::utils::info::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::utils::types::ByteOrder;
 use crate::{log_debug, log_error, log_warn, Image, ImageFrame, PixelData, PixelFormat};
+use serde::Serialize;
 use std::f32::consts::PI;
 use std::fmt::Debug;
 use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
-use serde::Serialize;
+use tsify::Tsify;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JpegMarker {
@@ -337,7 +338,7 @@ const DEFAULT_QUANTIZATION_TABLE: [u16; 64] = [
     72, 92, 95, 98, 112, 100, 103, 99,
 ];
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
 pub enum JpegMode {
     Baseline,
     ExtendedSequential,
@@ -345,13 +346,13 @@ pub enum JpegMode {
     Lossless,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
 pub enum JpegCodingMethod {
     Huffman,
     Arithmetic,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct QuantizationTable {
     pub id: u8,
     pub precision: u8,
@@ -359,7 +360,7 @@ pub struct QuantizationTable {
     pub table: Vec<u16>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct HuffmanTable {
     pub id: u8,
     pub class: u8,
@@ -368,20 +369,20 @@ pub struct HuffmanTable {
     pub codes: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ArithmeticCodingValue {
     pub value: u8,
     pub length: u8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ArithmeticCodingTable {
     pub table_class: u8,
     pub identifier: u8,
     pub values: Vec<ArithmeticCodingValue>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ColorComponentInfo {
     pub id: u8,
     pub horizontal_sampling_factor: u8,
@@ -391,7 +392,7 @@ pub struct ColorComponentInfo {
     pub ac_table_selector: u8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct JFIFHeader {
     pub identifier: String,
     pub version_major: u8,
@@ -404,7 +405,7 @@ pub struct JFIFHeader {
     pub thumbnail_data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ExifHeader {
     pub identifier: String,
     pub byte_order: ByteOrder,
@@ -412,7 +413,7 @@ pub struct ExifHeader {
     pub ifd_entries: Vec<IFDEntry>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct IFDEntry {
     pub tag: u16,
     pub format: u16,
@@ -420,7 +421,7 @@ pub struct IFDEntry {
     pub value_offset: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ScanInfo {
     pub start_spectral: u8,
     pub end_spectral: u8,
@@ -444,7 +445,7 @@ pub struct ScanData {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ScanComponent {
     pub component_id: u8,
     pub dc_table_selector: u8,
@@ -647,7 +648,13 @@ impl ArithmeticDecoder {
 
         self.state_table[s] = self.next_state;
         self.mps_table[s] = self.next_mps;
-        log_debug!("State: {}, MPS: {}, QE: {}, Decision: {}", self.next_state, self.next_mps, self.qe, ret_val);
+        log_debug!(
+            "State: {}, MPS: {}, QE: {}, Decision: {}",
+            self.next_state,
+            self.next_mps,
+            self.qe,
+            ret_val
+        );
         ret_val != 0
     }
 
@@ -698,7 +705,7 @@ fn run_test_sequence() {
         //println!("{}: {}", i, d as usize);
         assert_eq!(d as usize, expected[i]);
     }
-    
+
     println!("Test passed!");
 }
 
@@ -2452,8 +2459,18 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut previous_dc = vec![0i32; planes.len()];
         let mut prev_dc_diffs = vec![0i32; planes.len()];
 
-        let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
-        let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
+        let max_h_samp = self
+            .components
+            .iter()
+            .map(|c| c.horizontal_sampling_factor)
+            .max()
+            .unwrap_or(1);
+        let max_v_samp = self
+            .components
+            .iter()
+            .map(|c| c.vertical_sampling_factor)
+            .max()
+            .unwrap_or(1);
 
         let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
         let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
@@ -2480,10 +2497,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let dc_table = self.components[comp_idx].dc_table_selector;
                     let ac_table = self.components[comp_idx].ac_table_selector;
 
-                    // These would come from the DAC marker segment
                     let small = 0; // Default L threshold
-                    let large = 1; // Default U threshold 
-                    let kx = 5;    // Default Kx value for AC coding
+                    let large = 1; // Default U threshold
+                    let kx = 5; // Default Kx value for AC coding
 
                     for v in 0..comp.vertical_sampling_factor {
                         for h in 0..comp.horizontal_sampling_factor {
@@ -2500,7 +2516,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                     large,
                                     kx,
                                     dc_table,
-                                    ac_table
+                                    ac_table,
                                 )?;
                             }
                         }
@@ -2523,18 +2539,26 @@ impl<R: Read + Seek> JpegDecoder<R> {
         dc_ctx: u8,
         ac_ctx: u8,
     ) -> VexelResult<()> {
-        // DC decoding with proper context based on prev diff
         let dc_context = if *prev_diff == 0 {
             0
         } else if *prev_diff > 0 {
-            if *prev_diff <= (1 << small) { 4 } else { 8 }
+            if *prev_diff <= (1 << small) {
+                4
+            } else {
+                8
+            }
         } else {
-            if *prev_diff >= -(1 << small) { 12 } else { 16 }
+            if *prev_diff >= -(1 << small) {
+                12
+            } else {
+                16
+            }
         };
 
         let s0 = dc_context;
 
-        if decoder.decode(s0) { // Non-zero DC
+        if decoder.decode(s0) {
+            // Non-zero DC
             let sign = decoder.decode(s0 + 1); // Sign in SS context
 
             let mut magnitude = 1;
@@ -2547,7 +2571,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
             let mut value = 1 << (magnitude - 1);
             s += 14; // Switch to M contexts
-            for i in (0..magnitude-1).rev() {
+            for i in (0..magnitude - 1).rev() {
                 if decoder.decode(s) {
                     value |= 1 << i;
                 }
@@ -2556,15 +2580,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
             if sign {
                 value = -value;
             }
-
-            // Rest of DC decoding...
         }
 
         // AC decoding with correct contexts
         let mut k = 1;
         while k <= 63 {
-            let se = 3 * (k-1); // Base EOB context
-            let s0 = se + 1;  // Base zero/non-zero context
+            let se = 3 * (k - 1); // Base EOB context
+            let s0 = se + 1; // Base zero/non-zero context
 
             if k > 1 && decoder.decode(se) {
                 // EOB, fill with zeros
@@ -2573,14 +2595,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
             if decoder.decode(s0) {
                 // Non-zero coefficient
-                let sign = decoder.decode(0xFF);  // Uniform context
-                // Rest of magnitude decoding...
+                let sign = decoder.decode(0xFF); // Uniform context
             }
             k += 1;
         }
 
         Ok(())
-    }    
+    }
     fn decode_huffman_to_planes(&mut self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
         if self.scans.len() < 1 {
             // Well, nothing to do here, how did this even happen?
@@ -3094,11 +3115,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             JpegCodingMethod::Huffman => self.decode_huffman_to_planes(&mut component_planes)?,
             JpegCodingMethod::Arithmetic => self.decode_arithmetic_to_planes(&mut component_planes)?,
         }
-        
-        println!("{:?}", component_planes[0]);
-        
-        run_test_sequence();
-        
+
         self.dequantize_planes(&mut component_planes)?;
         self.inverse_dct_planes(&mut component_planes)?;
 
@@ -3116,9 +3133,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     log_debug!("Found marker: {:?}", marker);
 
                     let result = match marker {
-                        JpegMarker::SOI => {
-                            Ok(())
-                        }
+                        JpegMarker::SOI => Ok(()),
                         JpegMarker::COM => self.read_com(),
                         JpegMarker::APP0 => self.read_app0_jfif(),
                         JpegMarker::APP1 => self.read_app1_exif(),

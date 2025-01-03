@@ -1,15 +1,16 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Result, Seek, SeekFrom};
+use tsify::Tsify;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ICCProfile {
     pub header: ProfileHeader,
     pub tag_table: TagTable,
     pub tag_data: HashMap<String, Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ProfileHeader {
     pub size: u32,
     pub preferred_cmm_type: u32,
@@ -30,13 +31,13 @@ pub struct ProfileHeader {
     pub profile_id: [u8; 16],
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct TagTable {
     pub tag_count: u32,
     pub entries: Vec<TagEntry>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct TagEntry {
     pub signature: String,
     pub offset: u32,

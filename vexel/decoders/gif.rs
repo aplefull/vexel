@@ -8,8 +8,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
+use tsify::Tsify;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct GifFrameInfo {
     pub left: u32,
     pub top: u32,
@@ -47,7 +48,7 @@ pub struct GifDecoder<R: Read + Seek> {
     reader: BitReader<R>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ApplicationExtension {
     pub loop_count: Option<u16>,
     pub buffer_size: Option<u8>,
@@ -65,7 +66,7 @@ pub struct GraphicsControlExtension {
     pub transparent_color_index: u8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct PlainTextExtension {
     pub left: u16,
     pub top: u16,
@@ -78,7 +79,7 @@ pub struct PlainTextExtension {
     pub text: String,
 }
 
-#[derive(Debug, Copy, Clone, Serialize)]
+#[derive(Debug, Copy, Clone, Serialize, Tsify)]
 pub enum DisposalMethod {
     None,
     Background,

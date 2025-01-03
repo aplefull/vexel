@@ -6,10 +6,11 @@ use serde::Serialize;
 use std::cmp::PartialEq;
 use std::fmt::Debug;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 #[wasm_bindgen]
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
 pub enum NetpbmFormat {
     P1, // ASCII bitmap
     P2, // ASCII graymap
@@ -21,7 +22,7 @@ pub enum NetpbmFormat {
 }
 
 #[wasm_bindgen]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub enum TupleType {
     BlackAndWhite,
     Grayscale,

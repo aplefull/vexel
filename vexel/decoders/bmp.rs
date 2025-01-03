@@ -6,8 +6,9 @@ use crate::{log_error, log_warn, Image, PixelData};
 use serde::Serialize;
 use std::fmt::Debug;
 use std::io::{Read, Seek, SeekFrom};
+use tsify::Tsify;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum BitmapCompression {
     BiRgb = 0,
     BiRle8 = 1,
@@ -42,7 +43,7 @@ impl BitmapCompression {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct BitmapFileHeader {
     pub file_size: u32,
     pub reserved1: u16,
@@ -50,7 +51,7 @@ pub struct BitmapFileHeader {
     pub pixel_offset: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub enum DibHeader {
     Core(BitmapCoreHeader),
     OS2V2(OS22XBitmapHeader),
@@ -111,7 +112,7 @@ impl DibHeader {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct BitmapCoreHeader {
     pub width: u16,
     pub height: u16,
@@ -119,7 +120,7 @@ pub struct BitmapCoreHeader {
     pub bits_per_pixel: u16,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct OS22XBitmapHeader {
     pub width: i32,
     pub height: i32,
@@ -141,7 +142,7 @@ pub struct OS22XBitmapHeader {
     pub identifier: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct BitmapInfoHeader {
     pub width: i32,
     pub height: i32,
@@ -155,7 +156,7 @@ pub struct BitmapInfoHeader {
     pub important_colors: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct BitmapV2InfoHeader {
     pub info: BitmapInfoHeader,
     pub red_mask: u32,
@@ -163,13 +164,13 @@ pub struct BitmapV2InfoHeader {
     pub blue_mask: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct BitmapV3InfoHeader {
     pub v2: BitmapV2InfoHeader,
     pub alpha_mask: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct BitmapV4Header {
     pub v3: BitmapV3InfoHeader,
     pub cs_type: u32,
@@ -179,7 +180,7 @@ pub struct BitmapV4Header {
     pub gamma_blue: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct BitmapV5Header {
     pub v4: BitmapV4Header,
     pub intent: u32,
@@ -188,21 +189,21 @@ pub struct BitmapV5Header {
     pub reserved: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ColorSpace {
     pub ciexyz_red: CIEXYZ,
     pub ciexyz_green: CIEXYZ,
     pub ciexyz_blue: CIEXYZ,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct CIEXYZ {
     pub x: i32,
     pub y: i32,
     pub z: i32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct ColorEntry {
     pub blue: u8,
     pub green: u8,

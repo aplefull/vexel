@@ -274,7 +274,7 @@ pub struct JsImage {
     frames: Vec<JsImageFrame>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Tsify)]
 pub struct JsImageFrame {
     width: u32,
     height: u32,
@@ -282,7 +282,7 @@ pub struct JsImageFrame {
     delay: u32,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = getInfo)]
 pub fn get_info(data: &[u8]) -> Result<ImageInfo, String> {
     let cursor = Cursor::new(data);
     let mut decoder = Vexel::new(cursor).map_err(|e| e.to_string())?;

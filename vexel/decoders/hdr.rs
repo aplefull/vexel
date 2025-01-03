@@ -4,8 +4,9 @@ use crate::utils::info::HdrInfo;
 use crate::{log_warn, Image, PixelData};
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom};
+use tsify::Tsify;
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Tsify)]
 pub enum HdrFormat {
     RGBE,
     XYZE,
