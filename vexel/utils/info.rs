@@ -7,18 +7,16 @@ use crate::decoders::png::{
     PngText, RenderingIntent, SignificantBits, SuggestedPalette, TransparencyData,
 };
 use crate::utils::icc::ICCProfile;
-use js_sys::JsString;
 use serde::Serialize;
 use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
-use wasm_bindgen::JsValue;
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub enum ImageInfo {
     Jpeg(JpegInfo),
-    /*Png(PngInfo),
-    Bmp(BmpInfo),
+    Png(PngInfo),
+    /*Bmp(BmpInfo),
     Gif(GifInfo),
     Netpbm(NetpbmInfo),*/
 }
@@ -49,7 +47,8 @@ pub struct JpegInfo {
     pub comments: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct PngInfo {
     pub width: u32,
     pub height: u32,

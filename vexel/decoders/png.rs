@@ -5,6 +5,7 @@ use crate::utils::info::PngInfo;
 use crate::utils::traits::SafeAccess;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use flate2::read::ZlibDecoder;
+use serde::Serialize;
 use std::fmt::Debug;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -67,7 +68,7 @@ fn get_chunk(chunk_type: &[u8; 4]) -> Option<PngChunk> {
     chunk
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum ColorType {
     Grayscale = 0,
     RGB = 2,
@@ -76,13 +77,13 @@ pub enum ColorType {
     RGBA = 6,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum CompressionMethod {
     Deflate = 0,
     None = 1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum FilterType {
     None = 0,
     Sub = 1,
@@ -91,21 +92,21 @@ pub enum FilterType {
     Paeth = 4,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum TransparencyData {
     Grayscale(u16),
     RGB(u16, u16, u16),
     Palette(Vec<u8>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum BackgroundData {
     Grayscale(u16),
     RGB(u16, u16, u16),
     PaletteIndex(u8),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub enum RenderingIntent {
     Perceptual = 0,
     RelativeColorimetric = 1,
@@ -113,7 +114,7 @@ pub enum RenderingIntent {
     AbsoluteColorimetric = 3,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct Chromaticities {
     pub white_point_x: f32,
     pub white_point_y: f32,
@@ -125,13 +126,13 @@ pub struct Chromaticities {
     pub blue_y: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ActlChunk {
     pub num_frames: u32,
     pub num_plays: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FctlChunk {
     pub sequence_number: u32,
     pub width: u32,
@@ -144,7 +145,7 @@ pub struct FctlChunk {
     pub blend_op: u8,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PngFrame {
     pub fctl_info: FctlChunk,
     pub fdat: Vec<u8>,
@@ -184,7 +185,7 @@ impl CrcCalculator {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum PngText {
     Basic {
         keyword: String,
@@ -202,7 +203,7 @@ pub enum PngText {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SuggestedPaletteSample {
     pub red: u16,
     pub green: u16,
@@ -211,27 +212,27 @@ pub struct SuggestedPaletteSample {
     pub frequency: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SuggestedPalette {
     pub name: String,
     pub sample_depth: u8,
     pub samples: Vec<SuggestedPaletteSample>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PhysicalDimensions {
     pub pixels_per_unit_x: u32,
     pub pixels_per_unit_y: u32,
     pub unit: PhysicalUnit,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum PhysicalUnit {
     Unknown,
     Meter,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum SignificantBits {
     Grayscale { gray: u8 },
     RGB { red: u8, green: u8, blue: u8 },
@@ -240,7 +241,7 @@ pub enum SignificantBits {
     RGBA { red: u8, green: u8, blue: u8, alpha: u8 },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ImageTime {
     pub year: u16,
     pub month: u8,
