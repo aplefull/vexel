@@ -1,12 +1,15 @@
+use crate::bitreader::BitReader;
+use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::NetpbmInfo;
+use crate::{log_error, log_warn, Image, PixelData};
+use serde::Serialize;
 use std::cmp::PartialEq;
 use std::fmt::Debug;
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use crate::bitreader::BitReader;
-use crate::{log_error, log_warn, Image, PixelData};
-use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::NetpbmInfo;
+use wasm_bindgen::prelude::wasm_bindgen;
 
-#[derive(Debug, Clone, PartialEq)]
+#[wasm_bindgen]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum NetpbmFormat {
     P1, // ASCII bitmap
     P2, // ASCII graymap
@@ -17,7 +20,8 @@ pub enum NetpbmFormat {
     P7, // PAM
 }
 
-#[derive(Debug, Clone)]
+#[wasm_bindgen]
+#[derive(Debug, Clone, Serialize)]
 pub enum TupleType {
     BlackAndWhite,
     Grayscale,
@@ -59,7 +63,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     pub fn height(&self) -> u32 {
         self.height
     }
-    
+
     pub fn get_info(&self) -> NetpbmInfo {
         NetpbmInfo {
             width: self.width,
@@ -83,14 +87,12 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         loop {
             let byte = reader.read_u8()?;
             match byte {
-                b'#' => {
-                    loop {
-                        let b = reader.read_u8()?;
-                        if b == b'\n' {
-                            break;
-                        }
+                b'#' => loop {
+                    let b = reader.read_u8()?;
+                    if b == b'\n' {
+                        break;
                     }
-                }
+                },
                 b' ' | b'\t' | b'\n' | b'\r' => continue,
                 _ => {
                     reader.seek(SeekFrom::Current(-1))?;
@@ -111,9 +113,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             match byte {
                 b'0'..=b'9' => {
                     has_digits = true;
-                    number = match number
-                        .checked_mul(10)
-                        .and_then(|n| n.checked_add((byte - b'0') as u32)) {
+                    number = match number.checked_mul(10).and_then(|n| n.checked_add((byte - b'0') as u32)) {
                         Some(n) => n,
                         None => {
                             log_warn!("Number is too large: {} + {}", number, (byte - b'0') as u32);
@@ -234,22 +234,30 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
             match key.as_str() {
                 "ENDHDR" => break,
-                "WIDTH" => self.width = value.parse::<u32>().or_else(|_| {
-                    log_warn!("Invalid WIDTH value: {}", value);
-                    Ok::<u32, VexelError>(0)
-                })?,
-                "HEIGHT" => self.height = value.parse::<u32>().or_else(|_| {
-                    log_warn!("Invalid HEIGHT value: {}", value);
-                    Ok::<u32, VexelError>(0)
-                })?,
-                "DEPTH" => self.depth = value.parse::<u8>().or_else(|_| {
-                    log_warn!("Invalid DEPTH value: {}", value);
-                    Ok::<u8, VexelError>(3)
-                })?,
-                "MAXVAL" => self.max_value = value.parse().or_else(|_| {
-                    log_warn!("Invalid MAXVAL value: {}", value);
-                    Ok::<u32, VexelError>(255)
-                })?,
+                "WIDTH" => {
+                    self.width = value.parse::<u32>().or_else(|_| {
+                        log_warn!("Invalid WIDTH value: {}", value);
+                        Ok::<u32, VexelError>(0)
+                    })?
+                }
+                "HEIGHT" => {
+                    self.height = value.parse::<u32>().or_else(|_| {
+                        log_warn!("Invalid HEIGHT value: {}", value);
+                        Ok::<u32, VexelError>(0)
+                    })?
+                }
+                "DEPTH" => {
+                    self.depth = value.parse::<u8>().or_else(|_| {
+                        log_warn!("Invalid DEPTH value: {}", value);
+                        Ok::<u8, VexelError>(3)
+                    })?
+                }
+                "MAXVAL" => {
+                    self.max_value = value.parse().or_else(|_| {
+                        log_warn!("Invalid MAXVAL value: {}", value);
+                        Ok::<u32, VexelError>(255)
+                    })?
+                }
                 "TUPLTYPE" => {
                     self.tuple_type = Some(match value.as_str() {
                         "BLACKANDWHITE" => TupleType::BlackAndWhite,
@@ -304,7 +312,6 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                     }
                 };
 
-
                 image_data.push(!(value as u8) & 1);
             }
         }
@@ -329,13 +336,16 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             .collect();
 
         if bits_per_sample == 8 {
-            Ok(PixelData::L8(values.iter()
-                .map(|&v| Self::scale_to_8bit(v, self.max_value))
-                .collect()))
+            Ok(PixelData::L8(
+                values.iter().map(|&v| Self::scale_to_8bit(v, self.max_value)).collect(),
+            ))
         } else {
-            Ok(PixelData::L16(values.iter()
-                .map(|&v| Self::scale_to_16bit(v, self.max_value))
-                .collect()))
+            Ok(PixelData::L16(
+                values
+                    .iter()
+                    .map(|&v| Self::scale_to_16bit(v, self.max_value))
+                    .collect(),
+            ))
         }
     }
 
@@ -355,15 +365,17 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             })
             .collect();
 
-
         if bits_per_sample == 8 {
-            Ok(PixelData::RGB8(values.iter()
-                .map(|&v| Self::scale_to_8bit(v, self.max_value))
-                .collect()))
+            Ok(PixelData::RGB8(
+                values.iter().map(|&v| Self::scale_to_8bit(v, self.max_value)).collect(),
+            ))
         } else {
-            Ok(PixelData::RGB16(values.iter()
-                .map(|&v| Self::scale_to_16bit(v, self.max_value))
-                .collect()))
+            Ok(PixelData::RGB16(
+                values
+                    .iter()
+                    .map(|&v| Self::scale_to_16bit(v, self.max_value))
+                    .collect(),
+            ))
         }
     }
 
@@ -421,9 +433,9 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
             for _ in 0..self.height {
                 for _ in 0..self.width {
-                    let r = reader.read_u8()?.clamp(0, self.max_value as u8);
-                    let g = reader.read_u8()?.clamp(0, self.max_value as u8);
-                    let b = reader.read_u8()?.clamp(0, self.max_value as u8);
+                    let r = reader.read_u8().unwrap_or(0).clamp(0, self.max_value as u8);
+                    let g = reader.read_u8().unwrap_or(0).clamp(0, self.max_value as u8);
+                    let b = reader.read_u8().unwrap_or(0).clamp(0, self.max_value as u8);
 
                     image_data.push(Self::scale_to_8bit(r as u32, self.max_value));
                     image_data.push(Self::scale_to_8bit(g as u32, self.max_value));
@@ -472,7 +484,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             // BLACKANDWHITE format (1 channel, maxval must be 1)
             (Some(TupleType::BlackAndWhite), 1) => {
                 if self.max_value != 1 {
-                    log_warn!("BLACKANDWHITE tuple type requires maxval of 1 for color channel, found: {}", self.max_value);
+                    log_warn!(
+                        "BLACKANDWHITE tuple type requires maxval of 1 for color channel, found: {}",
+                        self.max_value
+                    );
                     self.max_value = 1;
                 }
 
@@ -549,7 +564,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             // BLACKANDWHITE_ALPHA format (2 channels)
             (Some(TupleType::BlackAndWhiteAlpha), 2) => {
                 if self.max_value != 1 {
-                    log_warn!("BLACKANDWHITE_ALPHA tuple type requires maxval of 1 for color channel, found: {}", self.max_value);
+                    log_warn!(
+                        "BLACKANDWHITE_ALPHA tuple type requires maxval of 1 for color channel, found: {}",
+                        self.max_value
+                    );
                     self.max_value = 1;
                 }
 
@@ -638,27 +656,49 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
             _ => {
                 // TODO
-                log_error!("Invalid combination of tuple type and depth: {:?}, {}", self.tuple_type, self.depth);
+                log_error!(
+                    "Invalid combination of tuple type and depth: {:?}, {}",
+                    self.tuple_type,
+                    self.depth
+                );
                 panic!("Invalid combination of tuple type and depth");
             }
         }
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        self.read_header()?;
-        self.read_data()?;
+        match self.read_header() {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(VexelError::Custom("Error reading header".to_string()));
+            }
+        };
 
-        let mut pixel_data = match self.format {
-            Some(NetpbmFormat::P1) => self.decode_ascii_bitmap()?,
-            Some(NetpbmFormat::P2) => self.decode_ascii_graymap()?,
-            Some(NetpbmFormat::P3) => self.decode_ascii_pixmap()?,
-            Some(NetpbmFormat::P4) => self.decode_binary_bitmap()?,
-            Some(NetpbmFormat::P5) => self.decode_binary_graymap()?,
-            Some(NetpbmFormat::P6) => self.decode_binary_pixmap()?,
-            Some(NetpbmFormat::P7) => self.decode_pam()?,
+        match self.read_data() {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(VexelError::Custom("Error reading data".to_string()));
+            }
+        };
+
+        let mut result = match self.format {
+            Some(NetpbmFormat::P1) => self.decode_ascii_bitmap(),
+            Some(NetpbmFormat::P2) => self.decode_ascii_graymap(),
+            Some(NetpbmFormat::P3) => self.decode_ascii_pixmap(),
+            Some(NetpbmFormat::P4) => self.decode_binary_bitmap(),
+            Some(NetpbmFormat::P5) => self.decode_binary_graymap(),
+            Some(NetpbmFormat::P6) => self.decode_binary_pixmap(),
+            Some(NetpbmFormat::P7) => self.decode_pam(),
             None => {
                 log_warn!("Format not set before decoding, assuming binary pixmap (P6)");
-                self.decode_binary_pixmap()?
+                self.decode_binary_pixmap()
+            }
+        };
+
+        let mut pixel_data = match result {
+            Ok(data) => data,
+            Err(e) => {
+                return Err(VexelError::Custom("Error decoding image".to_string()));
             }
         };
 

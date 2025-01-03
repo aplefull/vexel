@@ -11,15 +11,15 @@ use crate::decoders::png::PngDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::{ImageInfo};
+use crate::utils::info::ImageInfo;
 
 pub use utils::{bitreader, logger};
 
+use serde::Serialize;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
-use serde::Serialize;
 use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -603,7 +603,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
                 ImageInfo::Jpeg(image_data)
             }
-            /*Decoders::Png(png_decoder) => {
+            Decoders::Png(png_decoder) => {
                 let image_data = png_decoder.get_info();
 
                 ImageInfo::Png(image_data)
@@ -622,7 +622,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = netpbm_decoder.get_info();
 
                 ImageInfo::Netpbm(image_data)
-            }*/
+            }
             _ => unimplemented!(),
         }
     }
@@ -777,7 +777,7 @@ pub fn get_info(data: &[u8]) -> Result<ImageInfo, String> {
 
     decoder.decode().map_err(|e| e.to_string())?;
     let info = decoder.get_info();
-    
+
     Ok(info)
 }
 

@@ -18,7 +18,7 @@ pub enum ImageInfo {
     Png(PngInfo),
     Bmp(BmpInfo),
     Gif(GifInfo),
-    /*Netpbm(NetpbmInfo),*/
+    Netpbm(NetpbmInfo),
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -105,7 +105,8 @@ pub struct GifInfo {
     pub plain_text_extensions: Vec<PlainTextExtension>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct NetpbmInfo {
     pub width: u32,
     pub height: u32,
