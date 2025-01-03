@@ -11,7 +11,7 @@ use crate::decoders::png::PngDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::ImageInfo;
+use crate::utils::info::{ImageInfo};
 
 pub use utils::{bitreader, logger};
 
@@ -19,6 +19,8 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
+use serde::Serialize;
+use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 macro_rules! impl_decode {
@@ -129,7 +131,7 @@ fn la16_to_u8_rgba(values: Vec<u16>) -> Vec<u8> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ImageFormat {
     Jpeg,
     JpegLs,
@@ -601,7 +603,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
                 ImageInfo::Jpeg(image_data)
             }
-            Decoders::Png(png_decoder) => {
+            /*Decoders::Png(png_decoder) => {
                 let image_data = png_decoder.get_info();
 
                 ImageInfo::Png(image_data)
@@ -620,7 +622,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = netpbm_decoder.get_info();
 
                 ImageInfo::Netpbm(image_data)
-            }
+            }*/
             _ => unimplemented!(),
         }
     }
@@ -751,29 +753,32 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     }
 }
 
-#[wasm_bindgen]
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct JsImage {
     width: u32,
     height: u32,
-    data: Vec<u8>,
+    image_format: ImageFormat,
+    frames: Vec<JsImageFrame>,
+}
+
+#[derive(Serialize)]
+pub struct JsImageFrame {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    delay: u32,
 }
 
 #[wasm_bindgen]
-impl JsImage {
-    #[wasm_bindgen(getter)]
-    pub fn width(&self) -> u32 {
-        self.width
-    }
+pub fn get_info(data: &[u8]) -> Result<ImageInfo, String> {
+    let cursor = Cursor::new(data);
+    let mut decoder = Vexel::new(cursor).map_err(|e| e.to_string())?;
 
-    #[wasm_bindgen(getter)]
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn data(&self) -> Vec<u8> {
-        self.data.clone()
-    }
+    decoder.decode().map_err(|e| e.to_string())?;
+    let info = decoder.get_info();
+    
+    Ok(info)
 }
 
 #[wasm_bindgen(js_name = decodeImage)]
@@ -786,7 +791,17 @@ pub fn decode_image(data: &[u8]) -> Result<JsImage, String> {
     Ok(JsImage {
         width: image.width(),
         height: image.height(),
-        data: image.as_rgba8(),
+        image_format: decoder.get_format(),
+        frames: image
+            .frames()
+            .iter()
+            .map(|frame| JsImageFrame {
+                width: frame.width(),
+                height: frame.height(),
+                pixels: frame.as_rgba8(),
+                delay: frame.delay(),
+            })
+            .collect(),
     })
 }
 

@@ -1,36 +1,48 @@
 use crate::decoders::bmp::{BitmapFileHeader, ColorEntry, DibHeader};
 use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtension};
-use crate::decoders::jpeg::{ArithmeticCodingTable, ExifHeader, JFIFHeader, QuantizationTable, ScanInfo};
+use crate::decoders::jpeg::{ArithmeticCodingTable, ColorComponentInfo, ExifHeader, JFIFHeader, JpegCodingMethod, JpegMode, QuantizationTable, ScanInfo};
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::{
     ActlChunk, BackgroundData, Chromaticities, ColorType, CompressionMethod, ImageTime, PhysicalDimensions, PngFrame,
     PngText, RenderingIntent, SignificantBits, SuggestedPalette, TransparencyData,
 };
 use crate::utils::icc::ICCProfile;
+use js_sys::JsString;
+use serde::Serialize;
+use tsify::Tsify;
+use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::JsValue;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub enum ImageInfo {
     Jpeg(JpegInfo),
-    Png(PngInfo),
+    /*Png(PngInfo),
     Bmp(BmpInfo),
     Gif(GifInfo),
-    Netpbm(NetpbmInfo),
+    Netpbm(NetpbmInfo),*/
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct JpegInfo {
     pub width: u32,
     pub height: u32,
     pub color_depth: u8,
     pub number_of_components: u8,
+    pub mode: JpegMode,
+    pub coding_method: JpegCodingMethod,
     pub jfif_header: Option<JFIFHeader>,
     pub exif_header: Option<ExifHeader>,
     pub quantization_tables: Vec<QuantizationTable>,
     pub ac_arithmetic_tables: Vec<ArithmeticCodingTable>,
     pub dc_arithmetic_tables: Vec<ArithmeticCodingTable>,
     pub scans: Vec<ScanInfo>,
-    pub spectral_selection: (u8, u8),
-    pub successive_approximation: (u8, u8),
+    pub color_components: Vec<ColorComponentInfo>,
+    pub spectral_selection_start: u8,
+    pub spectral_selection_end: u8,
+    pub successive_approximation_high: u8,
+    pub successive_approximation_low: u8,
     pub horizontal_sampling_factor: u8,
     pub vertical_sampling_factor: u8,
     pub restart_interval: u16,
