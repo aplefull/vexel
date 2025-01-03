@@ -17,8 +17,8 @@ pub enum ImageInfo {
     Jpeg(JpegInfo),
     Png(PngInfo),
     Bmp(BmpInfo),
-    /*Gif(GifInfo),
-    Netpbm(NetpbmInfo),*/
+    Gif(GifInfo),
+    /*Netpbm(NetpbmInfo),*/
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -84,7 +84,8 @@ pub struct BmpInfo {
     pub color_table: Vec<ColorEntry>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct GifInfo {
     pub width: u32,
     pub height: u32,
