@@ -623,6 +623,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
                 ImageInfo::Netpbm(image_data)
             }
+            Decoders::Hdr(hdr_decoder) => {
+                let image_data = hdr_decoder.get_info();
+
+                ImageInfo::Hdr(image_data)
+            }
             _ => unimplemented!(),
         }
     }

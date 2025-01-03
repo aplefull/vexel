@@ -1,6 +1,10 @@
 use crate::decoders::bmp::{BitmapFileHeader, ColorEntry, DibHeader};
 use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtension};
-use crate::decoders::jpeg::{ArithmeticCodingTable, ColorComponentInfo, ExifHeader, JFIFHeader, JpegCodingMethod, JpegMode, QuantizationTable, ScanInfo};
+use crate::decoders::hdr::HdrFormat;
+use crate::decoders::jpeg::{
+    ArithmeticCodingTable, ColorComponentInfo, ExifHeader, JFIFHeader, JpegCodingMethod, JpegMode, QuantizationTable,
+    ScanInfo,
+};
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::{
     ActlChunk, BackgroundData, Chromaticities, ColorType, CompressionMethod, ImageTime, PhysicalDimensions, PngFrame,
@@ -19,6 +23,7 @@ pub enum ImageInfo {
     Bmp(BmpInfo),
     Gif(GifInfo),
     Netpbm(NetpbmInfo),
+    Hdr(HdrInfo),
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -114,4 +119,18 @@ pub struct NetpbmInfo {
     pub depth: u8,
     pub format: Option<NetpbmFormat>,
     pub tuple_type: Option<TupleType>,
+}
+
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct HdrInfo {
+    pub width: u32,
+    pub height: u32,
+    pub gamma: Option<f32>,
+    pub exposure: Option<f32>,
+    pub pixel_aspect_ratio: Option<f32>,
+    pub color_correction: Option<[f32; 3]>,
+    pub primaries: Option<[f32; 8]>,
+    pub format: HdrFormat,
+    pub comments: Vec<String>,
 }

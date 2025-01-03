@@ -1,10 +1,12 @@
-use std::io::{Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
-use crate::{log_warn, Image, PixelData};
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::HdrInfo;
+use crate::{log_warn, Image, PixelData};
+use serde::Serialize;
+use std::io::{Read, Seek, SeekFrom};
 
-#[derive(Debug, Clone, Copy)]
-enum HdrFormat {
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum HdrFormat {
     RGBE,
     XYZE,
 }
@@ -144,8 +146,14 @@ impl<R: Read + Seek> HdrDecoder<R> {
                     }
                 }
                 self.primaries = Some([
-                    primaries[0], primaries[1], primaries[2], primaries[3],
-                    primaries[4], primaries[5], primaries[6], primaries[7],
+                    primaries[0],
+                    primaries[1],
+                    primaries[2],
+                    primaries[3],
+                    primaries[4],
+                    primaries[5],
+                    primaries[6],
+                    primaries[7],
                 ]);
 
                 continue;
@@ -184,17 +192,21 @@ impl<R: Read + Seek> HdrDecoder<R> {
                     (width_str, height_str)
                 }
                 _ => {
-                    return Err(VexelError::Custom(format!("Invalid header line: {}, cant parse image dimensions", line)));
+                    return Err(VexelError::Custom(format!(
+                        "Invalid header line: {}, cant parse image dimensions",
+                        line
+                    )));
                 }
             };
 
-            self.width = dim1.parse::<u32>()
-                .map_err(|_| "Failed to parse width")?;
-            self.height = dim2.parse::<u32>()
-                .map_err(|_| "Failed to parse height")?;
+            self.width = dim1.parse::<u32>().map_err(|_| "Failed to parse width")?;
+            self.height = dim2.parse::<u32>().map_err(|_| "Failed to parse height")?;
 
             if self.width == 0 || self.height == 0 {
-                return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+                return Err(VexelError::InvalidDimensions {
+                    width: self.width,
+                    height: self.height,
+                });
             }
 
             break;
@@ -262,12 +274,20 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 for x in 0..self.width as usize {
                     for component_index in 0..4 {
                         if scanline_start + x * 4 + component_index >= rgbe_data.len() {
-                            log_warn!("Scanline index out of bounds: {} >= {}", scanline_start + x * 4 + component_index, rgbe_data.len());
+                            log_warn!(
+                                "Scanline index out of bounds: {} >= {}",
+                                scanline_start + x * 4 + component_index,
+                                rgbe_data.len()
+                            );
                             break;
                         }
 
                         if x >= channel_data[component_index].len() {
-                            log_warn!("Scanline index out of bounds: {} >= {}", x, channel_data[component_index].len());
+                            log_warn!(
+                                "Scanline index out of bounds: {} >= {}",
+                                x,
+                                channel_data[component_index].len()
+                            );
                             break;
                         }
 
@@ -281,20 +301,30 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 let scanline_start = (y * self.width) as usize * 4;
 
                 if scanline_start + 4 >= rgbe_data.len() {
-                    log_warn!("Scanline index out of bounds: {} >= {}", scanline_start + 4, rgbe_data.len());
+                    log_warn!(
+                        "Scanline index out of bounds: {} >= {}",
+                        scanline_start + 4,
+                        rgbe_data.len()
+                    );
                     break;
                 }
 
-                self.reader.read_exact(&mut rgbe_data[scanline_start..scanline_start + 4])?;
+                self.reader
+                    .read_exact(&mut rgbe_data[scanline_start..scanline_start + 4])?;
 
                 let bytes_to_read = (self.width as usize - 1) * 4;
 
                 if scanline_start + bytes_to_read + 4 >= rgbe_data.len() {
-                    log_warn!("Scanline index out of bounds: {} >= {}", scanline_start + bytes_to_read + 4, rgbe_data.len());
+                    log_warn!(
+                        "Scanline index out of bounds: {} >= {}",
+                        scanline_start + bytes_to_read + 4,
+                        rgbe_data.len()
+                    );
                     break;
                 }
 
-                self.reader.read_exact(&mut rgbe_data[scanline_start + 4..scanline_start + bytes_to_read + 4])?;
+                self.reader
+                    .read_exact(&mut rgbe_data[scanline_start + 4..scanline_start + bytes_to_read + 4])?;
             }
         }
 
@@ -305,7 +335,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 log_warn!("Pixel index out of bounds: {} >= {}", i * 4 + 3, rgbe_data.len());
                 continue;
             }
-            
+
             if i * 3 + 2 >= rgb_data.len() {
                 log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, rgb_data.len());
                 continue;
@@ -337,12 +367,12 @@ impl<R: Read + Seek> HdrDecoder<R> {
                         log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, rgb_data.len());
                         continue;
                     }
-                    
+
                     if i * 3 + 2 >= final_data.len() {
                         log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, final_data.len());
                         continue;
                     }
-                    
+
                     let xyz = &rgb_data[i * 3..(i + 1) * 3];
                     let rgb = &mut final_data[i * 3..(i + 1) * 3];
 
@@ -357,6 +387,20 @@ impl<R: Read + Seek> HdrDecoder<R> {
 
                 Ok(PixelData::RGB32F(final_data))
             }
+        }
+    }
+
+    pub fn get_info(&self) -> HdrInfo {
+        HdrInfo {
+            width: self.width,
+            height: self.height,
+            gamma: self.gamma,
+            exposure: self.exposure,
+            pixel_aspect_ratio: self.pixel_aspect_ratio,
+            color_correction: self.color_correction,
+            primaries: self.primaries,
+            format: self.format,
+            comments: self.comments.clone(),
         }
     }
 
