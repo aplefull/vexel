@@ -1,7 +1,7 @@
-use std::collections::HashSet;
-use std::io::{Read, Seek, SeekFrom};
 use crate::utils::marker::Marker;
 use crate::utils::types::ByteOrder;
+use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
 
 pub struct BitReader<R: Read + Seek> {
     reader: R,

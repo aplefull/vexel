@@ -4,10 +4,10 @@ use crate::utils::info::GifInfo;
 use crate::utils::traits::SafeAccess;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use rayon::prelude::*;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
-use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GifFrameInfo {

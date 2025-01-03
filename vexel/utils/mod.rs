@@ -1,6 +1,7 @@
 pub mod bitreader;
 pub mod error;
 pub mod icc;
+pub mod image;
 pub mod info;
 pub mod logger;
 pub mod macros;
