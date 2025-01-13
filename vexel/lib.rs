@@ -10,6 +10,8 @@ use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
+use crate::decoders::avif::AvifDecoder;
+use crate::decoders::webp::WebpDecoder;
 
 pub(crate) use utils::bitreader;
 pub use utils::error::{VexelError, VexelResult};
@@ -43,6 +45,8 @@ pub enum Decoders<R: Read + Seek> {
     Hdr(HdrDecoder<R>),
     Tiff(TiffDecoder<R>),
     Tga(TgaDecoder<R>),
+    Avif(AvifDecoder<R>),
+    WebP(WebpDecoder<R>),
     Unknown,
 }
 
@@ -78,6 +82,8 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Hdr => Decoders::Hdr(HdrDecoder::new(reader)),
             ImageFormat::Tiff => Decoders::Tiff(TiffDecoder::new(reader)),
             ImageFormat::Tga => Decoders::Tga(TgaDecoder::new(reader)),
+            ImageFormat::Avif => Decoders::Avif(AvifDecoder::new(reader)),
+            ImageFormat::WebP => Decoders::WebP(WebpDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -95,6 +101,8 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Hdr(decoder) => impl_decode!(decoder),
             Decoders::Tiff(decoder) => impl_decode!(decoder),
             Decoders::Tga(decoder) => impl_decode!(decoder),
+            Decoders::Avif(decoder) => impl_decode!(decoder),
+            Decoders::WebP(decoder) => impl_decode!(decoder),
             Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
         }
     }
@@ -135,12 +143,20 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
                 ImageInfo::Hdr(image_data)
             }
+            Decoders::Avif(avif_decoder) => {
+                let image_data = avif_decoder.get_info();
+                ImageInfo::Avif(image_data)
+            }
+            Decoders::WebP(webp_decoder) => {
+                let image_data = webp_decoder.get_info();
+                ImageInfo::Webp(image_data)
+            }
             _ => unimplemented!(),
         }
     }
 
     fn try_guess_format(reader: &mut R) -> VexelResult<ImageFormat> {
-        let mut header = [0u8; 18];
+        let mut header = [0u8; 32];
         reader.read_exact(&mut header)?;
         reader.seek(SeekFrom::Start(0))?;
 
@@ -163,9 +179,26 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             return Ok(ImageFormat::Png);
         }
 
-        // GIF87a and GIF89a
+        // GIF
         if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
             return Ok(ImageFormat::Gif);
+        }
+
+        // WebP
+        if header.starts_with(b"RIFF") && &header[8..12] == b"WEBP" {
+            return Ok(ImageFormat::WebP);
+        }
+
+        // AVIF
+        if &header[4..8] == b"ftyp" {
+            let brands = [
+                &header[8..12],
+                &header[16..20], &header[20..24], &header[24..28],
+            ];
+            
+            if brands.iter().any(|&brand| brand == b"avif" || brand == b"avis") {
+                return Ok(ImageFormat::Avif);
+            }
         }
 
         // Netpbm

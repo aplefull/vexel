@@ -24,6 +24,8 @@ pub enum ImageInfo {
     Gif(GifInfo),
     Netpbm(NetpbmInfo),
     Hdr(HdrInfo),
+    Webp(WebpInfo),
+    Avif(AvifInfo),
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -133,4 +135,18 @@ pub struct HdrInfo {
     pub primaries: Option<[f32; 8]>,
     pub format: HdrFormat,
     pub comments: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct WebpInfo {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct AvifInfo {
+    pub width: u32,
+    pub height: u32,
 }
