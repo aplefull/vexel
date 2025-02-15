@@ -1,8 +1,8 @@
-use std::io::{Read, Seek, SeekFrom};
-use crate::{Image, PixelData};
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::types::ByteOrder;
+use crate::{Image, PixelData};
+use std::io::{Read, Seek, SeekFrom};
 
 // TODO some tags are commented out since they are duplicates, but with different values
 // This probably requires a different approach to handle them
@@ -382,7 +382,7 @@ impl TryFrom<u16> for Compression {
             5 => Ok(Self::LZW),
             6 => Ok(Self::JPEG),
             32773 => Ok(Self::PackBits),
-            _ => Err(VexelError::Custom(format!("Invalid compression value: {}", value)))
+            _ => Err(VexelError::Custom(format!("Invalid compression value: {}", value))),
         }
     }
 }
@@ -394,9 +394,9 @@ pub enum PhotometricInterpretation {
     RGB = 2,              // RGB color model
     Palette = 3,          // Color map indexed
     TransparencyMask = 4, // Transparency mask
-    CMYK = 5,            // CMYK color model
-    YCbCr = 6,           // YCbCr color model
-    CIELab = 8,          // CIE L*a*b* color model
+    CMYK = 5,             // CMYK color model
+    YCbCr = 6,            // YCbCr color model
+    CIELab = 8,           // CIE L*a*b* color model
 }
 
 impl TryFrom<u32> for PhotometricInterpretation {
@@ -412,7 +412,10 @@ impl TryFrom<u32> for PhotometricInterpretation {
             5 => Ok(Self::CMYK),
             6 => Ok(Self::YCbCr),
             8 => Ok(Self::CIELab),
-            _ => Err(VexelError::Custom(format!("Invalid photometric interpretation value: {}", value)))
+            _ => Err(VexelError::Custom(format!(
+                "Invalid photometric interpretation value: {}",
+                value
+            ))),
         }
     }
 }
@@ -432,7 +435,7 @@ impl TryFrom<u32> for ResolutionUnit {
             1 => Ok(Self::NoUnit),
             2 => Ok(Self::Inch),
             3 => Ok(Self::Centimeter),
-            _ => Err(VexelError::Custom(format!("Invalid resolution unit value: {}", value)))
+            _ => Err(VexelError::Custom(format!("Invalid resolution unit value: {}", value))),
         }
     }
 }
@@ -451,8 +454,8 @@ pub enum Orientation {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlanarConfiguration {
-    Chunky = 1,  // RGB RGB RGB ...
-    Planar = 2,  // RRR... GGG... BBB...
+    Chunky = 1, // RGB RGB RGB ...
+    Planar = 2, // RRR... GGG... BBB...
 }
 
 impl TryFrom<u32> for PlanarConfiguration {
@@ -462,7 +465,10 @@ impl TryFrom<u32> for PlanarConfiguration {
         match value {
             1 => Ok(Self::Chunky),
             2 => Ok(Self::Planar),
-            _ => Err(VexelError::Custom(format!("Invalid planar configuration value: {}", value)))
+            _ => Err(VexelError::Custom(format!(
+                "Invalid planar configuration value: {}",
+                value
+            ))),
         }
     }
 }
@@ -544,7 +550,7 @@ where
             1 => reader.read_u8()? as u32,
             3 => reader.read_u16()? as u32,
             4 => reader.read_u32()?,
-            _ => return Err(VexelError::Custom("Unsupported type".to_string()))
+            _ => return Err(VexelError::Custom("Unsupported type".to_string())),
         };
 
         values.push(T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
@@ -600,7 +606,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             3 => 2,
             4 => 4,
             5 => 8,
-            _ => return Err(VexelError::Custom(format!("Unsupported type: {}", type_)))
+            _ => return Err(VexelError::Custom(format!("Unsupported type: {}", type_))),
         };
 
         let total_bytes = bytes_per_value * count;
@@ -612,22 +618,26 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 1 => {
                     for i in 0..count {
                         let value = (value_offset >> (i * 8)) & 0xFF;
-                        values.push(T::try_from(value)
-                            .map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
+                        values.push(
+                            T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?,
+                        );
                     }
                 }
                 3 => {
                     for i in 0..count {
                         let value = (value_offset >> (i * 16)) & 0xFFFF;
-                        values.push(T::try_from(value)
-                            .map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
+                        values.push(
+                            T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?,
+                        );
                     }
                 }
                 4 => {
-                    values.push(T::try_from(value_offset)
-                        .map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
+                    values.push(
+                        T::try_from(value_offset)
+                            .map_err(|_| VexelError::Custom("Value conversion error".to_string()))?,
+                    );
                 }
-                _ => return Err(VexelError::Custom("Invalid type for inline value".to_string()))
+                _ => return Err(VexelError::Custom("Invalid type for inline value".to_string())),
             }
         } else {
             // Values are stored at the offset
@@ -646,11 +656,10 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         }
                         numerator
                     }
-                    _ => return Err(VexelError::Custom("Unsupported type".to_string()))
+                    _ => return Err(VexelError::Custom("Unsupported type".to_string())),
                 };
 
-                values.push(T::try_from(value)
-                    .map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
+                values.push(T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
             }
         }
 
@@ -691,22 +700,30 @@ impl<R: Read + Seek> TiffDecoder<R> {
             match tag {
                 256 => self.header.image_width = read_single_value(type_, value_offset, &mut self.reader)?,
                 257 => self.header.image_length = read_single_value(type_, value_offset, &mut self.reader)?,
-                258 => self.header.bits_per_sample = read_multiple_values(type_, count, value_offset, &mut self.reader)?,
-                259 => self.header.compression = match read_single_value(type_, value_offset, &mut self.reader)? {
-                    1 => Compression::None,
-                    2 => Compression::CCITT1D,
-                    3 => Compression::Group3Fax,
-                    4 => Compression::Group4Fax,
-                    5 => Compression::LZW,
-                    6 => Compression::JPEG,
-                    32773 => Compression::PackBits,
-                    _ => Compression::None,
-                },
-                262 => self.header.photometric_interpretation = read_single_value(type_, value_offset, &mut self.reader)?,
+                258 => {
+                    self.header.bits_per_sample = read_multiple_values(type_, count, value_offset, &mut self.reader)?
+                }
+                259 => {
+                    self.header.compression = match read_single_value(type_, value_offset, &mut self.reader)? {
+                        1 => Compression::None,
+                        2 => Compression::CCITT1D,
+                        3 => Compression::Group3Fax,
+                        4 => Compression::Group4Fax,
+                        5 => Compression::LZW,
+                        6 => Compression::JPEG,
+                        32773 => Compression::PackBits,
+                        _ => Compression::None,
+                    }
+                }
+                262 => {
+                    self.header.photometric_interpretation = read_single_value(type_, value_offset, &mut self.reader)?
+                }
                 273 => self.header.strip_offsets = read_multiple_values(type_, count, value_offset, &mut self.reader)?,
                 277 => self.header.samples_per_pixel = read_single_value(type_, value_offset, &mut self.reader)?,
                 278 => self.header.rows_per_strip = read_single_value(type_, value_offset, &mut self.reader)?,
-                279 => self.header.strip_byte_counts = read_multiple_values(type_, count, value_offset, &mut self.reader)?,
+                279 => {
+                    self.header.strip_byte_counts = read_multiple_values(type_, count, value_offset, &mut self.reader)?
+                }
                 282 => self.header.x_resolution = read_rational(value_offset, &mut self.reader)?,
                 283 => self.header.y_resolution = read_rational(value_offset, &mut self.reader)?,
                 284 => self.header.planar_configuration = read_single_value(type_, value_offset, &mut self.reader)?,
@@ -727,18 +744,23 @@ impl<R: Read + Seek> TiffDecoder<R> {
         match header.photometric_interpretation {
             PhotometricInterpretation::WhiteIsZero | PhotometricInterpretation::BlackIsZero => {
                 // 0 = WhiteIsZero, 1 = BlackIsZero (Grayscale)
-                match (header.samples_per_pixel, header.bits_per_sample.get(0).copied().unwrap_or(1)) {
+                match (
+                    header.samples_per_pixel,
+                    header.bits_per_sample.get(0).copied().unwrap_or(1),
+                ) {
                     (1, 1) => Ok(PixelData::L1(data)),
                     (1, 8) => Ok(PixelData::L8(data)),
                     (1, 16) => {
-                        let pixels = data.chunks_exact(2)
+                        let pixels = data
+                            .chunks_exact(2)
                             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
                             .collect();
                         Ok(PixelData::L16(pixels))
                     }
-                    (2, 8) => Ok(PixelData::LA8(data)),  // Grayscale with alpha
+                    (2, 8) => Ok(PixelData::LA8(data)), // Grayscale with alpha
                     (2, 16) => {
-                        let pixels = data.chunks_exact(4)
+                        let pixels = data
+                            .chunks_exact(4)
                             .map(|chunk| {
                                 let gray = u16::from_le_bytes([chunk[0], chunk[1]]);
                                 let alpha = u16::from_le_bytes([chunk[2], chunk[3]]);
@@ -752,16 +774,20 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         "Unsupported grayscale format: {} samples with {} bits",
                         header.samples_per_pixel,
                         header.bits_per_sample.get(0).unwrap_or(&0)
-                    )))
+                    ))),
                 }
             }
             PhotometricInterpretation::RGB => {
                 // RGB
-                match (header.samples_per_pixel, header.bits_per_sample.get(0).copied().unwrap_or(8)) {
+                match (
+                    header.samples_per_pixel,
+                    header.bits_per_sample.get(0).copied().unwrap_or(8),
+                ) {
                     (3, 8) => Ok(PixelData::RGB8(data)),
                     (4, 8) => Ok(PixelData::RGBA8(data)),
                     (3, 16) => {
-                        let pixels = data.chunks_exact(6)
+                        let pixels = data
+                            .chunks_exact(6)
                             .map(|chunk| {
                                 vec![
                                     u16::from_le_bytes([chunk[0], chunk[1]]),
@@ -774,7 +800,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         Ok(PixelData::RGB16(pixels))
                     }
                     (4, 16) => {
-                        let pixels = data.chunks_exact(8)
+                        let pixels = data
+                            .chunks_exact(8)
                             .map(|chunk| {
                                 vec![
                                     u16::from_le_bytes([chunk[0], chunk[1]]),
@@ -791,7 +818,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         "Unsupported RGB format: {} samples with {} bits",
                         header.samples_per_pixel,
                         header.bits_per_sample.get(0).unwrap_or(&0)
-                    )))
+                    ))),
                 }
             }
             PhotometricInterpretation::Palette => {
@@ -821,7 +848,12 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         let mut bytes = Vec::new();
 
-        for (offset, byte_count) in self.header.strip_offsets.iter().zip(self.header.strip_byte_counts.iter()) {
+        for (offset, byte_count) in self
+            .header
+            .strip_offsets
+            .iter()
+            .zip(self.header.strip_byte_counts.iter())
+        {
             self.reader.seek(SeekFrom::Start(*offset as u64))?;
 
             let mut strip_data = vec![0u8; *byte_count as usize];
@@ -829,7 +861,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
             let decompressed = match self.header.compression {
                 Compression::None => strip_data,
-                _ => return Err(VexelError::Custom("Unsupported compression".to_string()))
+                _ => return Err(VexelError::Custom("Unsupported compression".to_string())),
             };
 
             bytes.extend_from_slice(&decompressed);

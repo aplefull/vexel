@@ -1,20 +1,20 @@
+use crate::bitreader::BitReader;
+use crate::utils::error::VexelResult;
+use crate::utils::marker::Marker;
+use crate::{Image, PixelData};
 use std::fmt;
 use std::fmt::Debug;
 use std::io::{Cursor, Error, Read, Seek};
-use crate::bitreader::BitReader;
-use crate::{Image, PixelData};
-use crate::utils::error::VexelResult;
-use crate::utils::marker::Marker;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JpegLsMarker {
-    SOI, // Start of Image
-    EOI, // End of Image
+    SOI,   // Start of Image
+    EOI,   // End of Image
     SOF55, // Start of Frame (JPEG-LS)
-    SOS, // Start of Scan
-    LSE, // JPEG-LS preset parameters
-    DNL, // Define Number of Lines
-    DRI, // Define Restart Interval
+    SOS,   // Start of Scan
+    LSE,   // JPEG-LS preset parameters
+    DNL,   // Define Number of Lines
+    DRI,   // Define Restart Interval
 
     // Restart interval termination
     RST0,
@@ -48,8 +48,7 @@ pub enum JpegLsMarker {
 }
 
 impl Marker for JpegLsMarker {
-    fn from_u16(value: u16) -> Option<Self>
-    {
+    fn from_u16(value: u16) -> Option<Self> {
         match value {
             0xFFD8 => Some(JpegLsMarker::SOI),
             0xFFD9 => Some(JpegLsMarker::EOI),
@@ -407,7 +406,9 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             *a = std::cmp::max(2, (self.range as i32 + 2i32.pow(5)) / 2i32.pow(6));
         }
 
-        self.j = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        self.j = [
+            0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        ];
     }
 
     fn compute_local_gradients(&self, ra: u16, rb: u16, rc: u16, rd: u16) -> (i32, i32, i32) {
@@ -438,7 +439,12 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         k
     }
 
-    fn decode_mapped_error_value(&self, k: u16, g_limit: u16, reader: &mut BitReader<Cursor<Vec<u8>>>) -> Result<u32, Error> {
+    fn decode_mapped_error_value(
+        &self,
+        k: u16,
+        g_limit: u16,
+        reader: &mut BitReader<Cursor<Vec<u8>>>,
+    ) -> Result<u32, Error> {
         let mut value;
         let mut unary_code = 0u32;
 
@@ -491,12 +497,17 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         let sign = if !ri_type && ra > rb { -1 } else { 1 };
         let px = if ri_type { ra } else { rb };
 
-        let a = if ri_type { self.a[366] + (self.n[366] >> 1) } else { self.a[365] };
+        let a = if ri_type {
+            self.a[366] + (self.n[366] >> 1)
+        } else {
+            self.a[365]
+        };
         let q = 365 + if ri_type { 1 } else { 0 };
 
         let k = self.compute_golomb(self.n[q] as u32, a as u32);
 
-        let em_errval = self.decode_mapped_error_value(k, self.limit - self.j[self.run_index as usize] as u16 - 1, reader)?;
+        let em_errval =
+            self.decode_mapped_error_value(k, self.limit - self.j[self.run_index as usize] as u16 - 1, reader)?;
         let t_em_errval = em_errval + if ri_type { 1 } else { 0 };
 
         let mut errval = if t_em_errval == 0 {
@@ -563,14 +574,30 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
     }
 
     fn quantize_gradient(&mut self, value: i32) -> i16 {
-        if value <= -self.t3 { return -4; }
-        if value <= -self.t2 { return -3; }
-        if value <= -self.t1 { return -2; }
-        if value <= -(self.near as i32) { return -1; }
-        if value <= self.near as i32 { return 0; }
-        if value <= self.t1 { return 1; }
-        if value <= self.t2 { return 2; }
-        if value <= self.t3 { return 3; }
+        if value <= -self.t3 {
+            return -4;
+        }
+        if value <= -self.t2 {
+            return -3;
+        }
+        if value <= -self.t1 {
+            return -2;
+        }
+        if value <= -(self.near as i32) {
+            return -1;
+        }
+        if value <= self.near as i32 {
+            return 0;
+        }
+        if value <= self.t1 {
+            return 1;
+        }
+        if value <= self.t2 {
+            return 2;
+        }
+        if value <= self.t3 {
+            return 3;
+        }
 
         4
     }
@@ -622,13 +649,21 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         if self.b[q] <= -self.n[q] {
             self.b[q] += self.n[q];
 
-            if self.c[q] > self.min_c as i32 { self.c[q] -= 1 };
-            if self.b[q] <= -self.n[q] { self.b[q] = -self.n[q] + 1 };
+            if self.c[q] > self.min_c as i32 {
+                self.c[q] -= 1
+            };
+            if self.b[q] <= -self.n[q] {
+                self.b[q] = -self.n[q] + 1
+            };
         } else if self.b[q] > 0 {
             self.b[q] -= self.n[q];
 
-            if self.c[q] < self.max_c as i32 { self.c[q] += 1 };
-            if self.b[q] > 0 { self.b[q] = 0 };
+            if self.c[q] < self.max_c as i32 {
+                self.c[q] += 1
+            };
+            if self.b[q] > 0 {
+                self.b[q] = 0
+            };
         }
     }
 
@@ -639,26 +674,24 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
     pub fn decode(&mut self) -> VexelResult<Image> {
         while let Ok(marker) = self.reader.next_marker(&JPEG_LS_MARKERS) {
             match marker {
-                Some(marker) => {
-                    match marker {
-                        JpegLsMarker::SOI => {
-                            println!("Start of image");
-                        }
-                        JpegLsMarker::SOF55 => self.read_sof_info()?,
-                        JpegLsMarker::SOS => {
-                            self.read_sos_info()?;
-                            self.init_default_parameters();
-                            self.read_sos_bitstream()?;
-                        }
-                        JpegLsMarker::EOI => {
-                            println!("End of image marker found");
-                            break;
-                        }
-                        _ => {
-                            println!("Unhandled marker found: {:?}", marker);
-                        }
+                Some(marker) => match marker {
+                    JpegLsMarker::SOI => {
+                        println!("Start of image");
                     }
-                }
+                    JpegLsMarker::SOF55 => self.read_sof_info()?,
+                    JpegLsMarker::SOS => {
+                        self.read_sos_info()?;
+                        self.init_default_parameters();
+                        self.read_sos_bitstream()?;
+                    }
+                    JpegLsMarker::EOI => {
+                        println!("End of image marker found");
+                        break;
+                    }
+                    _ => {
+                        println!("Unhandled marker found: {:?}", marker);
+                    }
+                },
                 None => {
                     println!("No more markers found");
                     break;
@@ -692,17 +725,29 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
                 if row > 0 {
                     rb = prev_row[col as usize];
-                    rc = if col > 0 { prev_row[(col - 1) as usize] } else { prev_ra_0 };
-                    ra = if col > 0 { this_row[(col - 1) as usize] } else {
+                    rc = if col > 0 {
+                        prev_row[(col - 1) as usize]
+                    } else {
+                        prev_ra_0
+                    };
+                    ra = if col > 0 {
+                        this_row[(col - 1) as usize]
+                    } else {
                         prev_ra_0 = rb;
                         prev_ra_0
                     };
-                    rd = if col + 1 < self.width { prev_row[(col + 1) as usize] } else { rb };
+                    rd = if col + 1 < self.width {
+                        prev_row[(col + 1) as usize]
+                    } else {
+                        rb
+                    };
                 } else {
                     rb = 0;
                     rc = 0;
                     rd = 0;
-                    ra = if col > 0 { this_row[(col - 1) as usize] } else {
+                    ra = if col > 0 {
+                        this_row[(col - 1) as usize]
+                    } else {
                         prev_ra_0 = 0;
                         prev_ra_0
                     };
@@ -791,7 +836,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
                             -1
                         }
-                        false => 1
+                        false => 1,
                     };
 
                     let q = self.compute_q(q1, q2, q3);
@@ -807,7 +852,9 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
                     errval = self.dequantize_errval(errval);
 
-                    if sign < 0 { errval = -errval; }
+                    if sign < 0 {
+                        errval = -errval;
+                    }
 
                     rx = px + errval;
 
