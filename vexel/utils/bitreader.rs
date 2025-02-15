@@ -119,6 +119,26 @@ impl<R: Read + Seek> BitReader<R> {
         }
     }
 
+    /// Reads a single 24-bit value from the bitstream.
+    /// Since Rust does not have a 24-bit integer type, the value is returned as a 32-bit integer.
+    ///
+    /// # Returns
+    /// - The 24-bit value read, as a 32-bit integer
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read_u24(&mut self) -> Result<u32, std::io::Error> {
+        if self.little_endian {
+            let b0 = self.read_u8()? as u32;
+            let b1 = self.read_u8()? as u32;
+            let b2 = self.read_u8()? as u32;
+            Ok(b0 | (b1 << 8) | (b2 << 16))
+        } else {
+            let b0 = self.read_u8()? as u32;
+            let b1 = self.read_u8()? as u32;
+            let b2 = self.read_u8()? as u32;
+            Ok((b0 << 16) | (b1 << 8) | b2)
+        }
+    }
+
     /// Reads a single 32-bit value from the bitstream.
     ///
     /// # Returns
