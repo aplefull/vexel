@@ -14,6 +14,8 @@ use crate::utils::icc::ICCProfile;
 use serde::Serialize;
 use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
+use crate::decoders::avif::{AvifColorInfo, AvifFrameInfo, AvifProperties};
+use crate::decoders::webp::{AlphaChunkInfo, WebpAnimationInfo, WebpCompressionType, WebpExtendedInfo, WebpFrame};
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
@@ -142,6 +144,14 @@ pub struct HdrInfo {
 pub struct WebpInfo {
     pub width: u32,
     pub height: u32,
+    pub compression_type: WebpCompressionType,
+    pub has_alpha: bool,
+    pub has_animation: bool,
+    pub animation_info: Option<WebpAnimationInfo>,
+    pub frames: Vec<WebpFrame>,
+    pub extended_info: Option<WebpExtendedInfo>,
+    pub background_color: Option<[u8; 4]>,
+    pub alpha_info: Option<AlphaChunkInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -149,4 +159,9 @@ pub struct WebpInfo {
 pub struct AvifInfo {
     pub width: u32,
     pub height: u32,
+    pub color_info: AvifColorInfo,
+    pub is_animated: bool,
+    pub loop_count: u32,
+    pub properties: AvifProperties,
+    pub frames: Vec<AvifFrameInfo>,
 }
