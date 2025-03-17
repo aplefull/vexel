@@ -2451,157 +2451,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.samples_to_image(samples)
     }
 
-    fn decode_arithmetic_to_planes(&mut self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
-        let scan = &self.scans.clone()[0];
-        let mut decoder = ArithmeticDecoder::new(BitReader::new(Cursor::new(scan.data.clone())));
-        decoder.init();
-
-        let mut previous_dc = vec![0i32; planes.len()];
-        let mut prev_dc_diffs = vec![0i32; planes.len()];
-
-        let max_h_samp = self
-            .components
-            .iter()
-            .map(|c| c.horizontal_sampling_factor)
-            .max()
-            .unwrap_or(1);
-        let max_v_samp = self
-            .components
-            .iter()
-            .map(|c| c.vertical_sampling_factor)
-            .max()
-            .unwrap_or(1);
-
-        let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-        let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
-
-        let mut restart_counter = self.restart_interval as u32;
-
-        for mcu_y in 0..mcu_height {
-            for mcu_x in 0..mcu_width {
-                // Handle restart interval
-                if self.restart_interval > 0 {
-                    if restart_counter == 0 {
-                        prev_dc_diffs.fill(0);
-                        previous_dc.fill(0);
-                        decoder = ArithmeticDecoder::new(BitReader::new(Cursor::new(scan.data.clone())));
-                        decoder.init();
-                        restart_counter = self.restart_interval as u32;
-                    }
-                    restart_counter = restart_counter.saturating_sub(1);
-                }
-
-                // Process components
-                for (comp_idx, comp) in self.components.clone().iter().enumerate() {
-                    // Get conditioning parameters from AC/DC tables
-                    let dc_table = self.components[comp_idx].dc_table_selector;
-                    let ac_table = self.components[comp_idx].ac_table_selector;
-
-                    let small = 0; // Default L threshold
-                    let large = 1; // Default U threshold
-                    let kx = 5; // Default Kx value for AC coding
-
-                    for v in 0..comp.vertical_sampling_factor {
-                        for h in 0..comp.horizontal_sampling_factor {
-                            let block_x = mcu_x * comp.horizontal_sampling_factor as u32 + h as u32;
-                            let block_y = mcu_y * comp.vertical_sampling_factor as u32 + v as u32;
-
-                            if let Some(block) = planes[comp_idx].get_block_mut(block_x, block_y) {
-                                self.decode_arithmetic_block(
-                                    &mut decoder,
-                                    block,
-                                    &mut previous_dc[comp_idx],
-                                    &mut prev_dc_diffs[comp_idx],
-                                    small,
-                                    large,
-                                    kx,
-                                    dc_table,
-                                    ac_table,
-                                )?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-    fn decode_arithmetic_block(
-        &mut self,
-        decoder: &mut ArithmeticDecoder,
-        block: &mut [i32],
-        prev_dc: &mut i32,
-        prev_diff: &mut i32,
-        small: u8,
-        large: u8,
-        kx: u8,
-        dc_ctx: u8,
-        ac_ctx: u8,
-    ) -> VexelResult<()> {
-        let dc_context = if *prev_diff == 0 {
-            0
-        } else if *prev_diff > 0 {
-            if *prev_diff <= (1 << small) {
-                4
-            } else {
-                8
-            }
-        } else {
-            if *prev_diff >= -(1 << small) {
-                12
-            } else {
-                16
-            }
-        };
-
-        let s0 = dc_context;
-
-        if decoder.decode(s0) {
-            // Non-zero DC
-            let sign = decoder.decode(s0 + 1); // Sign in SS context
-
-            let mut magnitude = 1;
-            let mut s = s0 + if sign { 3 } else { 2 }; // SN or SP context
-
-            while decoder.decode(s) {
-                magnitude += 1;
-                s += 1;
-            }
-
-            let mut value = 1 << (magnitude - 1);
-            s += 14; // Switch to M contexts
-            for i in (0..magnitude - 1).rev() {
-                if decoder.decode(s) {
-                    value |= 1 << i;
-                }
-            }
-
-            if sign {
-                value = -value;
-            }
-        }
-
-        // AC decoding with correct contexts
-        let mut k = 1;
-        while k <= 63 {
-            let se = 3 * (k - 1); // Base EOB context
-            let s0 = se + 1; // Base zero/non-zero context
-
-            if k > 1 && decoder.decode(se) {
-                // EOB, fill with zeros
-                break;
-            }
-
-            if decoder.decode(s0) {
-                // Non-zero coefficient
-                let sign = decoder.decode(0xFF); // Uniform context
-            }
-            k += 1;
-        }
-
-        Ok(())
-    }
     fn decode_huffman_to_planes(&mut self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
         if self.scans.len() < 1 {
             // Well, nothing to do here, how did this even happen?
@@ -3074,7 +2923,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             Ok(PixelData::RGB16(pixels16))
         }
     }
-
+    
     fn decode_baseline(&mut self) -> VexelResult<Image> {
         // Calculate dimensions for each component based on sampling
         let max_h_samp = self
@@ -3113,7 +2962,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         match self.coding_method {
             JpegCodingMethod::Huffman => self.decode_huffman_to_planes(&mut component_planes)?,
-            JpegCodingMethod::Arithmetic => self.decode_arithmetic_to_planes(&mut component_planes)?,
+            JpegCodingMethod::Arithmetic => {
+                // TODO
+            },
         }
 
         self.dequantize_planes(&mut component_planes)?;

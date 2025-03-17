@@ -2,7 +2,7 @@ extern crate core;
 
 #[cfg(test)]
 mod tests {
-use std::path::{Path, PathBuf};
+    use std::path::{Path, PathBuf};
     use vexel::{Image, Vexel};
     use writer::{Writer, WriterImage, WriterImageFrame};
 
@@ -35,7 +35,11 @@ use std::path::{Path, PathBuf};
                 height: frame.height(),
                 has_alpha: frame.has_alpha(),
                 delay: frame.delay(),
-                pixels: if frame.has_alpha() { frame.as_rgba8() } else { frame.as_rgb8() },
+                pixels: if frame.has_alpha() {
+                    frame.as_rgba8()
+                } else {
+                    frame.as_rgb8()
+                },
             });
         }
 
@@ -57,12 +61,9 @@ use std::path::{Path, PathBuf};
                 }
 
                 if test_case.save {
-                    Writer::write_webp(
-                        &get_out_path(test_case.path, None),
-                        &image_to_writer_image(&image),
-                    )?;
+                    Writer::write_webp(&get_out_path(test_case.path, None), &image_to_writer_image(&image))?;
                 }
-                
+
                 Ok(())
             }
             Err(e) => {
@@ -80,7 +81,7 @@ use std::path::{Path, PathBuf};
                 path: "jpeg/cat.jpg",
                 validation: Some(Box::new(|image: &Image| {
                     let pixels = image.as_rgb8();
-                    
+
                     assert_eq!(pixels.len(), 680 * 453 * 3);
                     assert_eq!(pixels[0], 25);
                     assert_eq!(pixels[10], 20);
@@ -145,17 +146,18 @@ use std::path::{Path, PathBuf};
 
         Ok(())
     }
-    
+
     #[test]
     // This test is used during development for convenience for any new image formats
     pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
-        const PATH: &str = "";
+        let in_path = r"C:\Users\aplef\repos\vexel\vexel\tests\images\jpeg\cat_arithmetic.jpg";
+        let out_path = Path::new(in_path).with_extension("webp");
 
-        let mut decoder = Vexel::open(get_in_path(PATH))?;
+        let mut decoder = Vexel::open(in_path)?;
 
         match decoder.decode() {
             Ok(image) => {
-                Writer::write_webp(&get_out_path(PATH, None), &image_to_writer_image(&image))?;
+                Writer::write_webp(&out_path, &image_to_writer_image(&image))?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
