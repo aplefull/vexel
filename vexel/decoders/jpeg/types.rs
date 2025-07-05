@@ -1,0 +1,154 @@
+use crate::utils::types::ByteOrder;
+use serde::Serialize;
+use tsify::Tsify;
+
+#[rustfmt::skip]
+pub const ZIGZAG_MAP: [u8; 64] = [
+     0,  1,  8, 16,  9,  2,  3, 10,
+    17, 24, 32, 25, 18, 11,  4,  5,
+    12, 19, 26, 33, 40, 48, 41, 34,
+    27, 20, 13,  6,  7, 14, 21, 28,
+    35, 42, 49, 56, 57, 50, 43, 36,
+    29, 22, 15, 23, 30, 37, 44, 51,
+    58, 59, 52, 45, 38, 31, 39, 46,
+    53, 60, 61, 54, 47, 55, 62, 63,
+];
+
+// Table K.1 from JPEG specification
+#[rustfmt::skip]
+pub const DEFAULT_QUANTIZATION_TABLE: [u16; 64] = [
+    16, 11, 10, 16, 24, 40, 51, 61,
+    12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56,
+    14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77,
+    24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101,
+    72, 92, 95, 98, 112, 100, 103, 99,
+];
+
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+pub enum JpegMode {
+    Baseline,
+    ExtendedSequential,
+    Progressive,
+    Lossless,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+pub enum JpegCodingMethod {
+    Huffman,
+    Arithmetic,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct QuantizationTable {
+    pub id: u8,
+    pub precision: u8,
+    pub length: u16,
+    pub table: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct HuffmanTable {
+    pub id: u8,
+    pub class: u8,
+    pub offsets: Vec<u32>,
+    pub symbols: Vec<u8>,
+    pub codes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct ArithmeticCodingValue {
+    pub value: u8,
+    pub length: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct ArithmeticCodingTable {
+    pub table_class: u8,
+    pub identifier: u8,
+    pub values: Vec<ArithmeticCodingValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct ColorComponentInfo {
+    pub id: u8,
+    pub horizontal_sampling_factor: u8,
+    pub vertical_sampling_factor: u8,
+    pub quantization_table_id: u8,
+    pub dc_table_selector: u8,
+    pub ac_table_selector: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct JFIFHeader {
+    pub identifier: String,
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub density_units: u8,
+    pub x_density: u16,
+    pub y_density: u16,
+    pub thumbnail_width: u8,
+    pub thumbnail_height: u8,
+    pub thumbnail_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct ExifHeader {
+    pub identifier: String,
+    pub byte_order: ByteOrder,
+    pub first_ifd_offset: u32,
+    pub ifd_entries: Vec<IFDEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct IFDEntry {
+    pub tag: u16,
+    pub format: u16,
+    pub components: u32,
+    pub value_offset: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct ScanInfo {
+    pub start_spectral: u8,
+    pub end_spectral: u8,
+    pub successive_high: u8,
+    pub successive_low: u8,
+    pub components: Vec<ScanComponent>,
+    pub dc_tables: Vec<HuffmanTable>,
+    pub ac_tables: Vec<HuffmanTable>,
+    pub data_length: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanData {
+    pub start_spectral: u8,
+    pub end_spectral: u8,
+    pub successive_high: u8,
+    pub successive_low: u8,
+    pub components: Vec<ScanComponent>,
+    pub dc_tables: Vec<HuffmanTable>,
+    pub ac_tables: Vec<HuffmanTable>,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct ScanComponent {
+    pub component_id: u8,
+    pub dc_table_selector: u8,
+    pub ac_table_selector: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Predictor {
+    NoPrediction = 0,
+    Ra = 1,
+    Rb = 2,
+    Rc = 3,
+    RaRbRc1 = 4,
+    RaRbRc2 = 5,
+    RaRbRc3 = 6,
+    RaRb = 7,
+}

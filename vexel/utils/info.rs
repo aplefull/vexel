@@ -1,7 +1,7 @@
 use crate::decoders::bmp::{BitmapFileHeader, ColorEntry, DibHeader};
 use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtension};
 use crate::decoders::hdr::HdrFormat;
-use crate::decoders::jpeg::{
+use crate::decoders::jpeg::types::{
     ArithmeticCodingTable, ColorComponentInfo, ExifHeader, JFIFHeader, JpegCodingMethod, JpegMode, QuantizationTable,
     ScanInfo,
 };

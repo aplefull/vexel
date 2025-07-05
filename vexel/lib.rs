@@ -4,7 +4,7 @@ mod utils;
 use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
-use crate::decoders::jpeg::JpegDecoder;
+use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;

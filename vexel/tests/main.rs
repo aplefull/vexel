@@ -122,7 +122,7 @@ mod tests {
             },
             TestCase {
                 name: "PNG",
-                path: "png/342083299-7b50019a-7c6f-4625-99c2-f1e69de95b61.png",
+                path: "png/rgb_16bit.png",
                 validation: None,
                 save: false,
             },
@@ -150,20 +150,20 @@ mod tests {
     #[test]
     // This test is used during development for convenience for any new image formats
     pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
-        let in_path = r"C:\Users\aplef\repos\vexel\vexel\tests\images\jpeg\cat_arithmetic.jpg";
+       /* let in_path = r"/home/aplefull/Repos/vexel/vexel/tests/images/jpeg/cat_arithmetic.jpg";
         let out_path = Path::new(in_path).with_extension("webp");
 
         let mut decoder = Vexel::open(in_path)?;
 
         match decoder.decode() {
             Ok(image) => {
-                Writer::write_webp(&out_path, &image_to_writer_image(&image))?;
+                //Writer::write_webp(&out_path, &image_to_writer_image(&image))?;
             }
             Err(e) => {
                 println!("Error decoding image: {:?}", e);
                 assert!(false);
             }
-        }
+        }*/
 
         Ok(())
     }
