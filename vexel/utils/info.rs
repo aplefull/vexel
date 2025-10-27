@@ -1,3 +1,4 @@
+use crate::decoders::avif::{AvifColorInfo, AvifFrameInfo, AvifProperties};
 use crate::decoders::bmp::{BitmapFileHeader, ColorEntry, DibHeader};
 use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtension};
 use crate::decoders::hdr::HdrFormat;
@@ -6,16 +7,11 @@ use crate::decoders::jpeg::types::{
     ScanInfo,
 };
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
-use crate::decoders::png::{
-    ActlChunk, BackgroundData, Chromaticities, ColorType, CompressionMethod, ImageTime, PhysicalDimensions, PngFrame,
-    PngText, RenderingIntent, SignificantBits, SuggestedPalette, TransparencyData,
-};
-use crate::utils::icc::ICCProfile;
+use crate::decoders::png::PngChunkInfo;
+use crate::decoders::webp::{AlphaChunkInfo, WebpAnimationInfo, WebpCompressionType, WebpExtendedInfo, WebpFrame};
 use serde::Serialize;
 use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
-use crate::decoders::avif::{AvifColorInfo, AvifFrameInfo, AvifProperties};
-use crate::decoders::webp::{AlphaChunkInfo, WebpAnimationInfo, WebpCompressionType, WebpExtendedInfo, WebpFrame};
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
@@ -59,28 +55,7 @@ pub struct JpegInfo {
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct PngInfo {
-    pub width: u32,
-    pub height: u32,
-    pub bit_depth: u8,
-    pub color_type: ColorType,
-    pub compression_method: CompressionMethod,
-    pub has_filters: bool,
-    pub interlace: bool,
-    pub palette: Option<Vec<[u8; 3]>>,
-    pub gamma: Option<f32>,
-    pub icc_profile: Option<(String, ICCProfile)>,
-    pub transparency: Option<TransparencyData>,
-    pub background: Option<BackgroundData>,
-    pub rendering_intent: Option<RenderingIntent>,
-    pub chromaticities: Option<Chromaticities>,
-    pub suggested_palettes: Vec<SuggestedPalette>,
-    pub physical_dimensions: Option<PhysicalDimensions>,
-    pub significant_bits: Option<SignificantBits>,
-    pub histogram: Option<Vec<u16>>,
-    pub modification_time: Option<ImageTime>,
-    pub text_chunks: Vec<PngText>,
-    pub frames: Vec<PngFrame>,
-    pub actl_info: Option<ActlChunk>,
+    pub chunks: Vec<PngChunkInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]

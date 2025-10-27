@@ -252,6 +252,158 @@ pub struct ImageTime {
     pub second: u8,
 }
 
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct IhdrChunkData {
+    pub width: u32,
+    pub height: u32,
+    pub bit_depth: u8,
+    pub color_type: ColorType,
+    pub compression_method: u8,
+    pub filter_method: u8,
+    pub interlace_method: u8,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct PlteChunkData {
+    pub entries: Vec<[u8; 3]>,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct IdatChunkData {
+    pub data_length: u32,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct GamaChunkData {
+    pub gamma: f32,
+    pub gamma_raw: u32,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct ChrmChunkData {
+    pub chromaticities: Chromaticities,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct TrnsChunkData {
+    pub transparency: TransparencyData,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct BkgdChunkData {
+    pub background: BackgroundData,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct PhysChunkData {
+    pub physical_dimensions: PhysicalDimensions,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct SbitChunkData {
+    pub significant_bits: SignificantBits,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct TimeChunkData {
+    pub time: ImageTime,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct TextChunkData {
+    pub text: PngText,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct SrgbChunkData {
+    pub rendering_intent: RenderingIntent,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct IccpChunkData {
+    pub profile_name: String,
+    pub profile: ICCProfile,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct SpltChunkData {
+    pub palette: SuggestedPalette,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct HistChunkData {
+    pub frequencies: Vec<u16>,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct ActlChunkData {
+    pub actl: ActlChunk,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct FctlChunkData {
+    pub fctl: FctlChunk,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct FdatChunkData {
+    pub sequence_number: u32,
+    pub data_length: u32,
+    pub crc: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub enum PngChunkData {
+    IHDR(IhdrChunkData),
+    PLTE(PlteChunkData),
+    IDAT(IdatChunkData),
+    GAMA(GamaChunkData),
+    CHRM(ChrmChunkData),
+    TRNS(TrnsChunkData),
+    BKGD(BkgdChunkData),
+    PHYS(PhysChunkData),
+    SBIT(SbitChunkData),
+    TIME(TimeChunkData),
+    TEXT(TextChunkData),
+    ZTXT(TextChunkData),
+    ITXT(TextChunkData),
+    SRGB(SrgbChunkData),
+    ICCP(IccpChunkData),
+    SPLT(SpltChunkData),
+    HIST(HistChunkData),
+    ACTL(ActlChunkData),
+    FCTL(FctlChunkData),
+    FDAT(FdatChunkData),
+    IEND { crc: u32 },
+    Unknown { chunk_type: String, length: u32, crc: u32 },
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct PngChunkInfo {
+    pub start_offset: u64,
+    pub chunk_type: String,
+    pub length: u32,
+    pub raw_bytes: Vec<u8>,
+    pub data: PngChunkData,
+}
+
 pub struct PngDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
@@ -276,6 +428,7 @@ pub struct PngDecoder<R: Read + Seek> {
     text_chunks: Vec<PngText>,
     frames: Vec<PngFrame>,
     actl_info: Option<ActlChunk>,
+    chunks: Vec<PngChunkInfo>,
     reader: BitReader<R>,
 }
 
@@ -305,6 +458,7 @@ impl<R: Read + Seek> PngDecoder<R> {
             text_chunks: Vec::new(),
             frames: Vec::new(),
             actl_info: None,
+            chunks: Vec::new(),
             reader: BitReader::new(reader),
         }
     }
@@ -319,39 +473,20 @@ impl<R: Read + Seek> PngDecoder<R> {
 
     pub fn get_info(&self) -> PngInfo {
         PngInfo {
-            width: self.width,
-            height: self.height,
-            bit_depth: self.bit_depth,
-            color_type: self.color_type,
-            compression_method: self.compression_method,
-            has_filters: self.has_filters,
-            interlace: self.interlace,
-            palette: self.palette.clone(),
-            gamma: self.gamma,
-            icc_profile: self.icc_profile.clone(),
-            transparency: self.transparency.clone(),
-            background: self.background.clone(),
-            rendering_intent: self.rendering_intent,
-            chromaticities: self.chromaticities,
-            suggested_palettes: self.suggested_palettes.clone(),
-            physical_dimensions: self.physical_dimensions.clone(),
-            significant_bits: self.significant_bits.clone(),
-            histogram: self.histogram.clone(),
-            modification_time: self.modification_time.clone(),
-            text_chunks: self.text_chunks.clone(),
-            frames: self.frames.clone(),
-            actl_info: self.actl_info.clone(),
+            chunks: self.chunks.clone(),
         }
     }
 
     fn read_ihdr(&mut self) -> VexelResult<()> {
+        let (start_offset, length, raw_bytes, chunk_type_str, crc) = self.capture_chunk_info()?;
+
         self.validate_chunk_crc()?;
 
         let width = self.reader.read_u32()?;
         let height = self.reader.read_u32()?;
         let bit_depth = self.reader.read_u8()?;
-        let color_type = self.reader.read_u8()?;
-        let compression_method = self.reader.read_u8()?;
+        let color_type_raw = self.reader.read_u8()?;
+        let compression_method_raw = self.reader.read_u8()?;
         let filter_method = self.reader.read_u8()?;
         let interlace_method = self.reader.read_u8()?;
 
@@ -366,23 +501,23 @@ impl<R: Read + Seek> PngDecoder<R> {
             }
         };
 
-        self.color_type = match color_type {
+        self.color_type = match color_type_raw {
             0 => ColorType::Grayscale,
             2 => ColorType::RGB,
             3 => ColorType::Indexed,
             4 => ColorType::GrayscaleAlpha,
             6 => ColorType::RGBA,
             _ => {
-                log_warn!("Invalid color type: {}", color_type);
+                log_warn!("Invalid color type: {}", color_type_raw);
                 ColorType::RGB
             }
         };
 
-        self.compression_method = match compression_method {
+        self.compression_method = match compression_method_raw {
             0 => CompressionMethod::Deflate,
             1 => CompressionMethod::None,
             _ => {
-                log_warn!("Invalid compression method: {}", compression_method);
+                log_warn!("Invalid compression method: {}", compression_method_raw);
                 CompressionMethod::None
             }
         };
@@ -412,10 +547,29 @@ impl<R: Read + Seek> PngDecoder<R> {
             });
         }
 
+        self.chunks.push(PngChunkInfo {
+            start_offset,
+            chunk_type: chunk_type_str,
+            length,
+            raw_bytes,
+            data: PngChunkData::IHDR(IhdrChunkData {
+                width,
+                height,
+                bit_depth,
+                color_type: self.color_type,
+                compression_method: compression_method_raw,
+                filter_method,
+                interlace_method,
+                crc,
+            }),
+        });
+
         Ok(())
     }
 
     fn read_plte(&mut self) -> VexelResult<()> {
+        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = self.capture_chunk_info()?;
+
         self.validate_chunk_crc()?;
 
         let length = self.get_chunk_length()?;
@@ -435,12 +589,22 @@ impl<R: Read + Seek> PngDecoder<R> {
             palette.push([r, g, b]);
         }
 
-        self.palette = Some(palette);
+        self.palette = Some(palette.clone());
+
+        self.chunks.push(PngChunkInfo {
+            start_offset,
+            chunk_type: chunk_type_str,
+            length: length_u32,
+            raw_bytes,
+            data: PngChunkData::PLTE(PlteChunkData { entries: palette, crc }),
+        });
 
         Ok(())
     }
 
     fn read_idat(&mut self) -> VexelResult<()> {
+        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = self.capture_chunk_info()?;
+
         self.validate_chunk_crc()?;
 
         let length = self.get_chunk_length()?;
@@ -456,6 +620,17 @@ impl<R: Read + Seek> PngDecoder<R> {
         }
 
         self.idat_data.extend(chunk_data);
+
+        self.chunks.push(PngChunkInfo {
+            start_offset,
+            chunk_type: chunk_type_str,
+            length: length_u32,
+            raw_bytes,
+            data: PngChunkData::IDAT(IdatChunkData {
+                data_length: length,
+                crc,
+            }),
+        });
 
         Ok(())
     }
@@ -509,6 +684,22 @@ impl<R: Read + Seek> PngDecoder<R> {
         let profile_name = String::from_utf8_lossy(&profile_name_bytes).to_string();
 
         self.icc_profile = Some((profile_name, icc));
+
+        Ok(())
+    }
+
+    fn read_iend(&mut self) -> VexelResult<()> {
+        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = self.capture_chunk_info()?;
+
+        self.validate_chunk_crc()?;
+
+        self.chunks.push(PngChunkInfo {
+            start_offset,
+            chunk_type: chunk_type_str,
+            length: length_u32,
+            raw_bytes,
+            data: PngChunkData::IEND { crc },
+        });
 
         Ok(())
     }
@@ -612,12 +803,26 @@ impl<R: Read + Seek> PngDecoder<R> {
     }
 
     fn read_gama(&mut self) -> VexelResult<()> {
+        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = self.capture_chunk_info()?;
+
         self.validate_chunk_crc()?;
 
         let gamma_int = self.reader.read_u32()?;
         let gamma = gamma_int as f32 / 100000.0;
 
         self.gamma = Some(gamma);
+
+        self.chunks.push(PngChunkInfo {
+            start_offset,
+            chunk_type: chunk_type_str,
+            length: length_u32,
+            raw_bytes,
+            data: PngChunkData::GAMA(GamaChunkData {
+                gamma,
+                gamma_raw: gamma_int,
+                crc,
+            }),
+        });
 
         Ok(())
     }
@@ -1190,6 +1395,33 @@ impl<R: Read + Seek> PngDecoder<R> {
         self.reader.seek(SeekFrom::Start(current_pos))?;
 
         Ok(length)
+    }
+
+    fn capture_chunk_info(&mut self) -> VexelResult<(u64, u32, Vec<u8>, String, u32)> {
+        let start_offset = self.reader.stream_position()? - 4;
+
+        self.reader.seek(SeekFrom::Start(start_offset))?;
+
+        let length_u32 = self.reader.read_u32()?;
+        let mut chunk_type = vec![0; 4];
+        self.reader.read_exact(&mut chunk_type)?;
+        let chunk_type_str = String::from_utf8_lossy(&chunk_type).to_string();
+
+        let mut chunk_data = vec![0; length_u32 as usize];
+        self.reader.read_exact(&mut chunk_data)?;
+
+        let crc = self.reader.read_u32()?;
+
+        let total_size = 4 + 4 + length_u32 as usize + 4;
+        let mut raw_bytes = Vec::with_capacity(total_size);
+        raw_bytes.extend_from_slice(&length_u32.to_be_bytes());
+        raw_bytes.extend_from_slice(&chunk_type);
+        raw_bytes.extend_from_slice(&chunk_data);
+        raw_bytes.extend_from_slice(&crc.to_be_bytes());
+
+        self.reader.seek(SeekFrom::Start(start_offset + 8))?;
+
+        Ok((start_offset, length_u32, raw_bytes, chunk_type_str, crc))
     }
 
     fn validate_chunk_crc(&mut self) -> VexelResult<()> {
@@ -1902,6 +2134,22 @@ impl<R: Read + Seek> PngDecoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
+        let mut signature = vec![0u8; 8];
+        self.reader.seek(SeekFrom::Start(0))?;
+        self.reader.read_exact(&mut signature)?;
+
+        self.chunks.push(PngChunkInfo {
+            start_offset: 0,
+            chunk_type: "PNG Signature".to_string(),
+            length: 8,
+            raw_bytes: signature.clone(),
+            data: PngChunkData::Unknown {
+                chunk_type: "PNG Signature".to_string(),
+                length: 8,
+                crc: 0,
+            },
+        });
+
         let mut window = [0u8; 4];
 
         for i in 1..4 {
@@ -1937,7 +2185,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                         PngChunk::FCTL => self.read_fctl(),
                         PngChunk::FDAT => self.read_fdat(),
                         PngChunk::ICCP => self.read_iccp(),
-                        PngChunk::IEND => break,
+                        PngChunk::IEND => self.read_iend(),
                     };
 
                     match result {
@@ -1947,7 +2195,21 @@ impl<R: Read + Seek> PngDecoder<R> {
                         }
                     }
                 }
-                None => {}
+                None => {
+                    if let Ok((start_offset, length_u32, raw_bytes, chunk_type_str, crc)) = self.capture_chunk_info() {
+                        self.chunks.push(PngChunkInfo {
+                            start_offset,
+                            chunk_type: chunk_type_str.clone(),
+                            length: length_u32,
+                            raw_bytes,
+                            data: PngChunkData::Unknown {
+                                chunk_type: chunk_type_str,
+                                length: length_u32,
+                                crc,
+                            },
+                        });
+                    }
+                }
             }
         }
 
