@@ -25,6 +25,7 @@ pub struct GifFrameInfo {
     pub transparent_index: Option<u8>,
     pub disposal_method: DisposalMethod,
     pub delay: u16,
+    pub user_input: bool,
     pub data: Vec<u8>,
 }
 
@@ -274,6 +275,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn read_plain_text_extension(&mut self) -> VexelResult<()> {
         let block_size = self.reader.read_u8()?;
         if block_size != 12 {
@@ -404,6 +406,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             size_of_local_color_table: 0,
             local_color_table: Vec::new(),
             lzw_minimum_code_size: 0,
+            user_input: gce.as_ref().map(|gce| gce.user_input).unwrap_or(false),
             transparent_index: gce
                 .as_ref()
                 .filter(|gce| gce.transparency)

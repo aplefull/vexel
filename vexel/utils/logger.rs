@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+// TODO: Go over all allow(dead_code) in project and remove them
+// A bunch was added because values are not used yet, but will be used in future 
+
 use std::fmt::Display;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -89,10 +93,6 @@ pub enum LogLevel {
 pub struct Logger {}
 
 impl Logger {
-    pub fn new() -> Self {
-        Self {}
-    }
-
     fn get_timestamp() -> String {
         #[cfg(target_arch = "wasm32")]
         let (secs, millis) = {

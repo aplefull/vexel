@@ -42,9 +42,6 @@ impl UpsampledPlane {
 
 #[derive(Debug, Clone)]
 struct ComponentPlane {
-    id: u8,
-    h_samp: u8,
-    v_samp: u8,
     data: Vec<i32>,
     width: u32,
     height: u32,
@@ -52,14 +49,11 @@ struct ComponentPlane {
 }
 
 impl ComponentPlane {
-    fn new(width: u32, height: u32, h_samp: u8, v_samp: u8, id: u8) -> Self {
+    fn new(width: u32, height: u32) -> Self {
         let blocks_per_line = (width + 7) / 8;
         let block_lines = (height + 7) / 8;
 
         Self {
-            id,
-            h_samp,
-            v_samp,
             width,
             height,
             blocks_per_line,
@@ -849,9 +843,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 ComponentPlane::new(
                     comp_width,
                     comp_height,
-                    comp.horizontal_sampling_factor,
-                    comp.vertical_sampling_factor,
-                    comp.id,
                 )
             })
             .collect();
@@ -1951,7 +1942,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     fn upsample_planes(&self, planes: &[ComponentPlane]) -> Vec<UpsampledPlane> {
         let mut upsampled_planes = Vec::new();
 
-        for (plane) in planes.iter() {
+        for plane in planes.iter() {
             // For Y component (id=1), we keep original dimensions
             // For Cb and Cr (id=2,3), we upsample to full image dimensions
             let target_width = self.width;
@@ -2067,9 +2058,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 ComponentPlane::new(
                     comp_width,
                     comp_height,
-                    comp.horizontal_sampling_factor,
-                    comp.vertical_sampling_factor,
-                    comp.id,
                 )
             })
             .collect();

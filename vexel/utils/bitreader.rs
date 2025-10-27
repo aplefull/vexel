@@ -175,35 +175,6 @@ impl<R: Read + Seek> BitReader<R> {
         self.buffer = 0;
     }
 
-    /// Searches for a marker in the bitstream.
-    /// If marker is found, cursor is positioned right after the marker.
-    /// If marker is not found, cursor returns to the start of the bitstream.
-    ///
-    /// # Parameters
-    /// - `marker`: The marker to search for
-    ///
-    /// # Returns
-    /// - `true` if marker is found, `false` otherwise
-    /// - `std::io::Error` if an I/O error occurs
-    pub fn find_marker<M: Marker>(&mut self, marker: M) -> Result<bool, std::io::Error> {
-        let marker = marker.to_u16();
-        let mut byte_buffer = [0u8; 2];
-
-        while let Ok(_) = self.reader.read_exact(&mut byte_buffer) {
-            let current_value = u16::from_be_bytes(byte_buffer);
-
-            if current_value == marker {
-                return Ok(true);
-            }
-
-            self.reader.seek(SeekFrom::Current(-1))?;
-        }
-
-        self.reader.seek(SeekFrom::Start(0))?;
-
-        Ok(false)
-    }
-
     /// Searches for the next known marker in the bitstream.
     /// If marker is found, cursor is positioned right after the marker.
     ///
@@ -269,6 +240,8 @@ impl<R: Read + Seek> BitReader<R> {
     /// # Returns
     /// - A vector of bytes containing the next `n` bytes in the bitstream
     /// - `std::io::Error` if an I/O error occurs
+    // TODO: use this in places where we read bytes and go back
+    #[allow(dead_code)]
     pub fn peek_bytes(&mut self, n: usize) -> Result<Vec<u8>, std::io::Error> {
         let mut bytes = vec![0; n];
         self.reader.read_exact(&mut bytes)?;
@@ -321,17 +294,5 @@ impl<R: Read + Seek> BitReader<R> {
         self.clear_buffer();
 
         Ok(bytes)
-    }
-
-    /// Resets the bitreader to the start of the bitstream and clears the buffer.
-    ///
-    /// # Returns
-    /// - `std::io::Error` if an I/O error occurs
-    /// - `Ok(())` if the operation is successful
-    pub fn reset(&mut self) -> Result<(), std::io::Error> {
-        self.reader.seek(SeekFrom::Start(0))?;
-        self.buffer = 0;
-        self.bits_in_buffer = 0;
-        Ok(())
     }
 }

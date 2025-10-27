@@ -670,19 +670,19 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     pub fn decode(&mut self) -> VexelResult<Image> {
         match self.read_header() {
             Ok(_) => {}
-            Err(e) => {
+            Err(_e) => {
                 return Err(VexelError::Custom("Error reading header".to_string()));
             }
         };
 
         match self.read_data() {
             Ok(_) => {}
-            Err(e) => {
+            Err(_e) => {
                 return Err(VexelError::Custom("Error reading data".to_string()));
             }
         };
 
-        let mut result = match self.format {
+        let result = match self.format {
             Some(NetpbmFormat::P1) => self.decode_ascii_bitmap(),
             Some(NetpbmFormat::P2) => self.decode_ascii_graymap(),
             Some(NetpbmFormat::P3) => self.decode_ascii_pixmap(),
@@ -698,7 +698,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
         let mut pixel_data = match result {
             Ok(data) => data,
-            Err(e) => {
+            Err(_e) => {
                 return Err(VexelError::Custom("Error decoding image".to_string()));
             }
         };

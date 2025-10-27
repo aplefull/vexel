@@ -334,7 +334,7 @@ impl<R: Read + Seek> AvifDecoder<R> {
         let mut version_flags = [0u8; 4];
         self.reader.read_exact(&mut version_flags)?;
         let version = version_flags[0];
-        let flags = u32::from_be_bytes(version_flags) & 0x00FFFFFF;
+        let _flags = u32::from_be_bytes(version_flags) & 0x00FFFFFF;
 
         let (creation_time, modification_time, timescale, duration) = if version == 1 {
             // 64-bit values
@@ -383,7 +383,7 @@ impl<R: Read + Seek> AvifDecoder<R> {
         self.reader.read_exact(&mut volume_buf)?;
         let volume = (u16::from_be_bytes(volume_buf) as f32) / 256.0;
 
-        let mvhd = MvhdBox {
+        let _mvhd = MvhdBox {
             version,
             creation_time,
             modification_time,
@@ -398,7 +398,7 @@ impl<R: Read + Seek> AvifDecoder<R> {
 
         // Calculate frame info
         if timescale > 0 {
-            let duration_seconds = duration as f64 / timescale as f64;
+            let _duration_seconds = duration as f64 / timescale as f64;
             self.frames.push(AvifFrameInfo {
                 duration: duration as u32,
                 timescale,
@@ -490,7 +490,7 @@ impl<R: Read + Seek> AvifDecoder<R> {
         self.reader.read_exact(&mut dim_buf)?;
         let height = f32::from_be_bytes(dim_buf) / 65536.0;
 
-        let tkhd = TkhdBox {
+        let _tkhd = TkhdBox {
             version,
             flags,
             creation_time,
@@ -873,7 +873,7 @@ impl<R: Read + Seek> AvifDecoder<R> {
         let mut version_flags = [0u8; 4];
         self.reader.read_exact(&mut version_flags)?;
         let infe_version = version_flags[0];
-        let infe_flags = u32::from_be_bytes(version_flags) & 0x00FFFFFF;
+        let _infe_flags = u32::from_be_bytes(version_flags) & 0x00FFFFFF;
 
         let item_id = if version >= 2 {
             let mut buf = [0u8; 4];
@@ -960,7 +960,7 @@ impl<R: Read + Seek> AvifDecoder<R> {
         for _ in 0..entry_count {
             let mut size = [0u8; 4];
             if self.reader.read_exact(&mut size).is_ok() {
-                let size = u32::from_be_bytes(size);
+                let _size = u32::from_be_bytes(size);
                 let infe = self.read_infe_box(version)?;
                 item_infos.push(infe);
             }
@@ -1061,7 +1061,7 @@ impl<R: Read + Seek> AvifDecoder<R> {
             let result = match box_header.box_type {
                 BoxType::Ftyp => self.read_ftyp_box(box_header.size - 8),
                 BoxType::Meta => {
-                    self.reader.seek(SeekFrom::Current(4));
+                    let _ = self.reader.seek(SeekFrom::Current(4));
                     self.read_boxes(Some(box_end))
                 }
                 BoxType::Moov
@@ -1075,7 +1075,6 @@ impl<R: Read + Seek> AvifDecoder<R> {
                     self.read_boxes(Some(box_end))
                 }
                 BoxType::Mvhd => self.read_mvhd_box(),
-                BoxType::Trak => self.read_boxes(Some(box_end)),
                 BoxType::Tkhd => self.read_tkhd_box(),
                 BoxType::Udta => self.read_loop_count(),
                 BoxType::Ispe => self.read_ispe_box(),

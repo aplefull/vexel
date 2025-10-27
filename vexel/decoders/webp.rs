@@ -171,11 +171,11 @@ impl<R: Read + Seek> WebpDecoder<R> {
     fn read_lossy_header(&mut self) -> VexelResult<()> {
         self.compression_type = WebpCompressionType::Lossy;
         self.reader.read_bytes(8)?;
-        
-        let frame_type = self.reader.read_bit()?;
-        let version_number = self.reader.read_bits(3)?;
-        let show_frame = self.reader.read_bit()?;
-        let first_partition_size = self.reader.read_bits(19)?;
+
+        let _frame_type = self.reader.read_bit()?;
+        let _version_number = self.reader.read_bits(3)?;
+        let _show_frame = self.reader.read_bit()?;
+        let _first_partition_size = self.reader.read_bits(19)?;
         
         // If it's a key frame:
         let bytes = self.reader.read_bytes(3)?;

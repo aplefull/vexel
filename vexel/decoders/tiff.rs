@@ -8,6 +8,7 @@ use std::io::{Read, Seek, SeekFrom};
 // This probably requires a different approach to handle them
 #[derive(Debug, Clone, Copy)]
 #[repr(u16)]
+#[allow(dead_code)]
 pub enum TiffTags {
     NewSubfileType = 254,
     SubfileType = 255,
@@ -440,6 +441,7 @@ impl TryFrom<u32> for ResolutionUnit {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Orientation {
     TopLeft = 1,
@@ -596,6 +598,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.height
     }
 
+    #[allow(dead_code)]
     fn read_value<T>(&mut self, type_: u16, count: u32, value_offset: u32) -> VexelResult<Vec<T>>
     where
         T: TryFrom<u32>,

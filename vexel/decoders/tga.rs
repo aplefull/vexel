@@ -37,6 +37,7 @@ impl TryFrom<u8> for TgaImageType {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct TgaColorMapSpec {
     pub origin: u16,
@@ -44,6 +45,7 @@ pub struct TgaColorMapSpec {
     pub entry_size: u8,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct TgaImageSpec {
     pub x_origin: u16,
@@ -67,6 +69,7 @@ impl TgaImageSpec {
         (self.descriptor & 0x10) != 0
     }
 
+    #[allow(dead_code)]
     pub fn alpha_channel_bits(&self) -> u8 {
         // Bits 0-3 specify number of alpha channel bits
         self.descriptor & 0x0F
