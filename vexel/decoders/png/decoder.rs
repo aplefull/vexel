@@ -2,7 +2,7 @@ use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::PngInfo;
-use crate::{log_warn, Image, PixelData, PixelFormat};
+use crate::{log_debug, log_warn, Image, PixelData, PixelFormat};
 use flate2::read::ZlibDecoder;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -135,18 +135,19 @@ impl<R: Read + Seek> PngDecoder<R> {
 
         let mut window = [0u8; 4];
 
-        for i in 1..4 {
+        let _first_length = self.reader.read_u32()?;
+
+        for i in 0..4 {
             window[i] = self.reader.read_u8()?;
         }
 
-        while let Ok(byte) = self.reader.read_u8() {
-            window[0] = window[1];
-            window[1] = window[2];
-            window[2] = window[3];
-            window[3] = byte;
-
+        loop {
             match get_chunk(&window) {
                 Some(chunk) => {
+                    log_debug!("Found chunk: {:?}", chunk);
+                    
+                    let _chunk_length = chunks::get_chunk_length(&mut self.reader)?;
+                    
                     let result = match chunk {
                         PngChunk::IHDR => {
                             let (width, height, bit_depth, color_type, compression_method, has_filters, interlace) =
@@ -257,11 +258,29 @@ impl<R: Read + Seek> PngDecoder<R> {
                     if let Err(e) = result {
                         log_warn!("Error reading chunk {:?}: {:?}", chunk, e);
                     }
+                    
+                    let current_pos = self.reader.stream_position()?;
+                    
+                    self.reader.seek(SeekFrom::Start(current_pos + 4))?;
+                    
+                    let _next_length = match self.reader.read_u32() {
+                        Ok(len) => len,
+                        Err(_) => break,
+                    };
+                    
+                    for i in 0..4 {
+                        window[i] = match self.reader.read_u8() {
+                            Ok(b) => b,
+                            Err(_) => break,
+                        };
+                    }
                 }
                 None => {
                     if let Ok((start_offset, length_u32, raw_bytes, chunk_type_str, crc)) =
                         chunks::capture_chunk_info(&mut self.reader)
                     {
+                        log_debug!("Unknown chunk: {}", chunk_type_str);
+                        
                         self.chunks.push(PngChunkInfo {
                             start_offset,
                             chunk_type: chunk_type_str.clone(),
@@ -273,6 +292,31 @@ impl<R: Read + Seek> PngDecoder<R> {
                                 crc,
                             },
                         });
+                        
+                        let current_pos = self.reader.stream_position()?;
+                        
+                        self.reader.seek(SeekFrom::Start(current_pos + length_u32 as u64 + 4))?;
+                        
+                        let _next_length = match self.reader.read_u32() {
+                            Ok(len) => len,
+                            Err(_) => break,
+                        };
+                        
+                        for i in 0..4 {
+                            window[i] = match self.reader.read_u8() {
+                                Ok(b) => b,
+                                Err(_) => break,
+                            };
+                        }
+                    } else {
+                        let byte = match self.reader.read_u8() {
+                            Ok(b) => b,
+                            Err(_) => break,
+                        };
+                        window[0] = window[1];
+                        window[1] = window[2];
+                        window[2] = window[3];
+                        window[3] = byte;
                     }
                 }
             }
