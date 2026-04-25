@@ -2,10 +2,7 @@ use crate::decoders::avif::{AvifColorInfo, AvifFrameInfo, AvifProperties};
 use crate::decoders::bmp::{BitmapFileHeader, ColorEntry, DibHeader};
 use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtension};
 use crate::decoders::hdr::HdrFormat;
-use crate::decoders::jpeg::types::{
-    ArithmeticCodingTable, ColorComponentInfo, ExifHeader, JFIFHeader, JpegCodingMethod, JpegMode, QuantizationTable,
-    ScanInfo,
-};
+use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::PngChunkInfo;
 use crate::decoders::webp::{AlphaChunkInfo, WebpAnimationInfo, WebpCompressionType, WebpExtendedInfo, WebpFrame};
@@ -30,27 +27,7 @@ pub enum ImageInfo {
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct JpegInfo {
-    pub width: u32,
-    pub height: u32,
-    pub color_depth: u8,
-    pub number_of_components: u8,
-    pub mode: JpegMode,
-    pub coding_method: JpegCodingMethod,
-    pub jfif_header: Option<JFIFHeader>,
-    pub exif_header: Option<ExifHeader>,
-    pub quantization_tables: Vec<QuantizationTable>,
-    pub ac_arithmetic_tables: Vec<ArithmeticCodingTable>,
-    pub dc_arithmetic_tables: Vec<ArithmeticCodingTable>,
-    pub scans: Vec<ScanInfo>,
-    pub color_components: Vec<ColorComponentInfo>,
-    pub spectral_selection_start: u8,
-    pub spectral_selection_end: u8,
-    pub successive_approximation_high: u8,
-    pub successive_approximation_low: u8,
-    pub horizontal_sampling_factor: u8,
-    pub vertical_sampling_factor: u8,
-    pub restart_interval: u16,
-    pub comments: Vec<String>,
+    pub segments: Vec<JpegSegmentInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -311,29 +288,94 @@ impl fmt::Display for PngInfo {
 
 impl fmt::Display for JpegInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::jpeg::types::JpegSegmentData;
+
         writeln!(f, "JPEG Info")?;
         writeln!(f, "======================")?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "Color depth: {} bits", self.color_depth)?;
-        writeln!(f, "Components: {}", self.number_of_components)?;
-        writeln!(f, "Mode: {:?}", self.mode)?;
-        writeln!(f, "Coding method: {:?}", self.coding_method)?;
+        writeln!(f, "Segments: {}", self.segments.len())?;
+        writeln!(f)?;
 
-        if let Some(jfif) = &self.jfif_header {
-            writeln!(f, "\nJFIF Header:")?;
-            writeln!(f, "  Version: {}.{:02}", jfif.version_major, jfif.version_minor)?;
-            writeln!(f, "  Density: {}x{} units", jfif.x_density, jfif.y_density)?;
-        }
+        for segment in &self.segments {
+            writeln!(f, "Offset 0x{:08X}  {}", segment.start_offset, segment.marker)?;
 
-        if !self.quantization_tables.is_empty() {
-            writeln!(f, "\nQuantization tables: {}", self.quantization_tables.len())?;
-        }
-
-        if !self.comments.is_empty() {
-            writeln!(f, "\nComments:")?;
-            for comment in &self.comments {
-                writeln!(f, "  {}", comment)?;
+            match &segment.data {
+                JpegSegmentData::SOI => {
+                    writeln!(f, "  Start of image")?;
+                }
+                JpegSegmentData::EOI => {
+                    writeln!(f, "  End of image")?;
+                }
+                JpegSegmentData::APP0(jfif) => {
+                    writeln!(f, "  Length: {} bytes", jfif.length)?;
+                    writeln!(f, "  Identifier: {}", jfif.identifier.trim_end_matches('\0'))?;
+                    writeln!(f, "  Version: {}.{:02}", jfif.version_major, jfif.version_minor)?;
+                    writeln!(f, "  Density units: {}", jfif.density_units)?;
+                    writeln!(f, "  Density: {}x{}", jfif.x_density, jfif.y_density)?;
+                    if jfif.thumbnail_width > 0 || jfif.thumbnail_height > 0 {
+                        writeln!(f, "  Thumbnail: {}x{}", jfif.thumbnail_width, jfif.thumbnail_height)?;
+                    }
+                }
+                JpegSegmentData::APP1 { length } => {
+                    writeln!(f, "  Length: {} bytes", length)?;
+                }
+                JpegSegmentData::APP { marker, length } => {
+                    writeln!(f, "  Marker: {}", marker)?;
+                    writeln!(f, "  Length: {} bytes", length)?;
+                }
+                JpegSegmentData::SOF(sof) => {
+                    writeln!(f, "  Length: {} bytes", sof.length)?;
+                    writeln!(f, "  Marker: {}", sof.marker)?;
+                    writeln!(f, "  Precision: {} bits", sof.precision)?;
+                    writeln!(f, "  Width: {} pixels", sof.width)?;
+                    writeln!(f, "  Height: {} pixels", sof.height)?;
+                    writeln!(f, "  Components: {}", sof.component_count)?;
+                    for comp in &sof.components {
+                        writeln!(f, "    Component {}: sampling {}x{}, quant table {}", comp.id, comp.horizontal_sampling_factor, comp.vertical_sampling_factor, comp.quantization_table_id)?;
+                    }
+                }
+                JpegSegmentData::DHT(dht) => {
+                    writeln!(f, "  Length: {} bytes", dht.length)?;
+                    writeln!(f, "  Tables: {}", dht.tables.len())?;
+                    for table in &dht.tables {
+                        let class = if table.class == 0 { "DC" } else { "AC" };
+                        writeln!(f, "    {} table id={}, symbols={}", class, table.id, table.symbols.len())?;
+                    }
+                }
+                JpegSegmentData::DAC(dac) => {
+                    writeln!(f, "  Length: {} bytes", dac.length)?;
+                    writeln!(f, "  DC tables: {}", dac.dc_tables.len())?;
+                    writeln!(f, "  AC tables: {}", dac.ac_tables.len())?;
+                }
+                JpegSegmentData::DQT(dqt) => {
+                    writeln!(f, "  Length: {} bytes", dqt.length)?;
+                    writeln!(f, "  Tables: {}", dqt.tables.len())?;
+                    for table in &dqt.tables {
+                        writeln!(f, "    Table id={}, precision={}", table.id, table.precision)?;
+                    }
+                }
+                JpegSegmentData::DRI { restart_interval } => {
+                    writeln!(f, "  Restart interval: {}", restart_interval)?;
+                }
+                JpegSegmentData::SOS(sos) => {
+                    writeln!(f, "  Length: {} bytes", sos.length)?;
+                    writeln!(f, "  Components: {}", sos.component_count)?;
+                    for comp in &sos.components {
+                        writeln!(f, "    Component {}: DC table {}, AC table {}", comp.component_id, comp.dc_table_selector, comp.ac_table_selector)?;
+                    }
+                    writeln!(f, "  Spectral selection: {}-{}", sos.start_spectral, sos.end_spectral)?;
+                    writeln!(f, "  Successive approximation: {}/{}", sos.successive_high, sos.successive_low)?;
+                    writeln!(f, "  Scan data: {} bytes", sos.data_length)?;
+                }
+                JpegSegmentData::COM { text } => {
+                    writeln!(f, "  Comment: {}", text)?;
+                }
+                JpegSegmentData::Unknown { marker, length } => {
+                    writeln!(f, "  Marker: {}", marker)?;
+                    writeln!(f, "  Length: {} bytes", length)?;
+                }
             }
+
+            writeln!(f)?;
         }
 
         Ok(())
