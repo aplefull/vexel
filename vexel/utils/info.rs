@@ -6,6 +6,7 @@ use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::PngChunkInfo;
 use crate::decoders::webp::{AlphaChunkInfo, WebpAnimationInfo, WebpCompressionType, WebpExtendedInfo, WebpFrame};
+use crate::utils::exif::{ExifIfd, ExifValue};
 use serde::Serialize;
 use std::fmt;
 use tsify::Tsify;
@@ -286,6 +287,38 @@ impl fmt::Display for PngInfo {
     }
 }
 
+fn fmt_exif_value(value: &ExifValue) -> String {
+    match value {
+        ExifValue::Ascii(s) => s.clone(),
+        ExifValue::Short(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+        ExifValue::Long(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+        ExifValue::Rational(v) => v
+            .iter()
+            .map(|(n, d)| if *d == 0 { format!("{}/0", n) } else { format!("{}/{}", n, d) })
+            .collect::<Vec<_>>()
+            .join(", "),
+        ExifValue::SLong(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+        ExifValue::SRational(v) => v
+            .iter()
+            .map(|(n, d)| if *d == 0 { format!("{}/0", n) } else { format!("{}/{}", n, d) })
+            .collect::<Vec<_>>()
+            .join(", "),
+        ExifValue::Byte(v) => format!("{} bytes", v.len()),
+        ExifValue::Undefined(v) => format!("{} bytes (undefined)", v.len()),
+    }
+}
+
+fn fmt_exif_ifd(f: &mut fmt::Formatter<'_>, name: &str, ifd: &ExifIfd) -> fmt::Result {
+    writeln!(f, "  {} ({} entries):", name, ifd.entries.len())?;
+    for entry in &ifd.entries {
+        let label = entry.tag_name.as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("0x{:04X}", entry.tag));
+        writeln!(f, "    {}: {}", label, fmt_exif_value(&entry.value))?;
+    }
+    Ok(())
+}
+
 impl fmt::Display for JpegInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use crate::decoders::jpeg::types::JpegSegmentData;
@@ -315,8 +348,21 @@ impl fmt::Display for JpegInfo {
                         writeln!(f, "  Thumbnail: {}x{}", jfif.thumbnail_width, jfif.thumbnail_height)?;
                     }
                 }
-                JpegSegmentData::APP1 { length } => {
+                JpegSegmentData::APP1 { length, exif } => {
                     writeln!(f, "  Length: {} bytes", length)?;
+                    if let Some(exif) = exif {
+                        writeln!(f, "  Byte order: {:?}", exif.byte_order)?;
+                        fmt_exif_ifd(f, "IFD0", &exif.ifd0)?;
+                        if let Some(ifd) = &exif.exif_ifd {
+                            fmt_exif_ifd(f, "ExifIFD", ifd)?;
+                        }
+                        if let Some(ifd) = &exif.gps_ifd {
+                            fmt_exif_ifd(f, "GPSIFD", ifd)?;
+                        }
+                        if let Some(ifd) = &exif.ifd1 {
+                            fmt_exif_ifd(f, "IFD1 (thumbnail)", ifd)?;
+                        }
+                    }
                 }
                 JpegSegmentData::APP { marker, length } => {
                     writeln!(f, "  Marker: {}", marker)?;

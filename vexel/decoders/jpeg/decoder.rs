@@ -1,5 +1,6 @@
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::exif::ExifReader;
 use crate::utils::info::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
@@ -7,7 +8,7 @@ use std::f32::consts::PI;
 use std::fmt::Debug;
 use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
-use crate::decoders::jpeg::types::{ArithmeticCodingTable, ArithmeticCodingValue, ColorComponentInfo, DACData, DHTData, DQTData, ExifHeader, HuffmanTable, JFIFData, JFIFHeader, JpegCodingMethod, JpegMode, JpegSegmentData, JpegSegmentInfo, Predictor, QuantizationTable, SOFData, SOSData, ScanComponent, ScanData, DEFAULT_QUANTIZATION_TABLE, ZIGZAG_MAP};
+use crate::decoders::jpeg::types::{ArithmeticCodingTable, ArithmeticCodingValue, ColorComponentInfo, DACData, DHTData, DQTData, HuffmanTable, JFIFData, JFIFHeader, JpegCodingMethod, JpegMode, JpegSegmentData, JpegSegmentInfo, Predictor, QuantizationTable, SOFData, SOSData, ScanComponent, ScanData, DEFAULT_QUANTIZATION_TABLE, ZIGZAG_MAP};
 
 #[derive(Debug, Clone)]
 struct UpsampledPlane {
@@ -124,7 +125,6 @@ pub struct JpegDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
     jfif_header: Option<JFIFHeader>,
-    exif_header: Option<ExifHeader>,
     comments: Vec<String>,
     mode: JpegMode,
     coding_method: JpegCodingMethod,
@@ -158,7 +158,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
             height: 0,
             comments: Vec::new(),
             jfif_header: None,
-            exif_header: None,
             mode: JpegMode::Baseline,
             coding_method: JpegCodingMethod::Huffman,
             mcu_width: 0,
@@ -303,13 +302,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn read_app1_exif(&mut self, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
+        let payload = self.reader.read_bytes((length - 2) as usize)?;
 
-        for _ in 0..(length - 2) {
-            self.reader.read_u8()?;
-        }
+        let exif = if payload.starts_with(b"Exif\0\0") {
+            ExifReader::parse(&payload[6..])
+        } else {
+            None
+        };
 
-        // TODO actually implement this
-        self.record_segment(segment_start, "APP1", JpegSegmentData::APP1 { length });
+        self.record_segment(segment_start, "APP1", JpegSegmentData::APP1 { length, exif });
 
         Ok(())
     }

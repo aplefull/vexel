@@ -21,6 +21,7 @@ pub use utils::image::ImageFrame;
 pub use utils::image::PixelData;
 pub use utils::image::PixelFormat;
 pub use utils::info::ImageInfo;
+pub use utils::logger::{LogLevel, set_log_level};
 
 use serde::Serialize;
 use std::fs::File;

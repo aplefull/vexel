@@ -6,7 +6,7 @@ use glob::glob;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use vexel::{Image, PixelData, Vexel};
+use vexel::{Image, LogLevel, PixelData, Vexel};
 use writer::{Writer, WriterImage, WriterImageFrame, WriterPixelData};
 
 #[derive(Parser, Debug)]
@@ -29,6 +29,9 @@ struct Cli {
 
     #[arg(long, help = "Decode the image without writing to a file")]
     void: bool,
+
+    #[arg(long, value_parser = ["error", "warn", "info", "debug"], default_value = "error", help = "Minimum log level to display")]
+    log_level: String,
 }
 
 fn get_files(path: &str) -> Vec<PathBuf> {
@@ -296,6 +299,15 @@ fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    let log_level = match cli.log_level.as_str() {
+        "debug" => LogLevel::Debug,
+        "info" => LogLevel::Info,
+        "warn" => LogLevel::Warning,
+        _ => LogLevel::Error,
+    };
+    vexel::set_log_level(log_level);
+
     let files = get_files(&cli.path);
 
     if files.is_empty() {

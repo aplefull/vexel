@@ -1,4 +1,4 @@
-use crate::utils::types::ByteOrder;
+use crate::utils::exif::ExifData;
 use serde::Serialize;
 use tsify::Tsify;
 
@@ -14,7 +14,7 @@ pub enum JpegSegmentData {
     SOI,
     EOI,
     APP0(JFIFData),
-    APP1 { length: u16 },
+    APP1 { length: u16, exif: Option<ExifData> },
     APP { marker: String, length: u16 },
     SOF(SOFData),
     DHT(DHTData),
@@ -174,22 +174,6 @@ pub struct JFIFHeader {
     pub thumbnail_width: u8,
     pub thumbnail_height: u8,
     pub thumbnail_data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct ExifHeader {
-    pub identifier: String,
-    pub byte_order: ByteOrder,
-    pub first_ifd_offset: u32,
-    pub ifd_entries: Vec<IFDEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct IFDEntry {
-    pub tag: u16,
-    pub format: u16,
-    pub components: u32,
-    pub value_offset: u32,
 }
 
 

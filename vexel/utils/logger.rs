@@ -1,8 +1,7 @@
 #![allow(dead_code)]
-// TODO: Go over all allow(dead_code) in project and remove them
-// A bunch was added because values are not used yet, but will be used in future 
 
 use std::fmt::Display;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
@@ -17,6 +16,12 @@ const BLUE: &str = "\x1b[34m";
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
+
+static MIN_LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Error as u8);
+
+pub fn set_log_level(level: LogLevel) {
+    MIN_LOG_LEVEL.store(level as u8, Ordering::Relaxed);
+}
 
 #[macro_export]
 macro_rules! log_info {
@@ -82,12 +87,13 @@ macro_rules! log_error {
     };
 }
 
-#[derive(Debug, PartialEq)]
+#[repr(u8)]
+#[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub enum LogLevel {
-    Debug,
-    Info,
-    Warning,
-    Error,
+    Debug = 0,
+    Info = 1,
+    Warning = 2,
+    Error = 3,
 }
 
 pub struct Logger {}
@@ -116,6 +122,10 @@ impl Logger {
     }
 
     pub fn log(level: LogLevel, message: impl Display) {
+        if (level as u8) < MIN_LOG_LEVEL.load(Ordering::Relaxed) {
+            return;
+        }
+
         let (level_str, color) = match level {
             LogLevel::Debug => ("DEBUG", BLUE),
             LogLevel::Info => ("INFO", GREEN),

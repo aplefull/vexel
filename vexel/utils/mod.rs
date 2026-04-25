@@ -1,5 +1,6 @@
 pub mod bitreader;
 pub mod error;
+pub mod exif;
 pub mod icc;
 pub mod image;
 pub mod info;
