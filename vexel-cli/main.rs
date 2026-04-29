@@ -3,6 +3,7 @@ use eframe;
 use egui;
 use egui::ViewportBuilder;
 use glob::glob;
+use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -57,6 +58,37 @@ fn get_files(path: &str) -> Vec<PathBuf> {
     }
 
     files
+}
+
+fn get_directory_files(path: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_file() {
+                files.push(entry_path);
+            }
+        }
+    }
+
+    files.sort_by(|a, b| match (a.file_name(), b.file_name()) {
+        (Some(a_name), Some(b_name)) => a_name.cmp(b_name),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
+
+    files
+}
+
+fn collect_gui_files(path: &str) -> Vec<PathBuf> {
+    let input = Path::new(path);
+    if input.is_dir() {
+        get_directory_files(input)
+    } else {
+        get_files(path)
+    }
 }
 
 fn get_output_path(file: &Path, output_dir: Option<&str>, format: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -180,9 +212,11 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
+fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     struct App {
         texture: Option<egui::TextureHandle>,
+        files: Vec<PathBuf>,
+        current_file_index: usize,
         frames: Vec<egui::ColorImage>,
         current_frame: usize,
         last_frame_time: Instant,
@@ -190,7 +224,7 @@ fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     impl App {
-        fn new(image: &Image) -> Self {
+        fn image_to_frames(image: &Image) -> (Vec<egui::ColorImage>, Vec<u32>) {
             let mut frames = Vec::new();
             let mut frame_delays = Vec::new();
 
@@ -215,12 +249,141 @@ fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
                 frame_delays.push((frame.delay() * 10).max(17));
             }
 
-            Self {
+            (frames, frame_delays)
+        }
+
+        fn new(files: Vec<PathBuf>) -> Self {
+            let mut app = Self {
                 texture: None,
-                frames,
+                files,
+                current_file_index: 0,
+                frames: Vec::new(),
                 current_frame: 0,
                 last_frame_time: Instant::now(),
-                frame_delays,
+                frame_delays: Vec::new(),
+            };
+
+            let _ = app.load_current_file();
+
+            app
+        }
+
+        fn load_image_from_path(path: &Path) -> Result<(Vec<egui::ColorImage>, Vec<u32>), Box<dyn std::error::Error>> {
+            let mut decoder = Vexel::open(path)?;
+            let image = decoder.decode()?;
+            Ok(Self::image_to_frames(&image))
+        }
+
+        fn load_current_file(&mut self) -> bool {
+            if self.files.is_empty() {
+                return false;
+            }
+
+            match Self::load_image_from_path(&self.files[self.current_file_index]) {
+                Ok((frames, frame_delays)) => {
+                    self.frames = frames;
+                    self.frame_delays = frame_delays;
+                    self.current_frame = 0;
+                    self.last_frame_time = Instant::now();
+                    if let Some(texture) = &mut self.texture {
+                        texture.set(self.frames[0].clone(), egui::TextureOptions::default());
+                    }
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+
+        fn try_move_file_index(&mut self, step: isize) -> bool {
+            if self.files.len() <= 1 {
+                return false;
+            }
+
+            let start = self.current_file_index;
+            let mut index = self.current_file_index;
+            let total = self.files.len();
+
+            loop {
+                if step >= 0 {
+                    index = (index + 1) % total;
+                } else {
+                    index = (index + total - 1) % total;
+                }
+
+                self.current_file_index = index;
+                if self.load_current_file() {
+                    return true;
+                }
+
+                if index == start {
+                    break;
+                }
+            }
+
+            false
+        }
+
+        fn load_files(&mut self, files: Vec<PathBuf>, start_index: usize) {
+            if files.is_empty() {
+                return;
+            }
+
+            self.files = files;
+            self.current_file_index = start_index.min(self.files.len() - 1);
+
+            if self.load_current_file() {
+                return;
+            }
+
+            let _ = self.try_move_file_index(1);
+        }
+
+        fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+            let dropped_paths: Vec<PathBuf> = ctx.input(|input| {
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect()
+            });
+
+            if dropped_paths.is_empty() {
+                return;
+            }
+
+            let path = &dropped_paths[0];
+            if path.is_dir() {
+                let files = get_directory_files(path);
+                self.load_files(files, 0);
+            } else if path.is_file() {
+                self.load_files(vec![path.clone()], 0);
+            }
+        }
+
+        fn handle_keyboard_navigation(&mut self, ctx: &egui::Context) {
+            let next = ctx.input(|input| {
+                input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowDown)
+            });
+            if next {
+                let _ = self.try_move_file_index(1);
+            }
+
+            let previous = ctx.input(|input| {
+                input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::ArrowUp)
+            });
+            if previous {
+                let _ = self.try_move_file_index(-1);
+            }
+        }
+
+        fn refresh_texture(&mut self, ctx: &egui::Context) {
+            if self.frames.is_empty() {
+                return;
+            }
+
+            if self.texture.is_none() {
+                self.texture = Some(ctx.load_texture("image", self.frames[0].clone(), egui::TextureOptions::default()));
             }
         }
 
@@ -255,9 +418,9 @@ fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
             visuals.panel_fill = egui::Color32::from_rgb(0x28, 0x2c, 0x34);
             ctx.set_visuals(visuals);
 
-            if self.texture.is_none() {
-                self.texture = Some(ctx.load_texture("image", self.frames[0].clone(), egui::TextureOptions::default()));
-            }
+            self.handle_dropped_files(ctx);
+            self.handle_keyboard_navigation(ctx);
+            self.refresh_texture(ctx);
 
             // Update animation frame
             self.update_frame(ctx);
@@ -293,7 +456,7 @@ fn display_image(image: &Image) -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    eframe::run_native("Vexel", options, Box::new(|_cc| Ok(Box::new(App::new(image)))))?;
+    eframe::run_native("Vexel", options, Box::new(|_cc| Ok(Box::new(App::new(files)))))?;
 
     Ok(())
 }
@@ -308,19 +471,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     vexel::set_log_level(log_level);
 
+    if cli.gui {
+        let files = collect_gui_files(&cli.path);
+        if files.is_empty() {
+            eprintln!("No files found matching path: {}", cli.path);
+            return Ok(());
+        }
+
+        display_image(files)?;
+
+        return Ok(());
+    }
+
     let files = get_files(&cli.path);
 
     if files.is_empty() {
         eprintln!("No files found matching pattern: {}", cli.path);
-        return Ok(());
-    }
-
-    if cli.gui {
-        let mut decoder = Vexel::open(&files[0])?;
-        let image = decoder.decode()?;
-
-        display_image(&image)?;
-
         return Ok(());
     }
 
