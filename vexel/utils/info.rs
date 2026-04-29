@@ -23,6 +23,7 @@ pub enum ImageInfo {
     Hdr(HdrInfo),
     Webp(WebpInfo),
     Avif(AvifInfo),
+    Jbig1(Jbig1Info),
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -120,6 +121,21 @@ pub struct AvifInfo {
     pub frames: Vec<AvifFrameInfo>,
 }
 
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct Jbig1Info {
+    pub width: u32,
+    pub height: u32,
+    pub planes: u8,
+    pub dl: u8,
+    pub d: u8,
+    pub l0: u32,
+    pub mx: u8,
+    pub my: u8,
+    pub order: u8,
+    pub options: u8,
+}
+
 impl fmt::Display for ImageInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -131,6 +147,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Hdr(info) => write!(f, "{}", info),
             ImageInfo::Webp(info) => write!(f, "{}", info),
             ImageInfo::Avif(info) => write!(f, "{}", info),
+            ImageInfo::Jbig1(info) => write!(f, "{}", info),
         }
     }
 }
@@ -522,6 +539,22 @@ impl fmt::Display for AvifInfo {
             writeln!(f, "Frames: {}", self.frames.len())?;
             writeln!(f, "Loop count: {}", self.loop_count)?;
         }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Jbig1Info {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "JBIG1 Image Information")?;
+        writeln!(f, "=======================")?;
+        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
+        writeln!(f, "Planes: {}", self.planes)?;
+        writeln!(f, "Resolution layers: {} to {}", self.dl, self.d)?;
+        writeln!(f, "Lines per stripe (L0): {}", self.l0)?;
+        writeln!(f, "Max ATMOVE x: {}", self.mx)?;
+        writeln!(f, "Max ATMOVE y: {}", self.my)?;
+        writeln!(f, "Order flags: 0x{:02X}", self.order)?;
+        writeln!(f, "Options: 0x{:02X}", self.options)?;
         Ok(())
     }
 }

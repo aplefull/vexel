@@ -138,6 +138,23 @@ mod tests {
                 validation: None,
                 save: true,
             },
+            TestCase {
+                name: "JBIG1 2x2 Checkerboard",
+                path: "jbig1/2x2.jbg",
+                validation: Some(Box::new(|image: &Image| {
+                    let pixels = image.as_rgb8();
+
+                    assert_eq!(image.width(), 2);
+                    assert_eq!(image.height(), 2);
+                    assert_eq!(pixels.len(), 2 * 2 * 3);
+
+                    assert_eq!(&pixels[0..3], &[0, 0, 0]);
+                    assert_eq!(&pixels[3..6], &[255, 255, 255]);
+                    assert_eq!(&pixels[6..9], &[255, 255, 255]);
+                    assert_eq!(&pixels[9..12], &[0, 0, 0]);
+                })),
+                save: false,
+            },
         ];
 
         for test_case in test_cases {

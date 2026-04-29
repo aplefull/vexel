@@ -1,16 +1,17 @@
 mod decoders;
 mod utils;
 
+use crate::decoders::avif::AvifDecoder;
 use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
+use crate::decoders::jbig1::Jbig1Decoder;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
-use crate::decoders::avif::AvifDecoder;
 use crate::decoders::webp::WebpDecoder;
 
 pub(crate) use utils::bitreader;
@@ -48,6 +49,7 @@ pub enum Decoders<R: Read + Seek> {
     Tga(TgaDecoder<R>),
     Avif(AvifDecoder<R>),
     WebP(WebpDecoder<R>),
+    Jbig1(Jbig1Decoder<R>),
     Unknown,
 }
 
@@ -85,6 +87,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Tga => Decoders::Tga(TgaDecoder::new(reader)),
             ImageFormat::Avif => Decoders::Avif(AvifDecoder::new(reader)),
             ImageFormat::WebP => Decoders::WebP(WebpDecoder::new(reader)),
+            ImageFormat::Jbig1 => Decoders::Jbig1(Jbig1Decoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -104,6 +107,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Tga(decoder) => impl_decode!(decoder),
             Decoders::Avif(decoder) => impl_decode!(decoder),
             Decoders::WebP(decoder) => impl_decode!(decoder),
+            Decoders::Jbig1(decoder) => impl_decode!(decoder),
             Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
         }
     }
@@ -152,13 +156,25 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = webp_decoder.get_info();
                 ImageInfo::Webp(image_data)
             }
+            Decoders::Jbig1(jbig1_decoder) => {
+                let image_data = jbig1_decoder.get_info();
+                ImageInfo::Jbig1(image_data)
+            }
             _ => unimplemented!(),
         }
     }
 
     fn try_guess_format(reader: &mut R) -> VexelResult<ImageFormat> {
         let mut header = [0u8; 32];
-        reader.read_exact(&mut header)?;
+        let mut read_pos = 0;
+
+        while read_pos < header.len() {
+            match reader.read(&mut header[read_pos..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => read_pos += n,
+            }
+        }
+
         reader.seek(SeekFrom::Start(0))?;
 
         // JPEG-LS
@@ -232,6 +248,20 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             && ((header[2] == 42 && header[3] == 0) || (header[2] == 0 && header[3] == 42))
         {
             return Ok(ImageFormat::Tiff);
+        }
+
+        // JBIG1 - no magic bytes; validate the 20-byte BIH header
+        // Byte 0 (DL) <= byte 1 (D), byte 2 (planes) >= 1, byte 3 = 0 (reserved)
+        // XD and YD (big-endian u32 at offsets 4 and 8) must be non-zero
+        // L0 (big-endian u32 at offset 12) must be non-zero
+        if header[3] == 0
+            && header[2] >= 1
+            && header[0] <= header[1]
+            && u32::from_be_bytes([header[4], header[5], header[6], header[7]]) > 0
+            && u32::from_be_bytes([header[8], header[9], header[10], header[11]]) > 0
+            && u32::from_be_bytes([header[12], header[13], header[14], header[15]]) > 0
+        {
+            return Ok(ImageFormat::Jbig1);
         }
 
         // TGA

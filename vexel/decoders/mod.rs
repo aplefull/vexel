@@ -2,6 +2,7 @@ pub mod avif;
 pub mod bmp;
 pub mod gif;
 pub mod hdr;
+pub mod jbig1;
 pub mod jpeg;
 pub mod jpeg_ls;
 pub mod netpbm;

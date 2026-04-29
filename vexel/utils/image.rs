@@ -121,6 +121,7 @@ pub enum ImageFormat {
     Tga,
     Avif,
     WebP,
+    Jbig1,
     Unknown,
 }
 
