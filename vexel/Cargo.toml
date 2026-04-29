@@ -20,6 +20,7 @@ tsify = "0.4.5"
 
 [dev-dependencies]
 writer = { path = "../writer" }
+webp = "0.3.0"
 
 [features]
 default = ["rayon"]
