@@ -250,24 +250,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             return Ok(ImageFormat::Tiff);
         }
 
-        // JBIG1 - no magic bytes; validate the 20-byte BIH header
-        // Byte 0 (DL) <= byte 1 (D), byte 2 (planes) >= 1, byte 3 = 0 (reserved)
-        // XD and YD (big-endian u32 at offsets 4 and 8) must be non-zero
-        // L0 (big-endian u32 at offset 12) must be non-zero
-        if header[3] == 0
-            && header[2] >= 1
-            && header[0] <= header[1]
-            && u32::from_be_bytes([header[4], header[5], header[6], header[7]]) > 0
-            && u32::from_be_bytes([header[8], header[9], header[10], header[11]]) > 0
-            && u32::from_be_bytes([header[12], header[13], header[14], header[15]]) > 0
-        {
-            return Ok(ImageFormat::Jbig1);
-        }
-
         // TGA
-        // Targa does not have a magic number, so we have to check the header manually
+        // Targa does not have a magic number, so we have to check the header manually.
         let image_type = header[2];
         let color_map_type = header[1];
+        let palette_bpp = header[7];
 
         let valid_image_type = matches!(image_type, 0 | 1 | 2 | 3 | 9 | 10 | 11 | 32 | 33);
         let valid_color_map = matches!(color_map_type, 0 | 1);
@@ -278,8 +265,28 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         let descriptor = header[17];
         let valid_descriptor = (descriptor & 0xC0) == 0;
 
-        if valid_image_type && valid_color_map && valid_depth && valid_descriptor {
+        let is_paletted_type = matches!(image_type, 1 | 9);
+        let palette_consistent = !is_paletted_type || color_map_type == 1;
+        let valid_palette_bpp = color_map_type != 1 || matches!(palette_bpp, 15 | 16 | 24 | 32);
+
+        if valid_image_type && valid_color_map && valid_depth && valid_descriptor && palette_consistent && valid_palette_bpp {
             return Ok(ImageFormat::Tga);
+        }
+
+        // JBIG1 - no magic bytes; validate the 20-byte BIH header
+        // Byte 0 (DL) <= byte 1 (D), byte 2 (planes) in 1..=8, byte 3 = 0 (reserved)
+        // XD, YD, L0 (big-endian u32 at offsets 4, 8, 12) must be non-zero and <= 65535
+        let xd = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        let yd = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+        let l0 = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);
+        if header[3] == 0
+            && (1..=8).contains(&header[2])
+            && header[0] <= header[1]
+            && xd > 0 && xd <= 65535
+            && yd > 0 && yd <= 65535
+            && l0 > 0 && l0 <= 65535
+        {
+            return Ok(ImageFormat::Jbig1);
         }
 
         // If all else fails, let's try harder and pray that we get the right format

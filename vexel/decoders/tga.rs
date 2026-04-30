@@ -1,428 +1,375 @@
-use crate::bitreader::BitReader;
+use crate::utils::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::{log_warn, Image, PixelData};
-use std::fmt::Debug;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum TgaImageType {
-    #[default]
-    NoImageData = 0,
-    UncompressedColorMapped = 1,
-    UncompressedRGB = 2,
-    UncompressedBW = 3,
-    RLEColorMapped = 9,
-    RLERGB = 10,
-    RLEBlackWhite = 11,
-    HuffmanColorMapped = 32,
-    HuffmanQuadTree = 33,
-}
+const FLAG_ORIGIN_RIGHT: u8 = 1 << 4;
+const FLAG_ORIGIN_TOP: u8 = 1 << 5;
+const FLAG_ALPHA_SIZE_MASK: u8 = 0x0f;
 
-impl TryFrom<u8> for TgaImageType {
-    type Error = VexelError;
+const IMAGE_TYPE_PALETTED: u8 = 1;
+const IMAGE_TYPE_MONOCHROME: u8 = 3;
+const IMAGE_TYPE_MASK: u8 = 3;
+const IMAGE_TYPE_FLAG_RLE: u8 = 1 << 3;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(TgaImageType::NoImageData),
-            1 => Ok(TgaImageType::UncompressedColorMapped),
-            2 => Ok(TgaImageType::UncompressedRGB),
-            3 => Ok(TgaImageType::UncompressedBW),
-            9 => Ok(TgaImageType::RLEColorMapped),
-            10 => Ok(TgaImageType::RLERGB),
-            11 => Ok(TgaImageType::RLEBlackWhite),
-            32 => Ok(TgaImageType::HuffmanColorMapped),
-            33 => Ok(TgaImageType::HuffmanQuadTree),
-            _ => Err(VexelError::Custom(format!("Invalid image type: {}", value))),
-        }
-    }
-}
+const ATTR_TYPE_ALPHA: u8 = 3;
+const ATTR_TYPE_PREMULTIPLIED_ALPHA: u8 = 4;
 
+const TGA_FOOTER_SIZE: i64 = 26;
+const TGA_SIGNATURE: &[u8] = b"TRUEVISION-XFILE.\x00";
+const EXT_AREA_ATTR_TYPE_OFFSET: u64 = 0x1ee;
+
+#[derive(Debug, Default)]
 #[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct TgaColorMapSpec {
-    pub origin: u16,
-    pub length: u16,
-    pub entry_size: u8,
+struct TgaHeader {
+    id_length: u8,
+    palette_type: u8,
+    image_type_raw: u8,
+    palette_first: u16,
+    palette_length: u16,
+    palette_bpp: u8,
+    x_origin: u16,
+    y_origin: u16,
+    width: u16,
+    height: u16,
+    bpp: u8,
+    flags: u8,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct TgaImageSpec {
-    pub x_origin: u16,
-    pub y_origin: u16,
-    pub width: u16,
-    pub height: u16,
-    pub pixel_depth: u8,
-    pub descriptor: u8,
-}
-
-impl TgaImageSpec {
-    pub fn is_top_to_bottom(&self) -> bool {
-        // Bit 5 of descriptor determines image origin
-        // 0 = bottom left, 1 = top left
-        (self.descriptor & 0x20) != 0
-    }
-
-    pub fn is_right_to_left(&self) -> bool {
-        // Bits 4-5 of descriptor determine horizontal orientation
-        // 0 = left to right, 1 = right to left
-        (self.descriptor & 0x10) != 0
-    }
-
-    #[allow(dead_code)]
-    pub fn alpha_channel_bits(&self) -> u8 {
-        // Bits 0-3 specify number of alpha channel bits
-        self.descriptor & 0x0F
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct TgaHeader {
-    pub id_length: u8,
-    pub color_map_type: u8,
-    pub image_type: TgaImageType,
-    pub color_map_spec: TgaColorMapSpec,
-    pub image_spec: TgaImageSpec,
+#[derive(Debug, Clone, Copy)]
+enum ExtAlphaType {
+    Alpha,
+    PremultipliedAlpha,
+    NoAlpha,
 }
 
 pub struct TgaDecoder<R: Read + Seek> {
-    width: u16,
-    height: u16,
-    header: TgaHeader,
-    color_map: Vec<[u8; 4]>,
-    image_id: String,
     reader: BitReader<R>,
 }
 
 impl<R: Read + Seek> TgaDecoder<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            width: 0,
-            height: 0,
-            header: TgaHeader::default(),
-            color_map: Vec::new(),
-            image_id: String::new(),
             reader: BitReader::with_le(reader),
         }
     }
 
-    fn read_header(&mut self) -> VexelResult<()> {
-        let id_length = self.reader.read_u8()?;
-        let color_map_type = self.reader.read_u8()?;
-        let image_type = TgaImageType::try_from(self.reader.read_u8()?)?;
-
-        let color_map_spec = TgaColorMapSpec {
-            origin: self.reader.read_u16()?,
-            length: self.reader.read_u16()?,
-            entry_size: self.reader.read_u8()?,
-        };
-
-        let image_spec = TgaImageSpec {
+    fn read_header(&mut self) -> VexelResult<TgaHeader> {
+        Ok(TgaHeader {
+            id_length: self.reader.read_u8()?,
+            palette_type: self.reader.read_u8()?,
+            image_type_raw: self.reader.read_u8()?,
+            palette_first: self.reader.read_u16()?,
+            palette_length: self.reader.read_u16()?,
+            palette_bpp: self.reader.read_u8()?,
             x_origin: self.reader.read_u16()?,
             y_origin: self.reader.read_u16()?,
             width: self.reader.read_u16()?,
             height: self.reader.read_u16()?,
-            pixel_depth: self.reader.read_u8()?,
-            descriptor: self.reader.read_u8()?,
-        };
-
-        self.width = image_spec.width;
-        self.height = image_spec.height;
-
-        self.header = TgaHeader {
-            id_length,
-            color_map_type,
-            image_type,
-            color_map_spec,
-            image_spec,
-        };
-
-        Ok(())
+            bpp: self.reader.read_u8()?,
+            flags: self.reader.read_u8()?,
+        })
     }
 
-    fn read_image_id(&mut self) -> VexelResult<()> {
-        if self.header.id_length > 0 {
-            let mut id_data = vec![0u8; self.header.id_length as usize];
-            self.reader.read_exact(&mut id_data)?;
-            self.image_id = String::from_utf8_lossy(&id_data).to_string();
+    fn read_ext_alpha_type(&mut self) -> Option<ExtAlphaType> {
+        self.reader.seek(SeekFrom::End(-TGA_FOOTER_SIZE)).ok()?;
+
+        let mut footer = [0u8; TGA_FOOTER_SIZE as usize];
+        self.reader.read_exact(&mut footer).ok()?;
+
+        if &footer[8..26] != TGA_SIGNATURE {
+            return None;
         }
 
-        Ok(())
-    }
-
-    fn read_color_map(&mut self) -> VexelResult<()> {
-        let header = &self.header;
-
-        if header.color_map_type == 1 {
-            let entry_size = header.color_map_spec.entry_size;
-            let map_length = header.color_map_spec.length as usize;
-            let mut color_map = Vec::with_capacity(map_length);
-
-            for _ in 0..map_length {
-                let entry = match entry_size {
-                    15 | 16 => {
-                        let pixel = self.reader.read_u16()?;
-                        let r = (((pixel >> 10) & 0x1F) as f32 * 255.0 / 31.0) as u8;
-                        let g = (((pixel >> 5) & 0x1F) as f32 * 255.0 / 31.0) as u8;
-                        let b = ((pixel & 0x1F) as f32 * 255.0 / 31.0) as u8;
-                        let a = if pixel & 0x8000 != 0 { 255 } else { 0 };
-                        [r, g, b, a]
-                    }
-                    24 => {
-                        let b = self.reader.read_u8()?;
-                        let g = self.reader.read_u8()?;
-                        let r = self.reader.read_u8()?;
-                        [r, g, b, 255]
-                    }
-                    32 => {
-                        let b = self.reader.read_u8()?;
-                        let g = self.reader.read_u8()?;
-                        let r = self.reader.read_u8()?;
-                        let a = self.reader.read_u8()?;
-                        [r, g, b, a]
-                    }
-                    _ => {
-                        return Err(VexelError::Custom(format!(
-                            "Unsupported color map entry size: {}",
-                            entry_size
-                        )))
-                    }
-                };
-
-                color_map.push(entry);
-            }
-
-            self.color_map = color_map;
+        let ext_offset = u32::from_le_bytes([footer[0], footer[1], footer[2], footer[3]]) as u64;
+        if ext_offset == 0 {
+            return None;
         }
 
-        Ok(())
-    }
+        self.reader
+            .seek(SeekFrom::Start(ext_offset + EXT_AREA_ATTR_TYPE_OFFSET))
+            .ok()?;
 
-    fn flip_pixels_vertical(pixels: &mut [u8], width: usize, height: usize, bytes_per_pixel: usize) {
-        let stride = width * bytes_per_pixel;
-        let rows = height / 2;
+        let mut attr = [0u8; 1];
+        self.reader.read_exact(&mut attr).ok()?;
 
-        for row in 0..rows {
-            let top_start = row * stride;
-            let bottom_start = (height - 1 - row) * stride;
-
-            for i in 0..stride {
-                pixels.swap(top_start + i, bottom_start + i);
-            }
+        match attr[0] {
+            ATTR_TYPE_ALPHA => Some(ExtAlphaType::Alpha),
+            ATTR_TYPE_PREMULTIPLIED_ALPHA => Some(ExtAlphaType::PremultipliedAlpha),
+            _ => Some(ExtAlphaType::NoAlpha),
         }
     }
 
-    fn decode_pixel(&mut self, pixel_depth: u8) -> VexelResult<[u8; 4]> {
-        match pixel_depth {
-            8 => {
-                let v = self.reader.read_u8()?;
-                Ok([v, v, v, 255])
-            }
+    fn expand_5bit(ch: u8) -> u8 {
+        ((ch as u16 * 255 + 15) / 31) as u8
+    }
+
+    fn rgb_from_word(word: u16) -> [u8; 3] {
+        [
+            Self::expand_5bit(((word >> 10) & 0x1f) as u8),
+            Self::expand_5bit(((word >> 5) & 0x1f) as u8),
+            Self::expand_5bit((word & 0x1f) as u8),
+        ]
+    }
+
+    fn read_palette_entry(&mut self, palette_bpp: u8, has_alpha: bool) -> [u8; 4] {
+        match palette_bpp {
             15 | 16 => {
-                let pixel = self.reader.read_u16()?;
-                let r = (((pixel >> 10) & 0x1F) as f32 * 255.0 / 31.0) as u8;
-                let g = (((pixel >> 5) & 0x1F) as f32 * 255.0 / 31.0) as u8;
-                let b = ((pixel & 0x1F) as f32 * 255.0 / 31.0) as u8;
-                let a = if pixel & 0x8000 != 0 { 255 } else { 0 };
-                Ok([r, g, b, a])
+                let lo = self.reader.read_u8().unwrap_or(0);
+                let hi = self.reader.read_u8().unwrap_or(0);
+                let word = lo as u16 | ((hi as u16) << 8);
+                let [r, g, b] = Self::rgb_from_word(word);
+                [r, g, b, 255]
             }
             24 => {
-                let b = self.reader.read_u8()?;
-                let g = self.reader.read_u8()?;
-                let r = self.reader.read_u8()?;
-                Ok([r, g, b, 255])
+                let b = self.reader.read_u8().unwrap_or(0);
+                let g = self.reader.read_u8().unwrap_or(0);
+                let r = self.reader.read_u8().unwrap_or(0);
+                [r, g, b, 255]
             }
             32 => {
-                let b = self.reader.read_u8()?;
-                let g = self.reader.read_u8()?;
-                let r = self.reader.read_u8()?;
-                let a = self.reader.read_u8()?;
-                Ok([r, g, b, a])
+                let b = self.reader.read_u8().unwrap_or(0);
+                let g = self.reader.read_u8().unwrap_or(0);
+                let r = self.reader.read_u8().unwrap_or(0);
+                let a = self.reader.read_u8().unwrap_or(255);
+                [r, g, b, if has_alpha { a } else { 255 }]
             }
-            _ => {
-                log_warn!("Invalid pixel depth: {}", pixel_depth);
-                
-                let v = self.reader.read_u8()?;
-                Ok([v, v, v, 255])
+            bpp => {
+                log_warn!("Unsupported TGA palette BPP: {}", bpp);
+                [0, 0, 0, 255]
             }
         }
     }
 
-    fn decode_uncompressed(&mut self) -> VexelResult<PixelData> {
-        let header = &self.header;
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let pixel_depth = header.image_spec.pixel_depth;
-        let is_top_to_bottom = header.image_spec.is_top_to_bottom();
-        let is_right_to_left = header.image_spec.is_right_to_left();
+    fn read_palette(&mut self, header: &TgaHeader) -> Vec<[u8; 4]> {
+        let bytes_per_entry = ((header.palette_bpp as usize + 7) / 8).max(1);
+        let skip_count = header.palette_first as usize;
+        let read_count = (header.palette_length as usize).saturating_sub(skip_count);
+        let has_alpha = header.palette_bpp == 32;
 
-        // Create a 2D vector to help with orientation handling
-        let mut pixel_rows = Vec::with_capacity(height);
-        for _ in 0..height {
-            let mut row = Vec::with_capacity(width * 4);
-            for _ in 0..width {
-                let pixel = self.decode_pixel(pixel_depth)?;
-                row.extend_from_slice(&pixel);
-            }
-            
-            if is_right_to_left {
-                // Reverse pixels in the row
-                let mut flipped_row = Vec::with_capacity(width * 4);
-                for pixel_idx in (0..row.len()).step_by(4).rev() {
-                    flipped_row.extend_from_slice(&row[pixel_idx..pixel_idx + 4]);
-                }
-                row = flipped_row;
-            }
-            
-            pixel_rows.push(row);
+        if skip_count > 0 {
+            let _ = self.reader.seek(SeekFrom::Current((skip_count * bytes_per_entry) as i64));
         }
 
-        // Flatten the 2D vector into the final pixel buffer
-        let mut pixels = Vec::with_capacity(width * height * 4);
-        if is_top_to_bottom {
-            // Top-to-bottom: use rows in order
-            for row in pixel_rows {
-                pixels.extend(row);
-            }
-        } else {
-            // Bottom-to-top: reverse row order
-            for row in pixel_rows.into_iter().rev() {
-                pixels.extend(row);
-            }
-        }
-
-        Ok(PixelData::RGBA8(pixels))
+        (0..read_count)
+            .map(|_| self.read_palette_entry(header.palette_bpp, has_alpha))
+            .collect()
     }
 
-    fn decode_rle(&mut self) -> VexelResult<PixelData> {
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let pixel_depth = self.header.image_spec.pixel_depth;
-        let is_top_to_bottom = self.header.image_spec.is_top_to_bottom();
+    fn skip_palette(&mut self, header: &TgaHeader) {
+        if header.palette_type != 1 || header.palette_length == 0 {
+            return;
+        }
+        let bytes_per_entry = ((header.palette_bpp as usize + 7) / 8).max(1);
+        let total_bytes = header.palette_length as usize * bytes_per_entry;
+        let _ = self.reader.seek(SeekFrom::Current(total_bytes as i64));
+    }
 
-        let mut pixels = Vec::with_capacity(width * height * 4);
-        let mut pixel_count = 0;
+    fn lookup_palette(palette: &[[u8; 4]], index: usize) -> [u8; 4] {
+        if palette.is_empty() {
+            return [0, 0, 0, 255];
+        }
+        palette.get(index).copied().unwrap_or_else(|| *palette.last().unwrap())
+    }
+
+    fn read_pixel(&mut self, bpp: u8, image_type: u8, has_alpha: bool) -> [u8; 4] {
+        match bpp {
+            8 => {
+                let v = self.reader.read_u8().unwrap_or(0);
+                [v, v, v, 255]
+            }
+            16 if image_type == IMAGE_TYPE_MONOCHROME => {
+                let gray = self.reader.read_u8().unwrap_or(0);
+                let a = self.reader.read_u8().unwrap_or(255);
+                [gray, gray, gray, if has_alpha { a } else { 255 }]
+            }
+            15 | 16 => {
+                let lo = self.reader.read_u8().unwrap_or(0);
+                let hi = self.reader.read_u8().unwrap_or(0);
+                let word = lo as u16 | ((hi as u16) << 8);
+                let [r, g, b] = Self::rgb_from_word(word);
+                let a = if has_alpha && (word & 0x8000) == 0 { 0 } else { 255 };
+                [r, g, b, a]
+            }
+            24 => {
+                let b = self.reader.read_u8().unwrap_or(0);
+                let g = self.reader.read_u8().unwrap_or(0);
+                let r = self.reader.read_u8().unwrap_or(0);
+                [r, g, b, 255]
+            }
+            32 => {
+                let b = self.reader.read_u8().unwrap_or(0);
+                let g = self.reader.read_u8().unwrap_or(0);
+                let r = self.reader.read_u8().unwrap_or(0);
+                let a = self.reader.read_u8().unwrap_or(255);
+                [r, g, b, if has_alpha { a } else { 255 }]
+            }
+            bpp => {
+                log_warn!("Unsupported TGA BPP: {}", bpp);
+                [0, 0, 0, 255]
+            }
+        }
+    }
+
+    fn decode_image_data(
+        &mut self,
+        header: &TgaHeader,
+        palette: &[[u8; 4]],
+        has_alpha: bool,
+        is_rle: bool,
+    ) -> Vec<u8> {
+        let width = header.width as usize;
+        let height = header.height as usize;
         let total_pixels = width * height;
+        let image_type = header.image_type_raw & IMAGE_TYPE_MASK;
+        let is_paletted = image_type == IMAGE_TYPE_PALETTED;
+        let bpp = header.bpp;
 
-        while pixel_count < total_pixels {
-            let packet_header = self.reader.read_u8()?;
-            let run_length = (packet_header & 0x7F) as usize + 1;
+        let mut pixels = vec![0u8; total_pixels * 4];
+        let mut written = 0usize;
 
-            if packet_header & 0x80 != 0 {
-                // RLE packet
-                let pixel = self.decode_pixel(pixel_depth)?;
-                for _ in 0..run_length {
-                    if pixel_count < total_pixels {
-                        pixels.extend_from_slice(&pixel);
-                        pixel_count += 1;
-                    }
+        macro_rules! write_pixel {
+            ($px:expr) => {
+                if written < total_pixels {
+                    let off = written * 4;
+                    let px = $px;
+                    pixels[off] = px[0];
+                    pixels[off + 1] = px[1];
+                    pixels[off + 2] = px[2];
+                    pixels[off + 3] = px[3];
+                    written += 1;
                 }
-            } else {
-                // Raw packet
-                for _ in 0..run_length {
-                    if pixel_count < total_pixels {
-                        let pixel = self.decode_pixel(pixel_depth)?;
-                        pixels.extend_from_slice(&pixel);
-                        pixel_count += 1;
-                    }
-                }
-            }
+            };
         }
 
-        if !is_top_to_bottom {
-            Self::flip_pixels_vertical(&mut pixels, width, height, 4);
-        }
+        if is_rle {
+            'rle: while written < total_pixels {
+                let packet = match self.reader.read_u8() {
+                    Ok(b) => b,
+                    Err(_) => break,
+                };
+                let count = (packet & 0x7f) as usize + 1;
 
-        Ok(PixelData::RGBA8(pixels))
-    }
-
-    fn decode_color_mapped(&mut self, is_rle: bool) -> VexelResult<PixelData> {
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let total_pixels = width * height;
-
-        let mut pixels = Vec::with_capacity(width * height * 4);
-        let mut pixel_count = 0;
-
-        if !is_rle {
-            // Uncompressed color mapped
-            while pixel_count < total_pixels {
-                let index = self.reader.read_u8()? as usize;
-                if let Some(color) = self.color_map.get(index) {
-                    pixels.extend_from_slice(color);
-                    pixel_count += 1;
-                }
-            }
-        } else {
-            // RLE color mapped
-            while pixel_count < total_pixels {
-                let packet_header = self.reader.read_u8()?;
-                let run_length = (packet_header & 0x7F) as usize + 1;
-
-                if packet_header & 0x80 != 0 {
-                    // RLE packet
-                    let index = self.reader.read_u8()? as usize;
-                    if let Some(color) = self.color_map.get(index) {
-                        for _ in 0..run_length {
-                            if pixel_count < total_pixels {
-                                pixels.extend_from_slice(color);
-                                pixel_count += 1;
-                            }
-                        }
+                if packet & 0x80 != 0 {
+                    let px = if is_paletted {
+                        let idx = self.reader.read_u8().unwrap_or(0) as usize;
+                        Self::lookup_palette(palette, idx)
+                    } else {
+                        self.read_pixel(bpp, image_type, has_alpha)
+                    };
+                    for _ in 0..count {
+                        write_pixel!(px);
                     }
                 } else {
-                    // Raw packet
-                    for _ in 0..run_length {
-                        if pixel_count < total_pixels {
-                            let index = self.reader.read_u8()? as usize;
-                            if let Some(color) = self.color_map.get(index) {
-                                pixels.extend_from_slice(color);
-                                pixel_count += 1;
+                    for _ in 0..count {
+                        let px = if is_paletted {
+                            match self.reader.read_u8() {
+                                Ok(idx) => Self::lookup_palette(palette, idx as usize),
+                                Err(_) => break 'rle,
                             }
-                        }
+                        } else {
+                            self.read_pixel(bpp, image_type, has_alpha)
+                        };
+                        write_pixel!(px);
                     }
+                }
+            }
+        } else {
+            'raw: for _ in 0..total_pixels {
+                let px = if is_paletted {
+                    match self.reader.read_u8() {
+                        Ok(idx) => Self::lookup_palette(palette, idx as usize),
+                        Err(_) => break 'raw,
+                    }
+                } else {
+                    self.read_pixel(bpp, image_type, has_alpha)
+                };
+                write_pixel!(px);
+            }
+        }
+
+        pixels
+    }
+
+    fn apply_orientation(pixels: &mut [u8], width: usize, height: usize, flags: u8) {
+        let flip_h = (flags & FLAG_ORIGIN_RIGHT) != 0;
+        let flip_v = (flags & FLAG_ORIGIN_TOP) == 0;
+
+        if flip_h {
+            let row_bytes = width * 4;
+            for y in 0..height {
+                let start = y * row_bytes;
+                let row = &mut pixels[start..start + row_bytes];
+                let mut l = 0;
+                let mut r = width.saturating_sub(1);
+                while l < r {
+                    row.swap(l * 4, r * 4);
+                    row.swap(l * 4 + 1, r * 4 + 1);
+                    row.swap(l * 4 + 2, r * 4 + 2);
+                    row.swap(l * 4 + 3, r * 4 + 3);
+                    l += 1;
+                    r -= 1;
                 }
             }
         }
 
-        Ok(PixelData::RGBA8(pixels))
+        if flip_v {
+            let stride = width * 4;
+            let mut top = 0;
+            let mut bot = height.saturating_sub(1);
+            while top < bot {
+                for i in 0..stride {
+                    pixels.swap(top * stride + i, bot * stride + i);
+                }
+                top += 1;
+                bot -= 1;
+            }
+        }
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        // Read header
-        self.read_header()?;
+        let header = self.read_header()?;
+        let ext_alpha = self.read_ext_alpha_type();
+        self.reader.seek(SeekFrom::Start(18 + header.id_length as u64))?;
 
-        // Read optional image ID
-        self.read_image_id()?;
 
-        // Read color map if present
-        self.read_color_map()?;
-
-        // Validate image dimensions
-        if self.width == 0 || self.height == 0 {
+        
+        if header.width == 0 || header.height == 0 {
             return Err(VexelError::InvalidDimensions {
-                width: self.width as u32,
-                height: self.height as u32,
+                width: header.width as u32,
+                height: header.height as u32,
             });
         }
 
-        let mut pixel_data = match self.header.image_type {
-            TgaImageType::UncompressedRGB | TgaImageType::UncompressedBW => self.decode_uncompressed()?,
-            TgaImageType::RLERGB | TgaImageType::RLEBlackWhite => self.decode_rle()?,
-            TgaImageType::UncompressedColorMapped => self.decode_color_mapped(false)?,
-            TgaImageType::RLEColorMapped => self.decode_color_mapped(true)?,
-            TgaImageType::NoImageData => {
-                log_warn!("Header specifies no image data in TGA image, will attempt to decode as uncompressed");
-                self.decode_uncompressed()?
-            }
-            TgaImageType::HuffmanColorMapped | TgaImageType::HuffmanQuadTree => {
-                log_warn!("Header specifies Huffman coding in TGA image, which doesn't actually exist, treating as uncompressed");
-                self.decode_uncompressed()?
+        let image_type = header.image_type_raw & IMAGE_TYPE_MASK;
+        let is_rle = (header.image_type_raw & IMAGE_TYPE_FLAG_RLE) != 0;
+        let alpha_bits = header.flags & FLAG_ALPHA_SIZE_MASK;
+
+        let has_alpha = match ext_alpha {
+            Some(ExtAlphaType::Alpha | ExtAlphaType::PremultipliedAlpha) => true,
+            Some(ExtAlphaType::NoAlpha) => false,
+            None => {
+                alpha_bits != 0
+                    || header.bpp == 32
+                    || (image_type == IMAGE_TYPE_MONOCHROME && header.bpp == 16)
+                    || (image_type == IMAGE_TYPE_PALETTED && header.palette_bpp == 32)
             }
         };
 
-        pixel_data.correct_pixels(self.width as u32, self.height as u32);
+        let palette = if image_type == IMAGE_TYPE_PALETTED {
+            self.read_palette(&header)
+        } else {
+            self.skip_palette(&header);
+            Vec::new()
+        };
 
-        Ok(Image::from_pixels(self.width as u32, self.height as u32, pixel_data))
+        let mut pixels = self.decode_image_data(&header, &palette, has_alpha, is_rle);
+
+        Self::apply_orientation(&mut pixels, header.width as usize, header.height as usize, header.flags);
+
+        let mut pixel_data = PixelData::RGBA8(pixels);
+        pixel_data.correct_pixels(header.width as u32, header.height as u32);
+
+        Ok(Image::from_pixels(header.width as u32, header.height as u32, pixel_data))
     }
 }
