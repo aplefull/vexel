@@ -222,9 +222,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     {
                         let plane = self.current_plane as usize;
                         let layer = self.current_layer as usize;
-                        if std::env::var("JBIG1_DEBUG").is_ok() {
-                            eprintln!("SDE plane={} layer={} stripe={}  len={}", plane, layer, self.current_stripe, sde_data.len());
-                        }
                         let at_moves_for_stripe = std::mem::take(&mut at_moves);
                         self.decode_pscd(plane, layer, sde_data, &at_moves_for_stripe);
                     }
@@ -468,12 +465,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 let raw = self.ar_decoders[plane][layer_idx].decode(TPDCX, data, &mut pos).unwrap_or(0);
                 lntp = raw != 0;
                 self.lntp[plane][layer_idx] = lntp;
-                if std::env::var("JBIG1_DEBUG").is_ok() {
-                    let target = Self::debug_target_rows(layer, self.d as usize);
-                    if target.contains(&y) {
-                        eprintln!("LNTP layer={} row={:4}  raw={}  lntp={}", layer, y, raw, lntp as u8);
-                    }
-                }
             }
             self.pseudo = false;
 
@@ -516,31 +507,10 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             let mut byte_idx = 0usize;
             let mut current_byte = 0u8;
 
-            if std::env::var("JBIG1_DEBUG").is_ok() {
-                let target = Self::debug_target_rows(layer, self.d as usize);
-                if target.contains(&y) {
-                    let lo_row = lo_line;
-                    let n = lbpl.min(8);
-                    let lo_off = lo_row * lbpl;
-                    let bits: Vec<String> = self.lhp[lhp_lo][plane]
-                        .get(lo_off..lo_off + n)
-                        .unwrap_or(&[])
-                        .iter()
-                        .map(|b| format!("{:08b}", b))
-                        .collect();
-                    eprintln!("  DIFF_IN  layer={} y={:4}  lo_row={}  lo_bits: {}", layer, y, lo_row, bits.join(" "));
-                }
-            }
-
-            let mut lp1_byte = 0usize;
-            let mut lp2_byte = 0usize;
-
             while x < hx as usize {
                 if (x & 15) == 0 {
                     let lbyte = x >> 4;
                     if lbyte + 1 < lbpl {
-                        lp1_byte = lbyte;
-                        lp2_byte = lbyte;
                         let lp1_next_off = lp1_off + lbyte + 1;
                         let lp2_next_off = lp2_off + lbyte + 1;
                         if lp2_next_off < self.lhp[lhp_lo][plane].len() {
@@ -556,7 +526,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                             line_l1 |= self.lhp[lhp_lo][plane][lp1_next_off] as u32;
                         }
                     }
-                    let _ = (lp1_byte, lp2_byte);
                 }
 
                 'pixel_pair: loop {
@@ -699,13 +668,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 }
             }
 
-            if std::env::var("JBIG1_DEBUG").is_ok() {
-                let target = Self::debug_target_rows(layer, self.d as usize);
-                if target.contains(&y) {
-                    Self::dbg_row("DIFF_ROW", layer, y, lntp, &self.lhp[lhp_hi][plane], hbpl);
-                }
-            }
-
             if (i & 1) == 1 {
                 self.pseudo = true;
             }
@@ -810,69 +772,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         };
         let cx = cx | ((y as u32 & 1) << 11);
 
-        let pix = self.ar_decoders[plane][layer_idx].decode(cx as usize, data, pos).unwrap_or(0);
-        if std::env::var("JBIG1_DEBUG").is_ok() {
-            let layer_abs = self.dl as usize + layer_idx;
-            if layer_abs == self.d as usize && y >= 170 && y <= 185 && x < 50 {
-                eprintln!("RUST_PIX  layer={} y={:4} x={:4}  cx=0x{:04x}  pix={}", layer_abs, y, x, cx, pix);
-            }
-        }
-        pix
-    }
-
-    fn dbg_row(label: &str, layer: usize, y: usize, lntp: bool, buf: &[u8], hbpl: usize) {
-        let off = y * hbpl;
-        if off + hbpl > buf.len() {
-            return;
-        }
-        // For layer 3: show bytes 150-166 (around col 1249 = byte 156)
-        // For layer 2: show bytes 75-84 (lo-res byte 78 = hi-res col 1248)
-        // For layer 1: show bytes 36-45 (lo-res byte ~39)
-        let (start, end) = if layer == 3 {
-            (150usize, hbpl.min(167))
-        } else if layer == 2 {
-            (75usize, hbpl.min(85))
-        } else if layer == 1 {
-            (36usize, hbpl.min(46))
-        } else {
-            (0usize, hbpl.min(20))
-        };
-        let bytes: Vec<String> = buf[off + start..off + end].iter().map(|b| format!("{:02x}", b)).collect();
-        eprintln!("RUST_ROW  layer={} y={:4}  lntp={}  bytes[{}-{}]: {}", layer, y, lntp as u8, start, end - 1, bytes.join(" "));
-    }
-
-    fn debug_target_rows(layer: usize, d: usize) -> Vec<usize> {
-        let shift = d.saturating_sub(layer);
-        if layer == d {
-            let mut rows: Vec<usize> = (155..=165).collect();
-            rows.extend(170..=185usize);
-            rows.extend(0..=26usize);
-            rows.sort();
-            rows.dedup();
-            rows
-        } else if layer + 1 == d {
-            // layer 2: log rows corresponding to layer-3 rows 85-93
-            let mut rows: Vec<usize> = (77..=82).collect();
-            rows.extend(85..=93usize);
-            let full_res: &[usize] = &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26];
-            rows.extend(full_res.iter().map(|&r| r >> shift));
-            rows.sort();
-            rows.dedup();
-            rows
-        } else if layer + 2 == d {
-            // layer 1: log rows 38-48
-            let mut rows: Vec<usize> = (38..=48).collect();
-            let full_res: &[usize] = &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26];
-            rows.extend(full_res.iter().map(|&r| r >> shift));
-            rows.sort();
-            rows.dedup();
-            rows
-        } else {
-            let full_res: &[usize] = &[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26];
-            let mut rows: Vec<usize> = full_res.iter().map(|&r| r >> shift).collect();
-            rows.dedup();
-            rows
-        }
+        self.ar_decoders[plane][layer_idx].decode(cx as usize, data, pos).unwrap_or(0)
     }
 
     fn decode_layer0_pscd(&mut self, plane: usize, data: &[u8], at_moves: &[AtMove]) {
@@ -931,10 +831,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 let old_lntp = lntp;
                 lntp = (slntp ^ (lntp as u8)) == 0;
                 self.lntp[plane][layer_idx] = lntp;
-
-                if std::env::var("JBIG1_DEBUG").is_ok() && layer == 0 && stripe <= 3 {
-                    eprintln!("L0  stripe={} row={:4}  old_lntp={}  slntp={}  lntp={}", stripe, y, old_lntp as u8, slntp, lntp as u8);
-                }
 
                 if !lntp {
                     let row_start = y * hbpl;
@@ -1083,10 +979,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 if dst < self.lhp[lhp_idx][plane].len() {
                     self.lhp[lhp_idx][plane][dst] = current_byte;
                 }
-            }
-
-            if std::env::var("JBIG1_DEBUG").is_ok() && y <= 26 {
-                Self::dbg_row("RUST_ROW", layer, y, lntp, &self.lhp[lhp_idx][plane], hbpl);
             }
 
             self.pseudo = true;

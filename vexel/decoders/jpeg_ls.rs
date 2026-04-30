@@ -1,7 +1,7 @@
 use crate::bitreader::BitReader;
 use crate::utils::error::VexelResult;
 use crate::utils::marker::Marker;
-use crate::{Image, PixelData};
+use crate::{Image, PixelData, log_info, log_warn};
 use std::fmt;
 use std::fmt::Debug;
 use std::io::{Cursor, Error, Read, Seek};
@@ -676,7 +676,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             match marker {
                 Some(marker) => match marker {
                     JpegLsMarker::SOI => {
-                        println!("Start of image");
+                        log_info!("Start of image marker found");
                     }
                     JpegLsMarker::SOF55 => self.read_sof_info()?,
                     JpegLsMarker::SOS => {
@@ -685,15 +685,14 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                         self.read_sos_bitstream()?;
                     }
                     JpegLsMarker::EOI => {
-                        println!("End of image marker found");
+                        log_info!("End of image marker found");
                         break;
                     }
                     _ => {
-                        println!("Unhandled marker found: {:?}", marker);
+                        log_warn!("Unhandled marker found: {:?}", marker);
                     }
                 },
                 None => {
-                    println!("No more markers found");
                     break;
                 }
             }
