@@ -1,7 +1,6 @@
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::BmpInfo;
-use crate::utils::traits::SafeAccess;
 use crate::{log_error, log_warn, Image, PixelData};
 use serde::Serialize;
 use std::fmt::Debug;
@@ -498,35 +497,6 @@ impl<R: Read + Seek> BmpDecoder<R> {
         Ok(())
     }
 
-    fn flip_v(data: &mut Vec<u8>, width: u32, height: u32, channels: u32) {
-        let row_size = (width * channels) as usize;
-        let mut temp_row = vec![0u8; row_size];
-
-        for y in 0..(height as usize / 2) {
-            let top_row_start = y * row_size;
-            let bottom_row_start = (height as usize - 1 - y) * row_size;
-
-            if data.check_range(top_row_start..top_row_start + row_size).is_err() {
-                log_warn!("Invalid top row range: {}..{}", top_row_start, top_row_start + row_size);
-                continue;
-            }
-
-            if data.check_range(bottom_row_start..bottom_row_start + row_size).is_err() {
-                log_warn!(
-                    "Invalid bottom row range: {}..{}",
-                    bottom_row_start,
-                    bottom_row_start + row_size
-                );
-                continue;
-            }
-
-            temp_row.copy_from_slice(&data[top_row_start..top_row_start + row_size]);
-
-            data.copy_within(bottom_row_start..bottom_row_start + row_size, top_row_start);
-
-            data[bottom_row_start..bottom_row_start + row_size].copy_from_slice(&temp_row);
-        }
-    }
 
     fn decode_rle8(&mut self) -> VexelResult<()> {
         let mut decoded = vec![0u8; (self.width * self.height) as usize];
@@ -715,47 +685,72 @@ impl<R: Read + Seek> BmpDecoder<R> {
             log_warn!("Invalid color table for 1-bit image");
         }
 
-        let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-        let bytes_per_row = ((self.width + 7) / 8) as usize;
-        let row_padding = (4 - (bytes_per_row % 4)) % 4;
-        let total_row_size = bytes_per_row + row_padding;
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let src_stride = (((width + 7) / 8) + 3) & !3;
+        let bottom_up = self.dib_header.height() > 0;
+        let color_table = &self.color_table;
+        let src = &self.data;
 
-        // Process each row
-        for y in 0..self.height as usize {
-            let row_start = y * total_row_size;
+        let mut image_data = vec![0u8; width * height * 3];
 
-            // Process each pixel in the row
-            for x in 0..self.width as usize {
-                let byte_index = row_start + (x / 8);
-                let bit_offset = 7 - (x % 8);
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width * 3)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
 
-                if byte_index < self.data.len() {
-                    let byte = self.data.get_safe(byte_index).unwrap_or_else(|e| {
-                        log_warn!("Error reading pixel data: {}", e);
-                        &0
-                    });
-
-                    let pixel_value = (byte >> bit_offset) & 1;
-                    let color = self.color_table.get_safe(pixel_value as usize).unwrap_or_else(|e| {
-                        log_warn!("Error reading color table: {}", e);
-
-                        &ColorEntry {
+                    for x in 0..width {
+                        let byte_index = row_offset + x / 8;
+                        let bit_offset = 7 - (x % 8);
+                        let pixel_value = if byte_index < src.len() {
+                            ((src[byte_index] >> bit_offset) & 1) as usize
+                        } else {
+                            0
+                        };
+                        let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
                             red: 0,
                             green: 0,
                             blue: 0,
                             reserved: 0,
-                        }
-                    });
-
-                    image_data.push(color.red);
-                    image_data.push(color.green);
-                    image_data.push(color.blue);
-                }
-            }
+                        });
+                        dst[x * 3] = color.red;
+                        dst[x * 3 + 1] = color.green;
+                        dst[x * 3 + 2] = color.blue;
+                    }
+                });
         }
 
-        if self.dib_header.height() > 0 {
-            Self::flip_v(&mut image_data, self.width, self.height, 3);
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height {
+                let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width * 3;
+
+                for x in 0..width {
+                    let byte_index = row_offset + x / 8;
+                    let bit_offset = 7 - (x % 8);
+                    let pixel_value = if byte_index < self.data.len() {
+                        ((self.data[byte_index] >> bit_offset) & 1) as usize
+                    } else {
+                        0
+                    };
+                    let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
+                        red: 0,
+                        green: 0,
+                        blue: 0,
+                        reserved: 0,
+                    });
+                    image_data[dst_offset + x * 3] = color.red;
+                    image_data[dst_offset + x * 3 + 1] = color.green;
+                    image_data[dst_offset + x * 3 + 2] = color.blue;
+                }
+            }
         }
 
         Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
@@ -766,52 +761,72 @@ impl<R: Read + Seek> BmpDecoder<R> {
             log_warn!("Invalid color table for 4-bit image");
         }
 
-        let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-        let bytes_per_row = ((self.width + 1) / 2) as usize;
-        let row_padding = (4 - (bytes_per_row % 4)) % 4;
-        let total_row_size = bytes_per_row + row_padding;
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let src_stride = (((width + 1) / 2) + 3) & !3;
+        let bottom_up = self.dib_header.height() > 0;
+        let color_table = &self.color_table;
+        let src = &self.data;
 
-        // Process each row
-        for y in 0..self.height as usize {
-            let row_start = y * total_row_size;
+        let mut image_data = vec![0u8; width * height * 3];
 
-            // Process each pixel in the row
-            for x in 0..self.width as usize {
-                let byte_index = row_start + (x / 2);
-                let is_high_nibble = x % 2 == 0;
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width * 3)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
 
-                if byte_index < self.data.len() {
-                    let byte = *self.data.get_safe(byte_index).unwrap_or_else(|e| {
-                        log_warn!("Error reading pixel data: {}", e);
-                        &0
-                    });
-
-                    let pixel_value = if is_high_nibble {
-                        (byte >> 4) & 0x0F
-                    } else {
-                        byte & 0x0F
-                    };
-
-                    let color = self.color_table.get_safe(pixel_value as usize).unwrap_or_else(|e| {
-                        log_warn!("Error reading color table: {}", e);
-
-                        &ColorEntry {
+                    for x in 0..width {
+                        let byte_index = row_offset + x / 2;
+                        let pixel_value = if byte_index < src.len() {
+                            let byte = src[byte_index];
+                            if x % 2 == 0 { ((byte >> 4) & 0x0F) as usize } else { (byte & 0x0F) as usize }
+                        } else {
+                            0
+                        };
+                        let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
                             red: 0,
                             green: 0,
                             blue: 0,
                             reserved: 0,
-                        }
-                    });
-
-                    image_data.push(color.red);
-                    image_data.push(color.green);
-                    image_data.push(color.blue);
-                }
-            }
+                        });
+                        dst[x * 3] = color.red;
+                        dst[x * 3 + 1] = color.green;
+                        dst[x * 3 + 2] = color.blue;
+                    }
+                });
         }
 
-        if self.dib_header.height() > 0 {
-            Self::flip_v(&mut image_data, self.width, self.height, 3);
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height {
+                let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width * 3;
+
+                for x in 0..width {
+                    let byte_index = row_offset + x / 2;
+                    let pixel_value = if byte_index < self.data.len() {
+                        let byte = self.data[byte_index];
+                        if x % 2 == 0 { ((byte >> 4) & 0x0F) as usize } else { (byte & 0x0F) as usize }
+                    } else {
+                        0
+                    };
+                    let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
+                        red: 0,
+                        green: 0,
+                        blue: 0,
+                        reserved: 0,
+                    });
+                    image_data[dst_offset + x * 3] = color.red;
+                    image_data[dst_offset + x * 3 + 1] = color.green;
+                    image_data[dst_offset + x * 3 + 2] = color.blue;
+                }
+            }
         }
 
         Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
@@ -822,270 +837,286 @@ impl<R: Read + Seek> BmpDecoder<R> {
             log_warn!("Invalid color table for 8-bit image");
         }
 
-        let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-        let bytes_per_row = self.width as usize;
-        let row_padding = (4 - (bytes_per_row % 4)) % 4;
-        let total_row_size = bytes_per_row + row_padding;
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let src_stride = (width + 3) & !3;
+        let bottom_up = self.dib_header.height() > 0;
+        let color_table = &self.color_table;
+        let src = &self.data;
 
-        // Process each row
-        for y in 0..self.height as usize {
-            let row_start = y * total_row_size;
+        let mut image_data = vec![0u8; width * height * 3];
 
-            // Process each pixel in the row
-            for x in 0..self.width as usize {
-                let byte_index = row_start + x;
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width * 3)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
 
-                if byte_index < self.data.len() {
-                    let pixel_value = *self.data.get_safe(byte_index).unwrap_or_else(|e| {
-                        log_warn!("Error reading pixel data: {}", e);
-                        &0
-                    });
-
-                    let color = self.color_table.get_safe(pixel_value as usize).unwrap_or_else(|e| {
-                        log_warn!("Error reading color table: {}", e);
-
-                        &ColorEntry {
+                    for x in 0..width {
+                        let byte_index = row_offset + x;
+                        let pixel_value = if byte_index < src.len() { src[byte_index] as usize } else { 0 };
+                        let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
                             red: 0,
                             green: 0,
                             blue: 0,
                             reserved: 0,
-                        }
-                    });
-
-                    image_data.push(color.red);
-                    image_data.push(color.green);
-                    image_data.push(color.blue);
-                }
-            }
+                        });
+                        dst[x * 3] = color.red;
+                        dst[x * 3 + 1] = color.green;
+                        dst[x * 3 + 2] = color.blue;
+                    }
+                });
         }
 
-        if self.dib_header.height() > 0 {
-            Self::flip_v(&mut image_data, self.width, self.height, 3);
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height {
+                let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width * 3;
+
+                for x in 0..width {
+                    let byte_index = row_offset + x;
+                    let pixel_value = if byte_index < self.data.len() { self.data[byte_index] as usize } else { 0 };
+                    let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
+                        red: 0,
+                        green: 0,
+                        blue: 0,
+                        reserved: 0,
+                    });
+                    image_data[dst_offset + x * 3] = color.red;
+                    image_data[dst_offset + x * 3 + 1] = color.green;
+                    image_data[dst_offset + x * 3 + 2] = color.blue;
+                }
+            }
         }
 
         Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_16bit_image(&self) -> Image {
-        let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-        let bytes_per_row = ((self.width * 16 + 31) / 32) * 4;
-        let row_padding = bytes_per_row - (self.width * 2);
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let src_stride = (((width * 2) + 3) & !3) as usize;
+        let bottom_up = self.dib_header.height() > 0;
+        let src = &self.data;
 
-        // Create a BitReader for the pixel data
-        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+        let mut image_data = vec![0u8; width * height * 3];
 
-        // Process each row
-        for _ in 0..self.height {
-            // Process each pixel in the row
-            for _ in 0..self.width {
-                let pixel = reader.read_u16().unwrap_or_else(|e| {
-                    log_error!("Error reading pixel data: {}", e);
-                    0
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width * 3)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
+
+                    for x in 0..width {
+                        let byte_offset = row_offset + x * 2;
+                        let pixel = if byte_offset + 1 < src.len() {
+                            u16::from_le_bytes([src[byte_offset], src[byte_offset + 1]])
+                        } else {
+                            0
+                        };
+
+                        let r = ((pixel >> 10) & 0x1F) as u8;
+                        let g = ((pixel >> 5) & 0x1F) as u8;
+                        let b = (pixel & 0x1F) as u8;
+
+                        dst[x * 3] = (r << 3) | (r >> 2);
+                        dst[x * 3 + 1] = (g << 3) | (g >> 2);
+                        dst[x * 3 + 2] = (b << 3) | (b >> 2);
+                    }
                 });
-
-                // Extract color components (5-5-5 format)
-                // Red: bits 10-14 (5 bits)
-                // Green: bits 5-9 (5 bits)
-                // Blue: bits 0-4 (5 bits)
-                let r = ((pixel >> 10) & 0x1F) as u8;
-                let g = ((pixel >> 5) & 0x1F) as u8;
-                let b = (pixel & 0x1F) as u8;
-
-                // Scale from 5 bits (0-31) to 8 bits (0-255)
-                image_data.push((r << 3) | (r >> 2)); // Replicate top bits to get better color distribution
-                image_data.push((g << 3) | (g >> 2));
-                image_data.push((b << 3) | (b >> 2));
-            }
-
-            // Skip row padding
-            if row_padding > 0 {
-                match reader.seek(SeekFrom::Current(row_padding as i64)) {
-                    Err(e) => {
-                        log_error!("Error skipping row padding: {}", e);
-                    }
-                    Ok(_) => {
-                        continue;
-                    }
-                }
-            }
         }
 
-        if self.dib_header.height() > 0 {
-            Self::flip_v(&mut image_data, self.width, self.height, 3);
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height {
+                let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width * 3;
+
+                for x in 0..width {
+                    let byte_offset = row_offset + x * 2;
+                    let pixel = if byte_offset + 1 < self.data.len() {
+                        u16::from_le_bytes([self.data[byte_offset], self.data[byte_offset + 1]])
+                    } else {
+                        0
+                    };
+
+                    let r = ((pixel >> 10) & 0x1F) as u8;
+                    let g = ((pixel >> 5) & 0x1F) as u8;
+                    let b = (pixel & 0x1F) as u8;
+
+                    image_data[dst_offset + x * 3] = (r << 3) | (r >> 2);
+                    image_data[dst_offset + x * 3 + 1] = (g << 3) | (g >> 2);
+                    image_data[dst_offset + x * 3 + 2] = (b << 3) | (b >> 2);
+                }
+            }
         }
 
         Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_24bit_image(&self) -> Image {
-        let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-        let bytes_per_row = ((self.width * 24 + 31) / 32) * 4;
-        let row_padding = bytes_per_row - (self.width * 3);
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let src_stride = (((width * 3) + 3) & !3) as usize;
+        let bottom_up = self.dib_header.height() > 0;
+        let src = &self.data;
 
-        // Create a BitReader for the pixel data
-        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+        let mut image_data = vec![0u8; width * height * 3];
 
-        // Process each row
-        for _ in 0..self.height {
-            // Process each pixel in the row
-            for _ in 0..self.width {
-                // Read BGR values (BMP stores in BGR order)
-                let b = reader.read_u8().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                });
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width * 3)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
 
-                let g = reader.read_u8().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                });
-
-                let r = reader.read_u8().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                });
-
-                // Store in RGB order
-                image_data.push(r);
-                image_data.push(g);
-                image_data.push(b);
-            }
-
-            // Skip row padding
-            if row_padding > 0 {
-                match reader.seek(SeekFrom::Current(row_padding as i64)) {
-                    Err(e) => {
-                        log_error!("Error skipping row padding: {}", e);
+                    for x in 0..width {
+                        let byte_offset = row_offset + x * 3;
+                        if byte_offset + 2 < src.len() {
+                            dst[x * 3] = src[byte_offset + 2];
+                            dst[x * 3 + 1] = src[byte_offset + 1];
+                            dst[x * 3 + 2] = src[byte_offset];
+                        }
                     }
-                    Ok(_) => {
-                        continue;
-                    }
-                };
-            }
+                });
         }
 
-        if self.dib_header.height() > 0 {
-            Self::flip_v(&mut image_data, self.width, self.height, 3);
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height {
+                let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width * 3;
+
+                for x in 0..width {
+                    let byte_offset = row_offset + x * 3;
+                    if byte_offset + 2 < self.data.len() {
+                        image_data[dst_offset + x * 3] = self.data[byte_offset + 2];
+                        image_data[dst_offset + x * 3 + 1] = self.data[byte_offset + 1];
+                        image_data[dst_offset + x * 3 + 2] = self.data[byte_offset];
+                    }
+                }
+            }
         }
 
         Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_32bit_image(&self) -> Image {
-        let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-        let bytes_per_row = ((self.width * 32 + 31) / 32) * 4;
-        let row_padding = bytes_per_row - (self.width * 4);
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let src_stride = width * 4;
+        let bottom_up = self.dib_header.height() > 0;
+        let src = &self.data;
 
-        // Create a BitReader for the pixel data
-        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+        let mut image_data = vec![0u8; width * height * 4];
 
-        // Process each row
-        for _ in 0..self.height {
-            // Process each pixel in the row
-            for _ in 0..self.width {
-                // Read BGRA values (BMP stores in BGRA order)
-                let b = reader.read_u8().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                });
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width * 4)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
 
-                let g = reader.read_u8().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                });
-
-                let r = reader.read_u8().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                });
-
-                let a = reader.read_u8().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                });
-
-                // Store in RGBA order
-                image_data.push(r);
-                image_data.push(g);
-                image_data.push(b);
-                image_data.push(a);
-            }
-
-            // Skip row padding
-            if row_padding > 0 {
-                match reader.seek(SeekFrom::Current(row_padding as i64)) {
-                    Err(e) => {
-                        log_error!("Error skipping row padding: {}", e);
+                    for x in 0..width {
+                        let byte_offset = row_offset + x * 4;
+                        if byte_offset + 3 < src.len() {
+                            dst[x * 4] = src[byte_offset + 2];
+                            dst[x * 4 + 1] = src[byte_offset + 1];
+                            dst[x * 4 + 2] = src[byte_offset];
+                            dst[x * 4 + 3] = src[byte_offset + 3];
+                        }
                     }
-                    Ok(_) => {
-                        continue;
+                });
+        }
+
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height {
+                let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width * 4;
+
+                for x in 0..width {
+                    let byte_offset = row_offset + x * 4;
+                    if byte_offset + 3 < self.data.len() {
+                        image_data[dst_offset + x * 4] = self.data[byte_offset + 2];
+                        image_data[dst_offset + x * 4 + 1] = self.data[byte_offset + 1];
+                        image_data[dst_offset + x * 4 + 2] = self.data[byte_offset];
+                        image_data[dst_offset + x * 4 + 3] = self.data[byte_offset + 3];
                     }
                 }
             }
-        }
-
-        if self.dib_header.height() > 0 {
-            Self::flip_v(&mut image_data, self.width, self.height, 4);
         }
 
         Image::from_pixels(self.width, self.height, PixelData::RGBA8(image_data))
     }
 
     fn decode_64bit_image(&self) -> Image {
-        let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-        let bytes_per_row = ((self.width * 64 + 31) / 32) * 4;
-        let row_padding = bytes_per_row - (self.width * 8);
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let src_stride = width * 8;
+        let bottom_up = self.dib_header.height() > 0;
+        let src = &self.data;
 
-        // Create a BitReader for the pixel data
-        let mut reader = BitReader::new(std::io::Cursor::new(&self.data));
+        let mut image_data = vec![0u8; width * height * 4];
 
-        // Process each row
-        for _ in 0..self.height {
-            // Process each pixel in the row
-            for _ in 0..self.width {
-                // Read BGRA values (each channel is 16 bits)
-                let b = reader.read_u16().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                }) >> 8;
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width * 4)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
 
-                let g = reader.read_u16().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                }) >> 8;
-
-                let r = reader.read_u16().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                }) >> 8;
-
-                let a = reader.read_u16().unwrap_or_else(|e| {
-                    log_warn!("Error reading pixel data: {}", e);
-                    0
-                }) >> 8;
-
-                // Store in RGBA order
-                image_data.push(r as u8);
-                image_data.push(g as u8);
-                image_data.push(b as u8);
-                image_data.push(a as u8);
-            }
-
-            // Skip row padding
-            if row_padding > 0 {
-                match reader.seek(SeekFrom::Current(row_padding as i64)) {
-                    Err(e) => {
-                        log_error!("Error skipping row padding: {}", e);
+                    for x in 0..width {
+                        let byte_offset = row_offset + x * 8;
+                        if byte_offset + 7 < src.len() {
+                            dst[x * 4] = src[byte_offset + 5];
+                            dst[x * 4 + 1] = src[byte_offset + 3];
+                            dst[x * 4 + 2] = src[byte_offset + 1];
+                            dst[x * 4 + 3] = src[byte_offset + 7];
+                        }
                     }
-                    Ok(_) => {
-                        continue;
+                });
+        }
+
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height {
+                let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width * 4;
+
+                for x in 0..width {
+                    let byte_offset = row_offset + x * 8;
+                    if byte_offset + 7 < self.data.len() {
+                        image_data[dst_offset + x * 4] = self.data[byte_offset + 5];
+                        image_data[dst_offset + x * 4 + 1] = self.data[byte_offset + 3];
+                        image_data[dst_offset + x * 4 + 2] = self.data[byte_offset + 1];
+                        image_data[dst_offset + x * 4 + 3] = self.data[byte_offset + 7];
                     }
                 }
             }
-        }
-
-        if self.dib_header.height() > 0 {
-            Self::flip_v(&mut image_data, self.width, self.height, 4);
         }
 
         Image::from_pixels(self.width, self.height, PixelData::RGBA8(image_data))
