@@ -72,29 +72,28 @@ impl ComponentPlane {
         }
     }
 
-    fn upsample(&self, target_width: u32, target_height: u32) -> UpsampledPlane {
+    fn upsample(&self, source_width: u32, source_height: u32, target_width: u32, target_height: u32) -> UpsampledPlane {
         let mut upsampled = UpsampledPlane::new(target_width, target_height);
 
-        let mut source_pixels = vec![0i32; (self.width * self.height) as usize];
+        let mut source_pixels = vec![0i32; (source_width * source_height) as usize];
 
-        let blocks_per_line = (self.width + 7) / 8;
-        for by in 0..((self.height + 7) / 8) {
-            for bx in 0..blocks_per_line {
-                let block_idx = (by * blocks_per_line + bx) as usize * 64;
+        for by in 0..((source_height + 7) / 8) {
+            for bx in 0..((source_width + 7) / 8) {
+                let block_idx = (by * self.blocks_per_line + bx) as usize * 64;
 
-                for py in 0..8 {
+                for py in 0..8u32 {
                     let y = by * 8 + py;
-                    if y >= self.height {
+                    if y >= source_height {
                         continue;
                     }
 
-                    for px in 0..8 {
+                    for px in 0..8u32 {
                         let x = bx * 8 + px;
-                        if x >= self.width {
+                        if x >= source_width {
                             continue;
                         }
 
-                        let pixel_idx = (y * self.width + x) as usize;
+                        let pixel_idx = (y * source_width + x) as usize;
                         let block_pixel_idx = block_idx + (py * 8 + px) as usize;
 
                         if block_pixel_idx < self.data.len() {
@@ -107,10 +106,10 @@ impl ComponentPlane {
 
         for y in 0..target_height {
             for x in 0..target_width {
-                let src_x = (x * self.width / target_width) as usize;
-                let src_y = (y * self.height / target_height) as usize;
+                let src_x = (x * source_width / target_width) as usize;
+                let src_y = (y * source_height / target_height) as usize;
 
-                let src_idx = src_y * self.width as usize + src_x;
+                let src_idx = src_y * source_width as usize + src_x;
                 if src_idx < source_pixels.len() {
                     upsampled.set_pixel(x, y, source_pixels[src_idx]);
                 }
@@ -133,9 +132,6 @@ pub struct JpegDecoder<R: Read + Seek> {
     dc_huffman_tables: Vec<HuffmanTable>,
     ac_arithmetic_tables: Vec<ArithmeticCodingTable>,
     dc_arithmetic_tables: Vec<ArithmeticCodingTable>,
-    start_of_spectral_selection: u8,
-    end_of_spectral_selection: u8,
-    successive_approximation_high: u8,
     successive_approximation_low: u8,
     horizontal_sampling_factor: u8,
     vertical_sampling_factor: u8,
@@ -164,9 +160,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
             mcu_height: 0,
             precision: 0,
             component_count: 0,
-            start_of_spectral_selection: 0,
-            end_of_spectral_selection: 0,
-            successive_approximation_high: 0,
             successive_approximation_low: 0,
             components: Vec::new(),
             quantization_tables: Vec::new(),
@@ -231,6 +224,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
     fn read_app0_jfif(&mut self, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
 
+        if length < 7 {
+            for _ in 0..(length.saturating_sub(2)) {
+                self.reader.read_u8()?;
+            }
+            self.record_segment(segment_start, "APP0", JpegSegmentData::Unknown {
+                marker: "APP0".to_string(),
+                length,
+            });
+            return Ok(());
+        }
+
         let mut identifier = Vec::new();
         for _ in 0..5 {
             identifier.push(self.reader.read_u8()?);
@@ -243,6 +247,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 "Invalid JFIF identifier in APP0, might not be a JFIF header: {}",
                 identifier
             );
+            let remaining = (length as i32) - 7;
+            for _ in 0..remaining.max(0) {
+                self.reader.read_u8()?;
+            }
+            self.record_segment(segment_start, "APP0", JpegSegmentData::Unknown {
+                marker: "APP0".to_string(),
+                length,
+            });
+            return Ok(());
         }
 
         let version_major = self.reader.read_bits(8)? as u8;
@@ -255,7 +268,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let thumbnail_width = self.reader.read_bits(8)? as u8;
         let thumbnail_height = self.reader.read_bits(8)? as u8;
 
-        let thumbnail_size = thumbnail_width * thumbnail_height * 3;
+        let thumbnail_size = thumbnail_width as u32 * thumbnail_height as u32 * 3;
         let mut thumbnail_data = Vec::new();
 
         if thumbnail_size > 0 {
@@ -870,19 +883,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
             .max()
             .unwrap_or(1);
 
+        let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
+        let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+
         let mut component_planes: Vec<ComponentPlane> = self
             .components
             .iter()
             .map(|comp| {
-                let comp_width =
-                    (self.width * comp.horizontal_sampling_factor as u32 + max_h_samp as u32 - 1) / max_h_samp as u32;
-                let comp_height =
-                    (self.height * comp.vertical_sampling_factor as u32 + max_v_samp as u32 - 1) / max_v_samp as u32;
+                let comp_width = mcu_width * 8 * comp.horizontal_sampling_factor as u32;
+                let comp_height = mcu_height * 8 * comp.vertical_sampling_factor as u32;
 
-                ComponentPlane::new(
-                    comp_width,
-                    comp_height,
-                )
+                ComponentPlane::new(comp_width, comp_height)
             })
             .collect();
 
@@ -973,8 +984,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                 let block_x = if is_luminance_only {
                                     mcu_x + h as u32
                                 } else {
-                                    (mcu_x * comp.horizontal_sampling_factor as u32 + h as u32)
-                                        .min(plane_blocks_per_line - 1)
+                                    mcu_x * comp.horizontal_sampling_factor as u32 + h as u32
                                 };
 
                                 let block_y = if is_luminance_only {
@@ -994,7 +1004,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                         if scan.successive_high == 0 {
                                             // First DC scan
                                             let dc_table =
-                                                match scan.dc_tables.get(scan_component.dc_table_selector as usize) {
+                                                match scan.dc_tables.iter().find(|t| t.id == scan_component.dc_table_selector) {
                                                     Some(table) => table,
                                                     None => {
                                                         log_warn!(
@@ -1026,8 +1036,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                 value -= (1 << length) - 1;
                                             }
 
-                                            value += previous_dc[comp_idx];
-                                            previous_dc[comp_idx] = value;
+                                            value += previous_dc[plane_index];
+                                            previous_dc[plane_index] = value;
                                             component_data[0] = value << scan.successive_low;
                                         } else {
                                             // Refining DC scan
@@ -1052,7 +1062,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                             }
 
                                             let ac_table =
-                                                match scan.ac_tables.get(scan_component.ac_table_selector as usize) {
+                                                match scan.ac_tables.iter().find(|t| t.id == scan_component.ac_table_selector) {
                                                     Some(table) => table,
                                                     None => {
                                                         log_warn!(
@@ -1159,7 +1169,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                                             if skips == 0 {
                                                 let ac_table =
-                                                    match scan.ac_tables.get(scan_component.ac_table_selector as usize)
+                                                    match scan.ac_tables.iter().find(|t| t.id == scan_component.ac_table_selector)
                                                     {
                                                         Some(table) => table,
                                                         None => {
@@ -1341,7 +1351,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         for _ in 0..height {
             for _ in 0..width {
                 for (i, scan_component) in scan.components.iter().enumerate() {
-                    let dc_table = match scan.dc_tables.get(scan_component.dc_table_selector as usize) {
+                    let dc_table = match scan.dc_tables.iter().find(|t| t.id == scan_component.dc_table_selector) {
                         Some(table) => table,
                         None => {
                             log_warn!("No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.", i);
@@ -1666,10 +1676,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         continue;
                     }
 
-                    let dc_selector = self.scans[0].components[comp_idx].dc_table_selector as usize;
-                    let ac_selector = self.scans[0].components[comp_idx].ac_table_selector as usize;
+                    let dc_selector = self.scans[0].components[comp_idx].dc_table_selector;
+                    let ac_selector = self.scans[0].components[comp_idx].ac_table_selector;
 
-                    let dc_table = match self.scans[0].dc_tables.get(dc_selector) {
+                    let dc_table = match self.scans[0].dc_tables.iter().find(|t| t.id == dc_selector) {
                         Some(table) => table.clone(),
                         None => {
                             log_warn!("DC table {} not found in baseline mode, substituting default, image will be corrupted.", dc_selector);
@@ -1697,7 +1707,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         }
                     };
 
-                    let ac_table = match self.scans[0].ac_tables.get(ac_selector) {
+                    let ac_table = match self.scans[0].ac_tables.iter().find(|t| t.id == ac_selector) {
                         Some(table) => table.clone(),
                         None => {
                             log_warn!("AC table {} not found in baseline mode, substituting default, image will be corrupted.", ac_selector);
@@ -1979,15 +1989,28 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn upsample_planes(&self, planes: &[ComponentPlane]) -> Vec<UpsampledPlane> {
+        let max_h_samp = self
+            .components
+            .iter()
+            .map(|c| c.horizontal_sampling_factor)
+            .max()
+            .unwrap_or(1);
+        let max_v_samp = self
+            .components
+            .iter()
+            .map(|c| c.vertical_sampling_factor)
+            .max()
+            .unwrap_or(1);
+
         let mut upsampled_planes = Vec::new();
 
-        for plane in planes.iter() {
-            // For Y component (id=1), we keep original dimensions
-            // For Cb and Cr (id=2,3), we upsample to full image dimensions
-            let target_width = self.width;
-            let target_height = self.height;
+        for (plane, comp) in planes.iter().zip(self.components.iter()) {
+            let source_width =
+                (self.width * comp.horizontal_sampling_factor as u32 + max_h_samp as u32 - 1) / max_h_samp as u32;
+            let source_height =
+                (self.height * comp.vertical_sampling_factor as u32 + max_v_samp as u32 - 1) / max_v_samp as u32;
 
-            let upsampled = plane.upsample(target_width, target_height);
+            let upsampled = plane.upsample(source_width, source_height, self.width, self.height);
             upsampled_planes.push(upsampled);
         }
 
@@ -2009,7 +2032,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 for y in 0..self.height {
                     for x in 0..self.width {
                         let y_val = planes[0].get_pixel(x, y).unwrap_or(0);
-                        let gray_val = y_val.clamp(0, 255) as u8;
+                        let gray_val = (y_val + 128).clamp(0, 255) as u8;
                         pixels.push(gray_val);
                     }
                 }
@@ -2021,7 +2044,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 for y in 0..self.height {
                     for x in 0..self.width {
                         let y_val = planes[0].get_pixel(x, y).unwrap_or(0);
-                        let gray_val = y_val.clamp(0, 4095) as u16;
+                        let gray_val = (y_val + 2048).clamp(0, 4095) as u16;
                         pixels16.push(gray_val);
                     }
                 }
@@ -2085,19 +2108,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
             .max()
             .unwrap_or(1);
 
+        let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
+        let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+
         let mut component_planes: Vec<ComponentPlane> = self
             .components
             .iter()
             .map(|comp| {
-                let comp_width =
-                    (self.width * comp.horizontal_sampling_factor as u32 + max_h_samp as u32 - 1) / max_h_samp as u32;
-                let comp_height =
-                    (self.height * comp.vertical_sampling_factor as u32 + max_v_samp as u32 - 1) / max_v_samp as u32;
+                let comp_width = mcu_width * 8 * comp.horizontal_sampling_factor as u32;
+                let comp_height = mcu_height * 8 * comp.vertical_sampling_factor as u32;
 
-                ComponentPlane::new(
-                    comp_width,
-                    comp_height,
-                )
+                ComponentPlane::new(comp_width, comp_height)
             })
             .collect();
 
@@ -2212,6 +2233,18 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 .collect::<Vec<String>>()
                 .join(", ")
         );
+
+        if self.width == 0 || self.height == 0 || self.components.is_empty() {
+            return Err(VexelError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Invalid JPEG: dimensions={}x{}, components={}",
+                    self.width,
+                    self.height,
+                    self.components.len()
+                ),
+            )));
+        }
 
         match &self.mode {
             JpegMode::Baseline => {

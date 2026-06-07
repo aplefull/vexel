@@ -828,7 +828,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 let tp_cx = if use_two_line { TPB2CX } else { TPB3CX };
                 let slntp = self.ar_decoders[plane][layer_idx].decode(tp_cx, data, &mut pos);
                 let slntp = slntp.unwrap_or(0);
-                let old_lntp = lntp;
                 lntp = (slntp ^ (lntp as u8)) == 0;
                 self.lntp[plane][layer_idx] = lntp;
 
