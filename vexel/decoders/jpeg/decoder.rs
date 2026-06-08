@@ -44,8 +44,6 @@ impl UpsampledPlane {
 #[derive(Debug, Clone)]
 struct ComponentPlane {
     data: Vec<i32>,
-    width: u32,
-    height: u32,
     blocks_per_line: u32,
 }
 
@@ -55,8 +53,6 @@ impl ComponentPlane {
         let block_lines = (height + 7) / 8;
 
         Self {
-            width,
-            height,
             blocks_per_line,
             data: vec![0; (blocks_per_line * block_lines * 64) as usize],
         }
@@ -104,14 +100,83 @@ impl ComponentPlane {
             }
         }
 
-        for y in 0..target_height {
-            for x in 0..target_width {
-                let src_x = (x * source_width / target_width) as usize;
-                let src_y = (y * source_height / target_height) as usize;
+        let get_src = |sx: usize, sy: usize| -> i32 {
+            let idx = sy * source_width as usize + sx;
+            if idx < source_pixels.len() { source_pixels[idx] } else { 0 }
+        };
 
-                let src_idx = src_y * source_width as usize + src_x;
-                if src_idx < source_pixels.len() {
-                    upsampled.set_pixel(x, y, source_pixels[src_idx]);
+        let h_2x = target_width == source_width * 2 || target_width == source_width * 2 - 1;
+        let v_2x = target_height == source_height * 2 || target_height == source_height * 2 - 1;
+        let is_2x = h_2x && v_2x;
+
+        if is_2x {
+            let sw = source_width as usize;
+            let sh = source_height as usize;
+
+            for sy in 0..sh {
+                let sy_above = sy.saturating_sub(1);
+                let sy_below = (sy + 1).min(sh - 1);
+                let dy0 = (sy * 2) as u32;
+
+                for v in 0..2u32 {
+                    let dy = dy0 + v;
+                    if dy >= target_height {
+                        continue;
+                    }
+                    let sy_near = if v == 0 { sy_above } else { sy_below };
+
+                    let col_sum = |sx: usize| -> i32 {
+                        get_src(sx, sy) * 3 + get_src(sx, sy_near)
+                    };
+
+                    let mut last = col_sum(0);
+                    let mut this = col_sum(1.min(sw - 1));
+
+                    let first_out = (last * 4 + 8) >> 4;
+                    upsampled.set_pixel(0, dy, first_out);
+                    if 1 < target_width {
+                        let second_out = (last * 3 + this + 7) >> 4;
+                        upsampled.set_pixel(1, dy, second_out);
+                    }
+
+                    for sx in 1..sw.saturating_sub(1) {
+                        let next = col_sum(sx + 1);
+                        let left_out = (this * 3 + last + 8) >> 4;
+                        let right_out = (this * 3 + next + 7) >> 4;
+                        let dx = (sx * 2) as u32;
+                        if dx < target_width { upsampled.set_pixel(dx, dy, left_out); }
+                        if dx + 1 < target_width { upsampled.set_pixel(dx + 1, dy, right_out); }
+                        last = this;
+                        this = next;
+                    }
+
+                    if sw > 1 {
+                        let dx = ((sw - 1) * 2) as u32;
+                        let left_out = (this * 3 + last + 8) >> 4;
+                        let right_out = (this * 4 + 7) >> 4;
+                        if dx < target_width { upsampled.set_pixel(dx, dy, left_out); }
+                        if dx + 1 < target_width { upsampled.set_pixel(dx + 1, dy, right_out); }
+                    }
+                }
+            }
+        } else {
+            for y in 0..target_height {
+                for x in 0..target_width {
+                    let fx = (x as f32 + 0.5) * source_width as f32 / target_width as f32 - 0.5;
+                    let fy = (y as f32 + 0.5) * source_height as f32 / target_height as f32 - 0.5;
+
+                    let x0 = (fx.floor() as i64).clamp(0, source_width as i64 - 1) as usize;
+                    let y0 = (fy.floor() as i64).clamp(0, source_height as i64 - 1) as usize;
+                    let x1 = (x0 + 1).min(source_width as usize - 1);
+                    let y1 = (y0 + 1).min(source_height as usize - 1);
+
+                    let wx = fx - fx.floor();
+                    let wy = fy - fy.floor();
+
+                    let v = (1.0 - wy) * ((1.0 - wx) * get_src(x0, y0) as f32 + wx * get_src(x1, y0) as f32)
+                        + wy * ((1.0 - wx) * get_src(x0, y1) as f32 + wx * get_src(x1, y1) as f32);
+
+                    upsampled.set_pixel(x, y, v.round() as i32);
                 }
             }
         }
@@ -952,7 +1017,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         restart_counter = restart_counter.saturating_sub(1);
                     }
 
-                    for (comp_idx, scan_comp) in scan.components.clone().iter().enumerate() {
+                    for scan_comp in scan.components.clone().iter() {
                         let comp = match self.components.iter().find(|c| c.id == scan_comp.component_id) {
                             Some(c) => c,
                             None => {
@@ -1973,14 +2038,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let b_6 = c_6 - c_7;
                     let b_7 = c_7;
 
-                    block[row * 8 + 0] = ((b_0 + b_7 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 1] = ((b_1 + b_6 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 2] = ((b_2 + b_5 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 3] = ((b_3 + b_4 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 4] = ((b_3 - b_4 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 5] = ((b_2 - b_5 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 6] = ((b_1 - b_6 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 7] = ((b_0 - b_7 + 0.5) as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 0] = ((b_0 + b_7).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 1] = ((b_1 + b_6).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 2] = ((b_2 + b_5).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 3] = ((b_3 + b_4).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 4] = ((b_3 - b_4).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 5] = ((b_2 - b_5).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 6] = ((b_1 - b_6).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                    block[row * 8 + 7] = ((b_0 - b_7).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
                 }
             }
         }
@@ -2064,9 +2129,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let cb_val = get_pixel_from_planes(planes, 1, x, y);
                     let cr_val = get_pixel_from_planes(planes, 2, x, y);
 
-                    let r = (y_val + 1.402 * cr_val + 128.0).clamp(0.0, 255.0) as u8;
-                    let g = (y_val - 0.344136 * cb_val - 0.714136 * cr_val + 128.0).clamp(0.0, 255.0) as u8;
-                    let b = (y_val + 1.772 * cb_val + 128.0).clamp(0.0, 255.0) as u8;
+                    let r = (y_val + 1.40200 * cr_val + 128.0).round().clamp(0.0, 255.0) as u8;
+                    let g = (y_val - 0.344136 * cb_val - 0.714136 * cr_val + 128.0).round().clamp(0.0, 255.0) as u8;
+                    let b = (y_val + 1.77200 * cb_val + 128.0).round().clamp(0.0, 255.0) as u8;
 
                     pixels.extend_from_slice(&[r, g, b]);
                 }
@@ -2082,9 +2147,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let cb_val = get_pixel_from_planes(planes, 1, x, y);
                     let cr_val = get_pixel_from_planes(planes, 2, x, y);
 
-                    let r = (y_val + 1.402 * cr_val + 2048.0).clamp(0.0, 4095.0) as u16;
-                    let g = (y_val - 0.344136 * cb_val - 0.714136 * cr_val + 2048.0).clamp(0.0, 4095.0) as u16;
-                    let b = (y_val + 1.772 * cb_val + 2048.0).clamp(0.0, 4095.0) as u16;
+                    let r = (y_val + 1.40200 * cr_val + 2048.0).round().clamp(0.0, 4095.0) as u16;
+                    let g = (y_val - 0.344136 * cb_val - 0.714136 * cr_val + 2048.0).round().clamp(0.0, 4095.0) as u16;
+                    let b = (y_val + 1.77200 * cb_val + 2048.0).round().clamp(0.0, 4095.0) as u16;
 
                     pixels16.extend_from_slice(&[r, g, b]);
                 }
