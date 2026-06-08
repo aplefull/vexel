@@ -443,6 +443,21 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                             ui.image((texture.id(), display_size));
                         },
                     );
+
+                    let file_name = self.files[self.current_file_index]
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Unknown");
+
+                    let painter = ui.painter();
+                    let text_pos = egui::pos2(10.0, 10.0);
+                    painter.text(
+                        text_pos,
+                        egui::Align2::LEFT_TOP,
+                        file_name,
+                        egui::FontId::proportional(16.0),
+                        egui::Color32::WHITE,
+                    );
                 }
             });
         }
