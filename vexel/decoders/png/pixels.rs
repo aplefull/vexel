@@ -114,8 +114,25 @@ impl PixelDecoder {
     }
 
     pub fn decode_grayscale(&self, input: &[u8]) -> VexelResult<PixelData> {
+        let trans_key = match &self.transparency {
+            Some(TransparencyData::Grayscale(key)) => Some(*key),
+            _ => None,
+        };
+
         match self.bit_depth {
-            8 => Ok(PixelData::L8(input.to_vec())),
+            8 => {
+                if let Some(key) = trans_key {
+                    let key8 = key as u8;
+                    let mut output = Vec::with_capacity(input.len() * 2);
+                    for &v in input {
+                        output.push(v);
+                        output.push(if v == key8 { 0 } else { 255 });
+                    }
+                    Ok(PixelData::LA8(output))
+                } else {
+                    Ok(PixelData::L8(input.to_vec()))
+                }
+            }
             16 => {
                 let mut output = Vec::with_capacity(input.len() / 2);
 
@@ -135,24 +152,44 @@ impl PixelDecoder {
                 let max_value = mask;
                 let width = self.width as usize;
                 let mut pixel_count = 0;
-                let mut output = Vec::new();
 
-                for &byte in input {
-                    for shift in (0..pixels_per_byte).rev() {
-                        if pixel_count >= width {
-                            break;
+                if let Some(key) = trans_key {
+                    let key_raw = key as u8;
+                    let mut output = Vec::new();
+                    for &byte in input {
+                        for shift in (0..pixels_per_byte).rev() {
+                            if pixel_count >= width {
+                                break;
+                            }
+                            let value = (byte >> (shift * bits_per_pixel)) & mask;
+                            let scaled = (value as u16 * 255 / max_value as u16) as u8;
+                            output.push(scaled);
+                            output.push(if value == key_raw { 0 } else { 255 });
+                            pixel_count += 1;
                         }
-                        let value = (byte >> (shift * bits_per_pixel)) & mask;
-                        let scaled = (value as u16 * 255 / max_value as u16) as u8;
-                        output.push(scaled);
-                        pixel_count += 1;
+                        if pixel_count >= width {
+                            pixel_count = 0;
+                        }
                     }
-                    if pixel_count >= width {
-                        pixel_count = 0;
+                    Ok(PixelData::LA8(output))
+                } else {
+                    let mut output = Vec::new();
+                    for &byte in input {
+                        for shift in (0..pixels_per_byte).rev() {
+                            if pixel_count >= width {
+                                break;
+                            }
+                            let value = (byte >> (shift * bits_per_pixel)) & mask;
+                            let scaled = (value as u16 * 255 / max_value as u16) as u8;
+                            output.push(scaled);
+                            pixel_count += 1;
+                        }
+                        if pixel_count >= width {
+                            pixel_count = 0;
+                        }
                     }
+                    Ok(PixelData::L8(output))
                 }
-
-                Ok(PixelData::L8(output))
             }
             _ => unreachable!(),
         }

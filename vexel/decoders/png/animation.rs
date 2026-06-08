@@ -1,9 +1,8 @@
+use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::{ImageFrame, PixelData};
-use super::types::{ColorType, FctlChunk, PngFrame};
+use super::types::{ColorType, FctlChunk, PngFrame, TransparencyData};
 use super::pixels::PixelDecoder;
-use flate2::read::ZlibDecoder;
-use std::io::Read;
 
 pub struct AnimationDecoder {
     width: u32,
@@ -19,61 +18,10 @@ impl AnimationDecoder {
         &self,
         pixels: &PixelData,
         fctl: &FctlChunk,
-        prev_frame: Option<PixelData>,
-        dispose_op: u8,
-        prev_fctl: Option<&FctlChunk>,
+        canvas: PixelData,
     ) -> VexelResult<PixelData> {
         let frame_pixels = pixels.clone().into_rgba8();
-
-        let mut output = match (dispose_op, prev_frame) {
-            (_, None) => PixelData::RGBA8(vec![0; (self.width * self.height * 4) as usize]),
-
-            (0, Some(prev)) => prev.clone().into_rgba8(),
-
-            (1, Some(prev)) => {
-                let mut output = prev.clone().into_rgba8();
-                let output_data = output.as_bytes_mut();
-
-                if let Some(prev_fctl) = prev_fctl {
-                    for y in 0..prev_fctl.height {
-                        let row_start = ((y + prev_fctl.y_offset) * self.width + prev_fctl.x_offset) as usize * 4;
-                        for x in 0..prev_fctl.width {
-                            let pixel_start = row_start + (x as usize * 4);
-                            if pixel_start + 3 < output_data.len() {
-                                output_data[pixel_start] = 0;
-                                output_data[pixel_start + 1] = 0;
-                                output_data[pixel_start + 2] = 0;
-                                output_data[pixel_start + 3] = 0;
-                            }
-                        }
-                    }
-                }
-                output
-            }
-
-            (2, Some(prev)) => {
-                let mut output = prev.clone().into_rgba8();
-                let output_data = output.as_bytes_mut();
-
-                if let Some(prev_fctl) = prev_fctl {
-                    for y in 0..prev_fctl.height {
-                        let row_start = ((y + prev_fctl.y_offset) * self.width + prev_fctl.x_offset) as usize * 4;
-                        for x in 0..prev_fctl.width {
-                            let pixel_start = row_start + (x as usize * 4);
-                            if pixel_start + 3 < output_data.len() {
-                                output_data[pixel_start] = 0;
-                                output_data[pixel_start + 1] = 0;
-                                output_data[pixel_start + 2] = 0;
-                                output_data[pixel_start + 3] = 0;
-                            }
-                        }
-                    }
-                }
-                output
-            }
-
-            _ => PixelData::RGBA8(vec![0; (self.width * self.height * 4) as usize]),
-        };
+        let mut output = canvas;
 
         let frame_data = frame_pixels.as_bytes();
         let output_data = output.as_bytes_mut();
@@ -119,12 +67,18 @@ impl AnimationDecoder {
     pub fn decode_apng_frames(
         &mut self,
         frames: &[PngFrame],
-        pixel_decoder: &PixelDecoder,
+        bit_depth: u8,
+        color_type: ColorType,
+        interlace: bool,
+        palette: Option<Vec<[u8; 3]>>,
+        transparency: Option<TransparencyData>,
     ) -> VexelResult<Vec<ImageFrame>> {
         let mut decoded_frames: Vec<ImageFrame> = Vec::new();
-        let mut previous_frame = None;
-        let mut prev_dispose_op = 0;
-        let mut prev_fctl = None;
+        let blank = PixelData::RGBA8(vec![0; (self.width * self.height * 4) as usize]);
+        let mut canvas = blank.clone();
+        let mut restore_canvas: Option<PixelData> = None;
+        let mut prev_dispose_op: u8 = 0;
+        let mut prev_fctl: Option<&FctlChunk> = None;
 
         if frames
             .iter()
@@ -146,19 +100,59 @@ impl AnimationDecoder {
                 return Err(VexelError::Custom("Invalid frame dimensions".into()));
             }
 
-            let mut decoder = ZlibDecoder::new(&frame.fdat[..]);
-            let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed)?;
+            let pre_compose_canvas = if prev_dispose_op == 2 {
+                match restore_canvas.take() {
+                    Some(r) => r,
+                    None => blank.clone(),
+                }
+            } else if prev_dispose_op == 1 {
+                let mut cleared = canvas.clone();
+                if let Some(pf) = prev_fctl {
+                    let data = cleared.as_bytes_mut();
+                    for y in 0..pf.height {
+                        let row_start = ((y + pf.y_offset) * self.width + pf.x_offset) as usize * 4;
+                        for x in 0..pf.width {
+                            let px = row_start + x as usize * 4;
+                            if px + 3 < data.len() {
+                                data[px] = 0;
+                                data[px + 1] = 0;
+                                data[px + 2] = 0;
+                                data[px + 3] = 0;
+                            }
+                        }
+                    }
+                }
+                cleared
+            } else {
+                canvas.clone()
+            };
 
-            let frame_pixels = pixel_decoder.deinterlace_scan_lines(&decompressed, fctl.width, fctl.height)?;
+            if fctl.dispose_op == 2 {
+                restore_canvas = Some(pre_compose_canvas.clone());
+            } else {
+                restore_canvas = None;
+            }
 
-            let mut pixels = pixel_decoder.decode_pixels_by_type(&frame_pixels)?;
+            let frame_pixel_decoder = PixelDecoder::new(
+                bit_depth,
+                color_type,
+                fctl.width,
+                interlace,
+                palette.clone(),
+                transparency.clone(),
+            );
+
+            let decompressed = ZlibDecoder::from_bytes(frame.fdat.clone()).decode();
+
+            let frame_pixels = frame_pixel_decoder.deinterlace_scan_lines(&decompressed, fctl.width, fctl.height)?;
+
+            let mut pixels = frame_pixel_decoder.decode_pixels_by_type(&frame_pixels)?;
 
             pixels.correct_pixels(fctl.width, fctl.height);
 
-            let out = self.compose_frame(&pixels, fctl, previous_frame, prev_dispose_op, prev_fctl)?;
+            let out = self.compose_frame(&pixels, fctl, pre_compose_canvas)?;
 
-            previous_frame = Some(out.clone());
+            canvas = out.clone();
             prev_dispose_op = fctl.dispose_op;
             prev_fctl = Some(fctl);
 
@@ -166,9 +160,9 @@ impl AnimationDecoder {
                 width: self.width,
                 height: self.height,
                 delay: if fctl.delay_den == 0 {
-                    (fctl.delay_num as f32 / 100.0) as u32
+                    fctl.delay_num as u32
                 } else {
-                    (fctl.delay_num as f32 / fctl.delay_den as f32) as u32
+                    (fctl.delay_num as f32 / fctl.delay_den as f32 * 100.0).round() as u32
                 },
                 pixels: out,
             });

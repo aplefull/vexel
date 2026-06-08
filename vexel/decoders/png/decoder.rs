@@ -1,9 +1,9 @@
 use crate::bitreader::BitReader;
+use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::PngInfo;
 use crate::{log_debug, log_warn, Image, PixelData, PixelFormat};
-use flate2::read::ZlibDecoder;
 use std::io::{Read, Seek, SeekFrom};
 
 use super::animation::AnimationDecoder;
@@ -86,10 +86,37 @@ impl<R: Read + Seek> PngDecoder<R> {
 
     fn decode_pixels(&mut self) -> VexelResult<PixelData> {
         if self.compression_method == CompressionMethod::Deflate {
-            let mut decoder = ZlibDecoder::new(self.idat_data.as_slice());
-            let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed)?;
-            self.idat_data = decompressed;
+            self.idat_data = ZlibDecoder::from_bytes(std::mem::take(&mut self.idat_data)).decode();
+        }
+
+        let bits_per_pixel = match self.color_type {
+            ColorType::Grayscale => self.bit_depth as u32,
+            ColorType::RGB => self.bit_depth as u32 * 3,
+            ColorType::Indexed => self.bit_depth as u32,
+            ColorType::GrayscaleAlpha => self.bit_depth as u32 * 2,
+            ColorType::RGBA => self.bit_depth as u32 * 4,
+        };
+        let bytes_per_row = (bits_per_pixel * self.width + 7) / 8 + 1;
+
+        if !self.interlace && bytes_per_row > 0 && self.idat_data.len() > 0 {
+            let actual_rows = (self.idat_data.len() as u32) / bytes_per_row;
+            if actual_rows < self.height {
+                log_warn!(
+                    "Decompressed data covers only {} rows, but IHDR declares {}. Adjusting height.",
+                    actual_rows,
+                    self.height
+                );
+                self.height = actual_rows;
+            }
+        }
+
+        if self.idat_data.is_empty() {
+            log_warn!(
+                "No decompressed pixel data for {}x{} image, filling with zeros",
+                self.width,
+                self.height
+            );
+            return Ok(PixelData::RGBA8(vec![0u8; (self.width * self.height * 4) as usize]));
         }
 
         let pixel_decoder = PixelDecoder::new(
@@ -145,33 +172,45 @@ impl<R: Read + Seek> PngDecoder<R> {
             match get_chunk(&window) {
                 Some(chunk) => {
                     log_debug!("Found chunk: {:?}", chunk);
-                    
-                    let _chunk_length = chunks::get_chunk_length(&mut self.reader)?;
-                    
+
+                    let chunk_data_start = self.reader.stream_position()?;
+                    let chunk_length = {
+                        self.reader.seek(SeekFrom::Start(chunk_data_start - 8))?;
+                        let len = self.reader.read_u32().unwrap_or(0);
+                        self.reader.seek(SeekFrom::Start(chunk_data_start))?;
+                        len
+                    };
+                    let next_chunk_start = chunk_data_start + chunk_length as u64 + 4;
+
                     let result = match chunk {
                         PngChunk::IHDR => {
-                            let (width, height, bit_depth, color_type, compression_method, has_filters, interlace) =
-                                ChunkReader::read_ihdr(&mut self.reader, &mut self.chunks)?;
-                            self.width = width;
-                            self.height = height;
-                            self.bit_depth = bit_depth;
-                            self.color_type = color_type;
-                            self.compression_method = compression_method;
-                            self.has_filters = has_filters;
-                            self.interlace = interlace;
+                            match ChunkReader::read_ihdr(&mut self.reader, &mut self.chunks) {
+                                Ok((width, height, bit_depth, color_type, compression_method, has_filters, interlace)) => {
+                                    self.width = width;
+                                    self.height = height;
+                                    self.bit_depth = bit_depth;
+                                    self.color_type = color_type;
+                                    self.compression_method = compression_method;
+                                    self.has_filters = has_filters;
+                                    self.interlace = interlace;
 
-                            if self.width == 0 || self.height == 0 {
-                                return Err(VexelError::InvalidDimensions {
-                                    width: self.width,
-                                    height: self.height,
-                                });
+                                    if self.width == 0 || self.height == 0 {
+                                        return Err(VexelError::InvalidDimensions {
+                                            width: self.width,
+                                            height: self.height,
+                                        });
+                                    }
+
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
                             }
-
-                            Ok(())
                         }
                         PngChunk::PLTE => {
-                            self.palette = Some(ChunkReader::read_plte(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_plte(&mut self.reader, &mut self.chunks) {
+                                Ok(palette) => { self.palette = Some(palette); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::IDAT => {
                             ChunkReader::read_idat(
@@ -182,75 +221,107 @@ impl<R: Read + Seek> PngDecoder<R> {
                             )
                         }
                         PngChunk::GAMA => {
-                            self.gamma = Some(ChunkReader::read_gama(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_gama(&mut self.reader, &mut self.chunks) {
+                                Ok(gamma) => { self.gamma = Some(gamma); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::CHRM => {
-                            self.chromaticities = Some(ChunkReader::read_chrm(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_chrm(&mut self.reader, &mut self.chunks) {
+                                Ok(chrm) => { self.chromaticities = Some(chrm); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::TEXT => {
-                            self.text_chunks.push(ChunkReader::read_text(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_text(&mut self.reader, &mut self.chunks) {
+                                Ok(text) => { self.text_chunks.push(text); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::ZTXT => {
-                            self.text_chunks.push(ChunkReader::read_ztxt(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_ztxt(&mut self.reader, &mut self.chunks) {
+                                Ok(text) => { self.text_chunks.push(text); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::ITXT => {
-                            self.text_chunks.push(ChunkReader::read_itxt(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_itxt(&mut self.reader, &mut self.chunks) {
+                                Ok(text) => { self.text_chunks.push(text); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::SRGB => {
-                            self.rendering_intent = Some(ChunkReader::read_srgb(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_srgb(&mut self.reader, &mut self.chunks) {
+                                Ok(intent) => { self.rendering_intent = Some(intent); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::TRNS => {
-                            self.transparency =
-                                Some(ChunkReader::read_trns(&mut self.reader, &mut self.chunks, self.color_type, self.palette.as_ref())?);
-                            Ok(())
+                            match ChunkReader::read_trns(&mut self.reader, &mut self.chunks, self.color_type, self.palette.as_ref()) {
+                                Ok(trns) => { self.transparency = Some(trns); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::BKGD => {
-                            self.background =
-                                Some(ChunkReader::read_bkgd(&mut self.reader, &mut self.chunks, self.color_type, self.palette.as_ref())?);
-                            Ok(())
+                            match ChunkReader::read_bkgd(&mut self.reader, &mut self.chunks, self.color_type, self.palette.as_ref()) {
+                                Ok(bkgd) => { self.background = Some(bkgd); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::PHYS => {
-                            self.physical_dimensions = Some(ChunkReader::read_phys(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_phys(&mut self.reader, &mut self.chunks) {
+                                Ok(phys) => { self.physical_dimensions = Some(phys); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::SBIT => {
-                            self.significant_bits = Some(ChunkReader::read_sbit(&mut self.reader, &mut self.chunks, self.color_type)?);
-                            Ok(())
+                            match ChunkReader::read_sbit(&mut self.reader, &mut self.chunks, self.color_type) {
+                                Ok(sbit) => { self.significant_bits = Some(sbit); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::HIST => {
-                            self.histogram = Some(ChunkReader::read_hist(&mut self.reader, &mut self.chunks, self.palette.as_ref())?);
-                            Ok(())
+                            match ChunkReader::read_hist(&mut self.reader, &mut self.chunks, self.palette.as_ref()) {
+                                Ok(hist) => { self.histogram = Some(hist); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::TIME => {
-                            self.modification_time = Some(ChunkReader::read_time(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_time(&mut self.reader, &mut self.chunks) {
+                                Ok(time) => { self.modification_time = Some(time); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::SPLT => {
-                            self.suggested_palettes.push(ChunkReader::read_splt(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_splt(&mut self.reader, &mut self.chunks) {
+                                Ok(splt) => { self.suggested_palettes.push(splt); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::ACTL => {
-                            self.actl_info = Some(ChunkReader::read_actl(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_actl(&mut self.reader, &mut self.chunks) {
+                                Ok(actl) => { self.actl_info = Some(actl); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::FCTL => {
-                            let fctl = ChunkReader::read_fctl(&mut self.reader, &mut self.chunks, self.width, self.height)?;
-                            self.frames.push(PngFrame {
-                                fctl_info: fctl,
-                                fdat: Vec::new(),
-                            });
-                            Ok(())
+                            match ChunkReader::read_fctl(&mut self.reader, &mut self.chunks, self.width, self.height) {
+                                Ok(fctl) => {
+                                    self.frames.push(PngFrame {
+                                        fctl_info: fctl,
+                                        fdat: Vec::new(),
+                                    });
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::FDAT => ChunkReader::read_fdat(&mut self.reader, &mut self.chunks, &mut self.frames),
                         PngChunk::ICCP => {
-                            self.icc_profile = Some(ChunkReader::read_iccp(&mut self.reader, &mut self.chunks)?);
-                            Ok(())
+                            match ChunkReader::read_iccp(&mut self.reader, &mut self.chunks) {
+                                Ok(icc) => { self.icc_profile = Some(icc); Ok(()) }
+                                Err(e) => Err(e),
+                            }
                         }
                         PngChunk::IEND => ChunkReader::read_iend(&mut self.reader, &mut self.chunks),
                     };
@@ -258,16 +329,16 @@ impl<R: Read + Seek> PngDecoder<R> {
                     if let Err(e) = result {
                         log_warn!("Error reading chunk {:?}: {:?}", chunk, e);
                     }
-                    
-                    let current_pos = self.reader.stream_position()?;
-                    
-                    self.reader.seek(SeekFrom::Start(current_pos + 4))?;
-                    
+
+                    if self.reader.seek(SeekFrom::Start(next_chunk_start)).is_err() {
+                        break;
+                    }
+
                     let _next_length = match self.reader.read_u32() {
                         Ok(len) => len,
                         Err(_) => break,
                     };
-                    
+
                     for i in 0..4 {
                         window[i] = match self.reader.read_u8() {
                             Ok(b) => b,
@@ -323,17 +394,15 @@ impl<R: Read + Seek> PngDecoder<R> {
         }
 
         if self.actl_info.is_some() {
-            let pixel_decoder = PixelDecoder::new(
+            let mut anim_decoder = AnimationDecoder::new(self.width, self.height);
+            let result = anim_decoder.decode_apng_frames(
+                &self.frames,
                 self.bit_depth,
                 self.color_type,
-                self.width,
                 self.interlace,
                 self.palette.clone(),
                 self.transparency.clone(),
             );
-
-            let mut anim_decoder = AnimationDecoder::new(self.width, self.height);
-            let result = anim_decoder.decode_apng_frames(&self.frames, &pixel_decoder);
 
             if let Ok(image_frames) = result {
                 return Ok(Image::new(self.width, self.height, PixelFormat::RGBA8, image_frames));

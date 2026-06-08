@@ -252,6 +252,7 @@ pub struct ImageFrame {
     pub width: u32,
     pub height: u32,
     pub pixels: PixelData,
+    // TODO: this is centiseconds now, change to ms
     pub delay: u32,
 }
 

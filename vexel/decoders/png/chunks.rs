@@ -1,8 +1,8 @@
 use crate::bitreader::BitReader;
 use crate::log_warn;
+use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::VexelResult;
 use crate::utils::icc::ICCProfile;
-use flate2::read::ZlibDecoder;
 use std::io::{Read, Seek, SeekFrom};
 use super::types::*;
 
@@ -96,7 +96,7 @@ impl ChunkReader {
     ) -> VexelResult<Vec<[u8; 3]>> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
+        let length = length_u32;
 
         if length % 3 != 0 {
             log_warn!("PLTE chunk length is not a multiple of 3");
@@ -134,7 +134,7 @@ impl ChunkReader {
     ) -> VexelResult<()> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
+        let length = length_u32;
         let mut chunk_data = vec![0; length as usize];
         reader.read_exact(&mut chunk_data)?;
 
@@ -165,7 +165,7 @@ impl ChunkReader {
     ) -> VexelResult<(String, ICCProfile)> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
+        let length = length_u32;
         let mut num_read = 0;
 
         let mut profile_name_bytes = Vec::new();
@@ -203,9 +203,7 @@ impl ChunkReader {
             num_read += 1;
         }
 
-        let mut decoder = ZlibDecoder::new(&compressed_profile[..]);
-        let mut profile_data = Vec::new();
-        decoder.read_to_end(&mut profile_data)?;
+        let profile_data = ZlibDecoder::from_bytes(compressed_profile).decode();
 
         let icc = ICCProfile::new(&*profile_data)?;
         let profile_name = String::from_utf8_lossy(&profile_name_bytes).to_string();
@@ -248,7 +246,7 @@ impl ChunkReader {
     ) -> VexelResult<SuggestedPalette> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
+        let length = length_u32;
 
         let mut name = Vec::new();
         loop {
@@ -396,24 +394,26 @@ impl ChunkReader {
     ) -> VexelResult<Chromaticities> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let white_x = reader.read_u32()?;
-        let white_y = reader.read_u32()?;
-        let red_x = reader.read_u32()?;
-        let red_y = reader.read_u32()?;
-        let green_x = reader.read_u32()?;
-        let green_y = reader.read_u32()?;
-        let blue_x = reader.read_u32()?;
-        let blue_y = reader.read_u32()?;
+        let mut buf = vec![0u8; length_u32 as usize];
+        reader.read_exact(&mut buf)?;
+
+        let read_u32_be = |buf: &[u8], offset: usize| -> u32 {
+            if offset + 4 <= buf.len() {
+                u32::from_be_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
+            } else {
+                0
+            }
+        };
 
         let chromaticities = Chromaticities {
-            white_point_x: white_x as f32 / 100000.0,
-            white_point_y: white_y as f32 / 100000.0,
-            red_x: red_x as f32 / 100000.0,
-            red_y: red_y as f32 / 100000.0,
-            green_x: green_x as f32 / 100000.0,
-            green_y: green_y as f32 / 100000.0,
-            blue_x: blue_x as f32 / 100000.0,
-            blue_y: blue_y as f32 / 100000.0,
+            white_point_x: read_u32_be(&buf, 0) as f32 / 100000.0,
+            white_point_y: read_u32_be(&buf, 4) as f32 / 100000.0,
+            red_x: read_u32_be(&buf, 8) as f32 / 100000.0,
+            red_y: read_u32_be(&buf, 12) as f32 / 100000.0,
+            green_x: read_u32_be(&buf, 16) as f32 / 100000.0,
+            green_y: read_u32_be(&buf, 20) as f32 / 100000.0,
+            blue_x: read_u32_be(&buf, 24) as f32 / 100000.0,
+            blue_y: read_u32_be(&buf, 28) as f32 / 100000.0,
         };
 
         chunks.push(PngChunkInfo {
@@ -438,7 +438,7 @@ impl ChunkReader {
     ) -> VexelResult<TransparencyData> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
+        let length = length_u32;
 
         let trns_data = match color_type {
             ColorType::Grayscale => {
@@ -498,7 +498,7 @@ impl ChunkReader {
     ) -> VexelResult<BackgroundData> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
+        let length = length_u32;
 
         let background = match color_type {
             ColorType::Grayscale | ColorType::GrayscaleAlpha => {
@@ -591,7 +591,7 @@ impl ChunkReader {
     ) -> VexelResult<SignificantBits> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
+        let length = length_u32;
 
         let mut chunk_data = vec![0; length as usize];
         reader.read_exact(&mut chunk_data)?;
@@ -603,7 +603,7 @@ impl ChunkReader {
                 }
 
                 SignificantBits::Grayscale {
-                    gray: reader.read_u8()?,
+                    gray: *chunk_data.first().unwrap_or(&0),
                 }
             }
             ColorType::RGB => {
@@ -612,9 +612,9 @@ impl ChunkReader {
                 }
 
                 SignificantBits::RGB {
-                    red: reader.read_u8()?,
-                    green: reader.read_u8()?,
-                    blue: reader.read_u8()?,
+                    red: *chunk_data.first().unwrap_or(&0),
+                    green: *chunk_data.get(1).unwrap_or(&0),
+                    blue: *chunk_data.get(2).unwrap_or(&0),
                 }
             }
             ColorType::Indexed => {
@@ -623,9 +623,9 @@ impl ChunkReader {
                 }
 
                 SignificantBits::Indexed {
-                    red: reader.read_u8()?,
-                    green: reader.read_u8()?,
-                    blue: reader.read_u8()?,
+                    red: *chunk_data.first().unwrap_or(&0),
+                    green: *chunk_data.get(1).unwrap_or(&0),
+                    blue: *chunk_data.get(2).unwrap_or(&0),
                 }
             }
             ColorType::GrayscaleAlpha => {
@@ -634,8 +634,8 @@ impl ChunkReader {
                 }
 
                 SignificantBits::GrayscaleAlpha {
-                    gray: reader.read_u8()?,
-                    alpha: reader.read_u8()?,
+                    gray: *chunk_data.first().unwrap_or(&0),
+                    alpha: *chunk_data.get(1).unwrap_or(&0),
                 }
             }
             ColorType::RGBA => {
@@ -644,10 +644,10 @@ impl ChunkReader {
                 }
 
                 SignificantBits::RGBA {
-                    red: reader.read_u8()?,
-                    green: reader.read_u8()?,
-                    blue: reader.read_u8()?,
-                    alpha: reader.read_u8()?,
+                    red: *chunk_data.first().unwrap_or(&0),
+                    green: *chunk_data.get(1).unwrap_or(&0),
+                    blue: *chunk_data.get(2).unwrap_or(&0),
+                    alpha: *chunk_data.get(3).unwrap_or(&0),
                 }
             }
         };
@@ -679,15 +679,16 @@ impl ChunkReader {
         }
 
         let palette_len = palette.unwrap().len();
-        let length = get_chunk_length(reader)?;
+        let length = length_u32;
 
         if length as usize != palette_len * 2 {
             log_warn!("Invalid hIST length: {}, expected {}", length, palette_len * 2);
         }
 
+        let entry_count = (length / 2) as usize;
         let mut frequencies = Vec::new();
 
-        for _ in 0..palette_len {
+        for _ in 0..entry_count {
             frequencies.push(reader.read_u16()?);
         }
 
@@ -767,36 +768,14 @@ impl ChunkReader {
     ) -> VexelResult<PngText> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
-        let mut num_read = 0;
+        let length = length_u32;
+        let mut chunk_data = vec![0u8; length as usize];
+        reader.read_exact(&mut chunk_data)?;
 
-        let mut keyword_bytes = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
-
-            if byte == 0 {
-                break;
-            }
-
-            keyword_bytes.push(byte);
-        }
-
-        let keyword = String::from_utf8_lossy(&keyword_bytes).to_string();
-
-        let mut text_bytes = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
-
-            if num_read >= length {
-                break;
-            }
-
-            text_bytes.push(byte);
-        }
-
-        let text = String::from_utf8_lossy(&text_bytes).to_string();
+        let null_pos = chunk_data.iter().position(|&b| b == 0).unwrap_or(chunk_data.len());
+        let keyword = String::from_utf8_lossy(&chunk_data[..null_pos]).to_string();
+        let text_bytes = if null_pos + 1 < chunk_data.len() { &chunk_data[null_pos + 1..] } else { &[] };
+        let text = String::from_utf8_lossy(text_bytes).to_string();
 
         let png_text = PngText::Basic {
             keyword: keyword.clone(),
@@ -823,24 +802,14 @@ impl ChunkReader {
     ) -> VexelResult<PngText> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
-        let mut num_read = 0;
+        let mut chunk_data = vec![0u8; length_u32 as usize];
+        reader.read_exact(&mut chunk_data)?;
 
-        let mut keyword_bytes = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
+        let null_pos = chunk_data.iter().position(|&b| b == 0).unwrap_or(chunk_data.len());
+        let keyword = String::from_utf8_lossy(&chunk_data[..null_pos]).to_string();
 
-            if byte == 0 {
-                break;
-            }
-
-            keyword_bytes.push(byte);
-        }
-
-        let keyword = String::from_utf8_lossy(&keyword_bytes).to_string();
-
-        let compression_method = reader.read_u8()?;
+        let after_null = null_pos + 1;
+        let compression_method = chunk_data.get(after_null).copied().unwrap_or(0);
 
         if compression_method != 0 {
             log_warn!("Unknown compression method in zTXt chunk: {}", compression_method);
@@ -858,21 +827,13 @@ impl ChunkReader {
             return Ok(png_text);
         }
 
-        let mut compressed_text = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
+        let compressed_text = if after_null + 1 < chunk_data.len() {
+            chunk_data[after_null + 1..].to_vec()
+        } else {
+            Vec::new()
+        };
 
-            if num_read >= length {
-                break;
-            }
-
-            compressed_text.push(byte);
-        }
-
-        let mut decoder = ZlibDecoder::new(&compressed_text[..]);
-        let mut text_bytes = Vec::new();
-        decoder.read_to_end(&mut text_bytes)?;
+        let text_bytes = ZlibDecoder::from_bytes(compressed_text).decode();
 
         let text = String::from_utf8_lossy(&text_bytes).to_string();
 
@@ -901,75 +862,36 @@ impl ChunkReader {
     ) -> VexelResult<PngText> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)?;
-        let mut num_read = 0;
+        let mut chunk_data = vec![0u8; length_u32 as usize];
+        reader.read_exact(&mut chunk_data)?;
 
-        let mut keyword_bytes = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
+        let mut pos = 0;
 
-            if byte == 0 {
-                break;
-            }
+        let kw_end = chunk_data[pos..].iter().position(|&b| b == 0).unwrap_or(chunk_data.len() - pos);
+        let keyword = String::from_utf8_lossy(&chunk_data[pos..pos + kw_end]).to_string();
+        pos += kw_end + 1;
 
-            keyword_bytes.push(byte);
-        }
+        let compression_flag = chunk_data.get(pos).copied().unwrap_or(0);
+        pos += 1;
+        let compression_method = chunk_data.get(pos).copied().unwrap_or(0);
+        pos += 1;
 
-        let keyword = String::from_utf8_lossy(&keyword_bytes).to_string();
+        let lang_end = chunk_data[pos.min(chunk_data.len())..].iter().position(|&b| b == 0).unwrap_or(chunk_data.len().saturating_sub(pos));
+        let language_tag = String::from_utf8_lossy(&chunk_data[pos..pos + lang_end]).to_string();
+        pos += lang_end + 1;
 
-        let compression_flag = reader.read_u8()?;
-        let compression_method = reader.read_u8()?;
+        let trans_end = chunk_data[pos.min(chunk_data.len())..].iter().position(|&b| b == 0).unwrap_or(chunk_data.len().saturating_sub(pos));
+        let translated_keyword = String::from_utf8_lossy(&chunk_data[pos..pos + trans_end]).to_string();
+        pos += trans_end + 1;
 
-        let mut lang_tag_bytes = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
-
-            if byte == 0 {
-                break;
-            }
-
-            lang_tag_bytes.push(byte);
-        }
-
-        let language_tag = String::from_utf8_lossy(&lang_tag_bytes).to_string();
-
-        let mut trans_keyword_bytes = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
-
-            if byte == 0 {
-                break;
-            }
-
-            trans_keyword_bytes.push(byte);
-        }
-
-        let translated_keyword = String::from_utf8_lossy(&trans_keyword_bytes).to_string();
-
-        let mut text_bytes = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
-
-            if num_read >= length {
-                break;
-            }
-
-            text_bytes.push(byte);
-        }
+        let text_bytes = if pos < chunk_data.len() { chunk_data[pos..].to_vec() } else { Vec::new() };
 
         let text = if compression_flag == 1 {
             if compression_method != 0 {
                 log_warn!("Invalid compression method in iTXt chunk: {}", compression_method);
             }
 
-            let mut decoder = ZlibDecoder::new(&text_bytes[..]);
-            let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed)?;
-
+            let decompressed = ZlibDecoder::from_bytes(text_bytes).decode();
             String::from_utf8_lossy(&decompressed).to_string()
         } else {
             String::from_utf8_lossy(&text_bytes).to_string()
@@ -1106,7 +1028,7 @@ impl ChunkReader {
     ) -> VexelResult<()> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = get_chunk_length(reader)? - 4;
+        let length = length_u32 - 4;
 
         let sequence_number = reader.read_u32()?;
 

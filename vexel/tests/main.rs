@@ -49,9 +49,51 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
         },
         TestCase {
             name: "PNG",
-            path: "png/rgb_16bit.png",
+            path: "png/0b7d50ac449fd59eb3de00647636d0c9.png",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact {
+                reference_path: "png/0b7d50ac449fd59eb3de00647636d0c9.avif"
+            },
+        },
+        TestCase {
+            name: "PNG",
+            path: "png/138331052d7c6e4acebfaa92af314e12.png",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "png/138331052d7c6e4acebfaa92af314e12.avif"
+            },
+        },
+        TestCase {
+            name: "PNG",
+            path: "png/gray_8bit.png",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "png/gray_8bit.avif"
+            },
+        },
+        TestCase {
+            name: "PNG",
+            path: "png/gray_alpha_8bit.png",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "png/gray_alpha_8bit.avif"
+            },
+        },
+        TestCase {
+            name: "PNG",
+            path: "png/rgb_8bit.png",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "png/rgb_8bit.avif"
+            },
+        },
+        TestCase {
+            name: "PNG",
+            path: "png/rgb_alpha_8bit.png",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "png/rgb_alpha_8bit.avif"
+            },
         },
         TestCase {
             name: "HDR",
@@ -152,13 +194,33 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
 pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
     let in_path = r"/home/aplefull/Repos/vexel/vexel/tests/images/jpeg/cat_arithmetic.jpg";
     let out_path = Path::new(in_path).with_extension("avif");
+    let save = true; 
 
     let mut decoder = Vexel::open(in_path)?;
 
     match decoder.decode() {
         Ok(image) => {
-            let avif_data = libavif::encode_rgb8(image.width(), image.height(), &image.as_rgba8())?;
-            std::fs::write(out_path, avif_data.as_ref())?;
+            if !save {
+                println!("Decoded image: {}x{}, {} frames", image.width(), image.height(), image.frames().len());
+                return Ok(());
+            }
+
+            if image.frames().len() > 1 {
+                let frames = image.frames();
+                for (i, frame) in frames.iter().enumerate() {
+                    let frame_out_path = out_path.with_file_name(format!(
+                        "{}_frame{}.avif",
+                        out_path.file_stem().unwrap().to_string_lossy(),
+                        i
+                    ));
+
+                    let avif_data = libavif::encode_rgb8(frame.width(), frame.height(), &frame.as_rgba8())?;
+                    std::fs::write(frame_out_path, avif_data.as_ref())?;
+                }
+            } else {
+                let avif_data = libavif::encode_rgb8(image.width(), image.height(), &image.as_rgba8())?;
+                std::fs::write(out_path, avif_data.as_ref())?;
+            }
         }
         Err(e) => {
             println!("Error decoding image: {:?}", e);

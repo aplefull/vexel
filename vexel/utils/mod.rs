@@ -1,4 +1,5 @@
 pub mod bitreader;
+pub mod deflate;
 pub mod error;
 pub mod exif;
 pub mod icc;
