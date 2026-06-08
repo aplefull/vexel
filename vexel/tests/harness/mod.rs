@@ -1,18 +1,19 @@
 use std::path::{Path, PathBuf};
 use vexel::{Image, Vexel};
-use webp::Decoder as WebPDecoder;
-use writer::{Writer, WriterImage, WriterImageFrame};
 
 pub const BASE_PATH: &str = "./tests/images/";
 pub const REFERENCES_PATH: &str = "./tests/references/";
+
+pub const DEFAULT_MSE_THRESHOLD: f64 = 0.5;
+pub const DEFAULT_SSIM_THRESHOLD: f64 = 0.99990;
 
 pub enum Comparison {
     None,
     Exact { reference_path: &'static str },
     Fuzzy {
         reference_path: &'static str,
-        tolerance: u8,
-        max_differing_pixels: usize,
+        mse_threshold: f64,
+        ssim_threshold: f64,
     },
 }
 
@@ -20,7 +21,6 @@ pub struct TestCase {
     pub name: &'static str,
     pub path: &'static str,
     pub validation: Option<Box<dyn Fn(&Image)>>,
-    pub save: bool,
     pub comparison: Comparison,
 }
 
@@ -38,32 +38,6 @@ pub fn get_ref_path(reference_path: &str) -> PathBuf {
     Path::new(REFERENCES_PATH).join(reference_path)
 }
 
-pub fn get_out_path(path: &str, ext: Option<&str>) -> PathBuf {
-    let path = Path::new(path).with_extension(ext.unwrap_or("webp"));
-    Path::new(BASE_PATH).join(path)
-}
-
-pub fn image_to_writer_image(image: &Image) -> WriterImage {
-    let mut frames = Vec::new();
-
-    for frame in image.frames() {
-        frames.push(WriterImageFrame {
-            width: frame.width(),
-            height: frame.height(),
-            has_alpha: true,
-            delay: frame.delay(),
-            pixels: frame.as_rgba8(),
-        });
-    }
-
-    WriterImage {
-        width: image.width(),
-        height: image.height(),
-        has_alpha: true,
-        frames,
-    }
-}
-
 pub fn image_to_reference(image: &Image) -> ReferenceImage {
     ReferenceImage {
         width: image.width(),
@@ -74,17 +48,24 @@ pub fn image_to_reference(image: &Image) -> ReferenceImage {
 
 pub fn read_reference(path: &Path) -> Result<ReferenceImage, Box<dyn std::error::Error>> {
     let buf = std::fs::read(path)?;
-    let decoded = WebPDecoder::new(&buf)
-        .decode()
-        .ok_or_else(|| format!("Failed to decode WebP reference: {}", path.display()))?;
+    let image = libavif::decode_rgb(&buf)
+        .map_err(|e| format!("Failed to decode AVIF reference {}: {:?}", path.display(), e))?;
 
-    let rgba = decoded.to_image().to_rgba8();
+    let width = image.width();
+    let height = image.height();
 
-    Ok(ReferenceImage {
-        width: rgba.width(),
-        height: rgba.height(),
-        pixels: rgba.into_raw(),
-    })
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            let (r, g, b, a) = image.pixel(x, y);
+            rgba.push(r);
+            rgba.push(g);
+            rgba.push(b);
+            rgba.push(a);
+        }
+    }
+
+    Ok(ReferenceImage { width, height, pixels: rgba })
 }
 
 fn normalize_transparent_pixels(pixels: &[u8]) -> Vec<u8> {
@@ -158,7 +139,7 @@ pub fn compute_ssim(a: &[u8], b: &[u8]) -> f64 {
         / ((mean_a.powi(2) + mean_b.powi(2) + c1) * (var_a + var_b + c2))
 }
 
-pub fn compare_fuzzy(name: &str, actual: &ReferenceImage, reference: &ReferenceImage, tolerance: u8, max_differing_pixels: usize) {
+pub fn compare_fuzzy(name: &str, actual: &ReferenceImage, reference: &ReferenceImage, mse_threshold: f64, ssim_threshold: f64) {
     assert_eq!(
         actual.width, reference.width,
         "[{}] Width mismatch: decoded={}, reference={}",
@@ -180,38 +161,21 @@ pub fn compare_fuzzy(name: &str, actual: &ReferenceImage, reference: &ReferenceI
 
     let actual_pixels = normalize_transparent_pixels(&actual.pixels);
     let reference_pixels = normalize_transparent_pixels(&reference.pixels);
-    let total_bytes = actual_pixels.len();
-    let mut differing_bytes = 0usize;
-    let mut worst_diff = 0u8;
-    let mut worst_byte_index = 0usize;
 
-    for (i, (&a, &b)) in actual_pixels.iter().zip(reference_pixels.iter()).enumerate() {
-        let diff = a.abs_diff(b);
-        if diff > worst_diff {
-            worst_diff = diff;
-            worst_byte_index = i;
-        }
-        if diff > tolerance {
-            differing_bytes += 1;
-        }
-    }
+    let mse = compute_mse(&actual_pixels, &reference_pixels);
+    let ssim = compute_ssim(&actual_pixels, &reference_pixels);
+    let psnr = if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0_f64.powi(2) / mse).log10() };
 
-    if differing_bytes > max_differing_pixels {
-        let mse = compute_mse(&actual_pixels, &reference_pixels);
-        let ssim = compute_ssim(&actual_pixels, &reference_pixels);
+    if mse > mse_threshold || ssim < ssim_threshold {
         panic!(
-            "[{}] Too many bytes exceed tolerance={}: {}/{} bytes differ\n  \
-             worst diff={} at byte index {}\n  \
-             MSE={:.4}  PSNR={:.2} dB  SSIM={:.6}",
+            "[{}] Quality thresholds not met\n  \
+             MSE={:.5} (threshold: {:.5})  {}\n  \
+             SSIM={:.6} (threshold: {:.6})  {}\n  \
+             PSNR={:.2} dB",
             name,
-            tolerance,
-            differing_bytes,
-            total_bytes,
-            worst_diff,
-            worst_byte_index,
-            mse,
-            if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0_f64.powi(2) / mse).log10() },
-            ssim,
+            mse, mse_threshold, if mse > mse_threshold { "FAIL" } else { "ok" },
+            ssim, ssim_threshold, if ssim < ssim_threshold { "FAIL" } else { "ok" },
+            psnr,
         );
     }
 }
@@ -224,10 +188,10 @@ pub fn run_comparison(name: &str, image: &Image, comparison: &Comparison) -> Res
             let actual = image_to_reference(image);
             compare_exact(name, &actual, &reference);
         }
-        Comparison::Fuzzy { reference_path, tolerance, max_differing_pixels } => {
+        Comparison::Fuzzy { reference_path, mse_threshold, ssim_threshold } => {
             let reference = read_reference(&get_ref_path(reference_path))?;
             let actual = image_to_reference(image);
-            compare_fuzzy(name, &actual, &reference, *tolerance, *max_differing_pixels);
+            compare_fuzzy(name, &actual, &reference, *mse_threshold, *ssim_threshold);
         }
     }
     Ok(())
@@ -243,10 +207,6 @@ pub fn test_decode(test_case: TestCase) -> Result<(), Box<dyn std::error::Error>
             }
 
             run_comparison(test_case.name, &image, &test_case.comparison)?;
-
-            if test_case.save {
-                Writer::write_webp(&get_out_path(test_case.path, None), &image_to_writer_image(&image))?;
-            }
 
             Ok(())
         }
