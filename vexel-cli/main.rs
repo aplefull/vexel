@@ -225,10 +225,15 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
 
     impl App {
         fn image_to_frames(image: &Image) -> (Vec<egui::ColorImage>, Vec<u32>) {
+            const MAX_TEXTURE_SIZE: usize = 16384;
+
             let mut frames = Vec::new();
             let mut frame_delays = Vec::new();
 
             for frame in image.frames() {
+                let src_width = frame.width() as usize;
+                let src_height = frame.height() as usize;
+
                 let buffer = if frame.has_alpha() {
                     frame.as_rgba8()
                 } else {
@@ -237,13 +242,38 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                     for i in (0..rgb.len()).step_by(3) {
                         rgba.extend_from_slice(&[rgb[i], rgb[i + 1], rgb[i + 2], 255]);
                     }
-
                     rgba
                 };
 
+                let scale = (MAX_TEXTURE_SIZE as f32 / src_width as f32)
+                    .min(MAX_TEXTURE_SIZE as f32 / src_height as f32)
+                    .min(1.0);
+
+                let (dst_width, dst_height, final_buffer) = if scale < 1.0 {
+                    let dst_w = ((src_width as f32 * scale) as usize).max(1);
+                    let dst_h = ((src_height as f32 * scale) as usize).max(1);
+                    let mut dst = vec![0u8; dst_w * dst_h * 4];
+
+                    for dy in 0..dst_h {
+                        for dx in 0..dst_w {
+                            let sx = ((dx as f32 + 0.5) / scale) as usize;
+                            let sy = ((dy as f32 + 0.5) / scale) as usize;
+                            let sx = sx.min(src_width - 1);
+                            let sy = sy.min(src_height - 1);
+                            let src_idx = (sy * src_width + sx) * 4;
+                            let dst_idx = (dy * dst_w + dx) * 4;
+                            dst[dst_idx..dst_idx + 4].copy_from_slice(&buffer[src_idx..src_idx + 4]);
+                        }
+                    }
+
+                    (dst_w, dst_h, dst)
+                } else {
+                    (src_width, src_height, buffer)
+                };
+
                 frames.push(egui::ColorImage::from_rgba_unmultiplied(
-                    [frame.width() as usize, frame.height() as usize],
-                    &buffer,
+                    [dst_width, dst_height],
+                    &final_buffer,
                 ));
 
                 frame_delays.push((frame.delay() * 10).max(17));
