@@ -107,14 +107,6 @@ pub struct AvifMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-pub struct AvifHandlerBox {
-    pub version: u8,
-    pub flags: u32,
-    pub handler_type: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct AvifColorBox {
     pub colour_type: String,
     pub primaries: ColorPrimaries,
