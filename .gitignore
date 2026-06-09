@@ -1,4 +1,6 @@
 /target
 /spec
 /bin
+/corpus-results
 .idea
+.env

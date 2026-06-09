@@ -14,6 +14,14 @@ save path loglevel="":
 test name="" loglevel="":
     cargo test --package vexel --release {{ if name != "" { "\"" + name + "\"" } else { "" } }} -- --nocapture {{ if loglevel != "" { "--log-level " + loglevel } else { "" } }}
 
+# Run benchmarks, optionally filtered by name
+bench *args="":
+    cargo bench --package vexel --bench decode {{ if args != "" { "-- " + args } else { "" } }}
+
+# Decode all images in VEXEL_CORPUS, compare against ImageMagick, save CSV
+corpus-bench:
+    cargo test --package vexel --release corpus_bench -- --ignored --nocapture
+
 # Generate or verify AVIF reference images
 convert *args:
     cd vexel/tests && python3 generate_references.py {{args}}

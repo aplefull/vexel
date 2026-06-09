@@ -1,8 +1,26 @@
 mod harness;
+mod corpus;
 
 use std::path::Path;
 use harness::*;
 use vexel::Vexel;
+
+fn load_env_file() {
+    let env_path = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".env");
+    if let Ok(contents) = std::fs::read_to_string(env_path) {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                if std::env::var(key.trim()).is_err() {
+                    std::env::set_var(key.trim(), value.trim());
+                }
+            }
+        }
+    }
+}
 
 #[test]
 fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
@@ -321,4 +339,13 @@ pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[test]
+#[ignore = "corpus bench"]
+pub fn corpus_bench() -> Result<(), Box<dyn std::error::Error>> {
+    load_env_file();
+    let corpus_path = std::env::var("VEXEL_CORPUS")
+        .map_err(|_| "VEXEL_CORPUS is not set. Add it to .env")?;
+    corpus::run(&corpus_path)
 }
