@@ -107,9 +107,67 @@ impl ComponentPlane {
 
         let h_2x = target_width == source_width * 2 || target_width == source_width * 2 - 1;
         let v_2x = target_height == source_height * 2 || target_height == source_height * 2 - 1;
-        let is_2x = h_2x && v_2x;
+        let is_h2v1 = h_2x && target_height == source_height;
+        let is_h1v2 = !h_2x && v_2x && target_width == source_width;
+        let is_h2v2 = h_2x && v_2x;
 
-        if is_2x {
+        if is_h2v1 {
+            let sw = source_width as usize;
+            let sh = source_height as usize;
+
+            for sy in 0..sh {
+                let dy = sy as u32;
+
+                if sw == 1 {
+                    let v = get_src(0, sy);
+                    upsampled.set_pixel(0, dy, v);
+                    if 1 < target_width {
+                        upsampled.set_pixel(1, dy, v);
+                    }
+                    continue;
+                }
+
+                let invalue = get_src(0, sy);
+                upsampled.set_pixel(0, dy, invalue);
+                if 1 < target_width {
+                    upsampled.set_pixel(1, dy, (invalue * 3 + get_src(1, sy) + 2) >> 2);
+                }
+
+                for sx in 1..sw - 1 {
+                    let invalue = get_src(sx, sy) * 3;
+                    let dx = (sx * 2) as u32;
+                    if dx < target_width { upsampled.set_pixel(dx, dy, (invalue + get_src(sx - 1, sy) + 1) >> 2); }
+                    if dx + 1 < target_width { upsampled.set_pixel(dx + 1, dy, (invalue + get_src(sx + 1, sy) + 2) >> 2); }
+                }
+
+                let last_sx = sw - 1;
+                let dx = (last_sx * 2) as u32;
+                let invalue = get_src(last_sx, sy);
+                if dx < target_width { upsampled.set_pixel(dx, dy, (invalue * 3 + get_src(last_sx - 1, sy) + 1) >> 2); }
+                if dx + 1 < target_width { upsampled.set_pixel(dx + 1, dy, invalue); }
+            }
+        } else if is_h1v2 {
+            let sw = source_width as usize;
+            let sh = source_height as usize;
+
+            for sy in 0..sh {
+                let sy_above = sy.saturating_sub(1);
+                let sy_below = (sy + 1).min(sh - 1);
+
+                for v in 0..2u32 {
+                    let dy = (sy * 2) as u32 + v;
+                    if dy >= target_height {
+                        continue;
+                    }
+                    let (sy_near, bias) = if v == 0 { (sy_above, 1) } else { (sy_below, 2) };
+
+                    for sx in 0..sw {
+                        let val = (get_src(sx, sy) * 3 + get_src(sx, sy_near) + bias) >> 2;
+                        upsampled.set_pixel(sx as u32, dy, val);
+                    }
+                }
+            }
+        } else if is_h2v2 {
             let sw = source_width as usize;
             let sh = source_height as usize;
 
@@ -803,24 +861,26 @@ impl<R: Read + Seek> JpegDecoder<R> {
             return Ok(());
         }
 
-        let version_major = self.reader.read_bits(8)? as u8;
-        let version_minor = self.reader.read_bits(8)? as u8;
-
-        let density_units = self.reader.read_bits(8)? as u8;
-        let x_density = self.reader.read_bits(16)? as u16;
-        let y_density = self.reader.read_bits(16)? as u16;
-
-        let thumbnail_width = self.reader.read_bits(8)? as u8;
-        let thumbnail_height = self.reader.read_bits(8)? as u8;
-
-        let thumbnail_size = thumbnail_width as u32 * thumbnail_height as u32 * 3;
-        let mut thumbnail_data = Vec::new();
-
-        if thumbnail_size > 0 {
-            for _ in 0..thumbnail_size {
-                thumbnail_data.push(self.reader.read_bits(8)? as u8);
-            }
+        let payload_len = (length as usize).saturating_sub(7);
+        let mut payload = vec![0u8; payload_len];
+        for i in 0..payload_len {
+            payload[i] = self.reader.read_u8().unwrap_or(0);
         }
+
+        let get = |i: usize| -> u8 { payload.get(i).copied().unwrap_or(0) };
+        let get_u16 = |i: usize| -> u16 { u16::from_be_bytes([get(i), get(i + 1)]) };
+
+        let version_major = get(0);
+        let version_minor = get(1);
+        let density_units = get(2);
+        let x_density = get_u16(3);
+        let y_density = get_u16(5);
+        let thumbnail_width = get(7);
+        let thumbnail_height = get(8);
+
+        let max_thumbnail_bytes = payload_len.saturating_sub(9);
+        let thumbnail_size = (thumbnail_width as usize * thumbnail_height as usize * 3).min(max_thumbnail_bytes);
+        let thumbnail_data = payload.get(9..9 + thumbnail_size).unwrap_or(&[]).to_vec();
 
         self.jfif_header = Some(JFIFHeader {
             identifier: identifier.clone(),
@@ -834,10 +894,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
             thumbnail_data: thumbnail_data.clone(),
         });
 
-        if length != 16 + thumbnail_size as u16 {
+        let expected_len = 16 + thumbnail_width as u16 * thumbnail_height as u16 * 3;
+        if length != expected_len {
             log_warn!(
                 "Invalid JFIF segment length, expected {}, got {}",
-                16 + thumbnail_size,
+                expected_len,
                 length
             );
         }
@@ -1040,9 +1101,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 offsets.push(total_symbols);
             }
 
-            if total_symbols > 162 {
+            if total_symbols > 256 {
                 log_warn!("Too many symbols in Huffman table: {}", total_symbols);
-                total_symbols = 162;
+                total_symbols = 256;
             }
 
             let mut table = Vec::with_capacity(total_symbols as usize);
@@ -1050,14 +1111,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 table.push(self.reader.read_bits(8)? as u8);
             }
 
-            segment_length -= 2 + 1 + 1 + 16 + total_symbols as i16;
+            segment_length -= 1 + 16 + total_symbols as i16;
 
             let mut huffman_table = HuffmanTable {
                 id,
                 class,
                 offsets,
                 symbols: table,
-                codes: vec![0; 162],
+                codes: vec![0; total_symbols as usize],
             };
 
             let mut code = 0;
@@ -1269,6 +1330,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         };
                     }
                 b if b == (JpegMarker::EOI.to_u16() & 0xFF) as u8 => {
+                    self.reader.seek(SeekFrom::Current(-2))?;
                     break;
                 }
                 _ => {
@@ -1486,9 +1548,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 .max()
                 .unwrap_or(1);
 
-            let is_luminance_only = scan.components.len() == 1 && scan.components[0].component_id == 1;
+            let is_non_interleaved = scan.components.len() == 1;
 
-            if is_luminance_only {
+            if is_non_interleaved {
                 max_h_samp = 1;
                 max_v_samp = 1;
             }
@@ -1510,25 +1572,21 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     }
 
                     for scan_comp in scan.components.clone().iter() {
-                        let comp = match self.components.iter().find(|c| c.id == scan_comp.component_id) {
-                            Some(c) => c,
+                        let (plane_index, comp) = match self
+                            .components
+                            .iter()
+                            .enumerate()
+                            .find(|(_, c)| c.id == scan_comp.component_id)
+                        {
+                            Some((i, c)) => (i, c),
                             None => {
                                 log_warn!("Component not found: {}", scan_comp.component_id);
                                 continue;
                             }
                         };
 
-                        let h_blocks = if is_luminance_only {
-                            1
-                        } else {
-                            comp.horizontal_sampling_factor
-                        };
-                        let v_blocks = if is_luminance_only {
-                            1
-                        } else {
-                            comp.vertical_sampling_factor
-                        };
-                        let plane_index = comp.id as usize - 1;
+                        let h_blocks = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
+                        let v_blocks = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
 
                         if plane_index >= planes.len() {
                             log_warn!("Invalid plane index: {}", plane_index);
@@ -1538,17 +1596,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         for v in 0..v_blocks {
                             for h in 0..h_blocks {
                                 let plane_blocks_per_line = planes[plane_index].blocks_per_line;
-                                let block_x = if is_luminance_only {
-                                    mcu_x + h as u32
-                                } else {
-                                    mcu_x * comp.horizontal_sampling_factor as u32 + h as u32
-                                };
-
-                                let block_y = if is_luminance_only {
-                                    mcu_y + v as u32
-                                } else {
-                                    mcu_y * comp.vertical_sampling_factor as u32 + v as u32
-                                };
+                                let block_x = mcu_x * h_blocks as u32 + h as u32;
+                                let block_y = mcu_y * v_blocks as u32 + v as u32;
 
                                 if block_x >= plane_blocks_per_line {
                                     continue;
@@ -2208,8 +2257,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut dc_stats: Vec<Vec<u8>> = (0..4).map(|_| vec![0u8; 64]).collect();
         let mut ac_stats: Vec<Vec<u8>> = (0..4).map(|_| vec![0u8; 256]).collect();
 
-        let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
-        let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
+        let is_non_interleaved = components.len() == 1;
+        let max_h_samp = if is_non_interleaved { 1 } else { self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1) };
+        let max_v_samp = if is_non_interleaved { 1 } else { self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1) };
 
         let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
         let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
@@ -2241,10 +2291,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let dc_u = get_dc_u(dc_sel);
                     let ac_k = get_ac_k(ac_sel);
 
-                    for v in 0..comp.vertical_sampling_factor {
-                        for h in 0..comp.horizontal_sampling_factor {
-                            let block_x = mcu_x * comp.horizontal_sampling_factor as u32 + h as u32;
-                            let block_y = mcu_y * comp.vertical_sampling_factor as u32 + v as u32;
+                    let h_samp = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
+                    let v_samp = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
+
+                    for v in 0..v_samp {
+                        for h in 0..h_samp {
+                            let block_x = mcu_x * h_samp as u32 + h as u32;
+                            let block_y = mcu_y * v_samp as u32 + v as u32;
 
                             if let Some(block) = planes[comp_idx].get_block_mut(block_x, block_y) {
                                 arith.decode_mcu_sequential(
@@ -2282,11 +2335,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let is_first_dc_scan = is_dc_scan && is_first_scan;
 
             for scan_comp in &scan.components {
-                let comp = match self.components.iter().find(|c| c.id == scan_comp.component_id) {
-                    Some(c) => c.clone(),
+                let (plane_idx, _comp) = match self
+                    .components
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| c.id == scan_comp.component_id)
+                {
+                    Some((i, c)) => (i, c.clone()),
                     None => continue,
                 };
-                let plane_idx = (comp.id as usize).saturating_sub(1);
                 let dc_sel = scan_comp.dc_table_selector as usize;
                 let ac_sel = scan_comp.ac_table_selector as usize;
 
@@ -2323,11 +2380,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
             let mut arith = ArithmeticDecoder::new(&scan.data);
 
-            let is_luminance_only = scan.components.len() == 1 && scan.components[0].component_id == 1;
-            let max_h_samp = if is_luminance_only { 1 } else {
+            let is_non_interleaved = scan.components.len() == 1;
+            let max_h_samp = if is_non_interleaved { 1 } else {
                 self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1)
             };
-            let max_v_samp = if is_luminance_only { 1 } else {
+            let max_v_samp = if is_non_interleaved { 1 } else {
                 self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1)
             };
 
@@ -2352,14 +2409,18 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     }
 
                     for scan_comp in scan.components.iter() {
-                        let comp = match self.components.iter().find(|c| c.id == scan_comp.component_id) {
-                            Some(c) => c.clone(),
+                        let (plane_index, comp) = match self
+                            .components
+                            .iter()
+                            .enumerate()
+                            .find(|(_, c)| c.id == scan_comp.component_id)
+                        {
+                            Some((i, c)) => (i, c.clone()),
                             None => continue,
                         };
 
-                        let h_blocks = if is_luminance_only { 1 } else { comp.horizontal_sampling_factor };
-                        let v_blocks = if is_luminance_only { 1 } else { comp.vertical_sampling_factor };
-                        let plane_index = (comp.id as usize).saturating_sub(1);
+                        let h_blocks = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
+                        let v_blocks = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
 
                         if plane_index >= planes.len() {
                             continue;
@@ -2373,16 +2434,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                         for v in 0..v_blocks {
                             for h in 0..h_blocks {
-                                let block_x = if is_luminance_only {
-                                    mcu_x + h as u32
-                                } else {
-                                    mcu_x * comp.horizontal_sampling_factor as u32 + h as u32
-                                };
-                                let block_y = if is_luminance_only {
-                                    mcu_y + v as u32
-                                } else {
-                                    mcu_y * comp.vertical_sampling_factor as u32 + v as u32
-                                };
+                                let block_x = mcu_x * h_blocks as u32 + h as u32;
+                                let block_y = mcu_y * v_blocks as u32 + v as u32;
 
                                 let plane_blocks_per_line = planes[plane_index].blocks_per_line;
                                 if block_x >= plane_blocks_per_line {
@@ -2449,22 +2502,29 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         let scan = &self.scans[0];
+        let is_non_interleaved = scan.components.len() == 1;
         // TODO uhh, how can we not clone this?
         let mut reader = BitReader::new(Cursor::new(scan.data.clone()));
         let mut previous_dc = vec![0i32; planes.len()];
 
-        let mut max_h_samp = self
-            .components
-            .iter()
-            .map(|c| c.horizontal_sampling_factor)
-            .max()
-            .unwrap_or(1);
-        let mut max_v_samp = self
-            .components
-            .iter()
-            .map(|c| c.vertical_sampling_factor)
-            .max()
-            .unwrap_or(1);
+        let mut max_h_samp = if is_non_interleaved {
+            1
+        } else {
+            self.components
+                .iter()
+                .map(|c| c.horizontal_sampling_factor)
+                .max()
+                .unwrap_or(1)
+        };
+        let mut max_v_samp = if is_non_interleaved {
+            1
+        } else {
+            self.components
+                .iter()
+                .map(|c| c.vertical_sampling_factor)
+                .max()
+                .unwrap_or(1)
+        };
 
         if max_h_samp == 0 || max_v_samp == 0 {
             log_warn!("Invalid sampling factors: ({}, {})", max_h_samp, max_v_samp);
@@ -2558,10 +2618,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         }
                     };
 
-                    for v in 0..comp.vertical_sampling_factor {
-                        for h in 0..comp.horizontal_sampling_factor {
-                            let block_x = mcu_x * comp.horizontal_sampling_factor as u32 + h as u32;
-                            let block_y = mcu_y * comp.vertical_sampling_factor as u32 + v as u32;
+                    let h_samp = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
+                    let v_samp = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
+
+                    for v in 0..v_samp {
+                        for h in 0..h_samp {
+                            let block_x = mcu_x * h_samp as u32 + h as u32;
+                            let block_y = mcu_y * v_samp as u32 + v as u32;
 
                             if comp_idx >= previous_dc.len() {
                                 log_warn!(
