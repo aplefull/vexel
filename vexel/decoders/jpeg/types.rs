@@ -186,6 +186,8 @@ pub struct ScanData {
     pub components: Vec<ScanComponent>,
     pub dc_tables: Vec<HuffmanTable>,
     pub ac_tables: Vec<HuffmanTable>,
+    pub arith_dc_tables: Vec<ArithmeticCodingTable>,
+    pub arith_ac_tables: Vec<ArithmeticCodingTable>,
     pub data: Vec<u8>,
 }
 

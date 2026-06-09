@@ -1060,14 +1060,6 @@ impl ChunkReader {
     }
 }
 
-pub fn get_chunk_length<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<u32> {
-    let current_pos = reader.stream_position()?;
-    reader.seek(SeekFrom::Start(current_pos - 8))?;
-    let length = reader.read_u32()?;
-    reader.seek(SeekFrom::Start(current_pos))?;
-    Ok(length)
-}
-
 pub fn capture_chunk_info<R: Read + Seek>(
     reader: &mut BitReader<R>,
 ) -> VexelResult<(u64, u32, Vec<u8>, String, u32)> {

@@ -179,10 +179,102 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
                 reference_path: "tga/cbw8.avif",
             },
         },
+        TestCase {
+            name: "JPEG arithmetic (cat)",
+            path: "jpeg/cat_arithmetic.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/cat_arithmetic.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG arithmetic (2x2)",
+            path: "jpeg/2x2_arithmetic.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/2x2_arithmetic.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG arithmetic (rainbow)",
+            path: "jpeg/arithmetic.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/arithmetic.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG arithmetic (demo1)",
+            path: "jpeg/demo1_arithmetic.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/demo1_arithmetic.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG arithmetic (demo2)",
+            path: "jpeg/demo2_arithmetic.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/demo2_arithmetic.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG arithmetic (progressive)",
+            path: "jpeg/9bccc4d2-c0de-11e6-8e21-b3f52f1d0eba.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/9bccc4d2-c0de-11e6-8e21-b3f52f1d0eba.avif",
+                // Arithmetic decoder seems to match libjpeg exactly, but we are doing IDCT differently, so final
+                // image differs slightly.
+                // TODO: Maybe switch to integer IDCT as well?
+                mse_threshold: 0.9,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        }
     ];
 
+    let name_width = test_cases.iter().map(|t| t.name.len()).max().unwrap_or(0);
+
+    let mut any_failed = false;
     for test_case in test_cases {
-        test_decode(test_case)?;
+        let name = test_case.name;
+        match test_decode(test_case) {
+            Err(e) => {
+                println!("  {:<width$}  FAIL  {}", name, e, width = name_width);
+                any_failed = true;
+            }
+            Ok(harness::TestResult::Fail(msg)) => {
+                println!("  {:<width$}  FAIL  {}", name, msg, width = name_width);
+                any_failed = true;
+            }
+            Ok(harness::TestResult::Ok { mse: None, ssim: None, psnr: None }) => {
+                println!("  {:<width$}  OK", name, width = name_width);
+            }
+            Ok(harness::TestResult::Ok { mse, ssim, psnr }) => {
+                let mse_str = mse.map(|v| format!("MSE={:.5}", v)).unwrap_or_default();
+                let ssim_str = ssim.map(|v| format!("SSIM={:.6}", v)).unwrap_or_default();
+                let psnr_str = psnr.map(|v| match v.is_infinite() {
+                    true => "PSNR=∞ dB".to_string(),
+                    false => format!("PSNR={:.2} dB", v),
+                }).unwrap_or_default();
+                println!("  {:<width$}  OK    {} {} {}", name, mse_str, ssim_str, psnr_str, width = name_width);
+            }
+        }
+    }
+
+    if any_failed {
+        return Err("one or more test cases failed".into());
     }
 
     Ok(())
@@ -192,7 +284,7 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
 #[ignore = "dev only"]
 // This test is used during development for convenience for any new image formats
 pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
-    let in_path = r"/home/aplefull/Repos/vexel/vexel/tests/images/jpeg/cat_arithmetic.jpg";
+    let in_path = r"/home/aplefull/Repos/vexel/vexel/tests/images/jpeg";
     let out_path = Path::new(in_path).with_extension("avif");
     let save = true; 
 

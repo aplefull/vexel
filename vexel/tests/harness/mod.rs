@@ -24,6 +24,11 @@ pub struct TestCase {
     pub comparison: Comparison,
 }
 
+pub enum TestResult {
+    Ok { mse: Option<f64>, ssim: Option<f64>, psnr: Option<f64> },
+    Fail(String),
+}
+
 pub struct ReferenceImage {
     pub width: u32,
     pub height: u32,
@@ -80,29 +85,23 @@ fn normalize_transparent_pixels(pixels: &[u8]) -> Vec<u8> {
     out
 }
 
-pub fn compare_exact(name: &str, actual: &ReferenceImage, reference: &ReferenceImage) {
-    assert_eq!(
-        actual.width, reference.width,
-        "[{}] Width mismatch: decoded={}, reference={}",
-        name, actual.width, reference.width
-    );
-    assert_eq!(
-        actual.height, reference.height,
-        "[{}] Height mismatch: decoded={}, reference={}",
-        name, actual.height, reference.height
-    );
+pub fn compare_exact(actual: &ReferenceImage, reference: &ReferenceImage) -> Result<(), String> {
+    if actual.width != reference.width {
+        return Err(format!("width mismatch: decoded={}, reference={}", actual.width, reference.width));
+    }
+    if actual.height != reference.height {
+        return Err(format!("height mismatch: decoded={}, reference={}", actual.height, reference.height));
+    }
     if actual.pixels != reference.pixels {
         let actual_norm = normalize_transparent_pixels(&actual.pixels);
         let reference_norm = normalize_transparent_pixels(&reference.pixels);
         let total = actual_norm.len();
         let differing = actual_norm.iter().zip(reference_norm.iter()).filter(|(a, b)| a != b).count();
         if differing > 0 {
-            panic!(
-                "[{}] Pixel data does not match reference exactly: {}/{} bytes differ",
-                name, differing, total
-            );
+            return Err(format!("pixel data mismatch: {}/{} bytes differ", differing, total));
         }
     }
+    Ok(())
 }
 
 pub fn compute_mse(a: &[u8], b: &[u8]) -> f64 {
@@ -139,65 +138,70 @@ pub fn compute_ssim(a: &[u8], b: &[u8]) -> f64 {
         / ((mean_a.powi(2) + mean_b.powi(2) + c1) * (var_a + var_b + c2))
 }
 
-pub fn compare_fuzzy(name: &str, actual: &ReferenceImage, reference: &ReferenceImage, mse_threshold: f64, ssim_threshold: f64) {
-    assert_eq!(
-        actual.width, reference.width,
-        "[{}] Width mismatch: decoded={}, reference={}",
-        name, actual.width, reference.width
-    );
-    assert_eq!(
-        actual.height, reference.height,
-        "[{}] Height mismatch: decoded={}, reference={}",
-        name, actual.height, reference.height
-    );
-    assert_eq!(
-        actual.pixels.len(),
-        reference.pixels.len(),
-        "[{}] Pixel buffer length mismatch: decoded={}, reference={}",
-        name,
-        actual.pixels.len(),
-        reference.pixels.len()
-    );
+pub fn compare_fuzzy(
+    actual: &ReferenceImage,
+    reference: &ReferenceImage,
+    mse_threshold: f64,
+    ssim_threshold: f64,
+) -> Result<(f64, f64, f64), String> {
+    if actual.width != reference.width {
+        return Err(format!("width mismatch: decoded={}, reference={}", actual.width, reference.width));
+    }
+    if actual.height != reference.height {
+        return Err(format!("height mismatch: decoded={}, reference={}", actual.height, reference.height));
+    }
+    if actual.pixels.len() != reference.pixels.len() {
+        return Err(format!(
+            "pixel buffer length mismatch: decoded={}, reference={}",
+            actual.pixels.len(),
+            reference.pixels.len()
+        ));
+    }
 
     let actual_pixels = normalize_transparent_pixels(&actual.pixels);
     let reference_pixels = normalize_transparent_pixels(&reference.pixels);
 
     let mse = compute_mse(&actual_pixels, &reference_pixels);
     let ssim = compute_ssim(&actual_pixels, &reference_pixels);
-    let psnr = if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0_f64.powi(2) / mse).log10() };
+    let psnr = if mse > 0.0 {
+        10.0 * (255.0_f64.powi(2) / mse).log10()
+    } else {
+        f64::INFINITY
+    };
 
     if mse > mse_threshold || ssim < ssim_threshold {
-        panic!(
-            "[{}] Quality thresholds not met\n  \
-             MSE={:.5} (threshold: {:.5})  {}\n  \
-             SSIM={:.6} (threshold: {:.6})  {}\n  \
-             PSNR={:.2} dB",
-            name,
-            mse, mse_threshold, if mse > mse_threshold { "FAIL" } else { "ok" },
-            ssim, ssim_threshold, if ssim < ssim_threshold { "FAIL" } else { "ok" },
-            psnr,
-        );
+        return Err(format!(
+            "quality thresholds not met: MSE={:.5} (max {:.5}), SSIM={:.6} (min {:.6}), PSNR={:.2} dB",
+            mse, mse_threshold, ssim, ssim_threshold, psnr
+        ));
     }
+
+    Ok((mse, ssim, psnr))
 }
 
-pub fn run_comparison(name: &str, image: &Image, comparison: &Comparison) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResult, Box<dyn std::error::Error>> {
     match comparison {
-        Comparison::None => {}
+        Comparison::None => Ok(TestResult::Ok { mse: None, ssim: None, psnr: None }),
         Comparison::Exact { reference_path } => {
             let reference = read_reference(&get_ref_path(reference_path))?;
             let actual = image_to_reference(image);
-            compare_exact(name, &actual, &reference);
+            match compare_exact(&actual, &reference) {
+                Ok(()) => Ok(TestResult::Ok { mse: None, ssim: None, psnr: None }),
+                Err(msg) => Ok(TestResult::Fail(msg)),
+            }
         }
         Comparison::Fuzzy { reference_path, mse_threshold, ssim_threshold } => {
             let reference = read_reference(&get_ref_path(reference_path))?;
             let actual = image_to_reference(image);
-            compare_fuzzy(name, &actual, &reference, *mse_threshold, *ssim_threshold);
+            match compare_fuzzy(&actual, &reference, *mse_threshold, *ssim_threshold) {
+                Ok((mse, ssim, psnr)) => Ok(TestResult::Ok { mse: Some(mse), ssim: Some(ssim), psnr: Some(psnr) }),
+                Err(msg) => Ok(TestResult::Fail(msg)),
+            }
         }
     }
-    Ok(())
 }
 
-pub fn test_decode(test_case: TestCase) -> Result<(), Box<dyn std::error::Error>> {
+pub fn test_decode(test_case: TestCase) -> Result<TestResult, Box<dyn std::error::Error>> {
     let mut decoder = Vexel::open(get_in_path(test_case.path))?;
 
     match decoder.decode() {
@@ -205,14 +209,8 @@ pub fn test_decode(test_case: TestCase) -> Result<(), Box<dyn std::error::Error>
             if let Some(validate) = test_case.validation {
                 validate(&image);
             }
-
-            run_comparison(test_case.name, &image, &test_case.comparison)?;
-
-            Ok(())
+            run_comparison(&image, &test_case.comparison)
         }
-        Err(e) => {
-            println!("Error decoding image: {:?}", e);
-            panic!("Failed to decode {}", test_case.name);
-        }
+        Err(e) => Ok(TestResult::Fail(format!("decode error: {:?}", e))),
     }
 }

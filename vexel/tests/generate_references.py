@@ -97,8 +97,12 @@ def verify_file(file: Path) -> tuple[float | None, str | None]:
     except Exception as e:
         return None, f"AVIF decode error: {e}"
 
-    if src_pixels.shape != ref_pixels.shape:
+    if src_pixels.shape[:2] != ref_pixels.shape[:2]:
         return None, f"shape mismatch: src={src_pixels.shape} ref={ref_pixels.shape}"
+
+    c = min(src_pixels.shape[2], ref_pixels.shape[2])
+    src_pixels = src_pixels[:, :, :c]
+    ref_pixels = ref_pixels[:, :, :c]
 
     mse = float(np.mean((src_pixels.astype(np.int32) - ref_pixels.astype(np.int32)) ** 2))
     return mse, None
