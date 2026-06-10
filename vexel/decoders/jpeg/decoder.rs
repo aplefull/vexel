@@ -11,29 +11,6 @@ use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
 use crate::decoders::jpeg::types::{ArithmeticCodingTable, ArithmeticCodingValue, ColorComponentInfo, DACData, DHTData, DQTData, HuffmanTable, JFIFData, JFIFHeader, JpegCodingMethod, JpegMode, JpegSegmentData, JpegSegmentInfo, Predictor, QuantizationTable, SOFData, SOSData, ScanComponent, ScanData, DEFAULT_QUANTIZATION_TABLE, ZIGZAG_MAP};
 
 #[derive(Debug, Clone)]
-struct UpsampledPlane {
-    data: Vec<i32>,
-    width: u32,
-    height: u32,
-}
-
-impl UpsampledPlane {
-    fn new(width: u32, height: u32) -> Self {
-        Self {
-            data: vec![0; (width * height) as usize],
-            width,
-            height,
-        }
-    }
-
-    fn set_pixel(&mut self, x: u32, y: u32, value: i32) {
-        if x < self.width && y < self.height {
-            self.data[(y * self.width + x) as usize] = value;
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 struct ComponentPlane {
     data: Vec<i32>,
     blocks_per_line: u32,
@@ -60,114 +37,13 @@ impl ComponentPlane {
         }
     }
 
-    fn upsample(&self, source_width: u32, source_height: u32, target_width: u32, target_height: u32, scratch: &mut Vec<i32>) -> UpsampledPlane {
+    fn deinterleave(&self, sw: u32, sh: u32) -> Vec<i32> {
         use crate::decoders::jpeg::upsample as up;
-
-        let sw = source_width as usize;
-        let sh = source_height as usize;
-        let tw = target_width as usize;
-        let th = target_height as usize;
-
-        scratch.clear();
-        if scratch.capacity() < sw * sh {
-            scratch.reserve(sw * sh - scratch.capacity());
-        }
-        scratch.resize(sw * sh, 0);
-        let source_pixels = scratch;
-        up::deinterleave_blocks(&self.data, self.blocks_per_line, source_width, source_height, source_pixels);
-
-        if source_width == target_width && source_height == target_height {
-            return UpsampledPlane { data: source_pixels.to_vec(), width: target_width, height: target_height };
-        }
-
-        let mut upsampled = UpsampledPlane::new(target_width, target_height);
-
-        let h_2x = tw == sw * 2 || tw == sw * 2 - 1;
-        let v_2x = th == sh * 2 || th == sh * 2 - 1;
-        let is_h2v1 = h_2x && th == sh;
-        let is_h1v2 = !h_2x && v_2x && tw == sw;
-        let is_h2v2 = h_2x && v_2x;
-
-        if is_h2v1 {
-            for sy in 0..sh {
-                let src_row = &source_pixels[sy * sw..(sy * sw + sw)];
-                let dst_row = &mut upsampled.data[sy * tw..sy * tw + tw];
-                up::upsample_h2v1_row(src_row, dst_row, sw, tw);
-            }
-        } else if is_h1v2 {
-            for sy in 0..sh {
-                let sy_above = sy.saturating_sub(1);
-                let sy_below = (sy + 1).min(sh - 1);
-
-                for v in 0..2usize {
-                    let dy = sy * 2 + v;
-                    if dy >= th {
-                        continue;
-                    }
-                    let (sy_near, bias) = if v == 0 { (sy_above, 1i32) } else { (sy_below, 2i32) };
-                    let src_row = &source_pixels[sy * sw..sy * sw + sw];
-                    let neighbor_row = &source_pixels[sy_near * sw..sy_near * sw + sw];
-                    let dst_row = &mut upsampled.data[dy * tw..dy * tw + sw.min(tw)];
-                    up::upsample_h1v2_row(src_row, neighbor_row, bias, dst_row, sw.min(dst_row.len()));
-                }
-            }
-        } else if is_h2v2 {
-            let mut col_sums = vec![0i32; sw];
-            let mut prev_col_sums = vec![0i32; sw];
-
-            for sy in 0..sh {
-                let sy_above = sy.saturating_sub(1);
-                let sy_below = (sy + 1).min(sh - 1);
-
-                for v in 0..2usize {
-                    let dy = sy * 2 + v;
-                    if dy >= th {
-                        continue;
-                    }
-                    let sy_near = if v == 0 { sy_above } else { sy_below };
-                    let src_row = &source_pixels[sy * sw..sy * sw + sw];
-                    let near_row = &source_pixels[sy_near * sw..sy_near * sw + sw];
-
-                    up::compute_col_sums(src_row, near_row, &mut col_sums, sw);
-
-                    let prev_near = if v == 0 { sy_above } else { sy };
-                    let prev_src_row = &source_pixels[sy * sw..sy * sw + sw];
-                    let prev_near_row = &source_pixels[prev_near * sw..prev_near * sw + sw];
-                    up::compute_col_sums(prev_src_row, prev_near_row, &mut prev_col_sums, sw);
-
-                    let dst_row = &mut upsampled.data[dy * tw..dy * tw + tw.min((sw * 2).min(tw))];
-                    up::upsample_h2v2_row(&col_sums, &prev_col_sums, dst_row, sw, dst_row.len());
-                }
-            }
-        } else {
-            let get_src = |sx: usize, sy: usize| -> i32 {
-                let idx = sy * sw + sx;
-                if idx < source_pixels.len() { source_pixels[idx] } else { 0 }
-            };
-
-            for y in 0..target_height {
-                for x in 0..target_width {
-                    let fx = (x as f32 + 0.5) * source_width as f32 / target_width as f32 - 0.5;
-                    let fy = (y as f32 + 0.5) * source_height as f32 / target_height as f32 - 0.5;
-
-                    let x0 = (fx.floor() as i64).clamp(0, source_width as i64 - 1) as usize;
-                    let y0 = (fy.floor() as i64).clamp(0, source_height as i64 - 1) as usize;
-                    let x1 = (x0 + 1).min(source_width as usize - 1);
-                    let y1 = (y0 + 1).min(source_height as usize - 1);
-
-                    let wx = fx - fx.floor();
-                    let wy = fy - fy.floor();
-
-                    let v = (1.0 - wy) * ((1.0 - wx) * get_src(x0, y0) as f32 + wx * get_src(x1, y0) as f32)
-                        + wy * ((1.0 - wx) * get_src(x0, y1) as f32 + wx * get_src(x1, y1) as f32);
-
-                    upsampled.set_pixel(x, y, v.round() as i32);
-                }
-            }
-        }
-
-        upsampled
+        let mut out = vec![0i32; (sw * sh) as usize];
+        up::deinterleave_blocks(&self.data, self.blocks_per_line, sw, sh, &mut out);
+        out
     }
+
 }
 
 #[rustfmt::skip]
@@ -1460,8 +1336,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
         self.dequantize_and_idct_planes(&mut component_planes)?;
 
-        let upsampled_planes = self.upsample_planes(&component_planes);
-        let mut pixel_data = self.convert_colorspace(&upsampled_planes)?;
+        let mut pixel_data = self.upsample_and_convert(&component_planes)?;
         pixel_data.correct_pixels(self.width, self.height);
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
@@ -2539,90 +2414,176 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
-    fn upsample_planes(&self, planes: &[ComponentPlane]) -> Vec<UpsampledPlane> {
-        let max_h_samp = self
+    fn upsample_and_convert(&self, planes: &[ComponentPlane]) -> VexelResult<PixelData> {
+        use crate::decoders::jpeg::upsample as up;
+
+        let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
+        let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
+
+        let tw = self.width as usize;
+        let th = self.height as usize;
+        let npixels = tw * th;
+
+        let source_dims: Vec<(usize, usize)> = self
             .components
             .iter()
-            .map(|c| c.horizontal_sampling_factor)
-            .max()
-            .unwrap_or(1);
-        let max_v_samp = self
-            .components
-            .iter()
-            .map(|c| c.vertical_sampling_factor)
-            .max()
-            .unwrap_or(1);
-
-        let target_width = self.width;
-        let target_height = self.height;
-
-        let pairs: Vec<(&ComponentPlane, (u32, u32))> = planes
-            .iter()
-            .zip(self.components.iter())
-            .map(|(plane, comp)| {
-                let source_width = (target_width * comp.horizontal_sampling_factor as u32
-                    + max_h_samp as u32 - 1) / max_h_samp as u32;
-                let source_height = (target_height * comp.vertical_sampling_factor as u32
-                    + max_v_samp as u32 - 1) / max_v_samp as u32;
-                (plane, (source_width, source_height))
+            .map(|comp| {
+                let sw = ((self.width * comp.horizontal_sampling_factor as u32 + max_h_samp as u32 - 1)
+                    / max_h_samp as u32) as usize;
+                let sh = ((self.height * comp.vertical_sampling_factor as u32 + max_v_samp as u32 - 1)
+                    / max_v_samp as u32) as usize;
+                (sw, sh)
             })
             .collect();
 
         #[cfg(feature = "rayon")]
-        {
+        let deinterleaved: Vec<Vec<i32>> = {
             use rayon::prelude::*;
-            pairs
-                .into_par_iter()
-                .map(|(plane, (sw, sh))| plane.upsample(sw, sh, target_width, target_height, &mut Vec::new()))
+            planes
+                .par_iter()
+                .zip(source_dims.par_iter())
+                .map(|(plane, &(sw, sh))| plane.deinterleave(sw as u32, sh as u32))
                 .collect()
-        }
+        };
 
         #[cfg(not(feature = "rayon"))]
-        {
-            let mut scratch = Vec::new();
-            pairs
-                .into_iter()
-                .map(|(plane, (sw, sh))| plane.upsample(sw, sh, target_width, target_height, &mut scratch))
-                .collect()
-        }
-    }
+        let deinterleaved: Vec<Vec<i32>> = planes
+            .iter()
+            .zip(source_dims.iter())
+            .map(|(plane, &(sw, sh))| plane.deinterleave(sw as u32, sh as u32))
+            .collect();
 
-    fn convert_colorspace(&self, planes: &[UpsampledPlane]) -> VexelResult<PixelData> {
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let npixels = width * height;
-
-        if planes.len() == 1 {
+        if deinterleaved.len() == 1 {
+            let src = &deinterleaved[0];
+            let (sw, sh) = source_dims[0];
             return if self.precision <= 8 {
-                let plane = &planes[0].data;
                 let mut pixels = Vec::with_capacity(npixels);
-                for i in 0..npixels.min(plane.len()) {
-                    pixels.push((plane[i] + 128).clamp(0, 255) as u8);
+                if sw == tw && sh == th {
+                    for i in 0..npixels.min(src.len()) {
+                        pixels.push((src[i] + 128).clamp(0, 255) as u8);
+                    }
+                } else {
+                    for i in 0..npixels.min(src.len()) {
+                        pixels.push((src[i] + 128).clamp(0, 255) as u8);
+                    }
                 }
-                if pixels.len() < npixels {
-                    pixels.resize(npixels, 0);
-                }
+                pixels.resize(npixels, 0);
                 Ok(PixelData::L8(pixels))
             } else {
-                let plane = &planes[0].data;
                 let mut pixels16 = Vec::with_capacity(npixels);
-                for i in 0..npixels.min(plane.len()) {
-                    pixels16.push((plane[i] + 2048).clamp(0, 4095) as u16);
+                for i in 0..npixels.min(src.len()) {
+                    pixels16.push((src[i] + 2048).clamp(0, 4095) as u16);
                 }
-                if pixels16.len() < npixels {
-                    pixels16.resize(npixels, 0);
-                }
+                pixels16.resize(npixels, 0);
                 Ok(PixelData::L16(pixels16))
             };
         }
 
-        if planes.len() < 3 {
-            log_warn!("Invalid number of planes for RGB conversion: {}.", planes.len());
+        if deinterleaved.len() < 3 {
+            log_warn!("Invalid number of planes for RGB conversion: {}.", deinterleaved.len());
         }
 
-        let plane0 = &planes[0].data;
-        let plane1 = planes.get(1).map(|p| p.data.as_slice()).unwrap_or(&[]);
-        let plane2 = planes.get(2).map(|p| p.data.as_slice()).unwrap_or(&[]);
+        let (y_sw, y_sh) = source_dims[0];
+        let (c_sw, c_sh) = if deinterleaved.len() >= 2 { source_dims[1] } else { (tw, th) };
+
+        let h_2x = tw == c_sw * 2 || tw == c_sw * 2 - 1;
+        let v_2x = th == c_sh * 2 || th == c_sh * 2 - 1;
+        let is_h2v1 = h_2x && th == c_sh;
+        let is_h1v2 = !h_2x && v_2x && tw == c_sw;
+        let is_h2v2 = h_2x && v_2x;
+        let is_identity = c_sw == tw && c_sh == th;
+
+        let y_plane = &deinterleaved[0];
+        let cb_plane = if deinterleaved.len() > 1 { deinterleaved[1].as_slice() } else { &[] };
+        let cr_plane = if deinterleaved.len() > 2 { deinterleaved[2].as_slice() } else { &[] };
+
+        let _upsample_y_row = |dy: usize, tmp: &mut Vec<i32>| {
+            if y_sw == tw && y_sh == th {
+                let base = dy * tw;
+                tmp.clear();
+                if tmp.capacity() < tw {
+                    tmp.reserve(tw);
+                }
+                tmp.extend_from_slice(&y_plane[base..base + tw.min(y_plane.len().saturating_sub(base))]);
+                tmp.resize(tw, 0);
+            } else {
+                tmp.resize(tw, 0);
+                let sy = (dy * y_sh / th).min(y_sh.saturating_sub(1));
+                let sy_above = sy.saturating_sub(1);
+                let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
+                let v = dy % 2;
+                let sy_near = if v == 0 { sy_above } else { sy_below };
+                let mut col_sums = vec![0i32; y_sw];
+                let mut prev_col_sums = vec![0i32; y_sw];
+                let src_row = &y_plane[sy * y_sw..(sy * y_sw + y_sw).min(y_plane.len())];
+                let near_row = &y_plane[sy_near * y_sw..(sy_near * y_sw + y_sw).min(y_plane.len())];
+                let prev_near = if v == 0 { sy_above } else { sy };
+                let prev_near_row = &y_plane[prev_near * y_sw..(prev_near * y_sw + y_sw).min(y_plane.len())];
+                up::compute_col_sums(src_row, near_row, &mut col_sums, y_sw.min(src_row.len()).min(near_row.len()));
+                up::compute_col_sums(src_row, prev_near_row, &mut prev_col_sums, y_sw.min(src_row.len()).min(prev_near_row.len()));
+                up::upsample_h2v2_row(&col_sums, &prev_col_sums, tmp, y_sw, tw);
+            }
+        };
+
+        macro_rules! upsample_chroma_row {
+            ($plane:expr, $dy:expr, $tmp:expr) => {{
+                $tmp.resize(tw, 0);
+                if is_identity {
+                    let base = $dy * tw;
+                    let avail = $plane.len().saturating_sub(base);
+                    let copy_len = tw.min(avail);
+                    $tmp[..copy_len].copy_from_slice(&$plane[base..base + copy_len]);
+                    $tmp[copy_len..].fill(0);
+                } else if is_h2v2 {
+                    let sy = ($dy / 2).min(c_sh.saturating_sub(1));
+                    let v = $dy % 2;
+                    let sy_above = sy.saturating_sub(1);
+                    let sy_below = (sy + 1).min(c_sh.saturating_sub(1));
+                    let sy_near = if v == 0 { sy_above } else { sy_below };
+                    let prev_near = if v == 0 { sy_above } else { sy };
+                    let src_row = &$plane[sy * c_sw..(sy * c_sw + c_sw).min($plane.len())];
+                    let near_row = &$plane[sy_near * c_sw..(sy_near * c_sw + c_sw).min($plane.len())];
+                    let prev_near_row = &$plane[prev_near * c_sw..(prev_near * c_sw + c_sw).min($plane.len())];
+                    let sw_eff = c_sw.min(src_row.len()).min(near_row.len());
+                    let mut col_sums = vec![0i32; c_sw];
+                    let mut prev_col_sums = vec![0i32; c_sw];
+                    up::compute_col_sums(src_row, near_row, &mut col_sums, sw_eff);
+                    up::compute_col_sums(src_row, prev_near_row, &mut prev_col_sums, sw_eff.min(prev_near_row.len()));
+                    up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut $tmp, c_sw, tw);
+                } else if is_h2v1 {
+                    let sy = $dy.min(c_sh.saturating_sub(1));
+                    let src_row = &$plane[sy * c_sw..(sy * c_sw + c_sw).min($plane.len())];
+                    up::upsample_h2v1_row(src_row, &mut $tmp, c_sw.min(src_row.len()), tw);
+                } else if is_h1v2 {
+                    let sy = ($dy / 2).min(c_sh.saturating_sub(1));
+                    let v = $dy % 2;
+                    let sy_near = if v == 0 { sy.saturating_sub(1) } else { (sy + 1).min(c_sh.saturating_sub(1)) };
+                    let bias = if v == 0 { 1i32 } else { 2i32 };
+                    let src_row = &$plane[sy * c_sw..(sy * c_sw + c_sw).min($plane.len())];
+                    let neighbor_row = &$plane[sy_near * c_sw..(sy_near * c_sw + c_sw).min($plane.len())];
+                    let sw_eff = c_sw.min(src_row.len()).min(neighbor_row.len()).min($tmp.len());
+                    up::upsample_h1v2_row(src_row, neighbor_row, bias, &mut $tmp[..sw_eff.min(tw)], sw_eff);
+                } else {
+                    for x in 0..tw {
+                        let fx = (x as f32 + 0.5) * c_sw as f32 / tw as f32 - 0.5;
+                        let fy = ($dy as f32 + 0.5) * c_sh as f32 / th as f32 - 0.5;
+                        let x0 = (fx.floor() as i64).clamp(0, c_sw as i64 - 1) as usize;
+                        let y0 = (fy.floor() as i64).clamp(0, c_sh as i64 - 1) as usize;
+                        let x1 = (x0 + 1).min(c_sw.saturating_sub(1));
+                        let y1 = (y0 + 1).min(c_sh.saturating_sub(1));
+                        let wx = fx - fx.floor();
+                        let wy = fy - fy.floor();
+                        let get = |px: usize, py: usize| -> i32 {
+                            let idx = py * c_sw + px;
+                            if idx < $plane.len() { $plane[idx] } else { 0 }
+                        };
+                        let v = (1.0 - wy) * ((1.0 - wx) * get(x0, y0) as f32 + wx * get(x1, y0) as f32)
+                            + wy * ((1.0 - wx) * get(x0, y1) as f32 + wx * get(x1, y1) as f32);
+                        $tmp[x] = v.round() as i32;
+                    }
+                }
+            }};
+        }
 
         if self.precision <= 8 {
             let mut pixels = vec![0u8; npixels * 3];
@@ -2630,13 +2591,40 @@ impl<R: Read + Seek> JpegDecoder<R> {
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
-                pixels.par_chunks_mut(width * 3).enumerate().for_each(|(row, dst)| {
-                    let row_start = row * width;
-                    for col in 0..width {
-                        let i = row_start + col;
-                        let y = plane0.get(i).copied().unwrap_or(0);
-                        let cb = plane1.get(i).copied().unwrap_or(0);
-                        let cr = plane2.get(i).copied().unwrap_or(0);
+                pixels.par_chunks_mut(tw * 3).enumerate().for_each(|(dy, dst)| {
+                    let mut y_row = vec![0i32; tw];
+                    let mut cb_row = vec![0i32; tw];
+                    let mut cr_row = vec![0i32; tw];
+
+                    if y_sw == tw && y_sh == th {
+                        let base = dy * tw;
+                        let copy_len = tw.min(y_plane.len().saturating_sub(base));
+                        y_row[..copy_len].copy_from_slice(&y_plane[base..base + copy_len]);
+                    } else {
+                        let sy = (dy * y_sh / th).min(y_sh.saturating_sub(1));
+                        let v = dy % 2;
+                        let sy_above = sy.saturating_sub(1);
+                        let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
+                        let sy_near = if v == 0 { sy_above } else { sy_below };
+                        let prev_near = if v == 0 { sy_above } else { sy };
+                        let src_row = &y_plane[sy * y_sw..(sy * y_sw + y_sw).min(y_plane.len())];
+                        let near_row = &y_plane[sy_near * y_sw..(sy_near * y_sw + y_sw).min(y_plane.len())];
+                        let prev_near_row = &y_plane[prev_near * y_sw..(prev_near * y_sw + y_sw).min(y_plane.len())];
+                        let sw_eff = y_sw.min(src_row.len()).min(near_row.len());
+                        let mut col_sums = vec![0i32; y_sw];
+                        let mut prev_col_sums = vec![0i32; y_sw];
+                        up::compute_col_sums(src_row, near_row, &mut col_sums, sw_eff);
+                        up::compute_col_sums(src_row, prev_near_row, &mut prev_col_sums, sw_eff.min(prev_near_row.len()));
+                        up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut y_row, y_sw, tw);
+                    }
+
+                    upsample_chroma_row!(cb_plane, dy, cb_row);
+                    upsample_chroma_row!(cr_plane, dy, cr_row);
+
+                    for col in 0..tw {
+                        let y = y_row.get(col).copied().unwrap_or(0);
+                        let cb = cb_row.get(col).copied().unwrap_or(0);
+                        let cr = cr_row.get(col).copied().unwrap_or(0);
                         let y128 = (y + 128) << 16;
                         dst[col * 3] = ((y128 + 91881 * cr + 32768) >> 16).clamp(0, 255) as u8;
                         dst[col * 3 + 1] = ((y128 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 255) as u8;
@@ -2647,15 +2635,23 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
             #[cfg(not(feature = "rayon"))]
             {
-                for i in 0..npixels {
-                    let y = plane0.get(i).copied().unwrap_or(0);
-                    let cb = plane1.get(i).copied().unwrap_or(0);
-                    let cr = plane2.get(i).copied().unwrap_or(0);
-                    let y128 = (y + 128) << 16;
-                    let base = i * 3;
-                    pixels[base] = ((y128 + 91881 * cr + 32768) >> 16).clamp(0, 255) as u8;
-                    pixels[base + 1] = ((y128 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 255) as u8;
-                    pixels[base + 2] = ((y128 + 116130 * cb + 32768) >> 16).clamp(0, 255) as u8;
+                let mut y_row = vec![0i32; tw];
+                let mut cb_row = vec![0i32; tw];
+                let mut cr_row = vec![0i32; tw];
+                for dy in 0..th {
+                    _upsample_y_row(dy, &mut y_row);
+                    upsample_chroma_row!(cb_plane, dy, cb_row);
+                    upsample_chroma_row!(cr_plane, dy, cr_row);
+                    let base = dy * tw * 3;
+                    for col in 0..tw {
+                        let y = y_row.get(col).copied().unwrap_or(0);
+                        let cb = cb_row.get(col).copied().unwrap_or(0);
+                        let cr = cr_row.get(col).copied().unwrap_or(0);
+                        let y128 = (y + 128) << 16;
+                        pixels[base + col * 3] = ((y128 + 91881 * cr + 32768) >> 16).clamp(0, 255) as u8;
+                        pixels[base + col * 3 + 1] = ((y128 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 255) as u8;
+                        pixels[base + col * 3 + 2] = ((y128 + 116130 * cb + 32768) >> 16).clamp(0, 255) as u8;
+                    }
                 }
             }
 
@@ -2666,13 +2662,40 @@ impl<R: Read + Seek> JpegDecoder<R> {
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
-                pixels16.par_chunks_mut(width * 3).enumerate().for_each(|(row, dst)| {
-                    let row_start = row * width;
-                    for col in 0..width {
-                        let i = row_start + col;
-                        let y = plane0.get(i).copied().unwrap_or(0);
-                        let cb = plane1.get(i).copied().unwrap_or(0);
-                        let cr = plane2.get(i).copied().unwrap_or(0);
+                pixels16.par_chunks_mut(tw * 3).enumerate().for_each(|(dy, dst)| {
+                    let mut y_row = vec![0i32; tw];
+                    let mut cb_row = vec![0i32; tw];
+                    let mut cr_row = vec![0i32; tw];
+
+                    if y_sw == tw && y_sh == th {
+                        let base = dy * tw;
+                        let copy_len = tw.min(y_plane.len().saturating_sub(base));
+                        y_row[..copy_len].copy_from_slice(&y_plane[base..base + copy_len]);
+                    } else {
+                        let sy = (dy * y_sh / th).min(y_sh.saturating_sub(1));
+                        let v = dy % 2;
+                        let sy_above = sy.saturating_sub(1);
+                        let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
+                        let sy_near = if v == 0 { sy_above } else { sy_below };
+                        let prev_near = if v == 0 { sy_above } else { sy };
+                        let src_row = &y_plane[sy * y_sw..(sy * y_sw + y_sw).min(y_plane.len())];
+                        let near_row = &y_plane[sy_near * y_sw..(sy_near * y_sw + y_sw).min(y_plane.len())];
+                        let prev_near_row = &y_plane[prev_near * y_sw..(prev_near * y_sw + y_sw).min(y_plane.len())];
+                        let sw_eff = y_sw.min(src_row.len()).min(near_row.len());
+                        let mut col_sums = vec![0i32; y_sw];
+                        let mut prev_col_sums = vec![0i32; y_sw];
+                        up::compute_col_sums(src_row, near_row, &mut col_sums, sw_eff);
+                        up::compute_col_sums(src_row, prev_near_row, &mut prev_col_sums, sw_eff.min(prev_near_row.len()));
+                        up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut y_row, y_sw, tw);
+                    }
+
+                    upsample_chroma_row!(cb_plane, dy, cb_row);
+                    upsample_chroma_row!(cr_plane, dy, cr_row);
+
+                    for col in 0..tw {
+                        let y = y_row.get(col).copied().unwrap_or(0);
+                        let cb = cb_row.get(col).copied().unwrap_or(0);
+                        let cr = cr_row.get(col).copied().unwrap_or(0);
                         let y2048 = (y + 2048) << 16;
                         dst[col * 3] = ((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16;
                         dst[col * 3 + 1] = ((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16;
@@ -2683,22 +2706,30 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
             #[cfg(not(feature = "rayon"))]
             {
-                for i in 0..npixels {
-                    let y = plane0.get(i).copied().unwrap_or(0);
-                    let cb = plane1.get(i).copied().unwrap_or(0);
-                    let cr = plane2.get(i).copied().unwrap_or(0);
-                    let y2048 = (y + 2048) << 16;
-                    let base = i * 3;
-                    pixels16[base] = ((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16;
-                    pixels16[base + 1] = ((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16;
-                    pixels16[base + 2] = ((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16;
+                let mut y_row = vec![0i32; tw];
+                let mut cb_row = vec![0i32; tw];
+                let mut cr_row = vec![0i32; tw];
+                for dy in 0..th {
+                    _upsample_y_row(dy, &mut y_row);
+                    upsample_chroma_row!(cb_plane, dy, cb_row);
+                    upsample_chroma_row!(cr_plane, dy, cr_row);
+                    let base = dy * tw * 3;
+                    for col in 0..tw {
+                        let y = y_row.get(col).copied().unwrap_or(0);
+                        let cb = cb_row.get(col).copied().unwrap_or(0);
+                        let cr = cr_row.get(col).copied().unwrap_or(0);
+                        let y2048 = (y + 2048) << 16;
+                        pixels16[base + col * 3] = ((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16;
+                        pixels16[base + col * 3 + 1] = ((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16;
+                        pixels16[base + col * 3 + 2] = ((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16;
+                    }
                 }
             }
 
             Ok(PixelData::RGB16(pixels16))
         }
     }
-    
+
     fn decode_baseline(&mut self) -> VexelResult<Image> {
         let max_h_samp = self
             .components
@@ -2734,8 +2765,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         self.dequantize_and_idct_planes(&mut component_planes)?;
 
-        let upsampled_planes = self.upsample_planes(&component_planes);
-        let mut pixel_data = self.convert_colorspace(&upsampled_planes)?;
+        let mut pixel_data = self.upsample_and_convert(&component_planes)?;
         pixel_data.correct_pixels(self.width, self.height);
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
