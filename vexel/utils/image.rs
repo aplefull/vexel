@@ -307,7 +307,10 @@ impl ImageFrame {
     }
 
     pub fn as_rgb8(&self) -> Vec<u8> {
-        self.pixels.clone().into_rgb8().as_bytes().to_vec()
+        match &self.pixels {
+            PixelData::RGB8(pixels) => pixels.to_vec(),
+            _ => self.pixels.clone().into_rgb8().as_bytes().to_vec(),
+        }
     }
 
     pub fn into_rgba8(self) -> ImageFrame {
@@ -320,7 +323,10 @@ impl ImageFrame {
     }
 
     pub fn as_rgba8(&self) -> Vec<u8> {
-        self.pixels.clone().into_rgba8().as_bytes().to_vec()
+        match &self.pixels {
+            PixelData::RGBA8(pixels) => pixels.to_vec(),
+            _ => self.pixels.clone().into_rgba8().as_bytes().to_vec(),
+        }
     }
 }
 

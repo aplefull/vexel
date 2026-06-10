@@ -60,7 +60,7 @@ impl ComponentPlane {
         }
     }
 
-    fn upsample(&self, source_width: u32, source_height: u32, target_width: u32, target_height: u32) -> UpsampledPlane {
+    fn upsample(&self, source_width: u32, source_height: u32, target_width: u32, target_height: u32, scratch: &mut Vec<i32>) -> UpsampledPlane {
         use crate::decoders::jpeg::upsample as up;
 
         let sw = source_width as usize;
@@ -68,11 +68,16 @@ impl ComponentPlane {
         let tw = target_width as usize;
         let th = target_height as usize;
 
-        let mut source_pixels = vec![0i32; sw * sh];
-        up::deinterleave_blocks(&self.data, self.blocks_per_line, source_width, source_height, &mut source_pixels);
+        scratch.clear();
+        if scratch.capacity() < sw * sh {
+            scratch.reserve(sw * sh - scratch.capacity());
+        }
+        scratch.resize(sw * sh, 0);
+        let source_pixels = scratch;
+        up::deinterleave_blocks(&self.data, self.blocks_per_line, source_width, source_height, source_pixels);
 
         if source_width == target_width && source_height == target_height {
-            return UpsampledPlane { data: source_pixels, width: target_width, height: target_height };
+            return UpsampledPlane { data: source_pixels.to_vec(), width: target_width, height: target_height };
         }
 
         let mut upsampled = UpsampledPlane::new(target_width, target_height);
@@ -1200,7 +1205,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             0
         });
 
-        let mut scan_data = Vec::new();
+        let mut scan_data = Vec::with_capacity((self.width as usize * self.height as usize) / 4);
         let is_arithmetic = self.coding_method == JpegCodingMethod::Arithmetic;
 
         loop {
@@ -1307,21 +1312,23 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     #[inline(always)]
-    fn get_next_symbol(&self, reader: &mut BitReader<Cursor<Vec<u8>>>, table: &HuffmanTable) -> VexelResult<u8> {
+    fn get_next_symbol<S: Read + Seek>(&self, reader: &mut BitReader<S>, table: &HuffmanTable) -> VexelResult<u8> {
+        if table.first_code.len() < 16 || table.offsets.len() < 17 {
+            log_warn!("Huffman table is malformed, first_code.len()={}, offsets.len()={}", table.first_code.len(), table.offsets.len());
+            return Ok(0);
+        }
+
         let mut code = 0u32;
 
         for i in 0..16 {
             code = (code << 1) | reader.read_bits_unchecked(1);
 
-            let first = table.first_code.get(i).copied().unwrap_or(u32::MAX);
+            let first = table.first_code[i];
             if first != u32::MAX {
-                let count = table.offsets.get(i + 1).copied().unwrap_or(0)
-                    .saturating_sub(table.offsets.get(i).copied().unwrap_or(0)) as usize;
+                let count = (table.offsets[i + 1] - table.offsets[i]) as usize;
                 if code >= first && (code - first) < count as u32 {
-                    let idx = table.offsets.get(i).copied().unwrap_or(0) as usize + (code - first) as usize;
-                    if let Some(&sym) = table.symbols.get(idx) {
-                        return Ok(sym);
-                    }
+                    let idx = table.offsets[i] as usize + (code - first) as usize;
+                    return Ok(table.symbols[idx]);
                 }
             }
         }
@@ -1331,9 +1338,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(0)
     }
 
-    fn decode_mcu(
-        &mut self,
-        reader: &mut BitReader<Cursor<Vec<u8>>>,
+    fn decode_mcu<S: Read + Seek>(
+        &self,
+        reader: &mut BitReader<S>,
         mcu_component: &mut [i32],
         dc_table: &HuffmanTable,
         ac_table: &HuffmanTable,
@@ -1464,7 +1471,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut previous_dc = vec![0i32; planes.len()];
 
         for scan in &self.scans {
-            let mut reader = BitReader::new(Cursor::new(scan.data.clone()));
+            let mut reader = BitReader::new(Cursor::new(scan.data.as_slice()));
             let mut skips = 0;
             let restart_interval = self.restart_interval;
 
@@ -1810,7 +1817,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn decode_differences(&mut self, scan: &ScanData) -> VexelResult<Vec<Vec<i32>>> {
-        let mut reader = BitReader::new(Cursor::new(scan.data.clone()));
+        let mut reader = BitReader::new(Cursor::new(scan.data.as_slice()));
 
         let mut differences: Vec<Vec<i32>> = vec![vec![]; scan.components.len()];
 
@@ -2087,8 +2094,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         let scan = &self.scans[0];
-        let data = scan.data.clone();
-        let components = scan.components.clone();
+        let components = &scan.components;
         let dc_table_selectors: Vec<u8> = components.iter().map(|c| c.dc_table_selector).collect();
         let ac_table_selectors: Vec<u8> = components.iter().map(|c| c.ac_table_selector).collect();
 
@@ -2105,7 +2111,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 .and_then(|t| t.values.first()).map(|v| v.value).unwrap_or(5)
         };
 
-        let mut arith = ArithmeticDecoder::new(&data);
+        let mut arith = ArithmeticDecoder::new(&scan.data);
 
         let num_components = planes.len();
         let mut dc_context = vec![0usize; num_components];
@@ -2185,7 +2191,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut per_scan_dc_context = vec![0usize; planes.len()];
         let mut per_scan_last_dc_val = vec![0i32; planes.len()];
 
-        for scan in &self.scans.clone() {
+        for scan in &self.scans {
             let is_dc_scan = scan.start_spectral == 0;
             let is_first_scan = scan.successive_high == 0;
             let is_first_dc_scan = is_dc_scan && is_first_scan;
@@ -2359,8 +2365,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let scan = &self.scans[0];
         let is_non_interleaved = scan.components.len() == 1;
-        // TODO uhh, how can we not clone this?
-        let mut reader = BitReader::new(Cursor::new(scan.data.clone()));
+        let mut reader = BitReader::new(Cursor::new(scan.data.as_slice()));
         let mut previous_dc = vec![0i32; planes.len()];
 
         let mut max_h_samp = if is_non_interleaved {
@@ -2705,15 +2710,16 @@ impl<R: Read + Seek> JpegDecoder<R> {
             use rayon::prelude::*;
             pairs
                 .into_par_iter()
-                .map(|(plane, (sw, sh))| plane.upsample(sw, sh, target_width, target_height))
+                .map(|(plane, (sw, sh))| plane.upsample(sw, sh, target_width, target_height, &mut Vec::new()))
                 .collect()
         }
 
         #[cfg(not(feature = "rayon"))]
         {
+            let mut scratch = Vec::new();
             pairs
                 .into_iter()
-                .map(|(plane, (sw, sh))| plane.upsample(sw, sh, target_width, target_height))
+                .map(|(plane, (sw, sh))| plane.upsample(sw, sh, target_width, target_height, &mut scratch))
                 .collect()
         }
     }
