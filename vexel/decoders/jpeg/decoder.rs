@@ -69,94 +69,54 @@ impl ComponentPlane {
     }
 
     fn upsample(&self, source_width: u32, source_height: u32, target_width: u32, target_height: u32) -> UpsampledPlane {
-        let mut upsampled = UpsampledPlane::new(target_width, target_height);
+        use crate::decoders::jpeg::upsample as up;
 
-        let mut source_pixels = vec![0i32; (source_width * source_height) as usize];
-
-        for by in 0..((source_height + 7) / 8) {
-            for bx in 0..((source_width + 7) / 8) {
-                let block_idx = (by * self.blocks_per_line + bx) as usize * 64;
-
-                for py in 0..8u32 {
-                    let y = by * 8 + py;
-                    if y >= source_height {
-                        continue;
-                    }
-
-                    for px in 0..8u32 {
-                        let x = bx * 8 + px;
-                        if x >= source_width {
-                            continue;
-                        }
-
-                        let pixel_idx = (y * source_width + x) as usize;
-                        let block_pixel_idx = block_idx + (py * 8 + px) as usize;
-
-                        if block_pixel_idx < self.data.len() {
-                            source_pixels[pixel_idx] = self.data[block_pixel_idx];
-                        }
-                    }
-                }
-            }
-        }
-
-        let get_src = |sx: usize, sy: usize| -> i32 {
-            let idx = sy * source_width as usize + sx;
-            if idx < source_pixels.len() { source_pixels[idx] } else { 0 }
-        };
-
-        let h_2x = target_width == source_width * 2 || target_width == source_width * 2 - 1;
-        let v_2x = target_height == source_height * 2 || target_height == source_height * 2 - 1;
-        let is_h2v1 = h_2x && target_height == source_height;
-        let is_h1v2 = !h_2x && v_2x && target_width == source_width;
-        let is_h2v2 = h_2x && v_2x;
-
+        let sw = source_width as usize;
+        let sh = source_height as usize;
         let tw = target_width as usize;
         let th = target_height as usize;
 
-        let set = |data: &mut Vec<i32>, x: usize, y: usize, v: i32| {
-            debug_assert!(x < tw && y < th);
-            data[y * tw + x] = v;
-        };
+        let mut source_pixels = vec![0i32; sw * sh];
+        up::deinterleave_blocks(&self.data, self.blocks_per_line, source_width, source_height, &mut source_pixels);
+
+        if source_width == target_width && source_height == target_height {
+            return UpsampledPlane { data: source_pixels, width: target_width, height: target_height };
+        }
+
+        let mut upsampled = UpsampledPlane::new(target_width, target_height);
+
+        let h_2x = tw == sw * 2 || tw == sw * 2 - 1;
+        let v_2x = th == sh * 2 || th == sh * 2 - 1;
+        let is_h2v1 = h_2x && th == sh;
+        let is_h1v2 = !h_2x && v_2x && tw == sw;
+        let is_h2v2 = h_2x && v_2x;
 
         if is_h2v1 {
-            let sw = source_width as usize;
-            let sh = source_height as usize;
-
             for sy in 0..sh {
-                let dy = sy;
-
-                if sw == 1 {
-                    let v = get_src(0, sy);
-                    set(&mut upsampled.data, 0, dy, v);
-                    if 1 < tw {
-                        set(&mut upsampled.data, 1, dy, v);
-                    }
-                    continue;
-                }
-
-                let invalue = get_src(0, sy);
-                set(&mut upsampled.data, 0, dy, invalue);
-                if 1 < tw {
-                    set(&mut upsampled.data, 1, dy, (invalue * 3 + get_src(1, sy) + 2) >> 2);
-                }
-
-                for sx in 1..sw - 1 {
-                    let invalue = get_src(sx, sy) * 3;
-                    let dx = sx * 2;
-                    if dx < tw { set(&mut upsampled.data, dx, dy, (invalue + get_src(sx - 1, sy) + 1) >> 2); }
-                    if dx + 1 < tw { set(&mut upsampled.data, dx + 1, dy, (invalue + get_src(sx + 1, sy) + 2) >> 2); }
-                }
-
-                let last_sx = sw - 1;
-                let dx = last_sx * 2;
-                let invalue = get_src(last_sx, sy);
-                if dx < tw { set(&mut upsampled.data, dx, dy, (invalue * 3 + get_src(last_sx - 1, sy) + 1) >> 2); }
-                if dx + 1 < tw { set(&mut upsampled.data, dx + 1, dy, invalue); }
+                let src_row = &source_pixels[sy * sw..(sy * sw + sw)];
+                let dst_row = &mut upsampled.data[sy * tw..sy * tw + tw];
+                up::upsample_h2v1_row(src_row, dst_row, sw, tw);
             }
         } else if is_h1v2 {
-            let sw = source_width as usize;
-            let sh = source_height as usize;
+            for sy in 0..sh {
+                let sy_above = sy.saturating_sub(1);
+                let sy_below = (sy + 1).min(sh - 1);
+
+                for v in 0..2usize {
+                    let dy = sy * 2 + v;
+                    if dy >= th {
+                        continue;
+                    }
+                    let (sy_near, bias) = if v == 0 { (sy_above, 1i32) } else { (sy_below, 2i32) };
+                    let src_row = &source_pixels[sy * sw..sy * sw + sw];
+                    let neighbor_row = &source_pixels[sy_near * sw..sy_near * sw + sw];
+                    let dst_row = &mut upsampled.data[dy * tw..dy * tw + sw.min(tw)];
+                    up::upsample_h1v2_row(src_row, neighbor_row, bias, dst_row, sw.min(dst_row.len()));
+                }
+            }
+        } else if is_h2v2 {
+            let mut col_sums = vec![0i32; sw];
+            let mut prev_col_sums = vec![0i32; sw];
 
             for sy in 0..sh {
                 let sy_above = sy.saturating_sub(1);
@@ -167,63 +127,27 @@ impl ComponentPlane {
                     if dy >= th {
                         continue;
                     }
-                    let (sy_near, bias) = if v == 0 { (sy_above, 1) } else { (sy_below, 2) };
-
-                    for sx in 0..sw {
-                        let val = (get_src(sx, sy) * 3 + get_src(sx, sy_near) + bias) >> 2;
-                        set(&mut upsampled.data, sx, dy, val);
-                    }
-                }
-            }
-        } else if is_h2v2 {
-            let sw = source_width as usize;
-            let sh = source_height as usize;
-
-            for sy in 0..sh {
-                let sy_above = sy.saturating_sub(1);
-                let sy_below = (sy + 1).min(sh - 1);
-                let dy0 = sy * 2;
-
-                for v in 0..2usize {
-                    let dy = dy0 + v;
-                    if dy >= th {
-                        continue;
-                    }
                     let sy_near = if v == 0 { sy_above } else { sy_below };
+                    let src_row = &source_pixels[sy * sw..sy * sw + sw];
+                    let near_row = &source_pixels[sy_near * sw..sy_near * sw + sw];
 
-                    let col_sum = |sx: usize| -> i32 {
-                        get_src(sx, sy) * 3 + get_src(sx, sy_near)
-                    };
+                    up::compute_col_sums(src_row, near_row, &mut col_sums, sw);
 
-                    let mut last = col_sum(0);
-                    let mut this = col_sum(1.min(sw - 1));
+                    let prev_near = if v == 0 { sy_above } else { sy };
+                    let prev_src_row = &source_pixels[sy * sw..sy * sw + sw];
+                    let prev_near_row = &source_pixels[prev_near * sw..prev_near * sw + sw];
+                    up::compute_col_sums(prev_src_row, prev_near_row, &mut prev_col_sums, sw);
 
-                    set(&mut upsampled.data, 0, dy, (last * 4 + 8) >> 4);
-                    if 1 < tw {
-                        set(&mut upsampled.data, 1, dy, (last * 3 + this + 7) >> 4);
-                    }
-
-                    for sx in 1..sw.saturating_sub(1) {
-                        let next = col_sum(sx + 1);
-                        let left_out = (this * 3 + last + 8) >> 4;
-                        let right_out = (this * 3 + next + 7) >> 4;
-                        let dx = sx * 2;
-                        if dx < tw { set(&mut upsampled.data, dx, dy, left_out); }
-                        if dx + 1 < tw { set(&mut upsampled.data, dx + 1, dy, right_out); }
-                        last = this;
-                        this = next;
-                    }
-
-                    if sw > 1 {
-                        let dx = (sw - 1) * 2;
-                        let left_out = (this * 3 + last + 8) >> 4;
-                        let right_out = (this * 4 + 7) >> 4;
-                        if dx < tw { set(&mut upsampled.data, dx, dy, left_out); }
-                        if dx + 1 < tw { set(&mut upsampled.data, dx + 1, dy, right_out); }
-                    }
+                    let dst_row = &mut upsampled.data[dy * tw..dy * tw + tw.min((sw * 2).min(tw))];
+                    up::upsample_h2v2_row(&col_sums, &prev_col_sums, dst_row, sw, dst_row.len());
                 }
             }
         } else {
+            let get_src = |sx: usize, sy: usize| -> i32 {
+                let idx = sy * sw + sx;
+                if idx < source_pixels.len() { source_pixels[idx] } else { 0 }
+            };
+
             for y in 0..target_height {
                 for x in 0..target_width {
                     let fx = (x as f32 + 0.5) * source_width as f32 / target_width as f32 - 0.5;
