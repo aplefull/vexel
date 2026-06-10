@@ -53,6 +53,7 @@ impl<R: Read + Seek> BitReader<R> {
     /// # Returns
     /// - `true` if the bit is 1, `false` if the bit is 0
     /// - `std::io::Error` if an I/O error occurs
+    #[inline(always)]
     pub fn read_bit(&mut self) -> Result<bool, std::io::Error> {
         if self.bits_in_buffer == 0 {
             let mut byte = [0u8; 1];
@@ -77,6 +78,7 @@ impl<R: Read + Seek> BitReader<R> {
     /// # Returns
     /// - The value of the bits read
     /// - `std::io::Error` if an I/O error occurs
+    #[inline(always)]
     pub fn read_bits(&mut self, n: u8) -> Result<u32, std::io::Error> {
         let mut result = 0;
         if self.little_endian {
@@ -89,6 +91,36 @@ impl<R: Read + Seek> BitReader<R> {
             }
         }
         Ok(result)
+    }
+
+    /// Reads `n` bits from the bitstream without returning an error.
+    /// Big-endian only. Returns 0 on EOF or I/O error.
+    ///
+    /// # Parameters
+    /// - `n`: The number of bits to read
+    ///
+    /// # Returns
+    /// - The value of the bits read, or 0 on error
+    #[inline(always)]
+    pub fn read_bits_unchecked(&mut self, n: u8) -> u32 {
+        while self.bits_in_buffer < n {
+            let mut byte = [0u8; 1];
+            match self.reader.read_exact(&mut byte) {
+                Ok(_) => {
+                    self.buffer = (self.buffer << 8) | byte[0] as u32;
+                    self.bits_in_buffer += 8;
+                }
+                Err(_) => {
+                    self.bits_in_buffer = n;
+                    break;
+                }
+            }
+        }
+        if n == 0 {
+            return 0;
+        }
+        self.bits_in_buffer -= n;
+        (self.buffer >> self.bits_in_buffer) & ((1u32 << n) - 1)
     }
 
     /// Reads a single byte from the bitstream.
@@ -170,6 +202,7 @@ impl<R: Read + Seek> BitReader<R> {
     }
 
     /// Clears the current bit buffer.
+    #[inline(always)]
     pub fn clear_buffer(&mut self) {
         self.bits_in_buffer = 0;
         self.buffer = 0;

@@ -26,14 +26,6 @@ impl UpsampledPlane {
         }
     }
 
-    fn get_pixel(&self, x: u32, y: u32) -> Option<i32> {
-        if x < self.width && y < self.height {
-            Some(self.data[(y * self.width + x) as usize])
-        } else {
-            None
-        }
-    }
-
     fn set_pixel(&mut self, x: u32, y: u32, value: i32) {
         if x < self.width && y < self.height {
             self.data[(y * self.width + x) as usize] = value;
@@ -1319,12 +1311,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut code = 0u32;
 
         for i in 0..16 {
-            let bit = reader.read_bit().unwrap_or_else(|_| {
-                log_warn!("Failed to read bit from bit reader, replacing with 0");
-                false
-            }) as u32;
-
-            code = (code << 1) | bit;
+            code = (code << 1) | reader.read_bits_unchecked(1);
 
             let first = table.first_code.get(i).copied().unwrap_or(u32::MAX);
             if first != u32::MAX {
@@ -1464,8 +1451,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             JpegCodingMethod::Huffman => self.decode_progressive_scans(&mut component_planes)?,
             JpegCodingMethod::Arithmetic => self.decode_progressive_scans_arithmetic(&mut component_planes)?,
         }
-        self.dequantize_planes(&mut component_planes)?;
-        self.inverse_dct_planes(&mut component_planes)?;
+        self.dequantize_and_idct_planes(&mut component_planes)?;
 
         let upsampled_planes = self.upsample_planes(&component_planes);
         let mut pixel_data = self.convert_colorspace(&upsampled_planes)?;
@@ -1595,13 +1581,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                 continue;
                                             }
 
-                                            let bits = match reader.read_bits(length) {
-                                                Ok(bits) => bits,
-                                                Err(e) => {
-                                                    log_warn!("Failed to read DC coefficient bits: {}", e);
-                                                    continue;
-                                                }
-                                            };
+                                            let bits = reader.read_bits_unchecked(length);
 
                                             let mut value = bits as i32;
 
@@ -1614,13 +1594,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                             component_data[0] = value << scan.successive_low;
                                         } else {
                                             // Refining DC scan
-                                            let bit = match reader.read_bits(1) {
-                                                Ok(bit) => bit,
-                                                Err(e) => {
-                                                    log_warn!("Failed to read DC coefficient bit: {}", e);
-                                                    continue;
-                                                }
-                                            };
+                                            let bit = reader.read_bits_unchecked(1);
 
                                             component_data[0] |= (bit as i32) << scan.successive_low;
                                         }
@@ -1679,14 +1653,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                         break;
                                                     }
 
-                                                    let bits = match reader.read_bits(length) {
-                                                        Ok(bits) => bits,
-                                                        Err(e) => {
-                                                            log_warn!("Failed to read AC coefficient bits: {}", e);
-                                                            break;
-                                                        }
-                                                    };
-
+                                                    let bits = reader.read_bits_unchecked(length);
                                                     let mut value = bits as i32;
 
                                                     if value < (1 << (length - 1)) {
@@ -1717,13 +1684,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                         }
                                                     } else {
                                                         skips = (1 << num_zeros) - 1;
-                                                        let extra_skips =
-                                                            reader.read_bits(num_zeros).unwrap_or_else(|e| {
-                                                                log_warn!("Failed to read extra skips: {}", e);
-                                                                0
-                                                            });
-
-                                                        skips += extra_skips;
+                                                        skips += reader.read_bits_unchecked(num_zeros);
                                                         break;
                                                     }
 
@@ -1767,33 +1728,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                             break;
                                                         }
 
-                                                        coefficient = match reader.read_bits(1) {
-                                                            Ok(bit) => match bit {
-                                                                0 => negative,
-                                                                1 => positive,
-                                                                _ => unreachable!(),
-                                                            },
-                                                            Err(e) => {
-                                                                log_warn!(
-                                                                    "Failed to read AC coefficient bit (refining): {}",
-                                                                    e
-                                                                );
-                                                                break;
-                                                            }
-                                                        };
+                                                        coefficient = if reader.read_bits_unchecked(1) != 0 { positive } else { negative };
                                                     } else {
                                                         if num_zeros != 15 {
                                                             skips = 1 << num_zeros;
-                                                            let extra_skips =
-                                                                reader.read_bits(num_zeros).unwrap_or_else(|e| {
-                                                                    log_warn!(
-                                                                        "Failed to read extra skips (refining): {}",
-                                                                        e
-                                                                    );
-                                                                    0
-                                                                });
-
-                                                            skips += extra_skips;
+                                                            skips += reader.read_bits_unchecked(num_zeros);
                                                             break;
                                                         }
                                                     }
@@ -1808,30 +1747,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                                                     loop {
                                                         if component_data[ZIGZAG_MAP[k] as usize] != 0 {
-                                                            match reader.read_bits(1) {
-                                                                Ok(bit) => {
-                                                                    if bit == 1 {
-                                                                        if component_data[ZIGZAG_MAP[k] as usize]
-                                                                            & positive
-                                                                            == 0
-                                                                        {
-                                                                            if component_data[ZIGZAG_MAP[k] as usize]
-                                                                                >= 0
-                                                                            {
-                                                                                component_data
-                                                                                    [ZIGZAG_MAP[k] as usize] +=
-                                                                                    positive;
-                                                                            } else {
-                                                                                component_data
-                                                                                    [ZIGZAG_MAP[k] as usize] +=
-                                                                                    negative;
-                                                                            }
-                                                                        }
+                                                            if reader.read_bits_unchecked(1) == 1 {
+                                                                if component_data[ZIGZAG_MAP[k] as usize] & positive == 0 {
+                                                                    if component_data[ZIGZAG_MAP[k] as usize] >= 0 {
+                                                                        component_data[ZIGZAG_MAP[k] as usize] += positive;
+                                                                    } else {
+                                                                        component_data[ZIGZAG_MAP[k] as usize] += negative;
                                                                     }
-                                                                }
-                                                                Err(e) => {
-                                                                    log_warn!("Failed to read AC coefficient bit (refining): {}", e);
-                                                                    break;
                                                                 }
                                                             }
                                                         } else {
@@ -1859,25 +1781,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                             if skips > 0 {
                                                 while k <= scan.end_spectral as usize {
                                                     if component_data[ZIGZAG_MAP[k] as usize] != 0 {
-                                                        match reader.read_bits(1) {
-                                                            Ok(b) => {
-                                                                if b == 1 {
-                                                                    if component_data[ZIGZAG_MAP[k] as usize] & positive
-                                                                        == 0
-                                                                    {
-                                                                        if component_data[ZIGZAG_MAP[k] as usize] >= 0 {
-                                                                            component_data[ZIGZAG_MAP[k] as usize] +=
-                                                                                positive;
-                                                                        } else {
-                                                                            component_data[ZIGZAG_MAP[k] as usize] +=
-                                                                                negative;
-                                                                        }
-                                                                    }
+                                                        if reader.read_bits_unchecked(1) == 1 {
+                                                            if component_data[ZIGZAG_MAP[k] as usize] & positive == 0 {
+                                                                if component_data[ZIGZAG_MAP[k] as usize] >= 0 {
+                                                                    component_data[ZIGZAG_MAP[k] as usize] += positive;
+                                                                } else {
+                                                                    component_data[ZIGZAG_MAP[k] as usize] += negative;
                                                                 }
-                                                            }
-                                                            Err(e) => {
-                                                                log_warn!("Failed to read AC coefficient bit: {}", e);
-                                                                break;
                                                             }
                                                         }
                                                     }
@@ -2582,57 +2492,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
-    fn dequantize_planes(&self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
-        for (comp_idx, plane) in planes.iter_mut().enumerate() {
-            let default_table = QuantizationTable {
-                id: 0,
-                precision: 8,
-                length: 64,
-                table: DEFAULT_QUANTIZATION_TABLE.to_vec(),
-            };
-
-            let quant_table = self
-                .components
-                .get(comp_idx)
-                .and_then(|comp| {
-                    self.quantization_tables
-                        .iter()
-                        .find(|q| q.id == comp.quantization_table_id)
-                })
-                .cloned()
-                .unwrap_or_else(|| {
-                    log_warn!("Quantization table not found for component, substituting default one.");
-                    default_table
-                });
-
-            let quant_data = quant_table.table;
-
-            #[cfg(feature = "rayon")]
-            {
-                use rayon::prelude::*;
-                plane.data.par_chunks_mut(64).for_each(|block| {
-                    let len = block.len().min(quant_data.len());
-                    for i in 0..len {
-                        block[i] *= quant_data[i] as i32;
-                    }
-                });
-            }
-
-            #[cfg(not(feature = "rayon"))]
-            {
-                for block in plane.data.chunks_mut(64) {
-                    let len = block.len().min(quant_data.len());
-                    for i in 0..len {
-                        block[i] *= quant_data[i] as i32;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn inverse_dct_planes(&self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
+    fn dequantize_and_idct_planes(&self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
         let m_0 = 2.0 * (1.0 / 16.0 * 2.0 * PI).cos();
         let m_1 = 2.0 * (2.0 / 16.0 * 2.0 * PI).cos();
         let m_3 = 2.0 * (2.0 / 16.0 * 2.0 * PI).cos();
@@ -2654,6 +2514,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         #[allow(clippy::too_many_arguments)]
         fn idct_block(
             block: &mut [i32],
+            quant: &[u16],
             m_1: f32, m_2: f32, m_3: f32, m_4: f32, m_5: f32,
             s_0: f32, s_1: f32, s_2: f32, s_3: f32, s_4: f32, s_5: f32, s_6: f32, s_7: f32,
             level_shift: i32,
@@ -2661,14 +2522,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let mut temp = [0.0f32; 64];
 
             for col in 0..8 {
-                let g_0 = block[0 * 8 + col] as f32 * s_0;
-                let g_1 = block[4 * 8 + col] as f32 * s_4;
-                let g_2 = block[2 * 8 + col] as f32 * s_2;
-                let g_3 = block[6 * 8 + col] as f32 * s_6;
-                let g_4 = block[5 * 8 + col] as f32 * s_5;
-                let g_5 = block[1 * 8 + col] as f32 * s_1;
-                let g_6 = block[7 * 8 + col] as f32 * s_7;
-                let g_7 = block[3 * 8 + col] as f32 * s_3;
+                let g_0 = block[0 * 8 + col] as f32 * quant[0 * 8 + col] as f32 * s_0;
+                let g_1 = block[4 * 8 + col] as f32 * quant[4 * 8 + col] as f32 * s_4;
+                let g_2 = block[2 * 8 + col] as f32 * quant[2 * 8 + col] as f32 * s_2;
+                let g_3 = block[6 * 8 + col] as f32 * quant[6 * 8 + col] as f32 * s_6;
+                let g_4 = block[5 * 8 + col] as f32 * quant[5 * 8 + col] as f32 * s_5;
+                let g_5 = block[1 * 8 + col] as f32 * quant[1 * 8 + col] as f32 * s_1;
+                let g_6 = block[7 * 8 + col] as f32 * quant[7 * 8 + col] as f32 * s_7;
+                let g_7 = block[3 * 8 + col] as f32 * quant[3 * 8 + col] as f32 * s_3;
 
                 let f_4 = g_4 - g_7;
                 let f_5 = g_5 + g_6;
@@ -2765,13 +2626,34 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        for plane in planes {
+        let default_table = QuantizationTable {
+            id: 0,
+            precision: 8,
+            length: 64,
+            table: DEFAULT_QUANTIZATION_TABLE.to_vec(),
+        };
+
+        for (comp_idx, plane) in planes.iter_mut().enumerate() {
+            let quant_data: Vec<u16> = self
+                .components
+                .get(comp_idx)
+                .and_then(|comp| {
+                    self.quantization_tables
+                        .iter()
+                        .find(|q| q.id == comp.quantization_table_id)
+                })
+                .map(|t| t.table.clone())
+                .unwrap_or_else(|| {
+                    log_warn!("Quantization table not found for component, substituting default one.");
+                    default_table.table.clone()
+                });
+
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
                 plane.data.par_chunks_mut(64).for_each(|block| {
                     if block.len() == 64 {
-                        idct_block(block, m_1, m_2, m_3, m_4, m_5, s_0, s_1, s_2, s_3, s_4, s_5, s_6, s_7, level_shift);
+                        idct_block(block, &quant_data, m_1, m_2, m_3, m_4, m_5, s_0, s_1, s_2, s_3, s_4, s_5, s_6, s_7, level_shift);
                     }
                 });
             }
@@ -2780,7 +2662,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             {
                 for block in plane.data.chunks_mut(64) {
                     if block.len() == 64 {
-                        idct_block(block, m_1, m_2, m_3, m_4, m_5, s_0, s_1, s_2, s_3, s_4, s_5, s_6, s_7, level_shift);
+                        idct_block(block, &quant_data, m_1, m_2, m_3, m_4, m_5, s_0, s_1, s_2, s_3, s_4, s_5, s_6, s_7, level_shift);
                     }
                 }
             }
@@ -2981,8 +2863,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             JpegCodingMethod::Arithmetic => self.decode_arithmetic_to_planes(&mut component_planes)?,
         }
 
-        self.dequantize_planes(&mut component_planes)?;
-        self.inverse_dct_planes(&mut component_planes)?;
+        self.dequantize_and_idct_planes(&mut component_planes)?;
 
         let upsampled_planes = self.upsample_planes(&component_planes);
         let mut pixel_data = self.convert_colorspace(&upsampled_planes)?;
