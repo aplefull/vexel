@@ -1,3 +1,11 @@
+# Set perf_event_paranoid to allow samply without root
+perf-allow:
+    echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+
+# Profile image decoding with samply
+profile path:
+    samply record target/release/vexel --void "{{path}}"
+
 # Open image in GUI viewer
 gui path loglevel="":
     cargo run --package vexel-cli --release -- --gui {{ if loglevel != "" { "--log-level " + loglevel + " " } else { "" } }}"{{path}}"
@@ -25,3 +33,7 @@ corpus-bench:
 # Generate or verify AVIF reference images
 convert *args:
     cd vexel/tests && python3 generate_references.py {{args}}
+
+# Run vexel binary
+vexel *args:
+    target/release/vexel {{args}}

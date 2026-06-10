@@ -111,40 +111,48 @@ impl ComponentPlane {
         let is_h1v2 = !h_2x && v_2x && target_width == source_width;
         let is_h2v2 = h_2x && v_2x;
 
+        let tw = target_width as usize;
+        let th = target_height as usize;
+
+        let set = |data: &mut Vec<i32>, x: usize, y: usize, v: i32| {
+            debug_assert!(x < tw && y < th);
+            data[y * tw + x] = v;
+        };
+
         if is_h2v1 {
             let sw = source_width as usize;
             let sh = source_height as usize;
 
             for sy in 0..sh {
-                let dy = sy as u32;
+                let dy = sy;
 
                 if sw == 1 {
                     let v = get_src(0, sy);
-                    upsampled.set_pixel(0, dy, v);
-                    if 1 < target_width {
-                        upsampled.set_pixel(1, dy, v);
+                    set(&mut upsampled.data, 0, dy, v);
+                    if 1 < tw {
+                        set(&mut upsampled.data, 1, dy, v);
                     }
                     continue;
                 }
 
                 let invalue = get_src(0, sy);
-                upsampled.set_pixel(0, dy, invalue);
-                if 1 < target_width {
-                    upsampled.set_pixel(1, dy, (invalue * 3 + get_src(1, sy) + 2) >> 2);
+                set(&mut upsampled.data, 0, dy, invalue);
+                if 1 < tw {
+                    set(&mut upsampled.data, 1, dy, (invalue * 3 + get_src(1, sy) + 2) >> 2);
                 }
 
                 for sx in 1..sw - 1 {
                     let invalue = get_src(sx, sy) * 3;
-                    let dx = (sx * 2) as u32;
-                    if dx < target_width { upsampled.set_pixel(dx, dy, (invalue + get_src(sx - 1, sy) + 1) >> 2); }
-                    if dx + 1 < target_width { upsampled.set_pixel(dx + 1, dy, (invalue + get_src(sx + 1, sy) + 2) >> 2); }
+                    let dx = sx * 2;
+                    if dx < tw { set(&mut upsampled.data, dx, dy, (invalue + get_src(sx - 1, sy) + 1) >> 2); }
+                    if dx + 1 < tw { set(&mut upsampled.data, dx + 1, dy, (invalue + get_src(sx + 1, sy) + 2) >> 2); }
                 }
 
                 let last_sx = sw - 1;
-                let dx = (last_sx * 2) as u32;
+                let dx = last_sx * 2;
                 let invalue = get_src(last_sx, sy);
-                if dx < target_width { upsampled.set_pixel(dx, dy, (invalue * 3 + get_src(last_sx - 1, sy) + 1) >> 2); }
-                if dx + 1 < target_width { upsampled.set_pixel(dx + 1, dy, invalue); }
+                if dx < tw { set(&mut upsampled.data, dx, dy, (invalue * 3 + get_src(last_sx - 1, sy) + 1) >> 2); }
+                if dx + 1 < tw { set(&mut upsampled.data, dx + 1, dy, invalue); }
             }
         } else if is_h1v2 {
             let sw = source_width as usize;
@@ -154,16 +162,16 @@ impl ComponentPlane {
                 let sy_above = sy.saturating_sub(1);
                 let sy_below = (sy + 1).min(sh - 1);
 
-                for v in 0..2u32 {
-                    let dy = (sy * 2) as u32 + v;
-                    if dy >= target_height {
+                for v in 0..2usize {
+                    let dy = sy * 2 + v;
+                    if dy >= th {
                         continue;
                     }
                     let (sy_near, bias) = if v == 0 { (sy_above, 1) } else { (sy_below, 2) };
 
                     for sx in 0..sw {
                         let val = (get_src(sx, sy) * 3 + get_src(sx, sy_near) + bias) >> 2;
-                        upsampled.set_pixel(sx as u32, dy, val);
+                        set(&mut upsampled.data, sx, dy, val);
                     }
                 }
             }
@@ -174,11 +182,11 @@ impl ComponentPlane {
             for sy in 0..sh {
                 let sy_above = sy.saturating_sub(1);
                 let sy_below = (sy + 1).min(sh - 1);
-                let dy0 = (sy * 2) as u32;
+                let dy0 = sy * 2;
 
-                for v in 0..2u32 {
+                for v in 0..2usize {
                     let dy = dy0 + v;
-                    if dy >= target_height {
+                    if dy >= th {
                         continue;
                     }
                     let sy_near = if v == 0 { sy_above } else { sy_below };
@@ -190,30 +198,28 @@ impl ComponentPlane {
                     let mut last = col_sum(0);
                     let mut this = col_sum(1.min(sw - 1));
 
-                    let first_out = (last * 4 + 8) >> 4;
-                    upsampled.set_pixel(0, dy, first_out);
-                    if 1 < target_width {
-                        let second_out = (last * 3 + this + 7) >> 4;
-                        upsampled.set_pixel(1, dy, second_out);
+                    set(&mut upsampled.data, 0, dy, (last * 4 + 8) >> 4);
+                    if 1 < tw {
+                        set(&mut upsampled.data, 1, dy, (last * 3 + this + 7) >> 4);
                     }
 
                     for sx in 1..sw.saturating_sub(1) {
                         let next = col_sum(sx + 1);
                         let left_out = (this * 3 + last + 8) >> 4;
                         let right_out = (this * 3 + next + 7) >> 4;
-                        let dx = (sx * 2) as u32;
-                        if dx < target_width { upsampled.set_pixel(dx, dy, left_out); }
-                        if dx + 1 < target_width { upsampled.set_pixel(dx + 1, dy, right_out); }
+                        let dx = sx * 2;
+                        if dx < tw { set(&mut upsampled.data, dx, dy, left_out); }
+                        if dx + 1 < tw { set(&mut upsampled.data, dx + 1, dy, right_out); }
                         last = this;
                         this = next;
                     }
 
                     if sw > 1 {
-                        let dx = ((sw - 1) * 2) as u32;
+                        let dx = (sw - 1) * 2;
                         let left_out = (this * 3 + last + 8) >> 4;
                         let right_out = (this * 4 + 7) >> 4;
-                        if dx < target_width { upsampled.set_pixel(dx, dy, left_out); }
-                        if dx + 1 < target_width { upsampled.set_pixel(dx + 1, dy, right_out); }
+                        if dx < tw { set(&mut upsampled.data, dx, dy, left_out); }
+                        if dx + 1 < tw { set(&mut upsampled.data, dx + 1, dy, right_out); }
                     }
                 }
             }
@@ -1119,6 +1125,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 offsets,
                 symbols: table,
                 codes: vec![0; total_symbols as usize],
+                first_code: vec![u32::MAX; 16],
             };
 
             let mut code = 0;
@@ -1139,6 +1146,16 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 }
 
                 code <<= 1;
+            }
+
+            for i in 0..16 {
+                if huffman_table.offsets.len() > i + 1 {
+                    let start = huffman_table.offsets[i] as usize;
+                    let end = huffman_table.offsets[i + 1] as usize;
+                    if start < end && start < huffman_table.codes.len() {
+                        huffman_table.first_code[i] = huffman_table.codes[start];
+                    }
+                }
             }
 
             new_tables.push(huffman_table.clone());
@@ -1375,7 +1392,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     #[inline(always)]
     fn get_next_symbol(&self, reader: &mut BitReader<Cursor<Vec<u8>>>, table: &HuffmanTable) -> VexelResult<u8> {
-        let mut code = 0;
+        let mut code = 0u32;
 
         for i in 0..16 {
             let bit = reader.read_bit().unwrap_or_else(|_| {
@@ -1385,9 +1402,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
             code = (code << 1) | bit;
 
-            for j in table.offsets[i] as usize..table.offsets[i + 1] as usize {
-                if table.codes[j] == code {
-                    return Ok(table.symbols[j]);
+            let first = table.first_code.get(i).copied().unwrap_or(u32::MAX);
+            if first != u32::MAX {
+                let count = table.offsets.get(i + 1).copied().unwrap_or(0)
+                    .saturating_sub(table.offsets.get(i).copied().unwrap_or(0)) as usize;
+                if code >= first && (code - first) < count as u32 {
+                    let idx = table.offsets.get(i).copied().unwrap_or(0) as usize + (code - first) as usize;
+                    if let Some(&sym) = table.symbols.get(idx) {
+                        return Ok(sym);
+                    }
                 }
             }
         }
@@ -1558,6 +1581,49 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
             let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
 
+            struct ScanCompInfo {
+                plane_index: usize,
+                h_blocks: u8,
+                v_blocks: u8,
+                dc_table_index: Option<usize>,
+                ac_table_index: Option<usize>,
+            }
+
+            let scan_comp_infos: Vec<ScanCompInfo> = scan.components.iter().filter_map(|scan_comp| {
+                let (plane_index, comp) = match self
+                    .components
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| c.id == scan_comp.component_id)
+                {
+                    Some((i, c)) => (i, c),
+                    None => {
+                        log_warn!("Component not found: {}", scan_comp.component_id);
+                        return None;
+                    }
+                };
+
+                if plane_index >= planes.len() {
+                    log_warn!("Invalid plane index: {}", plane_index);
+                    return None;
+                }
+
+                let h_blocks = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
+                let v_blocks = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
+
+                let dc_table_index = scan.dc_tables.iter().position(|t| t.id == scan_comp.dc_table_selector);
+                let ac_table_index = scan.ac_tables.iter().position(|t| t.id == scan_comp.ac_table_selector);
+
+                if scan.start_spectral == 0 && scan.successive_high == 0 && dc_table_index.is_none() {
+                    log_warn!("DC table not found: {}", scan_comp.dc_table_selector);
+                }
+                if scan.end_spectral > 0 && ac_table_index.is_none() {
+                    log_warn!("AC table not found: {}", scan_comp.ac_table_selector);
+                }
+
+                Some(ScanCompInfo { plane_index, h_blocks, v_blocks, dc_table_index, ac_table_index })
+            }).collect();
+
             let mut restart_counter = restart_interval;
 
             for mcu_y in 0..mcu_height {
@@ -1571,27 +1637,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         restart_counter = restart_counter.saturating_sub(1);
                     }
 
-                    for scan_comp in scan.components.clone().iter() {
-                        let (plane_index, comp) = match self
-                            .components
-                            .iter()
-                            .enumerate()
-                            .find(|(_, c)| c.id == scan_comp.component_id)
-                        {
-                            Some((i, c)) => (i, c),
-                            None => {
-                                log_warn!("Component not found: {}", scan_comp.component_id);
-                                continue;
-                            }
-                        };
-
-                        let h_blocks = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
-                        let v_blocks = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
-
-                        if plane_index >= planes.len() {
-                            log_warn!("Invalid plane index: {}", plane_index);
-                            continue;
-                        }
+                    for info in &scan_comp_infos {
+                        let plane_index = info.plane_index;
+                        let h_blocks = info.h_blocks;
+                        let v_blocks = info.v_blocks;
 
                         for v in 0..v_blocks {
                             for h in 0..h_blocks {
@@ -1604,22 +1653,16 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                 }
 
                                 if let Some(component_data) = planes[plane_index].get_block_mut(block_x, block_y) {
-                                    let scan_component = scan_comp;
-
                                     if scan.start_spectral == 0 {
                                         if scan.successive_high == 0 {
                                             // First DC scan
-                                            let dc_table =
-                                                match scan.dc_tables.iter().find(|t| t.id == scan_component.dc_table_selector) {
-                                                    Some(table) => table,
-                                                    None => {
-                                                        log_warn!(
-                                                            "DC table not found: {}",
-                                                            scan_component.dc_table_selector
-                                                        );
-                                                        continue;
-                                                    }
-                                                };
+                                            let dc_table = match info.dc_table_index.and_then(|i| scan.dc_tables.get(i)) {
+                                                Some(table) => table,
+                                                None => {
+                                                    log_warn!("DC table missing for block, skipping");
+                                                    continue;
+                                                }
+                                            };
 
                                             let length = self.get_next_symbol(&mut reader, dc_table)?;
 
@@ -1667,17 +1710,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                 continue;
                                             }
 
-                                            let ac_table =
-                                                match scan.ac_tables.iter().find(|t| t.id == scan_component.ac_table_selector) {
-                                                    Some(table) => table,
-                                                    None => {
-                                                        log_warn!(
-                                                            "AC table not found: {}",
-                                                            scan_component.ac_table_selector
-                                                        );
-                                                        continue;
-                                                    }
-                                                };
+                                            let ac_table = match info.ac_table_index.and_then(|i| scan.ac_tables.get(i)) {
+                                                Some(table) => table,
+                                                None => {
+                                                    log_warn!("AC table missing for block, skipping");
+                                                    continue;
+                                                }
+                                            };
 
                                             let mut k = scan.start_spectral as usize;
                                             while k <= scan.end_spectral as usize {
@@ -1774,18 +1813,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                             let mut k = scan.start_spectral as usize;
 
                                             if skips == 0 {
-                                                let ac_table =
-                                                    match scan.ac_tables.iter().find(|t| t.id == scan_component.ac_table_selector)
-                                                    {
-                                                        Some(table) => table,
-                                                        None => {
-                                                            log_warn!(
-                                                                "AC table not found: {}",
-                                                                scan_component.ac_table_selector
-                                                            );
-                                                            continue;
-                                                        }
-                                                    };
+                                                let ac_table = match info.ac_table_index.and_then(|i| scan.ac_tables.get(i)) {
+                                                    Some(table) => table,
+                                                    None => {
+                                                        log_warn!("AC table missing for block (refining), skipping");
+                                                        continue;
+                                                    }
+                                                };
 
                                                 while k <= scan.end_spectral as usize {
                                                     let symbol = match self.get_next_symbol(&mut reader, ac_table) {
@@ -1966,20 +2000,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                 id: 0,
                                 offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
                                 symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-                                codes: vec![
-                                    0b000,
-                                    0b010,
-                                    0b011,
-                                    0b100,
-                                    0b101,
-                                    0b110,
-                                    0b1110,
-                                    0b11110,
-                                    0b111110,
-                                    0b1111110,
-                                    0b11111110,
-                                    0b111111110,
-                                ],
+                                codes: vec![0b000, 0b010, 0b011, 0b100, 0b101, 0b110, 0b1110, 0b11110, 0b111110, 0b1111110, 0b11111110, 0b111111110],
+                                first_code: vec![u32::MAX, u32::MAX, 0b000, 0b011, u32::MAX, 0b100, 0b101, 0b110, 0b1110, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
                             }
                         }
                     };
@@ -2280,7 +2302,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     restart_counter = restart_counter.saturating_sub(1);
                 }
 
-                for (comp_idx, comp) in self.components.clone().iter().enumerate() {
+                for (comp_idx, comp) in self.components.iter().enumerate() {
                     if comp_idx >= components.len() {
                         continue;
                     }
@@ -2535,6 +2557,55 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
         let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
 
+        let default_dc_table = HuffmanTable {
+            class: 0,
+            id: 0,
+            offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
+            symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            codes: vec![0b000, 0b010, 0b011, 0b100, 0b101, 0b110, 0b1110, 0b11110, 0b111110, 0b1111110, 0b11111110, 0b111111110],
+            first_code: vec![u32::MAX, u32::MAX, 0b000, 0b011, u32::MAX, 0b100, 0b101, 0b110, 0b1110, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
+        };
+        let default_ac_table = HuffmanTable {
+            class: 0,
+            id: 0,
+            offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
+            symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            codes: vec![0b000, 0b010, 0b011, 0b100, 0b101, 0b110, 0b1110, 0b11110, 0b111110, 0b1111110, 0b11111110, 0b111111110],
+            first_code: vec![u32::MAX, u32::MAX, 0b000, 0b011, u32::MAX, 0b100, 0b101, 0b110, 0b1110, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
+        };
+
+        struct BaselineCompInfo {
+            h_samp: u8,
+            v_samp: u8,
+            dc_table: HuffmanTable,
+            ac_table: HuffmanTable,
+        }
+
+        let comp_infos: Vec<BaselineCompInfo> = self.components.iter().enumerate().filter_map(|(comp_idx, comp)| {
+            if self.scans[0].components.len() <= comp_idx {
+                log_warn!("Component index out of bounds: {} {}", self.scans[0].components.len(), comp_idx);
+                return None;
+            }
+
+            let dc_selector = self.scans[0].components[comp_idx].dc_table_selector;
+            let ac_selector = self.scans[0].components[comp_idx].ac_table_selector;
+
+            let dc_table = self.scans[0].dc_tables.iter().find(|t| t.id == dc_selector).cloned().unwrap_or_else(|| {
+                log_warn!("DC table {} not found in baseline mode, substituting default, image will be corrupted.", dc_selector);
+                default_dc_table.clone()
+            });
+
+            let ac_table = self.scans[0].ac_tables.iter().find(|t| t.id == ac_selector).cloned().unwrap_or_else(|| {
+                log_warn!("AC table {} not found in baseline mode, substituting default, image will be corrupted.", ac_selector);
+                default_ac_table.clone()
+            });
+
+            let h_samp = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
+            let v_samp = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
+
+            Some(BaselineCompInfo { h_samp, v_samp, dc_table, ac_table })
+        }).collect();
+
         let mut restart_counter = self.restart_interval as u32;
 
         for mcu_y in 0..mcu_height {
@@ -2549,82 +2620,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     restart_counter = restart_counter.saturating_sub(1);
                 }
 
-                for (comp_idx, comp) in self.components.clone().iter().enumerate() {
-                    if self.scans[0].components.len() <= comp_idx {
-                        log_warn!(
-                            "Component index out of bounds: {} {}",
-                            self.scans[0].components.len(),
-                            comp_idx
-                        );
-                        continue;
-                    }
-
-                    let dc_selector = self.scans[0].components[comp_idx].dc_table_selector;
-                    let ac_selector = self.scans[0].components[comp_idx].ac_table_selector;
-
-                    let dc_table = match self.scans[0].dc_tables.iter().find(|t| t.id == dc_selector) {
-                        Some(table) => table.clone(),
-                        None => {
-                            log_warn!("DC table {} not found in baseline mode, substituting default, image will be corrupted.", dc_selector);
-
-                            HuffmanTable {
-                                class: 0,
-                                id: 0,
-                                offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
-                                symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-                                codes: vec![
-                                    0b000,
-                                    0b010,
-                                    0b011,
-                                    0b100,
-                                    0b101,
-                                    0b110,
-                                    0b1110,
-                                    0b11110,
-                                    0b111110,
-                                    0b1111110,
-                                    0b11111110,
-                                    0b111111110,
-                                ],
-                            }
-                        }
-                    };
-
-                    let ac_table = match self.scans[0].ac_tables.iter().find(|t| t.id == ac_selector) {
-                        Some(table) => table.clone(),
-                        None => {
-                            log_warn!("AC table {} not found in baseline mode, substituting default, image will be corrupted.", ac_selector);
-
-                            HuffmanTable {
-                                class: 0,
-                                id: 0,
-                                offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
-                                symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-                                codes: vec![
-                                    0b000,
-                                    0b010,
-                                    0b011,
-                                    0b100,
-                                    0b101,
-                                    0b110,
-                                    0b1110,
-                                    0b11110,
-                                    0b111110,
-                                    0b1111110,
-                                    0b11111110,
-                                    0b111111110,
-                                ],
-                            }
-                        }
-                    };
-
-                    let h_samp = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
-                    let v_samp = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
-
-                    for v in 0..v_samp {
-                        for h in 0..h_samp {
-                            let block_x = mcu_x * h_samp as u32 + h as u32;
-                            let block_y = mcu_y * v_samp as u32 + v as u32;
+                for (comp_idx, info) in comp_infos.iter().enumerate() {
+                    for v in 0..info.v_samp {
+                        for h in 0..info.h_samp {
+                            let block_x = mcu_x * info.h_samp as u32 + h as u32;
+                            let block_y = mcu_y * info.v_samp as u32 + v as u32;
 
                             if comp_idx >= previous_dc.len() {
                                 log_warn!(
@@ -2639,8 +2639,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                 match self.decode_mcu(
                                     &mut reader,
                                     block,
-                                    &dc_table,
-                                    &ac_table,
+                                    &info.dc_table,
+                                    &info.ac_table,
                                     &mut previous_dc[comp_idx],
                                 ) {
                                     Ok(_) => {}
@@ -2660,7 +2660,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn dequantize_planes(&self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
         for (comp_idx, plane) in planes.iter_mut().enumerate() {
-            let default_table = &QuantizationTable {
+            let default_table = QuantizationTable {
                 id: 0,
                 precision: 8,
                 length: 64,
@@ -2675,24 +2675,32 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         .iter()
                         .find(|q| q.id == comp.quantization_table_id)
                 })
-                .map(|q| q)
+                .cloned()
                 .unwrap_or_else(|| {
                     log_warn!("Quantization table not found for component, substituting default one.");
                     default_table
                 });
 
-            for block in plane.data.chunks_mut(64) {
-                for i in 0..64 {
-                    if block.len() <= i || quant_table.table.len() <= i {
-                        log_warn!(
-                            "Block or quantization table index out of bounds: {} {}",
-                            block.len(),
-                            quant_table.table.len()
-                        );
-                        continue;
-                    }
+            let quant_data = quant_table.table;
 
-                    block[i] *= quant_table.table[i] as i32;
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                plane.data.par_chunks_mut(64).for_each(|block| {
+                    let len = block.len().min(quant_data.len());
+                    for i in 0..len {
+                        block[i] *= quant_data[i] as i32;
+                    }
+                });
+            }
+
+            #[cfg(not(feature = "rayon"))]
+            {
+                for block in plane.data.chunks_mut(64) {
+                    let len = block.len().min(quant_data.len());
+                    for i in 0..len {
+                        block[i] *= quant_data[i] as i32;
+                    }
                 }
             }
         }
@@ -2717,156 +2725,139 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let s_6 = (6.0 / 16.0 * PI).cos() / 2.0;
         let s_7 = (7.0 / 16.0 * PI).cos() / 2.0;
 
-        let level_shift = if self.precision <= 8 { 128 } else { 2048 };
+        let level_shift = if self.precision <= 8 { 128i32 } else { 2048i32 };
+
+        #[allow(clippy::too_many_arguments)]
+        fn idct_block(
+            block: &mut [i32],
+            m_1: f32, m_2: f32, m_3: f32, m_4: f32, m_5: f32,
+            s_0: f32, s_1: f32, s_2: f32, s_3: f32, s_4: f32, s_5: f32, s_6: f32, s_7: f32,
+            level_shift: i32,
+        ) {
+            let mut temp = [0.0f32; 64];
+
+            for col in 0..8 {
+                let g_0 = block[0 * 8 + col] as f32 * s_0;
+                let g_1 = block[4 * 8 + col] as f32 * s_4;
+                let g_2 = block[2 * 8 + col] as f32 * s_2;
+                let g_3 = block[6 * 8 + col] as f32 * s_6;
+                let g_4 = block[5 * 8 + col] as f32 * s_5;
+                let g_5 = block[1 * 8 + col] as f32 * s_1;
+                let g_6 = block[7 * 8 + col] as f32 * s_7;
+                let g_7 = block[3 * 8 + col] as f32 * s_3;
+
+                let f_4 = g_4 - g_7;
+                let f_5 = g_5 + g_6;
+                let f_6 = g_5 - g_6;
+                let f_7 = g_4 + g_7;
+
+                let e_2 = g_2 - g_3;
+                let e_3 = g_2 + g_3;
+                let e_5 = f_5 - f_7;
+                let e_7 = f_5 + f_7;
+                let e_8 = f_4 + f_6;
+
+                let d_2 = e_2 * m_1;
+                let d_4 = f_4 * m_2;
+                let d_5 = e_5 * m_3;
+                let d_6 = f_6 * m_4;
+                let d_8 = e_8 * m_5;
+
+                let c_0 = g_0 + g_1;
+                let c_1 = g_0 - g_1;
+                let c_2 = d_2 - e_3;
+                let c_4 = d_4 + d_8;
+                let c_5 = d_5 + e_7;
+                let c_6 = d_6 - d_8;
+                let c_8 = c_5 - c_6;
+
+                let b_0 = c_0 + e_3;
+                let b_1 = c_1 + c_2;
+                let b_2 = c_1 - c_2;
+                let b_3 = c_0 - e_3;
+                let b_4 = c_4 - c_8;
+                let b_6 = c_6 - e_7;
+
+                temp[0 * 8 + col] = b_0 + e_7;
+                temp[1 * 8 + col] = b_1 + b_6;
+                temp[2 * 8 + col] = b_2 + c_8;
+                temp[3 * 8 + col] = b_3 + b_4;
+                temp[4 * 8 + col] = b_3 - b_4;
+                temp[5 * 8 + col] = b_2 - c_8;
+                temp[6 * 8 + col] = b_1 - b_6;
+                temp[7 * 8 + col] = b_0 - e_7;
+            }
+
+            for row in 0..8 {
+                let g_0 = temp[row * 8 + 0] * s_0;
+                let g_1 = temp[row * 8 + 4] * s_4;
+                let g_2 = temp[row * 8 + 2] * s_2;
+                let g_3 = temp[row * 8 + 6] * s_6;
+                let g_4 = temp[row * 8 + 5] * s_5;
+                let g_5 = temp[row * 8 + 1] * s_1;
+                let g_6 = temp[row * 8 + 7] * s_7;
+                let g_7 = temp[row * 8 + 3] * s_3;
+
+                let f_4 = g_4 - g_7;
+                let f_5 = g_5 + g_6;
+                let f_6 = g_5 - g_6;
+                let f_7 = g_4 + g_7;
+
+                let e_2 = g_2 - g_3;
+                let e_3 = g_2 + g_3;
+                let e_5 = f_5 - f_7;
+                let e_7 = f_5 + f_7;
+                let e_8 = f_4 + f_6;
+
+                let d_2 = e_2 * m_1;
+                let d_4 = f_4 * m_2;
+                let d_5 = e_5 * m_3;
+                let d_6 = f_6 * m_4;
+                let d_8 = e_8 * m_5;
+
+                let c_0 = g_0 + g_1;
+                let c_1 = g_0 - g_1;
+                let c_2 = d_2 - e_3;
+                let c_4 = d_4 + d_8;
+                let c_5 = d_5 + e_7;
+                let c_6 = d_6 - d_8;
+                let c_8 = c_5 - c_6;
+
+                let b_0 = c_0 + e_3;
+                let b_1 = c_1 + c_2;
+                let b_2 = c_1 - c_2;
+                let b_3 = c_0 - e_3;
+                let b_4 = c_4 - c_8;
+                let b_6 = c_6 - e_7;
+
+                block[row * 8 + 0] = ((b_0 + e_7).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                block[row * 8 + 1] = ((b_1 + b_6).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                block[row * 8 + 2] = ((b_2 + c_8).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                block[row * 8 + 3] = ((b_3 + b_4).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                block[row * 8 + 4] = ((b_3 - b_4).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                block[row * 8 + 5] = ((b_2 - c_8).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                block[row * 8 + 6] = ((b_1 - b_6).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+                block[row * 8 + 7] = ((b_0 - e_7).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+            }
+        }
 
         for plane in planes {
-            let block_count = (plane.data.len() / 64) as u32;
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                plane.data.par_chunks_mut(64).for_each(|block| {
+                    if block.len() == 64 {
+                        idct_block(block, m_1, m_2, m_3, m_4, m_5, s_0, s_1, s_2, s_3, s_4, s_5, s_6, s_7, level_shift);
+                    }
+                });
+            }
 
-            for block_idx in 0..block_count {
-                let block_start = (block_idx * 64) as usize;
-
-                if block_start + 64 > plane.data.len() {
-                    log_warn!("Block index out of bounds: {} {}", block_start, plane.data.len());
-                    continue;
-                }
-
-                let block = &mut plane.data[block_start..block_start + 64];
-                let mut temp = [0.0f32; 64];
-
-                for col in 0..8 {
-                    let g_0 = block[0 * 8 + col] as f32 * s_0;
-                    let g_1 = block[4 * 8 + col] as f32 * s_4;
-                    let g_2 = block[2 * 8 + col] as f32 * s_2;
-                    let g_3 = block[6 * 8 + col] as f32 * s_6;
-                    let g_4 = block[5 * 8 + col] as f32 * s_5;
-                    let g_5 = block[1 * 8 + col] as f32 * s_1;
-                    let g_6 = block[7 * 8 + col] as f32 * s_7;
-                    let g_7 = block[3 * 8 + col] as f32 * s_3;
-
-                    let f_0 = g_0;
-                    let f_1 = g_1;
-                    let f_2 = g_2;
-                    let f_3 = g_3;
-                    let f_4 = g_4 - g_7;
-                    let f_5 = g_5 + g_6;
-                    let f_6 = g_5 - g_6;
-                    let f_7 = g_4 + g_7;
-
-                    let e_0 = f_0;
-                    let e_1 = f_1;
-                    let e_2 = f_2 - f_3;
-                    let e_3 = f_2 + f_3;
-                    let e_4 = f_4;
-                    let e_5 = f_5 - f_7;
-                    let e_6 = f_6;
-                    let e_7 = f_5 + f_7;
-                    let e_8 = f_4 + f_6;
-
-                    let d_0 = e_0;
-                    let d_1 = e_1;
-                    let d_2 = e_2 * m_1;
-                    let d_3 = e_3;
-                    let d_4 = e_4 * m_2;
-                    let d_5 = e_5 * m_3;
-                    let d_6 = e_6 * m_4;
-                    let d_7 = e_7;
-                    let d_8 = e_8 * m_5;
-
-                    let c_0 = d_0 + d_1;
-                    let c_1 = d_0 - d_1;
-                    let c_2 = d_2 - d_3;
-                    let c_3 = d_3;
-                    let c_4 = d_4 + d_8;
-                    let c_5 = d_5 + d_7;
-                    let c_6 = d_6 - d_8;
-                    let c_7 = d_7;
-                    let c_8 = c_5 - c_6;
-
-                    let b_0 = c_0 + c_3;
-                    let b_1 = c_1 + c_2;
-                    let b_2 = c_1 - c_2;
-                    let b_3 = c_0 - c_3;
-                    let b_4 = c_4 - c_8;
-                    let b_5 = c_8;
-                    let b_6 = c_6 - c_7;
-                    let b_7 = c_7;
-
-                    temp[0 * 8 + col] = b_0 + b_7;
-                    temp[1 * 8 + col] = b_1 + b_6;
-                    temp[2 * 8 + col] = b_2 + b_5;
-                    temp[3 * 8 + col] = b_3 + b_4;
-                    temp[4 * 8 + col] = b_3 - b_4;
-                    temp[5 * 8 + col] = b_2 - b_5;
-                    temp[6 * 8 + col] = b_1 - b_6;
-                    temp[7 * 8 + col] = b_0 - b_7;
-                }
-
-                for row in 0..8 {
-                    let g_0 = temp[row * 8 + 0] * s_0;
-                    let g_1 = temp[row * 8 + 4] * s_4;
-                    let g_2 = temp[row * 8 + 2] * s_2;
-                    let g_3 = temp[row * 8 + 6] * s_6;
-                    let g_4 = temp[row * 8 + 5] * s_5;
-                    let g_5 = temp[row * 8 + 1] * s_1;
-                    let g_6 = temp[row * 8 + 7] * s_7;
-                    let g_7 = temp[row * 8 + 3] * s_3;
-
-                    let f_0 = g_0;
-                    let f_1 = g_1;
-                    let f_2 = g_2;
-                    let f_3 = g_3;
-                    let f_4 = g_4 - g_7;
-                    let f_5 = g_5 + g_6;
-                    let f_6 = g_5 - g_6;
-                    let f_7 = g_4 + g_7;
-
-                    let e_0 = f_0;
-                    let e_1 = f_1;
-                    let e_2 = f_2 - f_3;
-                    let e_3 = f_2 + f_3;
-                    let e_4 = f_4;
-                    let e_5 = f_5 - f_7;
-                    let e_6 = f_6;
-                    let e_7 = f_5 + f_7;
-                    let e_8 = f_4 + f_6;
-
-                    let d_0 = e_0;
-                    let d_1 = e_1;
-                    let d_2 = e_2 * m_1;
-                    let d_3 = e_3;
-                    let d_4 = e_4 * m_2;
-                    let d_5 = e_5 * m_3;
-                    let d_6 = e_6 * m_4;
-                    let d_7 = e_7;
-                    let d_8 = e_8 * m_5;
-
-                    let c_0 = d_0 + d_1;
-                    let c_1 = d_0 - d_1;
-                    let c_2 = d_2 - d_3;
-                    let c_3 = d_3;
-                    let c_4 = d_4 + d_8;
-                    let c_5 = d_5 + d_7;
-                    let c_6 = d_6 - d_8;
-                    let c_7 = d_7;
-                    let c_8 = c_5 - c_6;
-
-                    let b_0 = c_0 + c_3;
-                    let b_1 = c_1 + c_2;
-                    let b_2 = c_1 - c_2;
-                    let b_3 = c_0 - c_3;
-                    let b_4 = c_4 - c_8;
-                    let b_5 = c_8;
-                    let b_6 = c_6 - c_7;
-                    let b_7 = c_7;
-
-                    block[row * 8 + 0] = ((b_0 + b_7).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 1] = ((b_1 + b_6).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 2] = ((b_2 + b_5).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 3] = ((b_3 + b_4).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 4] = ((b_3 - b_4).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 5] = ((b_2 - b_5).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 6] = ((b_1 - b_6).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                    block[row * 8 + 7] = ((b_0 - b_7).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+            #[cfg(not(feature = "rayon"))]
+            {
+                for block in plane.data.chunks_mut(64) {
+                    if block.len() == 64 {
+                        idct_block(block, m_1, m_2, m_3, m_4, m_5, s_0, s_1, s_2, s_3, s_4, s_5, s_6, s_7, level_shift);
+                    }
                 }
             }
         }
@@ -2888,53 +2879,64 @@ impl<R: Read + Seek> JpegDecoder<R> {
             .max()
             .unwrap_or(1);
 
-        let mut upsampled_planes = Vec::new();
+        let target_width = self.width;
+        let target_height = self.height;
 
-        for (plane, comp) in planes.iter().zip(self.components.iter()) {
-            let source_width =
-                (self.width * comp.horizontal_sampling_factor as u32 + max_h_samp as u32 - 1) / max_h_samp as u32;
-            let source_height =
-                (self.height * comp.vertical_sampling_factor as u32 + max_v_samp as u32 - 1) / max_v_samp as u32;
+        let pairs: Vec<(&ComponentPlane, (u32, u32))> = planes
+            .iter()
+            .zip(self.components.iter())
+            .map(|(plane, comp)| {
+                let source_width = (target_width * comp.horizontal_sampling_factor as u32
+                    + max_h_samp as u32 - 1) / max_h_samp as u32;
+                let source_height = (target_height * comp.vertical_sampling_factor as u32
+                    + max_v_samp as u32 - 1) / max_v_samp as u32;
+                (plane, (source_width, source_height))
+            })
+            .collect();
 
-            let upsampled = plane.upsample(source_width, source_height, self.width, self.height);
-            upsampled_planes.push(upsampled);
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            pairs
+                .into_par_iter()
+                .map(|(plane, (sw, sh))| plane.upsample(sw, sh, target_width, target_height))
+                .collect()
         }
 
-        upsampled_planes
+        #[cfg(not(feature = "rayon"))]
+        {
+            pairs
+                .into_iter()
+                .map(|(plane, (sw, sh))| plane.upsample(sw, sh, target_width, target_height))
+                .collect()
+        }
     }
 
     fn convert_colorspace(&self, planes: &[UpsampledPlane]) -> VexelResult<PixelData> {
-        let mut pixels = Vec::with_capacity((self.width * self.height * 3) as usize);
-
-        fn get_pixel_from_planes(planes: &[UpsampledPlane], index: usize, x: u32, y: u32) -> f32 {
-            match planes.get(index) {
-                Some(plane) => plane.get_pixel(x, y).unwrap_or(0) as f32,
-                None => 0.0,
-            }
-        }
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let npixels = width * height;
 
         if planes.len() == 1 {
             return if self.precision <= 8 {
-                for y in 0..self.height {
-                    for x in 0..self.width {
-                        let y_val = planes[0].get_pixel(x, y).unwrap_or(0);
-                        let gray_val = (y_val + 128).clamp(0, 255) as u8;
-                        pixels.push(gray_val);
-                    }
+                let plane = &planes[0].data;
+                let mut pixels = Vec::with_capacity(npixels);
+                for i in 0..npixels.min(plane.len()) {
+                    pixels.push((plane[i] + 128).clamp(0, 255) as u8);
                 }
-
+                if pixels.len() < npixels {
+                    pixels.resize(npixels, 0);
+                }
                 Ok(PixelData::L8(pixels))
             } else {
-                let mut pixels16 = Vec::with_capacity((self.width * self.height) as usize);
-
-                for y in 0..self.height {
-                    for x in 0..self.width {
-                        let y_val = planes[0].get_pixel(x, y).unwrap_or(0);
-                        let gray_val = (y_val + 2048).clamp(0, 4095) as u16;
-                        pixels16.push(gray_val);
-                    }
+                let plane = &planes[0].data;
+                let mut pixels16 = Vec::with_capacity(npixels);
+                for i in 0..npixels.min(plane.len()) {
+                    pixels16.push((plane[i] + 2048).clamp(0, 4095) as u16);
                 }
-
+                if pixels16.len() < npixels {
+                    pixels16.resize(npixels, 0);
+                }
                 Ok(PixelData::L16(pixels16))
             };
         }
@@ -2943,36 +2945,78 @@ impl<R: Read + Seek> JpegDecoder<R> {
             log_warn!("Invalid number of planes for RGB conversion: {}.", planes.len());
         }
 
+        let plane0 = &planes[0].data;
+        let plane1 = planes.get(1).map(|p| p.data.as_slice()).unwrap_or(&[]);
+        let plane2 = planes.get(2).map(|p| p.data.as_slice()).unwrap_or(&[]);
+
         if self.precision <= 8 {
-            for y in 0..self.height {
-                for x in 0..self.width {
-                    let y_val = get_pixel_from_planes(planes, 0, x, y);
-                    let cb_val = get_pixel_from_planes(planes, 1, x, y);
-                    let cr_val = get_pixel_from_planes(planes, 2, x, y);
+            let mut pixels = vec![0u8; npixels * 3];
 
-                    let r = (y_val + 1.40200 * cr_val + 128.0).round().clamp(0.0, 255.0) as u8;
-                    let g = (y_val - 0.344136 * cb_val - 0.714136 * cr_val + 128.0).round().clamp(0.0, 255.0) as u8;
-                    let b = (y_val + 1.77200 * cb_val + 128.0).round().clamp(0.0, 255.0) as u8;
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                pixels.par_chunks_mut(width * 3).enumerate().for_each(|(row, dst)| {
+                    let row_start = row * width;
+                    for col in 0..width {
+                        let i = row_start + col;
+                        let y = plane0.get(i).copied().unwrap_or(0);
+                        let cb = plane1.get(i).copied().unwrap_or(0);
+                        let cr = plane2.get(i).copied().unwrap_or(0);
+                        let y128 = (y + 128) << 16;
+                        dst[col * 3] = ((y128 + 91881 * cr + 32768) >> 16).clamp(0, 255) as u8;
+                        dst[col * 3 + 1] = ((y128 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 255) as u8;
+                        dst[col * 3 + 2] = ((y128 + 116130 * cb + 32768) >> 16).clamp(0, 255) as u8;
+                    }
+                });
+            }
 
-                    pixels.extend_from_slice(&[r, g, b]);
+            #[cfg(not(feature = "rayon"))]
+            {
+                for i in 0..npixels {
+                    let y = plane0.get(i).copied().unwrap_or(0);
+                    let cb = plane1.get(i).copied().unwrap_or(0);
+                    let cr = plane2.get(i).copied().unwrap_or(0);
+                    let y128 = (y + 128) << 16;
+                    let base = i * 3;
+                    pixels[base] = ((y128 + 91881 * cr + 32768) >> 16).clamp(0, 255) as u8;
+                    pixels[base + 1] = ((y128 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 255) as u8;
+                    pixels[base + 2] = ((y128 + 116130 * cb + 32768) >> 16).clamp(0, 255) as u8;
                 }
             }
 
             Ok(PixelData::RGB8(pixels))
         } else {
-            let mut pixels16 = Vec::with_capacity((self.width * self.height * 3) as usize);
+            let mut pixels16 = vec![0u16; npixels * 3];
 
-            for y in 0..self.height {
-                for x in 0..self.width {
-                    let y_val = get_pixel_from_planes(planes, 0, x, y);
-                    let cb_val = get_pixel_from_planes(planes, 1, x, y);
-                    let cr_val = get_pixel_from_planes(planes, 2, x, y);
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                pixels16.par_chunks_mut(width * 3).enumerate().for_each(|(row, dst)| {
+                    let row_start = row * width;
+                    for col in 0..width {
+                        let i = row_start + col;
+                        let y = plane0.get(i).copied().unwrap_or(0);
+                        let cb = plane1.get(i).copied().unwrap_or(0);
+                        let cr = plane2.get(i).copied().unwrap_or(0);
+                        let y2048 = (y + 2048) << 16;
+                        dst[col * 3] = ((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16;
+                        dst[col * 3 + 1] = ((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16;
+                        dst[col * 3 + 2] = ((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16;
+                    }
+                });
+            }
 
-                    let r = (y_val + 1.40200 * cr_val + 2048.0).round().clamp(0.0, 4095.0) as u16;
-                    let g = (y_val - 0.344136 * cb_val - 0.714136 * cr_val + 2048.0).round().clamp(0.0, 4095.0) as u16;
-                    let b = (y_val + 1.77200 * cb_val + 2048.0).round().clamp(0.0, 4095.0) as u16;
-
-                    pixels16.extend_from_slice(&[r, g, b]);
+            #[cfg(not(feature = "rayon"))]
+            {
+                for i in 0..npixels {
+                    let y = plane0.get(i).copied().unwrap_or(0);
+                    let cb = plane1.get(i).copied().unwrap_or(0);
+                    let cr = plane2.get(i).copied().unwrap_or(0);
+                    let y2048 = (y + 2048) << 16;
+                    let base = i * 3;
+                    pixels16[base] = ((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16;
+                    pixels16[base + 1] = ((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16;
+                    pixels16[base + 2] = ((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16;
                 }
             }
 

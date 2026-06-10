@@ -138,6 +138,7 @@ pub struct HuffmanTable {
     pub offsets: Vec<u32>,
     pub symbols: Vec<u8>,
     pub codes: Vec<u32>,
+    pub first_code: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
