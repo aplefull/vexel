@@ -4,7 +4,7 @@ use crate::utils::exif::ExifReader;
 use crate::utils::info::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
-use std::f32::consts::PI;
+use crate::decoders::jpeg::idct::dequantize_and_idct;
 use std::fmt::Debug;
 use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
@@ -2498,138 +2498,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn dequantize_and_idct_planes(&self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
-        let m_0 = 2.0 * (1.0 / 16.0 * 2.0 * PI).cos();
-        let m_1 = 2.0 * (2.0 / 16.0 * 2.0 * PI).cos();
-        let m_3 = 2.0 * (2.0 / 16.0 * 2.0 * PI).cos();
-        let m_5 = 2.0 * (3.0 / 16.0 * 2.0 * PI).cos();
-        let m_2 = m_0 - m_5;
-        let m_4 = m_0 + m_5;
-
-        let s_0 = (0.0 / 16.0 * PI).cos() / 8.0_f32.sqrt();
-        let s_1 = (1.0 / 16.0 * PI).cos() / 2.0;
-        let s_2 = (2.0 / 16.0 * PI).cos() / 2.0;
-        let s_3 = (3.0 / 16.0 * PI).cos() / 2.0;
-        let s_4 = (4.0 / 16.0 * PI).cos() / 2.0;
-        let s_5 = (5.0 / 16.0 * PI).cos() / 2.0;
-        let s_6 = (6.0 / 16.0 * PI).cos() / 2.0;
-        let s_7 = (7.0 / 16.0 * PI).cos() / 2.0;
-
         let level_shift = if self.precision <= 8 { 128i32 } else { 2048i32 };
-
-        #[allow(clippy::too_many_arguments)]
-        fn idct_block(
-            block: &mut [i32],
-            quant: &[u16],
-            m_1: f32, m_2: f32, m_3: f32, m_4: f32, m_5: f32,
-            s_0: f32, s_1: f32, s_2: f32, s_3: f32, s_4: f32, s_5: f32, s_6: f32, s_7: f32,
-            level_shift: i32,
-        ) {
-            let mut temp = [0.0f32; 64];
-
-            for col in 0..8 {
-                let g_0 = block[0 * 8 + col] as f32 * quant[0 * 8 + col] as f32 * s_0;
-                let g_1 = block[4 * 8 + col] as f32 * quant[4 * 8 + col] as f32 * s_4;
-                let g_2 = block[2 * 8 + col] as f32 * quant[2 * 8 + col] as f32 * s_2;
-                let g_3 = block[6 * 8 + col] as f32 * quant[6 * 8 + col] as f32 * s_6;
-                let g_4 = block[5 * 8 + col] as f32 * quant[5 * 8 + col] as f32 * s_5;
-                let g_5 = block[1 * 8 + col] as f32 * quant[1 * 8 + col] as f32 * s_1;
-                let g_6 = block[7 * 8 + col] as f32 * quant[7 * 8 + col] as f32 * s_7;
-                let g_7 = block[3 * 8 + col] as f32 * quant[3 * 8 + col] as f32 * s_3;
-
-                let f_4 = g_4 - g_7;
-                let f_5 = g_5 + g_6;
-                let f_6 = g_5 - g_6;
-                let f_7 = g_4 + g_7;
-
-                let e_2 = g_2 - g_3;
-                let e_3 = g_2 + g_3;
-                let e_5 = f_5 - f_7;
-                let e_7 = f_5 + f_7;
-                let e_8 = f_4 + f_6;
-
-                let d_2 = e_2 * m_1;
-                let d_4 = f_4 * m_2;
-                let d_5 = e_5 * m_3;
-                let d_6 = f_6 * m_4;
-                let d_8 = e_8 * m_5;
-
-                let c_0 = g_0 + g_1;
-                let c_1 = g_0 - g_1;
-                let c_2 = d_2 - e_3;
-                let c_4 = d_4 + d_8;
-                let c_5 = d_5 + e_7;
-                let c_6 = d_6 - d_8;
-                let c_8 = c_5 - c_6;
-
-                let b_0 = c_0 + e_3;
-                let b_1 = c_1 + c_2;
-                let b_2 = c_1 - c_2;
-                let b_3 = c_0 - e_3;
-                let b_4 = c_4 - c_8;
-                let b_6 = c_6 - e_7;
-
-                temp[0 * 8 + col] = b_0 + e_7;
-                temp[1 * 8 + col] = b_1 + b_6;
-                temp[2 * 8 + col] = b_2 + c_8;
-                temp[3 * 8 + col] = b_3 + b_4;
-                temp[4 * 8 + col] = b_3 - b_4;
-                temp[5 * 8 + col] = b_2 - c_8;
-                temp[6 * 8 + col] = b_1 - b_6;
-                temp[7 * 8 + col] = b_0 - e_7;
-            }
-
-            for row in 0..8 {
-                let g_0 = temp[row * 8 + 0] * s_0;
-                let g_1 = temp[row * 8 + 4] * s_4;
-                let g_2 = temp[row * 8 + 2] * s_2;
-                let g_3 = temp[row * 8 + 6] * s_6;
-                let g_4 = temp[row * 8 + 5] * s_5;
-                let g_5 = temp[row * 8 + 1] * s_1;
-                let g_6 = temp[row * 8 + 7] * s_7;
-                let g_7 = temp[row * 8 + 3] * s_3;
-
-                let f_4 = g_4 - g_7;
-                let f_5 = g_5 + g_6;
-                let f_6 = g_5 - g_6;
-                let f_7 = g_4 + g_7;
-
-                let e_2 = g_2 - g_3;
-                let e_3 = g_2 + g_3;
-                let e_5 = f_5 - f_7;
-                let e_7 = f_5 + f_7;
-                let e_8 = f_4 + f_6;
-
-                let d_2 = e_2 * m_1;
-                let d_4 = f_4 * m_2;
-                let d_5 = e_5 * m_3;
-                let d_6 = f_6 * m_4;
-                let d_8 = e_8 * m_5;
-
-                let c_0 = g_0 + g_1;
-                let c_1 = g_0 - g_1;
-                let c_2 = d_2 - e_3;
-                let c_4 = d_4 + d_8;
-                let c_5 = d_5 + e_7;
-                let c_6 = d_6 - d_8;
-                let c_8 = c_5 - c_6;
-
-                let b_0 = c_0 + e_3;
-                let b_1 = c_1 + c_2;
-                let b_2 = c_1 - c_2;
-                let b_3 = c_0 - e_3;
-                let b_4 = c_4 - c_8;
-                let b_6 = c_6 - e_7;
-
-                block[row * 8 + 0] = ((b_0 + e_7).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                block[row * 8 + 1] = ((b_1 + b_6).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                block[row * 8 + 2] = ((b_2 + c_8).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                block[row * 8 + 3] = ((b_3 + b_4).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                block[row * 8 + 4] = ((b_3 - b_4).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                block[row * 8 + 5] = ((b_2 - c_8).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                block[row * 8 + 6] = ((b_1 - b_6).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-                block[row * 8 + 7] = ((b_0 - e_7).round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-            }
-        }
 
         let default_table = QuantizationTable {
             id: 0,
@@ -2639,7 +2508,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         };
 
         for (comp_idx, plane) in planes.iter_mut().enumerate() {
-            let quant_data: Vec<u16> = self
+            let quant_data: &[u16] = self
                 .components
                 .get(comp_idx)
                 .and_then(|comp| {
@@ -2647,29 +2516,23 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         .iter()
                         .find(|q| q.id == comp.quantization_table_id)
                 })
-                .map(|t| t.table.clone())
+                .map(|t| t.table.as_slice())
                 .unwrap_or_else(|| {
                     log_warn!("Quantization table not found for component, substituting default one.");
-                    default_table.table.clone()
+                    default_table.table.as_slice()
                 });
 
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
-                plane.data.par_chunks_mut(64).for_each(|block| {
-                    if block.len() == 64 {
-                        idct_block(block, &quant_data, m_1, m_2, m_3, m_4, m_5, s_0, s_1, s_2, s_3, s_4, s_5, s_6, s_7, level_shift);
-                    }
+                plane.data.par_chunks_mut(64 * 8).for_each(|chunk| {
+                    dequantize_and_idct(chunk, quant_data, level_shift);
                 });
             }
 
             #[cfg(not(feature = "rayon"))]
             {
-                for block in plane.data.chunks_mut(64) {
-                    if block.len() == 64 {
-                        idct_block(block, &quant_data, m_1, m_2, m_3, m_4, m_5, s_0, s_1, s_2, s_3, s_4, s_5, s_6, s_7, level_shift);
-                    }
-                }
+                dequantize_and_idct(&mut plane.data, quant_data, level_shift);
             }
         }
 
