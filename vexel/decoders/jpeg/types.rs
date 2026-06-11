@@ -139,6 +139,42 @@ pub struct HuffmanTable {
     pub symbols: Vec<u8>,
     pub codes: Vec<u32>,
     pub first_code: Vec<u32>,
+    pub fast_lookup: Vec<u32>,
+}
+
+impl HuffmanTable {
+    pub fn build_fast_lookup(&mut self) {
+        const PEEK_BITS: usize = 9;
+        const TABLE_SIZE: usize = 1 << PEEK_BITS;
+        let mut table = vec![0u32; TABLE_SIZE];
+
+        for i in 0..16usize {
+            if i >= PEEK_BITS {
+                break;
+            }
+            let code_len = i + 1;
+            if self.offsets.len() <= i + 1 {
+                continue;
+            }
+            let start = self.offsets[i] as usize;
+            let end = self.offsets[i + 1] as usize;
+            for sym_idx in start..end {
+                if sym_idx >= self.symbols.len() || sym_idx >= self.codes.len() {
+                    break;
+                }
+                let code = self.codes[sym_idx];
+                let sym = self.symbols[sym_idx];
+                let fill_count = 1 << (PEEK_BITS - code_len);
+                let base = (code as usize) << (PEEK_BITS - code_len);
+                let entry = (1u32 << 16) | ((sym as u32) << 8) | (code_len as u32);
+                for k in 0..fill_count {
+                    table[base + k] = entry;
+                }
+            }
+        }
+
+        self.fast_lookup = table;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]

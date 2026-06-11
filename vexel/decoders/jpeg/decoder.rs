@@ -923,6 +923,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 symbols: table,
                 codes: vec![0; total_symbols as usize],
                 first_code: vec![u32::MAX; 16],
+                fast_lookup: Vec::new(),
             };
 
             let mut code = 0;
@@ -955,6 +956,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 }
             }
 
+            huffman_table.build_fast_lookup();
             new_tables.push(huffman_table.clone());
 
             match class {
@@ -1187,11 +1189,53 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
+    fn default_lossless_dc_table() -> HuffmanTable {
+        let mut t = HuffmanTable {
+            class: 0,
+            id: 0,
+            offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
+            symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            codes: vec![0b000, 0b010, 0b011, 0b100, 0b101, 0b110, 0b1110, 0b11110, 0b111110, 0b1111110, 0b11111110, 0b111111110],
+            first_code: vec![u32::MAX, u32::MAX, 0b000, 0b011, u32::MAX, 0b100, 0b101, 0b110, 0b1110, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
+            fast_lookup: Vec::new(),
+        };
+        t.build_fast_lookup();
+        t
+    }
+
     #[inline(always)]
     fn get_next_symbol<S: Read + Seek>(&self, reader: &mut BitReader<S>, table: &HuffmanTable) -> VexelResult<u8> {
         if table.first_code.len() < 16 || table.offsets.len() < 17 {
             log_warn!("Huffman table is malformed, first_code.len()={}, offsets.len()={}", table.first_code.len(), table.offsets.len());
             return Ok(0);
+        }
+
+        if !table.fast_lookup.is_empty() {
+            if let Some(peek) = reader.peek_bits_unchecked(9) {
+                let peek = peek as usize;
+                let entry = table.fast_lookup[peek];
+                if entry >> 16 != 0 {
+                    let code_len = (entry & 0xFF) as u8;
+                    let symbol = ((entry >> 8) & 0xFF) as u8;
+                    reader.consume_bits(code_len);
+                    return Ok(symbol);
+                }
+                reader.consume_bits(9);
+                let mut code = peek as u32;
+                for i in 9..16 {
+                    code = (code << 1) | reader.read_bits_unchecked(1);
+                    let first = table.first_code[i];
+                    if first != u32::MAX {
+                        let count = (table.offsets[i + 1] - table.offsets[i]) as usize;
+                        if code >= first && (code - first) < count as u32 {
+                            let idx = table.offsets[i] as usize + (code - first) as usize;
+                            return Ok(table.symbols[idx]);
+                        }
+                    }
+                }
+                log_warn!("Invalid Huffman code: {}, replacing with 0", code);
+                return Ok(0);
+            }
         }
 
         let mut code = 0u32;
@@ -1711,14 +1755,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         Some(table) => table,
                         None => {
                             log_warn!("No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.", i);
-                            &HuffmanTable {
-                                class: 0,
-                                id: 0,
-                                offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
-                                symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-                                codes: vec![0b000, 0b010, 0b011, 0b100, 0b101, 0b110, 0b1110, 0b11110, 0b111110, 0b1111110, 0b11111110, 0b111111110],
-                                first_code: vec![u32::MAX, u32::MAX, 0b000, 0b011, u32::MAX, 0b100, 0b101, 0b110, 0b1110, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
-                            }
+                            &Self::default_lossless_dc_table()
                         }
                     };
 
@@ -2271,22 +2308,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
         let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
 
-        let default_dc_table = HuffmanTable {
-            class: 0,
-            id: 0,
-            offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
-            symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-            codes: vec![0b000, 0b010, 0b011, 0b100, 0b101, 0b110, 0b1110, 0b11110, 0b111110, 0b1111110, 0b11111110, 0b111111110],
-            first_code: vec![u32::MAX, u32::MAX, 0b000, 0b011, u32::MAX, 0b100, 0b101, 0b110, 0b1110, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
-        };
-        let default_ac_table = HuffmanTable {
-            class: 0,
-            id: 0,
-            offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
-            symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-            codes: vec![0b000, 0b010, 0b011, 0b100, 0b101, 0b110, 0b1110, 0b11110, 0b111110, 0b1111110, 0b11111110, 0b111111110],
-            first_code: vec![u32::MAX, u32::MAX, 0b000, 0b011, u32::MAX, 0b100, 0b101, 0b110, 0b1110, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX],
-        };
+        let default_dc_table = Self::default_lossless_dc_table();
+        let default_ac_table = Self::default_lossless_dc_table();
 
         struct BaselineCompInfo {
             h_samp: u8,

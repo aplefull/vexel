@@ -8,6 +8,7 @@ pub struct BitReader<R: Read + Seek> {
     buffer: u32,
     bits_in_buffer: u8,
     little_endian: bool,
+    pub total_bits_consumed: u64,
 }
 
 impl<R: Read + Seek> BitReader<R> {
@@ -17,6 +18,7 @@ impl<R: Read + Seek> BitReader<R> {
             buffer: 0,
             bits_in_buffer: 0,
             little_endian: false,
+            total_bits_consumed: 0,
         }
     }
 
@@ -27,6 +29,7 @@ impl<R: Read + Seek> BitReader<R> {
             buffer: 0,
             bits_in_buffer: 0,
             little_endian: true,
+            total_bits_consumed: 0,
         }
     }
 
@@ -63,6 +66,7 @@ impl<R: Read + Seek> BitReader<R> {
         }
 
         self.bits_in_buffer -= 1;
+        self.total_bits_consumed += 1;
         if self.little_endian {
             Ok(((self.buffer >> (7 - self.bits_in_buffer)) & 1) != 0)
         } else {
@@ -120,8 +124,36 @@ impl<R: Read + Seek> BitReader<R> {
             return 0;
         }
         self.bits_in_buffer -= n;
+        self.total_bits_consumed += n as u64;
         (self.buffer >> self.bits_in_buffer) & ((1u32 << n) - 1)
     }
+
+    #[inline(always)]
+    pub fn peek_bits_unchecked(&mut self, n: u8) -> Option<u32> {
+        while self.bits_in_buffer < n {
+            let mut byte = [0u8; 1];
+            match self.reader.read_exact(&mut byte) {
+                Ok(_) => {
+                    self.buffer = (self.buffer << 8) | byte[0] as u32;
+                    self.bits_in_buffer += 8;
+                }
+                Err(_) => {
+                    return None;
+                }
+            }
+        }
+        if n == 0 {
+            return Some(0);
+        }
+        Some((self.buffer >> (self.bits_in_buffer - n)) & ((1u32 << n) - 1))
+    }
+
+    #[inline(always)]
+    pub fn consume_bits(&mut self, n: u8) {
+        self.bits_in_buffer -= n;
+        self.total_bits_consumed += n as u64;
+    }
+
 
     /// Reads a single byte from the bitstream.
     ///
@@ -202,8 +234,13 @@ impl<R: Read + Seek> BitReader<R> {
     }
 
     /// Clears the current bit buffer.
+    /// Seeks back any whole bytes that were pre-fetched but not yet consumed.
     #[inline(always)]
     pub fn clear_buffer(&mut self) {
+        let whole_bytes = self.bits_in_buffer / 8;
+        if whole_bytes > 0 {
+            self.reader.seek(SeekFrom::Current(-(whole_bytes as i64))).ok();
+        }
         self.bits_in_buffer = 0;
         self.buffer = 0;
     }
