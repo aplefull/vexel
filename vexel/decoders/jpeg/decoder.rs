@@ -5,6 +5,7 @@ use crate::utils::info::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use crate::decoders::jpeg::idct::dequantize_and_idct;
+use crate::decoders::jpeg::bitreader::JpegBitReader;
 use std::fmt::Debug;
 use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
@@ -27,11 +28,11 @@ impl ComponentPlane {
         }
     }
 
-    fn get_block_mut(&mut self, block_x: u32, block_y: u32) -> Option<&mut [i32]> {
+    fn get_block_mut(&mut self, block_x: u32, block_y: u32) -> Option<&mut [i32; 64]> {
         let block_idx = block_y * self.blocks_per_line + block_x;
         let start = (block_idx * 64) as usize;
         if start + 64 <= self.data.len() {
-            Some(&mut self.data[start..start + 64])
+            (&mut self.data[start..start + 64]).try_into().ok()
         } else {
             None
         }
@@ -1204,64 +1205,59 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     #[inline(always)]
-    fn get_next_symbol<S: Read + Seek>(&self, reader: &mut BitReader<S>, table: &HuffmanTable) -> VexelResult<u8> {
-        if !table.fast_lookup.is_empty() {
-            if let Some(peek) = reader.peek_bits_unchecked(9) {
-                let peek = peek as usize;
-                let entry = table.fast_lookup[peek];
-                if entry >> 16 != 0 {
-                    let code_len = (entry & 0xFF) as u8;
-                    let symbol = ((entry >> 8) & 0xFF) as u8;
-                    reader.consume_bits(code_len);
-                    return Ok(symbol);
-                }
-                reader.consume_bits(9);
-                let mut code = peek as u32;
-                for i in 9..16 {
-                    code = (code << 1) | reader.read_bits_unchecked(1);
-                    let first = table.first_code[i];
-                    if first != u32::MAX {
-                        let count = (table.offsets[i + 1] - table.offsets[i]) as usize;
-                        if code >= first && (code - first) < count as u32 {
-                            let idx = table.offsets[i] as usize + (code - first) as usize;
-                            return Ok(table.symbols[idx]);
-                        }
+    #[inline(always)]
+    fn get_next_symbol(reader: &mut JpegBitReader<'_>, table: &HuffmanTable) -> u8 {
+        if let Some(peek) = reader.peek9() {
+            let entry = unsafe { *table.fast_lookup.get_unchecked(peek as usize) };
+            if entry >> 16 != 0 {
+                reader.consume(entry & 0xFF);
+                return ((entry >> 8) & 0xFF) as u8;
+            }
+            reader.consume(9);
+            let mut code = peek;
+            for i in 9..16 {
+                code = (code << 1) | reader.read_bits(1);
+                let first = unsafe { *table.first_code.get_unchecked(i) };
+                if first != u32::MAX {
+                    let count = unsafe {
+                        table.offsets.get_unchecked(i + 1).wrapping_sub(*table.offsets.get_unchecked(i))
+                    } as usize;
+                    if code >= first && (code - first) < count as u32 {
+                        let idx = unsafe { *table.offsets.get_unchecked(i) } as usize + (code - first) as usize;
+                        return unsafe { *table.symbols.get_unchecked(idx) };
                     }
                 }
-                log_warn!("Invalid Huffman code: {}, replacing with 0", code);
-                return Ok(0);
             }
+            log_warn!("Invalid Huffman code: {}, replacing with 0", code);
+            return 0;
         }
 
         let mut code = 0u32;
-
         for i in 0..16 {
-            code = (code << 1) | reader.read_bits_unchecked(1);
-
+            code = (code << 1) | reader.read_bits(1);
             let first = table.first_code[i];
             if first != u32::MAX {
                 let count = (table.offsets[i + 1] - table.offsets[i]) as usize;
                 if code >= first && (code - first) < count as u32 {
                     let idx = table.offsets[i] as usize + (code - first) as usize;
-                    return Ok(table.symbols[idx]);
+                    return table.symbols[idx];
                 }
             }
         }
 
         log_warn!("Invalid Huffman code: {}, replacing with 0", code);
-
-        Ok(0)
+        0
     }
 
-    fn decode_mcu<S: Read + Seek>(
+    fn decode_mcu(
         &self,
-        reader: &mut BitReader<S>,
-        mcu_component: &mut [i32],
+        reader: &mut JpegBitReader<'_>,
+        mcu_component: &mut [i32; 64],
         dc_table: &HuffmanTable,
         ac_table: &HuffmanTable,
         previous_dc: &mut i32,
     ) -> VexelResult<()> {
-        let length = self.get_next_symbol(reader, dc_table)?;
+        let length = Self::get_next_symbol(reader, dc_table);
 
         let max_length = if self.precision > 8 { 12 } else { 11 };
         if length > max_length {
@@ -1269,21 +1265,19 @@ impl<R: Read + Seek> JpegDecoder<R> {
             return Ok(());
         }
 
-        let mut coefficient = reader.read_bits_unchecked(length) as i32;
+        let mut dc_coeff = reader.read_bits(length as u32) as i32;
 
-        if length != 0 && coefficient < (1 << (length - 1)) {
-            coefficient -= (1 << length) - 1;
+        if length != 0 && dc_coeff < (1 << (length - 1)) {
+            dc_coeff -= (1 << length) - 1;
         }
 
-        mcu_component[0] = coefficient + *previous_dc;
-        *previous_dc = mcu_component[0];
+        let dc_value = dc_coeff + *previous_dc;
+        *previous_dc = dc_value;
+        unsafe { *mcu_component.get_unchecked_mut(0) = dc_value; }
 
-        let mut i = 1;
+        let mut i = 1usize;
         while i < 64 {
-            let symbol = self.get_next_symbol(reader, ac_table).unwrap_or_else(|_| {
-                log_warn!("Failed to get next AC symbol during decoding, replacing with 0");
-                0
-            });
+            let symbol = Self::get_next_symbol(reader, ac_table);
 
             if symbol == 0 {
                 return Ok(());
@@ -1311,19 +1305,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
 
             if coefficient_length != 0 {
-                coefficient = reader.read_bits_unchecked(coefficient_length) as i32;
+                let mut coefficient = reader.read_bits(coefficient_length as u32) as i32;
 
                 if coefficient < (1 << (coefficient_length - 1)) {
                     coefficient -= (1 << coefficient_length) - 1;
                 }
 
-                if mcu_component.len() <= ZIGZAG_MAP[i] as usize {
-                    log_warn!("Invalid zigzag index: {}, skipping", ZIGZAG_MAP[i]);
-                    i += 1;
-                    continue;
-                }
-
-                mcu_component[ZIGZAG_MAP[i] as usize] = coefficient;
+                unsafe { *mcu_component.get_unchecked_mut(*ZIGZAG_MAP.get_unchecked(i) as usize) = coefficient; }
                 i += 1;
             }
         }
@@ -1375,7 +1363,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut previous_dc = vec![0i32; planes.len()];
 
         for scan in &self.scans {
-            let mut reader = BitReader::new(Cursor::new(scan.data.as_slice()));
+            let mut reader = JpegBitReader::new(scan.data.as_slice());
             let mut skips = 0;
             let restart_interval = self.restart_interval;
 
@@ -1462,10 +1450,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         let plane_index = info.plane_index;
                         let h_blocks = info.h_blocks;
                         let v_blocks = info.v_blocks;
+                        let plane_blocks_per_line = planes[plane_index].blocks_per_line;
 
                         for v in 0..v_blocks {
                             for h in 0..h_blocks {
-                                let plane_blocks_per_line = planes[plane_index].blocks_per_line;
                                 let block_x = mcu_x * h_blocks as u32 + h as u32;
                                 let block_y = mcu_y * v_blocks as u32 + v as u32;
 
@@ -1474,6 +1462,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                 }
 
                                 if let Some(component_data) = planes[plane_index].get_block_mut(block_x, block_y) {
+                                    assert_eq!(component_data.len(), 64);
                                     if scan.start_spectral == 0 {
                                         if scan.successive_high == 0 {
                                             // First DC scan
@@ -1485,14 +1474,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                 }
                                             };
 
-                                            let length = self.get_next_symbol(&mut reader, dc_table)?;
+                                            let length = Self::get_next_symbol(&mut reader, dc_table);
 
                                             if length > 11 {
                                                 log_warn!("Invalid DC coefficient length (>11): {}", length);
                                                 continue;
                                             }
 
-                                            let bits = reader.read_bits_unchecked(length);
+                                            let bits = reader.read_bits(length as u32);
 
                                             let mut value = bits as i32;
 
@@ -1505,7 +1494,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                             component_data[0] = value << scan.successive_low;
                                         } else {
                                             // Refining DC scan
-                                            let bit = reader.read_bits_unchecked(1);
+                                            let bit = reader.read_bits(1);
 
                                             component_data[0] |= (bit as i32) << scan.successive_low;
                                         }
@@ -1529,13 +1518,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                                             let mut k = scan.start_spectral as usize;
                                             while k <= scan.end_spectral as usize {
-                                                let symbol = match self.get_next_symbol(&mut reader, ac_table) {
-                                                    Ok(symbol) => symbol,
-                                                    Err(e) => {
-                                                        log_warn!("Failed to read AC coefficient symbol: {}", e);
-                                                        break;
-                                                    }
-                                                };
+                                                let symbol = Self::get_next_symbol(&mut reader, ac_table);
 
                                                 let num_zeros = symbol >> 4;
                                                 let length = symbol & 0xF;
@@ -1550,11 +1533,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                     }
 
                                                     for _ in 0..num_zeros {
-                                                        if k > ZIGZAG_MAP.len() {
-                                                            log_warn!("k value exceeded zigzag map: {}", k);
-                                                            break;
-                                                        }
-
                                                         component_data[ZIGZAG_MAP[k] as usize] = 0;
                                                         k += 1;
                                                     }
@@ -1564,7 +1542,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                         break;
                                                     }
 
-                                                    let bits = reader.read_bits_unchecked(length);
+                                                    let bits = reader.read_bits(length as u32);
                                                     let mut value = bits as i32;
 
                                                     if value < (1 << (length - 1)) {
@@ -1585,17 +1563,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                         }
 
                                                         for _ in 0..num_zeros {
-                                                            if k > ZIGZAG_MAP.len() {
-                                                                log_warn!("k value exceeded zigzag map: {}", k);
-                                                                break;
-                                                            }
-
                                                             component_data[ZIGZAG_MAP[k] as usize] = 0;
                                                             k += 1;
                                                         }
                                                     } else {
                                                         skips = (1 << num_zeros) - 1;
-                                                        skips += reader.read_bits_unchecked(num_zeros);
+                                                        skips += reader.read_bits(num_zeros as u32);
                                                         break;
                                                     }
 
@@ -1618,13 +1591,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                 };
 
                                                 while k <= scan.end_spectral as usize {
-                                                    let symbol = match self.get_next_symbol(&mut reader, ac_table) {
-                                                        Ok(symbol) => symbol,
-                                                        Err(e) => {
-                                                            log_warn!("Failed to read AC coefficient symbol: {}", e);
-                                                            break;
-                                                        }
-                                                    };
+                                                    let symbol = Self::get_next_symbol(&mut reader, ac_table);
 
                                                     let mut num_zeros = symbol >> 4;
                                                     let length = symbol & 0xF;
@@ -1639,31 +1606,24 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                             break;
                                                         }
 
-                                                        coefficient = if reader.read_bits_unchecked(1) != 0 { positive } else { negative };
+                                                        coefficient = if reader.read_bits(1) != 0 { positive } else { negative };
                                                     } else {
                                                         if num_zeros != 15 {
                                                             skips = 1 << num_zeros;
-                                                            skips += reader.read_bits_unchecked(num_zeros);
+                                                            skips += reader.read_bits(num_zeros as u32);
                                                             break;
                                                         }
                                                     }
 
-                                                    if component_data.len() <= ZIGZAG_MAP[k] as usize {
-                                                        log_warn!(
-                                                            "Value from a zigzag map exceeds component data length: {}",
-                                                            ZIGZAG_MAP[k]
-                                                        );
-                                                        break;
-                                                    }
-
                                                     loop {
-                                                        if component_data[ZIGZAG_MAP[k] as usize] != 0 {
-                                                            if reader.read_bits_unchecked(1) == 1 {
-                                                                if component_data[ZIGZAG_MAP[k] as usize] & positive == 0 {
-                                                                    if component_data[ZIGZAG_MAP[k] as usize] >= 0 {
-                                                                        component_data[ZIGZAG_MAP[k] as usize] += positive;
+                                                        let val = unsafe { component_data.get_unchecked_mut(ZIGZAG_MAP[k] as usize) };
+                                                        if *val != 0 {
+                                                            if reader.read_bits(1) == 1 {
+                                                                if *val & positive == 0 {
+                                                                    if *val >= 0 {
+                                                                        *val += positive;
                                                                     } else {
-                                                                        component_data[ZIGZAG_MAP[k] as usize] += negative;
+                                                                        *val += negative;
                                                                     }
                                                                 }
                                                             }
@@ -1682,7 +1642,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                     }
 
                                                     if coefficient != 0 && k <= scan.end_spectral as usize {
-                                                        component_data[ZIGZAG_MAP[k] as usize] = coefficient;
+                                                        unsafe { *component_data.get_unchecked_mut(ZIGZAG_MAP[k] as usize) = coefficient; }
                                                     }
 
                                                     k += 1;
@@ -1691,13 +1651,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                                             if skips > 0 {
                                                 while k <= scan.end_spectral as usize {
-                                                    if component_data[ZIGZAG_MAP[k] as usize] != 0 {
-                                                        if reader.read_bits_unchecked(1) == 1 {
-                                                            if component_data[ZIGZAG_MAP[k] as usize] & positive == 0 {
-                                                                if component_data[ZIGZAG_MAP[k] as usize] >= 0 {
-                                                                    component_data[ZIGZAG_MAP[k] as usize] += positive;
+                                                    let val = unsafe { component_data.get_unchecked_mut(ZIGZAG_MAP[k] as usize) };
+                                                    if *val != 0 {
+                                                        if reader.read_bits(1) == 1 {
+                                                            if *val & positive == 0 {
+                                                                if *val >= 0 {
+                                                                    *val += positive;
                                                                 } else {
-                                                                    component_data[ZIGZAG_MAP[k] as usize] += negative;
+                                                                    *val += negative;
                                                                 }
                                                             }
                                                         }
@@ -1721,7 +1682,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn decode_differences(&mut self, scan: &ScanData) -> VexelResult<Vec<Vec<i32>>> {
-        let mut reader = BitReader::new(Cursor::new(scan.data.as_slice()));
+        let mut reader = JpegBitReader::new(scan.data.as_slice());
 
         let mut differences: Vec<Vec<i32>> = vec![vec![]; scan.components.len()];
 
@@ -1744,12 +1705,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         }
                     };
 
-                    let bits_to_read = self.get_next_symbol(&mut reader, dc_table)?;
+                    let bits_to_read = Self::get_next_symbol(&mut reader, dc_table);
 
                     let diff = match bits_to_read {
                         0 => 0,
                         1..=15 => {
-                            let additional_bits = reader.read_bits(bits_to_read)? as i32;
+                            let additional_bits = reader.read_bits(bits_to_read as u32) as i32;
 
                             if additional_bits < (1 << (bits_to_read - 1)) {
                                 additional_bits + (-1 << bits_to_read) + 1
@@ -2262,7 +2223,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let scan = &self.scans[0];
         let is_non_interleaved = scan.components.len() == 1;
-        let mut reader = BitReader::new(Cursor::new(scan.data.as_slice()));
+        let mut reader = JpegBitReader::new(scan.data.as_slice());
         let mut previous_dc = vec![0i32; planes.len()];
 
         let mut max_h_samp = if is_non_interleaved {
