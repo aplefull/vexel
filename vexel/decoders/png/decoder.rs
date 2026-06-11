@@ -86,7 +86,17 @@ impl<R: Read + Seek> PngDecoder<R> {
 
     fn decode_pixels(&mut self) -> VexelResult<PixelData> {
         if self.compression_method == CompressionMethod::Deflate {
-            self.idat_data = ZlibDecoder::from_bytes(std::mem::take(&mut self.idat_data)).decode();
+            let bits_per_pixel = match self.color_type {
+                ColorType::Grayscale => self.bit_depth as u32,
+                ColorType::RGB => self.bit_depth as u32 * 3,
+                ColorType::Indexed => self.bit_depth as u32,
+                ColorType::GrayscaleAlpha => self.bit_depth as u32 * 2,
+                ColorType::RGBA => self.bit_depth as u32 * 4,
+            };
+            let bytes_per_row = ((bits_per_pixel * self.width + 7) / 8 + 1) as usize;
+            let capacity = bytes_per_row * self.height as usize;
+            self.idat_data = ZlibDecoder::from_bytes(std::mem::take(&mut self.idat_data))
+                .decode_with_capacity(capacity);
         }
 
         let bits_per_pixel = match self.color_type {

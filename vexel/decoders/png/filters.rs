@@ -1,6 +1,5 @@
 use crate::log_warn;
 use crate::utils::error::VexelResult;
-use crate::utils::traits::SafeAccess;
 use super::types::{FilterType, ColorType};
 
 pub struct FilterDecoder {
@@ -24,85 +23,57 @@ impl FilterDecoder {
     }
 
     fn decode_sub_filter(&self, src: &[u8], dst: &mut [u8], bytes_per_pixel: usize) {
-        if dst.check_range(0..bytes_per_pixel).is_err() || src.check_range(0..bytes_per_pixel).is_err() {
+        let len = src.len();
+        if dst.len() < len || bytes_per_pixel > len {
             log_warn!("Invalid range for sub filter: {}", bytes_per_pixel);
             return;
         }
-
         dst[..bytes_per_pixel].copy_from_slice(&src[..bytes_per_pixel]);
-
-        for i in bytes_per_pixel..src.len() {
-            if dst.get_safe(i).is_err() || src.get_safe(i).is_err() || dst.get_safe(i - bytes_per_pixel).is_err() {
-                log_warn!("Invalid range for sub filter: {}", i);
-                break;
-            }
-
+        for i in bytes_per_pixel..len {
             dst[i] = src[i].wrapping_add(dst[i - bytes_per_pixel]);
         }
     }
 
     fn decode_up_filter(&self, src: &[u8], dst: &mut [u8], prior: &[u8]) {
-        for i in 0..src.len() {
-            if dst.get_safe(i).is_err() || src.get_safe(i).is_err() || prior.get_safe(i).is_err() {
-                log_warn!("Invalid range for up filter: {}", i);
-                break;
-            }
-
+        let len = src.len();
+        if dst.len() < len || prior.len() < len {
+            log_warn!("Invalid range for up filter");
+            return;
+        }
+        for i in 0..len {
             dst[i] = src[i].wrapping_add(prior[i]);
         }
     }
 
     fn decode_average_filter(&self, src: &[u8], dst: &mut [u8], prior: &[u8], bytes_per_pixel: usize) {
+        let len = src.len();
+        if dst.len() < len || prior.len() < len || bytes_per_pixel > len {
+            log_warn!("Invalid range for average filter: {}", bytes_per_pixel);
+            return;
+        }
         for i in 0..bytes_per_pixel {
-            if dst.get_safe(i).is_err() || src.get_safe(i).is_err() || prior.get_safe(i).is_err() {
-                log_warn!("Invalid range for average filter: {}", i);
-                break;
-            }
-
             dst[i] = src[i].wrapping_add(prior[i] >> 1);
         }
-
-        for i in bytes_per_pixel..src.len() {
-            if dst.get_safe(i).is_err()
-                || src.get_safe(i).is_err()
-                || prior.get_safe(i).is_err()
-                || dst.get_safe(i - bytes_per_pixel).is_err()
-            {
-                log_warn!("Invalid range for average filter: {}", i);
-                break;
-            }
-
+        for i in bytes_per_pixel..len {
             let left = dst[i - bytes_per_pixel] as u16;
             let above = prior[i] as u16;
-            let avg = ((left + above) >> 1) as u8;
-            dst[i] = src[i].wrapping_add(avg);
+            dst[i] = src[i].wrapping_add(((left + above) >> 1) as u8);
         }
     }
 
     fn decode_paeth_filter(&self, src: &[u8], dst: &mut [u8], prior: &[u8], bytes_per_pixel: usize) {
+        let len = src.len();
+        if dst.len() < len || prior.len() < len || bytes_per_pixel > len {
+            log_warn!("Invalid range for paeth filter: {}", bytes_per_pixel);
+            return;
+        }
         for i in 0..bytes_per_pixel {
-            if dst.get_safe(i).is_err() || src.get_safe(i).is_err() || prior.get_safe(i).is_err() {
-                log_warn!("Invalid range for paeth filter: {}", i);
-                break;
-            }
-
             dst[i] = src[i].wrapping_add(prior[i]);
         }
-
-        for i in bytes_per_pixel..src.len() {
-            if dst.get_safe(i).is_err()
-                || src.get_safe(i).is_err()
-                || prior.get_safe(i).is_err()
-                || dst.get_safe(i - bytes_per_pixel).is_err()
-            {
-                log_warn!("Invalid range for paeth filter: {}", i);
-                break;
-            }
-
+        for i in bytes_per_pixel..len {
             let left = dst[i - bytes_per_pixel];
             let above = prior[i];
             let upper_left = prior[i - bytes_per_pixel];
-
             dst[i] = src[i].wrapping_add(paeth_predictor(left, above, upper_left));
         }
     }

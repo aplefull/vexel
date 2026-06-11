@@ -1,12 +1,18 @@
 use std::io;
 
+mod simd;
+
 const MAX_BITS: usize = 15;
 const CODELEN_SYMBOLS: usize = 19;
 
-const PRIMARY_BITS: u32 = 9;
-const PRIMARY_TABLE_SIZE: usize = 1 << PRIMARY_BITS;
+const LITLEN_PRIMARY_BITS: u32 = 11;
+const LITLEN_PRIMARY_SIZE: usize = 1 << LITLEN_PRIMARY_BITS;
 
-const MAX_SECONDARY_BITS: u32 = MAX_BITS as u32 - PRIMARY_BITS;
+const DIST_PRIMARY_BITS: u32 = 9;
+const DIST_PRIMARY_SIZE: usize = 1 << DIST_PRIMARY_BITS;
+
+const CL_PRIMARY_BITS: u32 = 7;
+const CL_PRIMARY_SIZE: usize = 1 << CL_PRIMARY_BITS;
 
 #[rustfmt::skip]
 const LENGTH_BASE: [u32; 29] = [
@@ -49,159 +55,133 @@ const FIXED_LITLEN_LENGTHS: [u8; 288] = {
 
 const FIXED_DIST_LENGTHS: [u8; 32] = [5u8; 32];
 
-const TAG_INVALID: u32 = 0;
-const TAG_LITERAL: u32 = 1;
-const TAG_EOB: u32 = 2;
-const TAG_LENGTH: u32 = 3;
-const TAG_DIST: u32 = 4;
-const TAG_CLSYM: u32 = 5;
+
+const TAG_INVALID:  u32 = 0;
+const TAG_LITERAL:  u32 = 1;
+const TAG_LIT_PAIR: u32 = 2;
+const TAG_LENGTH:   u32 = 3;
+const TAG_DIST:     u32 = 4;
+const TAG_EOB:      u32 = 5;
 const TAG_REDIRECT: u32 = 6;
+const TAG_CL_SYM:   u32 = 7;
 
 #[derive(Clone, Copy, Debug)]
 struct Entry(u32);
 
 impl Entry {
-    const INVALID: Entry = Entry(TAG_INVALID);
+    const INVALID: Entry = Entry(TAG_INVALID << 28);
 
     #[inline(always)]
-    fn make(tag: u32, payload: u32, extra: u32, code_len: u32) -> Self {
-        Entry(tag << 28 | (payload & 0xFFFF) << 12 | (extra & 0xF) << 8 | (code_len & 0xFF))
-    }
-
-    fn literal(byte: u8, code_len: u32) -> Self {
-        Self::make(TAG_LITERAL, byte as u32, 0, code_len)
-    }
-
-    fn end_of_block(code_len: u32) -> Self {
-        Self::make(TAG_EOB, 0, 0, code_len)
-    }
-
-    fn length_symbol(idx: u32, code_len: u32) -> Self {
-        Self::make(TAG_LENGTH, idx, 0, code_len)
-    }
-
-    fn dist_symbol(idx: u32, code_len: u32) -> Self {
-        Self::make(TAG_DIST, idx, 0, code_len)
-    }
-
-    fn cl_symbol(sym: u8, code_len: u32) -> Self {
-        Self::make(TAG_CLSYM, sym as u32, 0, code_len)
-    }
-
-    fn redirect(sec_base: u32, sec_bits: u32, primary_consumed: u32) -> Self {
-        Entry(TAG_REDIRECT << 28 | (sec_base & 0xFFFFF) << 8 | (sec_bits & 0xF) << 4 | (primary_consumed & 0xF))
-    }
+    fn tag(self) -> u32 { self.0 >> 28 }
 
     #[inline(always)]
-    fn tag(self) -> u32 {
-        self.0 >> 28
-    }
+    fn is_invalid(self) -> bool { self.tag() == TAG_INVALID }
+    #[inline(always)]
+    fn is_literal(self) -> bool { self.tag() == TAG_LITERAL }
+    #[inline(always)]
+    fn is_lit_pair(self) -> bool { self.tag() == TAG_LIT_PAIR }
+    #[inline(always)]
+    fn is_length(self) -> bool { self.tag() == TAG_LENGTH }
+    #[inline(always)]
+    fn is_dist(self) -> bool { self.tag() == TAG_DIST }
+    #[inline(always)]
+    fn is_eob(self) -> bool { self.tag() == TAG_EOB }
+    #[inline(always)]
+    fn is_redirect(self) -> bool { self.tag() == TAG_REDIRECT }
 
     #[inline(always)]
-    fn is_invalid(self) -> bool {
-        self.tag() == TAG_INVALID
-    }
+    fn full_len(self) -> u32 { (self.0 >> 6) & 0x3F }
+    #[inline(always)]
+    fn base_len(self) -> u32 { self.0 & 0x3F }
 
     #[inline(always)]
-    fn is_redirect(self) -> bool {
-        self.tag() == TAG_REDIRECT
-    }
+    fn lit_a(self) -> u8 { (self.0 >> 20) as u8 }
+    #[inline(always)]
+    fn lit_b(self) -> u8 { (self.0 >> 12) as u8 }
 
     #[inline(always)]
-    fn is_literal(self) -> bool {
-        self.tag() == TAG_LITERAL
-    }
+    fn base_value(self) -> u32 { (self.0 >> 12) & 0xFFFF }
 
     #[inline(always)]
-    fn is_end_of_block(self) -> bool {
-        self.tag() == TAG_EOB
-    }
+    fn redirect_base(self) -> usize { ((self.0 >> 12) & 0xFFFF) as usize }
+    #[inline(always)]
+    fn redirect_sub_bits(self) -> u32 { self.full_len() - self.base_len() }
 
     #[inline(always)]
-    fn is_length(self) -> bool {
-        self.tag() == TAG_LENGTH
+    fn cl_sym(self) -> u8 { (self.0 >> 20) as u8 }
+
+    fn make_literal(byte: u8, code_len: u32) -> Self {
+        Entry((TAG_LITERAL << 28) | ((byte as u32) << 20) | (code_len << 6) | code_len)
     }
 
-    #[inline(always)]
-    fn code_len(self) -> u32 {
-        self.0 & 0xFF
+    fn make_lit_pair(a: u8, b: u8, len_a: u32, len_b: u32) -> Self {
+        let total = len_a + len_b;
+        Entry(
+            (TAG_LIT_PAIR << 28)
+                | ((a as u32) << 20)
+                | ((b as u32) << 12)
+                | (total << 6)
+                | total,
+        )
     }
 
-    #[inline(always)]
-    fn payload(self) -> u32 {
-        (self.0 >> 12) & 0xFFFF
+    fn make_length(base_val: u32, code_len: u32, extra_bits: u32) -> Self {
+        Entry((TAG_LENGTH << 28) | (base_val << 12) | ((code_len + extra_bits) << 6) | code_len)
     }
 
-    fn redirect_base(self) -> usize {
-        ((self.0 >> 8) & 0xFFFFF) as usize
+    fn make_dist(base_val: u32, code_len: u32, extra_bits: u32) -> Self {
+        Entry((TAG_DIST << 28) | (base_val << 12) | ((code_len + extra_bits) << 6) | code_len)
     }
 
-    fn redirect_sec_bits(self) -> u32 {
-        (self.0 >> 4) & 0xF
+    fn make_eob(code_len: u32) -> Self {
+        Entry((TAG_EOB << 28) | (code_len << 6) | code_len)
     }
 
-    fn redirect_primary_consumed(self) -> u32 {
-        self.0 & 0xF
+    fn make_redirect(sub_base: u32, sub_bits: u32, primary_bits: u32) -> Self {
+        Entry(
+            (TAG_REDIRECT << 28)
+                | (sub_base << 12)
+                | ((primary_bits + sub_bits) << 6)
+                | primary_bits,
+        )
+    }
+
+    fn make_cl_sym(sym: u8, code_len: u32) -> Self {
+        Entry((TAG_CL_SYM << 28) | ((sym as u32) << 20) | (code_len << 6) | code_len)
     }
 }
 
 #[inline(always)]
 fn reverse_bits(code: u32, len: u32) -> u32 {
-    if len == 0 {
-        return 0;
-    }
-    let shifted = code << (32 - len);
-    shifted.reverse_bits()
+    if len == 0 { return 0; }
+    (code << (32 - len)).reverse_bits()
 }
 
 struct HuffTable {
-    primary: [Entry; PRIMARY_TABLE_SIZE],
+    primary: Vec<Entry>,
     secondary: Vec<Entry>,
     primary_bits: u32,
 }
 
-enum SymbolKind {
-    Literal,
-    Dist,
-    CodeLen,
-}
+enum SymbolKind { Literal, Dist, CodeLen }
 
 impl HuffTable {
-    fn new_litlen() -> Box<Self> {
+    fn new(primary_bits: u32, primary_size: usize) -> Box<Self> {
         Box::new(HuffTable {
-            primary: [Entry::INVALID; PRIMARY_TABLE_SIZE],
+            primary: vec![Entry::INVALID; primary_size],
             secondary: Vec::new(),
-            primary_bits: PRIMARY_BITS,
-        })
-    }
-
-    fn new_dist() -> Box<Self> {
-        Box::new(HuffTable {
-            primary: [Entry::INVALID; PRIMARY_TABLE_SIZE],
-            secondary: Vec::new(),
-            primary_bits: PRIMARY_BITS,
-        })
-    }
-
-    fn new_cl() -> Box<Self> {
-        Box::new(HuffTable {
-            primary: [Entry::INVALID; PRIMARY_TABLE_SIZE],
-            secondary: Vec::new(),
-            primary_bits: 7,
+            primary_bits,
         })
     }
 
     fn build(&mut self, lengths: &[u8], kind: SymbolKind) -> Result<(), io::Error> {
-        let n_symbols = lengths.len();
-
+        let n = lengths.len();
         let mut bl_count = [0u32; MAX_BITS + 1];
-        for &len in lengths {
-            if len as usize > MAX_BITS {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Huffman code length exceeds max"));
+        for &l in lengths {
+            if l as usize > MAX_BITS {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "code length > 15"));
             }
-            if len > 0 {
-                bl_count[len as usize] += 1;
-            }
+            if l > 0 { bl_count[l as usize] += 1; }
         }
 
         let mut next_code = [0u32; MAX_BITS + 1];
@@ -211,137 +191,193 @@ impl HuffTable {
             next_code[bits] = code;
         }
 
-        for i in 0..n_symbols {
+        for i in 0..n {
             let len = lengths[i] as u32;
-            if len == 0 {
-                continue;
-            }
-
+            if len == 0 { continue; }
             let sym_code = next_code[len as usize];
             next_code[len as usize] += 1;
 
             let entry = match kind {
                 SymbolKind::Literal => {
                     if i < 256 {
-                        Entry::literal(i as u8, len)
+                        Entry::make_literal(i as u8, len)
                     } else if i == 256 {
-                        Entry::end_of_block(len)
+                        Entry::make_eob(len)
                     } else if i <= 285 {
-                        Entry::length_symbol((i - 257) as u32, len)
+                        let idx = i - 257;
+                        Entry::make_length(LENGTH_BASE[idx], len, LENGTH_EXTRA[idx])
                     } else {
                         continue;
                     }
                 }
                 SymbolKind::Dist => {
                     if i < 30 {
-                        Entry::dist_symbol(i as u32, len)
+                        Entry::make_dist(DIST_BASE[i], len, DIST_EXTRA[i])
                     } else {
                         continue;
                     }
                 }
-                SymbolKind::CodeLen => Entry::cl_symbol(i as u8, len),
+                SymbolKind::CodeLen => Entry::make_cl_sym(i as u8, len),
             };
 
             self.insert(sym_code, len, entry)?;
         }
-
         Ok(())
     }
 
     fn insert(&mut self, code: u32, len: u32, entry: Entry) -> Result<(), io::Error> {
         let pb = self.primary_bits;
-
         if len <= pb {
             let fill = 1u32 << (pb - len);
             let rev = reverse_bits(code, len);
             for k in 0..fill {
                 let idx = (rev | (k << len)) as usize;
-                if idx < PRIMARY_TABLE_SIZE {
+                if idx < self.primary.len() {
                     self.primary[idx] = entry;
                 }
             }
         } else {
             let overflow_bits = len - pb;
-            let primary_code = code >> overflow_bits;
-            let primary_rev = reverse_bits(primary_code, pb) as usize;
+            let primary_rev = reverse_bits(code >> overflow_bits, pb) as usize;
+            let overflow_rev = reverse_bits(code & ((1 << overflow_bits) - 1), overflow_bits);
 
-            let overflow_code = code & ((1 << overflow_bits) - 1);
-            let overflow_rev = reverse_bits(overflow_code, overflow_bits);
-
-            let (sec_base, sec_bits) = match self.primary[primary_rev] {
-                e if e.is_redirect() => (e.redirect_base(), e.redirect_sec_bits()),
-                e if e.is_invalid() => {
-                    let base = self.secondary.len();
-                    let bits = MAX_SECONDARY_BITS;
-                    let size = 1usize << bits;
-                    self.secondary.resize(base + size, Entry::INVALID);
-                    self.primary[primary_rev] = Entry::redirect(base as u32, bits, pb);
-                    (base, bits)
-                }
-                _ => {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Huffman table insert conflict"));
-                }
+            let (sub_base, sub_bits) = if self.primary[primary_rev].is_redirect() {
+                let e = self.primary[primary_rev];
+                (e.redirect_base(), e.redirect_sub_bits())
+            } else if self.primary[primary_rev].is_invalid() {
+                let base = self.secondary.len();
+                let bits = (MAX_BITS as u32) - pb;
+                let size = 1usize << bits;
+                self.secondary.resize(base + size, Entry::INVALID);
+                self.primary[primary_rev] = Entry::make_redirect(base as u32, bits, pb);
+                (base, bits)
+            } else {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Huffman conflict"));
             };
 
-            let fill = 1u32 << (sec_bits - overflow_bits);
+            let fill = 1u32 << (sub_bits - overflow_bits);
             for k in 0..fill {
-                let idx = sec_base + ((overflow_rev | (k << overflow_bits)) as usize & ((1 << sec_bits) - 1));
-                if idx < sec_base + (1 << sec_bits) && idx < self.secondary.len() {
+                let idx = sub_base + ((overflow_rev | (k << overflow_bits)) as usize & ((1 << sub_bits) - 1));
+                if idx < sub_base + (1 << sub_bits) && idx < self.secondary.len() {
                     self.secondary[idx] = entry;
                 }
             }
         }
-
         Ok(())
     }
 
-    fn decode(&self, bits: u32, n_bits: u32) -> (Entry, u32) {
-        if n_bits == 0 {
-            return (Entry::INVALID, 0);
-        }
+    #[inline(always)]
+    fn lookup(&self, bits: u64) -> (Entry, u32) {
+        let mask = (1u64 << self.primary_bits) - 1;
+        let idx = (bits & mask) as usize;
+        let e = self.primary[idx];
 
-        let primary_mask = (1u32 << self.primary_bits) - 1;
-        let idx = (bits & primary_mask) as usize;
-        let entry = self.primary[idx];
-
-        if entry.is_redirect() {
-            let sec_base = entry.redirect_base();
-            let sec_bits = entry.redirect_sec_bits();
-            let consumed_primary = entry.redirect_primary_consumed();
-
-            if n_bits < consumed_primary {
-                return (Entry::INVALID, 0);
-            }
-
-            let sec_mask = (1u32 << sec_bits) - 1;
-            let sec_idx = sec_base + ((bits >> consumed_primary) & sec_mask) as usize;
-
-            let sec_entry = if sec_idx < self.secondary.len() {
-                self.secondary[sec_idx]
-            } else {
-                Entry::INVALID
-            };
-
-            if sec_entry.is_invalid() {
-                return (Entry::INVALID, 0);
-            }
-
-            let total = sec_entry.code_len();
-            if total > n_bits {
-                return (Entry::INVALID, 0);
-            }
-
-            (sec_entry, total)
-        } else if entry.is_invalid() {
-            (Entry::INVALID, 0)
+        if e.is_redirect() {
+            let sub_base = e.redirect_base();
+            let sub_bits = e.redirect_sub_bits();
+            let pb = e.base_len();
+            let sub_mask = (1u64 << sub_bits) - 1;
+            let sub_idx = sub_base + (((bits >> pb) & sub_mask) as usize);
+            let se = if sub_idx < self.secondary.len() { self.secondary[sub_idx] } else { Entry::INVALID };
+            (se, se.base_len())
         } else {
-            let code_len = entry.code_len();
-            if code_len > n_bits {
-                return (Entry::INVALID, 0);
-            }
-            (entry, code_len)
+            (e, e.base_len())
         }
     }
+}
+
+fn build_fast_table(table: &mut HuffTable) {
+    let primary_bits = table.primary_bits;
+    let size = table.primary.len();
+
+    for i in 0..size {
+        let e = table.primary[i];
+        if !e.is_literal() { continue; }
+        let len_a = e.base_len();
+        if len_a == 0 || len_a >= primary_bits { continue; }
+
+        let next_idx = (i >> len_a) & (size - 1);
+        let e2 = table.primary[next_idx];
+        if !e2.is_literal() { continue; }
+        let len_b = e2.base_len();
+        if len_a + len_b > primary_bits { continue; }
+
+        table.primary[i] = Entry::make_lit_pair(e.lit_a(), e2.lit_a(), len_a, len_b);
+    }
+}
+
+fn build_dynamic_tables(bits: &mut BitBuffer) -> Result<(Box<HuffTable>, Box<HuffTable>), io::Error> {
+    let hlit = bits.read_bits(5)? as usize + 257;
+    let hdist = bits.read_bits(5)? as usize + 1;
+    let hclen = bits.read_bits(4)? as usize + 4;
+
+    let mut cl_lengths = [0u8; CODELEN_SYMBOLS];
+    for i in 0..hclen {
+        cl_lengths[CODE_LENGTH_ORDER[i]] = bits.read_bits(3)? as u8;
+    }
+
+    let mut cl_table = HuffTable::new(CL_PRIMARY_BITS, CL_PRIMARY_SIZE);
+    cl_table.build(&cl_lengths, SymbolKind::CodeLen)?;
+
+    let total = hlit + hdist;
+    let mut lengths = vec![0u8; total];
+    let mut i = 0;
+    while i < total {
+        if bits.count < 7 { bits.fill(); }
+        let (entry, consumed) = cl_table.lookup(bits.buf);
+        if consumed == 0 || entry.is_invalid() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad cl code"));
+        }
+        bits.consume(consumed);
+
+        let sym = entry.cl_sym();
+        match sym {
+            0..=15 => { lengths[i] = sym; i += 1; }
+            16 => {
+                if i == 0 { return Err(io::Error::new(io::ErrorKind::InvalidData, "Repeat w/o prior")); }
+                let rep = bits.read_bits(2)? as usize + 3;
+                let prev = lengths[i - 1];
+                let end = (i + rep).min(total);
+                lengths[i..end].fill(prev);
+                i = end;
+            }
+            17 => {
+                let rep = bits.read_bits(3)? as usize + 3;
+                let end = (i + rep).min(total);
+                lengths[i..end].fill(0);
+                i = end;
+            }
+            18 => {
+                let rep = bits.read_bits(7)? as usize + 11;
+                let end = (i + rep).min(total);
+                lengths[i..end].fill(0);
+                i = end;
+            }
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad cl sym")),
+        }
+    }
+
+    let mut litlen = HuffTable::new(LITLEN_PRIMARY_BITS, LITLEN_PRIMARY_SIZE);
+    litlen.build(&lengths[..hlit], SymbolKind::Literal)?;
+    build_fast_table(&mut litlen);
+
+    let mut dist = HuffTable::new(DIST_PRIMARY_BITS, DIST_PRIMARY_SIZE);
+    if hdist > 0 && lengths[hlit..].iter().any(|&l| l != 0) {
+        dist.build(&lengths[hlit..], SymbolKind::Dist)?;
+    }
+
+    Ok((litlen, dist))
+}
+
+fn build_fixed_tables() -> (Box<HuffTable>, Box<HuffTable>) {
+    let mut litlen = HuffTable::new(LITLEN_PRIMARY_BITS, LITLEN_PRIMARY_SIZE);
+    litlen.build(&FIXED_LITLEN_LENGTHS, SymbolKind::Literal).expect("fixed litlen");
+    build_fast_table(&mut litlen);
+
+    let mut dist = HuffTable::new(DIST_PRIMARY_BITS, DIST_PRIMARY_SIZE);
+    dist.build(&FIXED_DIST_LENGTHS[..30], SymbolKind::Dist).expect("fixed dist");
+
+    (litlen, dist)
 }
 
 struct BitBuffer {
@@ -367,31 +403,13 @@ impl BitBuffer {
 
     #[inline(always)]
     fn peek(&self, n: u32) -> u32 {
-        if n == 0 {
-            return 0;
-        }
         (self.buf & ((1u64 << n) - 1)) as u32
     }
 
     #[inline(always)]
     fn consume(&mut self, n: u32) {
-        debug_assert!(n <= self.count);
         self.buf >>= n;
-        self.count -= n;
-    }
-
-    #[inline(always)]
-    fn read_bits(&mut self, n: u32) -> Result<u32, io::Error> {
-        if n == 0 {
-            return Ok(0);
-        }
-        self.fill();
-        if self.count < n {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Not enough bits"));
-        }
-        let val = self.peek(n);
-        self.consume(n);
-        Ok(val)
+        self.count = self.count.wrapping_sub(n);
     }
 
     fn align_to_byte(&mut self) {
@@ -410,7 +428,7 @@ impl BitBuffer {
             return Ok(b);
         }
         if self.pos >= self.src.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Unexpected EOF"));
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF"));
         }
         let b = self.src[self.pos];
         self.pos += 1;
@@ -423,167 +441,116 @@ impl BitBuffer {
         Ok(lo | (hi << 8))
     }
 
-    fn decode_symbol(&mut self, table: &HuffTable) -> Result<Entry, io::Error> {
-        self.fill();
-        let avail = self.count.min(15);
-        let (entry, consumed) = table.decode(self.peek(avail), avail);
-
-        if entry.is_invalid() || consumed == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad Huffman code"));
+    fn read_bits(&mut self, n: u32) -> Result<u32, io::Error> {
+        if n == 0 { return Ok(0); }
+        if self.count < n { self.fill(); }
+        if self.count < n {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Not enough bits"));
         }
+        let val = self.peek(n);
+        self.consume(n);
+        Ok(val)
+    }
 
+    #[inline(always)]
+    fn decode_litlen(&mut self, table: &HuffTable) -> Result<Entry, io::Error> {
+        if self.count < 15 { self.fill(); }
+        let (entry, consumed) = table.lookup(self.buf);
+        if entry.is_invalid() || consumed == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad litlen code"));
+        }
+        self.consume(consumed);
+        Ok(entry)
+    }
+
+    #[inline(always)]
+    fn decode_dist(&mut self, table: &HuffTable) -> Result<Entry, io::Error> {
+        if self.count < 15 { self.fill(); }
+        let (entry, consumed) = table.lookup(self.buf);
+        if entry.is_invalid() || consumed == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad dist code"));
+        }
         self.consume(consumed);
         Ok(entry)
     }
 }
 
-fn build_dynamic_tables(bits: &mut BitBuffer) -> Result<(Box<HuffTable>, Box<HuffTable>), io::Error> {
-    let hlit = bits.read_bits(5)? as usize + 257;
-    let hdist = bits.read_bits(5)? as usize + 1;
-    let hclen = bits.read_bits(4)? as usize + 4;
-
-    let mut cl_lengths = [0u8; CODELEN_SYMBOLS];
-    for i in 0..hclen {
-        cl_lengths[CODE_LENGTH_ORDER[i]] = bits.read_bits(3)? as u8;
-    }
-
-    let mut cl_table = HuffTable::new_cl();
-    cl_table.build(&cl_lengths, SymbolKind::CodeLen)?;
-
-    let total = hlit + hdist;
-    let mut lengths = vec![0u8; total];
-    let mut i = 0;
-    while i < total {
-        bits.fill();
-        let avail = bits.count.min(7);
-        if avail == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Not enough bits for code lengths"));
-        }
-        let (entry, consumed) = cl_table.decode(bits.peek(avail), avail);
-        if entry.is_invalid() || consumed == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad code-length Huffman code"));
-        }
-        bits.consume(consumed);
-
-        let sym = entry.payload() as u8;
-
-        match sym {
-            0..=15 => {
-                lengths[i] = sym;
-                i += 1;
-            }
-            16 => {
-                if i == 0 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Repeat with no previous length"));
-                }
-                let rep = bits.read_bits(2)? as usize + 3;
-                let prev = lengths[i - 1];
-                let end = (i + rep).min(total);
-                lengths[i..end].fill(prev);
-                i = end;
-            }
-            17 => {
-                let rep = bits.read_bits(3)? as usize + 3;
-                let end = (i + rep).min(total);
-                lengths[i..end].fill(0);
-                i = end;
-            }
-            18 => {
-                let rep = bits.read_bits(7)? as usize + 11;
-                let end = (i + rep).min(total);
-                lengths[i..end].fill(0);
-                i = end;
-            }
-            _ => {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad code-length symbol"));
-            }
-        }
-    }
-
-    let mut litlen = HuffTable::new_litlen();
-    litlen.build(&lengths[..hlit], SymbolKind::Literal)?;
-
-    let mut dist = HuffTable::new_dist();
-    if hdist > 0 && lengths[hlit..].iter().any(|&l| l != 0) {
-        dist.build(&lengths[hlit..], SymbolKind::Dist)?;
-    }
-
-    Ok((litlen, dist))
-}
-
-fn build_fixed_tables() -> (Box<HuffTable>, Box<HuffTable>) {
-    let mut litlen = HuffTable::new_litlen();
-    litlen.build(&FIXED_LITLEN_LENGTHS, SymbolKind::Literal).expect("Fixed litlen table");
-
-    let mut dist = HuffTable::new_dist();
-    dist.build(&FIXED_DIST_LENGTHS[..30], SymbolKind::Dist).expect("Fixed dist table");
-
-    (litlen, dist)
-}
-
 fn decode_block(bits: &mut BitBuffer, litlen: &HuffTable, dist: &HuffTable, output: &mut Vec<u8>) -> bool {
     loop {
-        let entry = match bits.decode_symbol(litlen) {
+        let entry = match bits.decode_litlen(litlen) {
             Ok(e) => e,
             Err(_) => return false,
         };
 
         if entry.is_literal() {
-            output.push(entry.payload() as u8);
+            if output.len() == output.capacity() {
+                output.reserve(4096);
+            }
+            unsafe {
+                let end = output.as_mut_ptr().add(output.len());
+                end.write(entry.lit_a());
+                output.set_len(output.len() + 1);
+            }
             continue;
         }
 
-        if entry.is_end_of_block() {
+        if entry.is_lit_pair() {
+            if output.len() + 2 > output.capacity() {
+                output.reserve(4096);
+            }
+            unsafe {
+                let len = output.len();
+                let end = output.as_mut_ptr().add(len);
+                end.write(entry.lit_a());
+                end.add(1).write(entry.lit_b());
+                output.set_len(len + 2);
+            }
+            continue;
+        }
+
+        if entry.is_eob() {
             return true;
         }
 
         if entry.is_length() {
-            let lc = entry.payload() as usize;
-            if lc >= 29 {
-                return false;
-            }
-            let base = LENGTH_BASE[lc];
-            let extra_bits = LENGTH_EXTRA[lc];
-            let match_len = if extra_bits > 0 {
-                bits.fill();
-                match bits.read_bits(extra_bits) {
-                    Ok(e) => base + e,
-                    Err(_) => return false,
-                }
+            let base_val = entry.base_value() as usize;
+            let base_len_bits = entry.base_len();
+            let extra_bits = entry.full_len() - base_len_bits;
+            let extra = if extra_bits > 0 {
+                if bits.count < extra_bits { bits.fill(); }
+                let v = bits.peek(extra_bits);
+                bits.consume(extra_bits);
+                v as usize
             } else {
-                base
-            } as usize;
+                0
+            };
+            let match_len = base_val + extra;
 
-            let dist_entry = match bits.decode_symbol(dist) {
+            let dist_entry = match bits.decode_dist(dist) {
                 Ok(e) => e,
                 Err(_) => return false,
             };
-            let dc = dist_entry.payload() as usize;
-            if dc >= 30 {
-                return false;
-            }
-            let dist_base = DIST_BASE[dc];
-            let dist_extra = DIST_EXTRA[dc];
-            let match_dist = if dist_extra > 0 {
-                bits.fill();
-                match bits.read_bits(dist_extra) {
-                    Ok(e) => dist_base + e,
-                    Err(_) => return false,
-                }
+            if !dist_entry.is_dist() { return false; }
+
+            let dist_base = dist_entry.base_value() as usize;
+            let dist_base_bits = dist_entry.base_len();
+            let dist_extra_bits = dist_entry.full_len() - dist_base_bits;
+            let dist_extra = if dist_extra_bits > 0 {
+                if bits.count < dist_extra_bits { bits.fill(); }
+                let v = bits.peek(dist_extra_bits);
+                bits.consume(dist_extra_bits);
+                v as usize
             } else {
-                dist_base
-            } as usize;
+                0
+            };
+            let match_dist = dist_base + dist_extra;
 
             if match_dist == 0 || match_dist > output.len() {
                 return false;
             }
 
-            let start = output.len() - match_dist;
             output.reserve(match_len);
-            for k in 0..match_len {
-                let byte = output[start + (k % match_dist)];
-                output.push(byte);
-            }
+            simd::copy_match(output, match_dist, match_len);
             continue;
         }
 
@@ -601,8 +568,12 @@ impl DeflateDecoder {
     }
 
     pub fn decode(&self) -> Vec<u8> {
+        self.decode_with_capacity(0)
+    }
+
+    pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
         let mut bits = BitBuffer::new(self.data.clone());
-        let mut output = Vec::new();
+        let mut output = Vec::with_capacity(capacity_hint);
 
         let (fixed_litlen, fixed_dist) = build_fixed_tables();
 
@@ -628,9 +599,7 @@ impl DeflateDecoder {
                         Ok(v) => v,
                         Err(_) => break,
                     };
-                    if len != !nlen {
-                        break;
-                    }
+                    if len != !nlen { break; }
                     output.reserve(len as usize);
                     let mut ok = true;
                     for _ in 0..len {
@@ -670,42 +639,17 @@ impl ZlibDecoder {
     }
 
     pub fn decode(&self) -> Vec<u8> {
-        if self.data.len() < 2 {
-            return Vec::new();
-        }
+        self.decode_with_capacity(0)
+    }
 
+    pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
+        if self.data.len() < 2 { return Vec::new(); }
         let cmf = self.data[0];
         let flg = self.data[1];
-
-        let cm = cmf & 0x0F;
-        if cm != 8 {
-            return Vec::new();
-        }
-
+        if cmf & 0x0F != 8 { return Vec::new(); }
         let fdict = (flg >> 5) & 1;
         let offset = if fdict != 0 && self.data.len() >= 6 { 6 } else { 2 };
-
-        if offset >= self.data.len() {
-            return Vec::new();
-        }
-
-        DeflateDecoder::from_bytes(self.data[offset..].to_vec()).decode()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_idat_decompress() {
-        let idat = vec![
-            0x78u8, 0x9c, 0x63, 0x60, 0x00, 0x02, 0x01, 0x20, 0x7e, 0xc0, 0x60, 0xc7, 0xa0,
-            0x05, 0xa4, 0xf7, 0x30, 0xcc, 0x61, 0x58, 0xc1, 0xa0, 0xb5, 0x82, 0x41, 0xb7, 0x82,
-            0x41, 0xff, 0x07, 0x50, 0x00, 0x00, 0x50, 0xd7, 0x05, 0xf7,
-        ];
-        let result = ZlibDecoder::from_bytes(idat).decode();
-        println!("Result len: {}, bytes: {:x?}", result.len(), result);
-        assert_eq!(result.len(), 34);
+        if offset >= self.data.len() { return Vec::new(); }
+        DeflateDecoder::from_bytes(self.data[offset..].to_vec()).decode_with_capacity(capacity_hint)
     }
 }
