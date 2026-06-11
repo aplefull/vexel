@@ -1205,11 +1205,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     #[inline(always)]
     fn get_next_symbol<S: Read + Seek>(&self, reader: &mut BitReader<S>, table: &HuffmanTable) -> VexelResult<u8> {
-        if table.first_code.len() < 16 || table.offsets.len() < 17 {
-            log_warn!("Huffman table is malformed, first_code.len()={}, offsets.len()={}", table.first_code.len(), table.offsets.len());
-            return Ok(0);
-        }
-
         if !table.fast_lookup.is_empty() {
             if let Some(peek) = reader.peek_bits_unchecked(9) {
                 let peek = peek as usize;
@@ -1274,7 +1269,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             return Ok(());
         }
 
-        let mut coefficient = reader.read_bits(length)? as i32;
+        let mut coefficient = reader.read_bits_unchecked(length) as i32;
 
         if length != 0 && coefficient < (1 << (length - 1)) {
             coefficient -= (1 << length) - 1;
@@ -1291,10 +1286,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
             });
 
             if symbol == 0 {
-                for j in i..64 {
-                    mcu_component[ZIGZAG_MAP[j] as usize] = 0;
-                }
-
                 return Ok(());
             }
 
@@ -1308,16 +1299,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
             if i + zero_count as usize >= 64 {
                 log_warn!("Sum of zero count and current index of mcu value exceeds 64");
-                for j in i..64 {
-                    mcu_component[ZIGZAG_MAP[j] as usize] = 0;
-                }
                 return Ok(());
             }
 
-            for _ in 0..zero_count {
-                mcu_component[ZIGZAG_MAP[i] as usize] = 0;
-                i += 1;
-            }
+            i += zero_count as usize;
 
             let max_coefficient_length = if self.precision > 8 { 16 } else { 10 };
             if coefficient_length > max_coefficient_length {
@@ -1326,7 +1311,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
 
             if coefficient_length != 0 {
-                coefficient = reader.read_bits(coefficient_length)? as i32;
+                coefficient = reader.read_bits_unchecked(coefficient_length) as i32;
 
                 if coefficient < (1 << (coefficient_length - 1)) {
                     coefficient -= (1 << coefficient_length) - 1;
