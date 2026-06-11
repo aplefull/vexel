@@ -1,16 +1,21 @@
 use crate::log_warn;
+use crate::utils::channel_simd;
 use serde::Serialize;
 
 fn drop_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
-    pixels.chunks(4).map(|chunk| chunk[0..3].to_vec()).flatten().collect()
+    let num_pixels = pixels.len() / 4;
+    let mut out = Vec::with_capacity(num_pixels * 3);
+    unsafe { out.set_len(num_pixels * 3) };
+    channel_simd::rgba_to_rgb(&pixels, &mut out);
+    out
 }
 
 fn add_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
-    pixels
-        .chunks(3)
-        .map(|chunk| chunk.to_vec())
-        .flat_map(|v| Vec::from([v[0], v[1], v[2], 255]))
-        .collect()
+    let num_pixels = pixels.len() / 3;
+    let mut out = Vec::with_capacity(num_pixels * 4);
+    unsafe { out.set_len(num_pixels * 4) };
+    channel_simd::rgb_to_rgba(&pixels, &mut out);
+    out
 }
 
 fn u16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {

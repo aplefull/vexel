@@ -221,11 +221,14 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
         current_frame: usize,
         last_frame_time: Instant,
         frame_delays: Vec<u32>,
+        original_image_size: [usize; 2],
     }
 
     impl App {
-        fn image_to_frames(image: &Image) -> (Vec<egui::ColorImage>, Vec<u32>) {
+        fn image_to_frames(image: &Image) -> (Vec<egui::ColorImage>, Vec<u32>, [usize; 2]) {
             const MAX_TEXTURE_SIZE: usize = 16384;
+
+            let original_size = [image.width() as usize, image.height() as usize];
 
             let mut frames = Vec::new();
             let mut frame_delays = Vec::new();
@@ -279,7 +282,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                 frame_delays.push((frame.delay() * 10).max(17));
             }
 
-            (frames, frame_delays)
+            (frames, frame_delays, original_size)
         }
 
         fn new(files: Vec<PathBuf>) -> Self {
@@ -291,6 +294,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                 current_frame: 0,
                 last_frame_time: Instant::now(),
                 frame_delays: Vec::new(),
+                original_image_size: [0, 0],
             };
 
             let _ = app.load_current_file();
@@ -298,7 +302,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
             app
         }
 
-        fn load_image_from_path(path: &Path) -> Result<(Vec<egui::ColorImage>, Vec<u32>), Box<dyn std::error::Error>> {
+        fn load_image_from_path(path: &Path) -> Result<(Vec<egui::ColorImage>, Vec<u32>, [usize; 2]), Box<dyn std::error::Error>> {
             let mut decoder = Vexel::open(path)?;
             let image = decoder.decode()?;
             Ok(Self::image_to_frames(&image))
@@ -310,13 +314,15 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
             }
 
             match Self::load_image_from_path(&self.files[self.current_file_index]) {
-                Ok((frames, frame_delays)) => {
+                Ok((frames, frame_delays, original_size)) => {
                     self.frames = frames;
                     self.frame_delays = frame_delays;
+                    self.original_image_size = original_size;
                     self.current_frame = 0;
                     self.last_frame_time = Instant::now();
+                    let options = self.texture_options();
                     if let Some(texture) = &mut self.texture {
-                        texture.set(self.frames[0].clone(), egui::TextureOptions::default());
+                        texture.set(self.frames[0].clone(), options);
                     }
                     true
                 }
@@ -407,13 +413,23 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
             }
         }
 
+        fn texture_options(&self) -> egui::TextureOptions {
+            const PIXELATED_THRESHOLD: usize = 64;
+            if self.original_image_size[0] < PIXELATED_THRESHOLD || self.original_image_size[1] < PIXELATED_THRESHOLD {
+                egui::TextureOptions::NEAREST
+            } else {
+                egui::TextureOptions::default()
+            }
+        }
+
         fn refresh_texture(&mut self, ctx: &egui::Context) {
             if self.frames.is_empty() {
                 return;
             }
 
             if self.texture.is_none() {
-                self.texture = Some(ctx.load_texture("image", self.frames[0].clone(), egui::TextureOptions::default()));
+                let options = self.texture_options();
+                self.texture = Some(ctx.load_texture("image", self.frames[0].clone(), options));
             }
         }
 
@@ -429,12 +445,11 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                 self.current_frame = (self.current_frame + 1) % self.frames.len();
                 self.last_frame_time = Instant::now();
 
-                // Update texture with new frame
+                let options = self.texture_options();
                 if let Some(texture) = &mut self.texture {
-                    texture.set(self.frames[self.current_frame].clone(), egui::TextureOptions::default());
+                    texture.set(self.frames[self.current_frame].clone(), options);
                 }
 
-                // Request a repaint
                 ctx.request_repaint();
             } else {
                 ctx.request_repaint_after(Duration::from_millis((current_delay - elapsed) as u64));
