@@ -1083,13 +1083,8 @@ pub fn capture_chunk_info<R: Read + Seek>(
 
     let crc = reader.read_u32()?;
 
-    // Validate CRC
-    let mut crc_data = Vec::with_capacity(4 + length_u32 as usize);
-    crc_data.extend_from_slice(&chunk_type);
-    crc_data.extend_from_slice(&chunk_data);
-    
     let calculator = CrcCalculator::new();
-    let calculated_crc = calculator.calculate_crc(&crc_data);
+    let calculated_crc = calculator.calculate_crc_two_parts(&chunk_type, &chunk_data);
     
     if calculated_crc != crc {
         log_warn!(

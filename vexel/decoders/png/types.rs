@@ -137,54 +137,17 @@ pub struct PngFrame {
     pub fdat: Vec<u8>,
 }
 
-pub struct CrcCalculator {
-    table: [[u32; 256]; 4],
-}
+pub struct CrcCalculator;
 
 impl CrcCalculator {
     pub fn new() -> Self {
-        let mut t0 = [0u32; 256];
-        for n in 0..256 {
-            let mut c = n as u32;
-            for _ in 0..8 {
-                if c & 1 == 1 {
-                    c = 0xedb88320u32 ^ (c >> 1);
-                } else {
-                    c >>= 1;
-                }
-            }
-            t0[n] = c;
-        }
-        let mut t1 = [0u32; 256];
-        let mut t2 = [0u32; 256];
-        let mut t3 = [0u32; 256];
-        for n in 0..256 {
-            t1[n] = (t0[n] >> 8) ^ t0[(t0[n] & 0xff) as usize];
-            t2[n] = (t1[n] >> 8) ^ t0[(t1[n] & 0xff) as usize];
-            t3[n] = (t2[n] >> 8) ^ t0[(t2[n] & 0xff) as usize];
-        }
-        Self { table: [t0, t1, t2, t3] }
+        CrcCalculator
     }
 
-    fn update_crc(&self, crc: u32, buf: &[u8]) -> u32 {
-        let [t0, t1, t2, t3] = &self.table;
-        let mut c = crc;
-        let mut chunks = buf.chunks_exact(4);
-        for chunk in chunks.by_ref() {
-            let w = c ^ u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            c = t3[(w & 0xff) as usize]
-                ^ t2[((w >> 8) & 0xff) as usize]
-                ^ t1[((w >> 16) & 0xff) as usize]
-                ^ t0[(w >> 24) as usize];
-        }
-        for &b in chunks.remainder() {
-            c = t0[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
-        }
-        c
-    }
-
-    pub fn calculate_crc(&self, data: &[u8]) -> u32 {
-        self.update_crc(0xffffffff, data) ^ 0xffffffff
+    pub fn calculate_crc_two_parts(&self, part1: &[u8], part2: &[u8]) -> u32 {
+        use super::crc_simd::update_crc;
+        let c = update_crc(0xffffffff, part1);
+        update_crc(c, part2) ^ 0xffffffff
     }
 }
 

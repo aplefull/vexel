@@ -141,11 +141,11 @@ impl<R: Read + Seek> PngDecoder<R> {
         let data = pixel_decoder.deinterlace_scan_lines(&self.idat_data, self.width, self.height)?;
 
         let mut pixels = match self.color_type {
-            ColorType::Indexed => pixel_decoder.decode_indexed(&data)?,
-            ColorType::RGB => pixel_decoder.decode_rgb(&data)?,
-            ColorType::RGBA => pixel_decoder.decode_rgba(&data)?,
-            ColorType::Grayscale => pixel_decoder.decode_grayscale(&data)?,
-            ColorType::GrayscaleAlpha => pixel_decoder.decode_grayscale_alpha(&data)?,
+            ColorType::Indexed => pixel_decoder.decode_indexed(data)?,
+            ColorType::RGB => pixel_decoder.decode_rgb(data)?,
+            ColorType::RGBA => pixel_decoder.decode_rgba(data)?,
+            ColorType::Grayscale => pixel_decoder.decode_grayscale(data)?,
+            ColorType::GrayscaleAlpha => pixel_decoder.decode_grayscale_alpha(data)?,
         };
 
         pixels.correct_pixels(self.width, self.height);

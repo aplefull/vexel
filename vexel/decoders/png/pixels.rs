@@ -43,7 +43,7 @@ impl PixelDecoder {
         }
     }
 
-    pub fn decode_indexed(&self, input: &[u8]) -> VexelResult<PixelData> {
+    pub fn decode_indexed(&self, input: Vec<u8>) -> VexelResult<PixelData> {
         let palette = match &self.palette {
             Some(palette) => palette,
             None => {
@@ -63,7 +63,7 @@ impl PixelDecoder {
 
         match self.bit_depth {
             8 => {
-                for &index in input {
+                for &index in &input {
                     let color = palette.get(index as usize).unwrap_or(&[0, 0, 0]);
                     if has_trans {
                         let alpha = trans.as_ref().unwrap().get(index as usize).unwrap_or(&255);
@@ -80,7 +80,7 @@ impl PixelDecoder {
                 let width = self.width as usize;
                 let mut pixel_count = 0;
 
-                for &byte in input {
+                for &byte in &input {
                     for shift in (0..pixels_per_byte).rev() {
                         if pixel_count >= width {
                             break;
@@ -113,7 +113,7 @@ impl PixelDecoder {
         }
     }
 
-    pub fn decode_grayscale(&self, input: &[u8]) -> VexelResult<PixelData> {
+    pub fn decode_grayscale(&self, input: Vec<u8>) -> VexelResult<PixelData> {
         let trans_key = match &self.transparency {
             Some(TransparencyData::Grayscale(key)) => Some(*key),
             _ => None,
@@ -124,13 +124,13 @@ impl PixelDecoder {
                 if let Some(key) = trans_key {
                     let key8 = key as u8;
                     let mut output = Vec::with_capacity(input.len() * 2);
-                    for &v in input {
+                    for &v in &input {
                         output.push(v);
                         output.push(if v == key8 { 0 } else { 255 });
                     }
                     Ok(PixelData::LA8(output))
                 } else {
-                    Ok(PixelData::L8(input.to_vec()))
+                    Ok(PixelData::L8(input))
                 }
             }
             16 => {
@@ -171,7 +171,7 @@ impl PixelDecoder {
                 if let Some(key) = trans_key {
                     let key_raw = key as u8;
                     let mut output = Vec::new();
-                    for &byte in input {
+                    for &byte in &input {
                         for shift in (0..pixels_per_byte).rev() {
                             if pixel_count >= width {
                                 break;
@@ -189,7 +189,7 @@ impl PixelDecoder {
                     Ok(PixelData::LA8(output))
                 } else {
                     let mut output = Vec::new();
-                    for &byte in input {
+                    for &byte in &input {
                         for shift in (0..pixels_per_byte).rev() {
                             if pixel_count >= width {
                                 break;
@@ -210,9 +210,9 @@ impl PixelDecoder {
         }
     }
 
-    pub fn decode_grayscale_alpha(&self, input: &[u8]) -> VexelResult<PixelData> {
+    pub fn decode_grayscale_alpha(&self, input: Vec<u8>) -> VexelResult<PixelData> {
         match self.bit_depth {
-            8 => Ok(PixelData::LA8(input.to_vec())),
+            8 => Ok(PixelData::LA8(input)),
             16 => {
                 let mut output = Vec::with_capacity((input.len() / 4) * 2);
 
@@ -229,12 +229,12 @@ impl PixelDecoder {
                     self.bit_depth
                 );
 
-                Ok(PixelData::LA8(input.to_vec()))
+                Ok(PixelData::LA8(input))
             }
         }
     }
 
-    pub fn decode_rgb(&self, input: &[u8]) -> VexelResult<PixelData> {
+    pub fn decode_rgb(&self, input: Vec<u8>) -> VexelResult<PixelData> {
         match self.bit_depth {
             8 => {
                 match &self.transparency {
@@ -247,7 +247,7 @@ impl PixelDecoder {
                         }
                         Ok(PixelData::RGBA8(output))
                     }
-                    _ => Ok(PixelData::RGB8(input.to_vec())),
+                    _ => Ok(PixelData::RGB8(input)),
                 }
             }
             16 => {
@@ -280,14 +280,14 @@ impl PixelDecoder {
             }
             _ => {
                 log_warn!("Invalid bit depth for RGB color: {}, assuming 8 bits", self.bit_depth);
-                Ok(PixelData::RGB8(input.to_vec()))
+                Ok(PixelData::RGB8(input))
             }
         }
     }
 
-    pub fn decode_rgba(&self, input: &[u8]) -> VexelResult<PixelData> {
+    pub fn decode_rgba(&self, input: Vec<u8>) -> VexelResult<PixelData> {
         match self.bit_depth {
-            8 => Ok(PixelData::RGBA8(input.to_vec())),
+            8 => Ok(PixelData::RGBA8(input)),
             16 => {
                 let mut output = Vec::with_capacity((input.len() / 8) * 4);
                 for rgba in input.chunks_exact(8) {
@@ -301,7 +301,7 @@ impl PixelDecoder {
             }
             _ => {
                 log_warn!("Invalid bit depth for RGBA color: {}, assuming 8 bits", self.bit_depth);
-                Ok(PixelData::RGBA8(input.to_vec()))
+                Ok(PixelData::RGBA8(input))
             }
         }
     }

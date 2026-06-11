@@ -146,7 +146,7 @@ impl AnimationDecoder {
 
             let frame_pixels = frame_pixel_decoder.deinterlace_scan_lines(&decompressed, fctl.width, fctl.height)?;
 
-            let mut pixels = frame_pixel_decoder.decode_pixels_by_type(&frame_pixels)?;
+            let mut pixels = frame_pixel_decoder.decode_pixels_by_type(frame_pixels)?;
 
             pixels.correct_pixels(fctl.width, fctl.height);
 
@@ -173,7 +173,7 @@ impl AnimationDecoder {
 }
 
 impl PixelDecoder {
-    pub fn decode_pixels_by_type(&self, frame_pixels: &[u8]) -> VexelResult<PixelData> {
+    pub fn decode_pixels_by_type(&self, frame_pixels: Vec<u8>) -> VexelResult<PixelData> {
         let color_type = self.get_color_type();
         match color_type {
             ColorType::Indexed => self.decode_indexed(frame_pixels),

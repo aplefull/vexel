@@ -1,5 +1,6 @@
 use crate::log_warn;
 use crate::utils::error::VexelResult;
+use super::filter_simd;
 use super::types::{FilterType, ColorType};
 
 pub struct FilterDecoder {
@@ -51,14 +52,7 @@ impl FilterDecoder {
             log_warn!("Invalid range for average filter: {}", bytes_per_pixel);
             return;
         }
-        for i in 0..bytes_per_pixel {
-            dst[i] = src[i].wrapping_add(prior[i] >> 1);
-        }
-        for i in bytes_per_pixel..len {
-            let left = dst[i - bytes_per_pixel] as u16;
-            let above = prior[i] as u16;
-            dst[i] = src[i].wrapping_add(((left + above) >> 1) as u8);
-        }
+        filter_simd::decode_average(src, dst, prior, bytes_per_pixel);
     }
 
     fn decode_paeth_filter(&self, src: &[u8], dst: &mut [u8], prior: &[u8], bytes_per_pixel: usize) {
@@ -83,18 +77,20 @@ impl FilterDecoder {
 
         let bytes_per_pixel = (bits_per_pixel as usize + 7) / 8;
         let bytes_per_row = (pass_width as usize * bits_per_pixel as usize + 7) / 8;
-
         let scanline_bytes = 1 + bytes_per_row;
-        let mut unfiltered = Vec::new();
-        let mut prior_scanline = vec![0u8; scanline_bytes - 1];
 
-        for (_, scanline) in data.chunks(scanline_bytes).enumerate() {
+        let num_rows = data.len() / scanline_bytes;
+        let mut unfiltered = vec![0u8; num_rows * bytes_per_row];
+        let mut prior_row = vec![0u8; bytes_per_row];
+
+        for (row_idx, scanline) in data.chunks(scanline_bytes).enumerate() {
             if scanline.len() < scanline_bytes {
                 log_warn!(
                     "Invalid scanline length: {}, expected: {}",
                     scanline.len(),
                     scanline_bytes
                 );
+                unfiltered.truncate(row_idx * bytes_per_row);
                 break;
             }
 
@@ -110,43 +106,29 @@ impl FilterDecoder {
                 }
             };
 
-            if scanline.len() < 1 {
-                log_warn!("Invalid scanline length: {}", scanline.len());
-                continue;
-            }
-
             let filtered = &scanline[1..];
-            let mut decoded = vec![0u8; filtered.len()];
+            let dst_start = row_idx * bytes_per_row;
+            let dst = &mut unfiltered[dst_start..dst_start + bytes_per_row];
 
             match filter_type {
                 FilterType::None => {
-                    if decoded.len() != filtered.len() {
-                        log_warn!(
-                            "Length mismatch for unfiltered scanline: {} != {}",
-                            decoded.len(),
-                            filtered.len()
-                        );
-                        continue;
-                    }
-
-                    decoded.copy_from_slice(filtered);
+                    dst.copy_from_slice(filtered);
                 }
                 FilterType::Sub => {
-                    self.decode_sub_filter(filtered, &mut decoded, bytes_per_pixel);
+                    self.decode_sub_filter(filtered, dst, bytes_per_pixel);
                 }
                 FilterType::Up => {
-                    self.decode_up_filter(filtered, &mut decoded, &prior_scanline);
+                    self.decode_up_filter(filtered, dst, &prior_row);
                 }
                 FilterType::Average => {
-                    self.decode_average_filter(filtered, &mut decoded, &prior_scanline, bytes_per_pixel);
+                    self.decode_average_filter(filtered, dst, &prior_row, bytes_per_pixel);
                 }
                 FilterType::Paeth => {
-                    self.decode_paeth_filter(filtered, &mut decoded, &prior_scanline, bytes_per_pixel);
+                    self.decode_paeth_filter(filtered, dst, &prior_row, bytes_per_pixel);
                 }
             }
 
-            prior_scanline.copy_from_slice(&decoded);
-            unfiltered.extend_from_slice(&decoded);
+            prior_row.copy_from_slice(dst);
         }
 
         Ok(unfiltered)
