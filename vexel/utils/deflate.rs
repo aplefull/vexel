@@ -475,8 +475,12 @@ impl BitBuffer {
     }
 }
 
-fn decode_block(bits: &mut BitBuffer, litlen: &HuffTable, dist: &HuffTable, output: &mut Vec<u8>) -> bool {
+fn decode_block(bits: &mut BitBuffer, litlen: &HuffTable, dist: &HuffTable, output: &mut Vec<u8>, max_output: usize) -> bool {
     loop {
+        if output.len() >= max_output {
+            return true;
+        }
+
         let entry = match bits.decode_litlen(litlen) {
             Ok(e) => e,
             Err(_) => return false,
@@ -549,8 +553,9 @@ fn decode_block(bits: &mut BitBuffer, litlen: &HuffTable, dist: &HuffTable, outp
                 return false;
             }
 
-            output.reserve(match_len);
-            simd::copy_match(output, match_dist, match_len);
+            let clamped_len = match_len.min(max_output.saturating_sub(output.len()));
+            output.reserve(clamped_len);
+            simd::copy_match(output, match_dist, clamped_len);
             continue;
         }
 
@@ -567,13 +572,10 @@ impl DeflateDecoder {
         DeflateDecoder { data }
     }
 
-    pub fn decode(&self) -> Vec<u8> {
-        self.decode_with_capacity(0)
-    }
-
     pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
         let mut bits = BitBuffer::new(self.data.clone());
         let mut output = Vec::with_capacity(capacity_hint);
+        let max_output = if capacity_hint > 0 { capacity_hint * 4 } else { 256 * 1024 * 1024 };
 
         let (fixed_litlen, fixed_dist) = build_fixed_tables();
 
@@ -603,6 +605,7 @@ impl DeflateDecoder {
                     output.reserve(len as usize);
                     let mut ok = true;
                     for _ in 0..len {
+                        if output.len() >= max_output { break; }
                         match bits.read_byte_aligned() {
                             Ok(b) => output.push(b),
                             Err(_) => { ok = false; break; }
@@ -610,10 +613,10 @@ impl DeflateDecoder {
                     }
                     ok
                 }
-                1 => decode_block(&mut bits, &fixed_litlen, &fixed_dist, &mut output),
+                1 => decode_block(&mut bits, &fixed_litlen, &fixed_dist, &mut output, max_output),
                 2 => {
                     match build_dynamic_tables(&mut bits) {
-                        Ok((litlen, dist)) => decode_block(&mut bits, &litlen, &dist, &mut output),
+                        Ok((litlen, dist)) => decode_block(&mut bits, &litlen, &dist, &mut output, max_output),
                         Err(_) => false,
                     }
                 }

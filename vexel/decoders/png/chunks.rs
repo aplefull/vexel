@@ -134,16 +134,15 @@ impl ChunkReader {
     ) -> VexelResult<()> {
         let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = length_u32;
-        let mut chunk_data = vec![0; length as usize];
-        reader.read_exact(&mut chunk_data)?;
+        let length = length_u32 as usize;
+        let chunk_data = &raw_bytes[8..8 + length];
 
         if !frames.is_empty() {
             let fctl_info = frames.last_mut().unwrap();
-            fctl_info.fdat.extend(chunk_data.clone());
+            fctl_info.fdat.extend_from_slice(chunk_data);
         }
 
-        idat_data.extend(chunk_data);
+        idat_data.extend_from_slice(chunk_data);
 
         chunks.push(PngChunkInfo {
             start_offset,
@@ -151,7 +150,7 @@ impl ChunkReader {
             length: length_u32,
             raw_bytes,
             data: PngChunkData::IDAT(IdatChunkData {
-                data_length: length,
+                data_length: length_u32,
                 crc,
             }),
         });

@@ -146,8 +146,10 @@ impl CrcCalculator {
 
     pub fn calculate_crc_two_parts(&self, part1: &[u8], part2: &[u8]) -> u32 {
         use super::crc_simd::update_crc;
-        let c = update_crc(0xffffffff, part1);
-        update_crc(c, part2) ^ 0xffffffff
+        let mut combined = Vec::with_capacity(part1.len() + part2.len());
+        combined.extend_from_slice(part1);
+        combined.extend_from_slice(part2);
+        update_crc(0xffffffff, &combined) ^ 0xffffffff
     }
 }
 
