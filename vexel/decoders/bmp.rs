@@ -109,6 +109,16 @@ impl DibHeader {
             DibHeader::V5(h) => h.v4.v3.v2.info.compression,
         }
     }
+
+    fn color_masks(&self) -> Option<(u32, u32, u32, u32)> {
+        match self {
+            DibHeader::V2(h) => Some((h.red_mask, h.green_mask, h.blue_mask, 0)),
+            DibHeader::V3(h) => Some((h.v2.red_mask, h.v2.green_mask, h.v2.blue_mask, h.alpha_mask)),
+            DibHeader::V4(h) => Some((h.v3.v2.red_mask, h.v3.v2.green_mask, h.v3.v2.blue_mask, h.v3.alpha_mask)),
+            DibHeader::V5(h) => Some((h.v4.v3.v2.red_mask, h.v4.v3.v2.green_mask, h.v4.v3.v2.blue_mask, h.v4.v3.alpha_mask)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -217,6 +227,7 @@ pub struct BmpDecoder<R: Read + Seek> {
     dib_header: DibHeader,
     color_table: Vec<ColorEntry>,
     data: Vec<u8>,
+    rle_decoded: bool,
     reader: BitReader<R>,
 }
 
@@ -245,6 +256,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }),
             color_table: Vec::new(),
             data: Vec::new(),
+            rle_decoded: false,
             reader: BitReader::with_le(reader),
         }
     }
@@ -566,15 +578,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     }
                 }
             }
-
-            // Handle line wrapping
-            if x >= self.width {
-                x = 0;
-                y += 1;
-            }
         }
 
         self.data = decoded;
+        self.rle_decoded = true;
 
         Ok(())
     }
@@ -657,17 +664,74 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     }
                 }
             }
-
-            // Handle line wrapping
-            if x >= self.width {
-                x = 0;
-                y += 1;
-            }
         }
 
         self.data = decoded;
+        self.rle_decoded = true;
 
         Ok(())
+    }
+
+    fn decode_rle4_image(&self) -> Image {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let color_table = &self.color_table;
+        let src = &self.data;
+
+        let mut image_data = vec![0u8; width * height * 3];
+
+        for dst_row in 0..height {
+            let src_row = height - 1 - dst_row;
+            let src_offset = src_row * width;
+            let dst_offset = dst_row * width * 3;
+
+            for x in 0..width {
+                let idx = src_offset + x;
+                let pixel_value = if idx < src.len() { src[idx] as usize } else { 0 };
+                let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
+                    red: 0,
+                    green: 0,
+                    blue: 0,
+                    reserved: 0,
+                });
+                image_data[dst_offset + x * 3] = color.red;
+                image_data[dst_offset + x * 3 + 1] = color.green;
+                image_data[dst_offset + x * 3 + 2] = color.blue;
+            }
+        }
+
+        Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
+    }
+
+    fn decode_rle8_image(&self) -> Image {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let color_table = &self.color_table;
+        let src = &self.data;
+
+        let mut image_data = vec![0u8; width * height * 3];
+
+        for dst_row in 0..height {
+            let src_row = height - 1 - dst_row;
+            let src_offset = src_row * width;
+            let dst_offset = dst_row * width * 3;
+
+            for x in 0..width {
+                let idx = src_offset + x;
+                let pixel_value = if idx < src.len() { src[idx] as usize } else { 0 };
+                let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
+                    red: 0,
+                    green: 0,
+                    blue: 0,
+                    reserved: 0,
+                });
+                image_data[dst_offset + x * 3] = color.red;
+                image_data[dst_offset + x * 3 + 1] = color.green;
+                image_data[dst_offset + x * 3 + 2] = color.blue;
+            }
+        }
+
+        Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
     fn decode_jpeg(&self) -> VexelResult<Image> {
@@ -1016,57 +1080,142 @@ impl<R: Read + Seek> BmpDecoder<R> {
         Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
     }
 
-    fn decode_32bit_image(&self) -> Image {
+    fn decode_32bit_image(&self, red_mask: u32, green_mask: u32, blue_mask: u32, alpha_mask: u32) -> Image {
         let width = self.width as usize;
         let height = self.height as usize;
         let src_stride = width * 4;
         let bottom_up = self.dib_header.height() > 0;
         let src = &self.data;
+        let has_alpha = alpha_mask != 0;
 
-        let mut image_data = vec![0u8; width * height * 4];
-
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            image_data
-                .par_chunks_mut(width * 4)
-                .enumerate()
-                .for_each(|(dst_row, dst)| {
-                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
-                    let row_offset = src_row * src_stride;
-
-                    for x in 0..width {
-                        let byte_offset = row_offset + x * 4;
-                        if byte_offset + 3 < src.len() {
-                            dst[x * 4] = src[byte_offset + 2];
-                            dst[x * 4 + 1] = src[byte_offset + 1];
-                            dst[x * 4 + 2] = src[byte_offset];
-                            dst[x * 4 + 3] = src[byte_offset + 3];
-                        }
-                    }
-                });
-        }
-
-        #[cfg(not(feature = "rayon"))]
-        {
-            for dst_row in 0..height {
-                let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
-                let row_offset = src_row * src_stride;
-                let dst_offset = dst_row * width * 4;
-
-                for x in 0..width {
-                    let byte_offset = row_offset + x * 4;
-                    if byte_offset + 3 < self.data.len() {
-                        image_data[dst_offset + x * 4] = self.data[byte_offset + 2];
-                        image_data[dst_offset + x * 4 + 1] = self.data[byte_offset + 1];
-                        image_data[dst_offset + x * 4 + 2] = self.data[byte_offset];
-                        image_data[dst_offset + x * 4 + 3] = self.data[byte_offset + 3];
-                    }
-                }
+        fn extract_channel(pixel: u32, mask: u32) -> u8 {
+            if mask == 0 {
+                return 0;
+            }
+            let shift = mask.trailing_zeros();
+            let bits = mask.count_ones();
+            let raw = (pixel & mask) >> shift;
+            if bits >= 8 {
+                (raw >> (bits - 8)) as u8
+            } else {
+                let scaled = (raw as u32 * 255) / ((1u32 << bits) - 1);
+                scaled as u8
             }
         }
 
-        Image::from_pixels(self.width, self.height, PixelData::RGBA8(image_data))
+        if has_alpha {
+            let mut image_data = vec![0u8; width * height * 4];
+
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                image_data
+                    .par_chunks_mut(width * 4)
+                    .enumerate()
+                    .for_each(|(dst_row, dst)| {
+                        let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                        let row_offset = src_row * src_stride;
+
+                        for x in 0..width {
+                            let byte_offset = row_offset + x * 4;
+                            if byte_offset + 3 < src.len() {
+                                let pixel = u32::from_le_bytes([
+                                    src[byte_offset],
+                                    src[byte_offset + 1],
+                                    src[byte_offset + 2],
+                                    src[byte_offset + 3],
+                                ]);
+                                dst[x * 4] = extract_channel(pixel, red_mask);
+                                dst[x * 4 + 1] = extract_channel(pixel, green_mask);
+                                dst[x * 4 + 2] = extract_channel(pixel, blue_mask);
+                                dst[x * 4 + 3] = extract_channel(pixel, alpha_mask);
+                            }
+                        }
+                    });
+            }
+
+            #[cfg(not(feature = "rayon"))]
+            {
+                for dst_row in 0..height {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
+                    let dst_offset = dst_row * width * 4;
+
+                    for x in 0..width {
+                        let byte_offset = row_offset + x * 4;
+                        if byte_offset + 3 < self.data.len() {
+                            let pixel = u32::from_le_bytes([
+                                self.data[byte_offset],
+                                self.data[byte_offset + 1],
+                                self.data[byte_offset + 2],
+                                self.data[byte_offset + 3],
+                            ]);
+                            image_data[dst_offset + x * 4] = extract_channel(pixel, red_mask);
+                            image_data[dst_offset + x * 4 + 1] = extract_channel(pixel, green_mask);
+                            image_data[dst_offset + x * 4 + 2] = extract_channel(pixel, blue_mask);
+                            image_data[dst_offset + x * 4 + 3] = extract_channel(pixel, alpha_mask);
+                        }
+                    }
+                }
+            }
+
+            Image::from_pixels(self.width, self.height, PixelData::RGBA8(image_data))
+        } else {
+            let mut image_data = vec![0u8; width * height * 3];
+
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                image_data
+                    .par_chunks_mut(width * 3)
+                    .enumerate()
+                    .for_each(|(dst_row, dst)| {
+                        let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                        let row_offset = src_row * src_stride;
+
+                        for x in 0..width {
+                            let byte_offset = row_offset + x * 4;
+                            if byte_offset + 3 < src.len() {
+                                let pixel = u32::from_le_bytes([
+                                    src[byte_offset],
+                                    src[byte_offset + 1],
+                                    src[byte_offset + 2],
+                                    src[byte_offset + 3],
+                                ]);
+                                dst[x * 3] = extract_channel(pixel, red_mask);
+                                dst[x * 3 + 1] = extract_channel(pixel, green_mask);
+                                dst[x * 3 + 2] = extract_channel(pixel, blue_mask);
+                            }
+                        }
+                    });
+            }
+
+            #[cfg(not(feature = "rayon"))]
+            {
+                for dst_row in 0..height {
+                    let src_row = if bottom_up { height - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
+                    let dst_offset = dst_row * width * 3;
+
+                    for x in 0..width {
+                        let byte_offset = row_offset + x * 4;
+                        if byte_offset + 3 < self.data.len() {
+                            let pixel = u32::from_le_bytes([
+                                self.data[byte_offset],
+                                self.data[byte_offset + 1],
+                                self.data[byte_offset + 2],
+                                self.data[byte_offset + 3],
+                            ]);
+                            image_data[dst_offset + x * 3] = extract_channel(pixel, red_mask);
+                            image_data[dst_offset + x * 3 + 1] = extract_channel(pixel, green_mask);
+                            image_data[dst_offset + x * 3 + 2] = extract_channel(pixel, blue_mask);
+                        }
+                    }
+                }
+            }
+
+            Image::from_pixels(self.width, self.height, PixelData::RGB8(image_data))
+        }
     }
 
     fn decode_64bit_image(&self) -> Image {
@@ -1187,11 +1336,29 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
         let image = match self.dib_header.bits_per_pixel() {
             1 => self.decode_1bit_image(),
-            4 => self.decode_4bit_image(),
-            8 => self.decode_8bit_image(),
+            4 => {
+                if self.rle_decoded {
+                    self.decode_rle4_image()
+                } else {
+                    self.decode_4bit_image()
+                }
+            }
+            8 => {
+                if self.rle_decoded {
+                    self.decode_rle8_image()
+                } else {
+                    self.decode_8bit_image()
+                }
+            }
             16 => self.decode_16bit_image(),
             24 => self.decode_24bit_image(),
-            32 => self.decode_32bit_image(),
+            32 => {
+                let (red_mask, green_mask, blue_mask, alpha_mask) = self
+                    .dib_header
+                    .color_masks()
+                    .unwrap_or((0x00FF0000, 0x0000FF00, 0x000000FF, 0));
+                self.decode_32bit_image(red_mask, green_mask, blue_mask, alpha_mask)
+            }
             64 => self.decode_64bit_image(),
             _ => {
                 log_warn!(

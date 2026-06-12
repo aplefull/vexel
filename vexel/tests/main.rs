@@ -54,10 +54,108 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
             comparison: Comparison::None,
         },
         TestCase {
-            name: "BMP",
-            path: "bmp/test.bmp",
+            name: "BMP bmp0_test_image",
+            path: "bmp/bmp0_test_image.bmp",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/bmp0_test_image.avif",
+            },
+        },
+        TestCase {
+            name: "BMP lena",
+            path: "bmp/lena.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/lena.avif",
+            },
+        },
+        TestCase {
+            name: "BMP OS2_2",
+            path: "bmp/OS2_2.BMP",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/OS2_2.avif",
+            },
+        },
+        TestCase {
+            name: "BMP Parrots",
+            path: "bmp/Parrots.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/Parrots.avif",
+            },
+        },
+        TestCase {
+            name: "BMP rgb32bfdef",
+            path: "bmp/rgb32bfdef.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/rgb32bfdef.avif",
+            },
+        },
+        TestCase {
+            name: "BMP rgb32",
+            path: "bmp/rgb32.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/rgb32.avif",
+            },
+        },
+        TestCase {
+            name: "BMP rgb32-xbgr",
+            path: "bmp/rgb32-xbgr.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/rgb32-xbgr.avif",
+            },
+        },
+        TestCase {
+            name: "BMP rgba32",
+            path: "bmp/rgba32.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/rgba32.avif",
+            },
+        },
+        TestCase {
+            name: "BMP RLE4_2",
+            path: "bmp/RLE4_2.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/RLE4_2.avif",
+            },
+        },
+        TestCase {
+            name: "BMP second_picture",
+            path: "bmp/second_picture.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/second_picture.avif",
+            },
+        },
+        TestCase {
+            name: "BMP terrain2",
+            path: "bmp/terrain2.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/terrain2.avif",
+            },
+        },
+        TestCase {
+            name: "BMP w3c_home",
+            path: "bmp/w3c_home.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/w3c_home.avif",
+            },
+        },
+        TestCase {
+            name: "BMP wallpaper-image-cuba-05",
+            path: "bmp/wallpaper-image-cuba-05.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/wallpaper-image-cuba-05.avif",
+            },
         },
         TestCase {
             name: "PNG",
