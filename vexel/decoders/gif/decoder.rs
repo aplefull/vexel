@@ -1,7 +1,6 @@
 use crate::bitreader::BitReader;
 use crate::utils::error::VexelResult;
 use crate::utils::info::GifInfo;
-use crate::utils::traits::SafeAccess;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use rayon::prelude::*;
 use std::io::{Read, Seek};
@@ -433,128 +432,82 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         })
     }
 
-    fn decode_frame(&self, frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
-        let indices = decompress_lzw(frame)?;
-        let mut image_data = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
-
-        let color_table = if frame.local_color_table_flag {
-            &frame.local_color_table
-        } else {
-            &self.global_color_table
-        };
-
-        for &index in &indices {
-            let color_index = index as usize * 3;
-
-            if let Some(transparent_idx) = frame.transparent_index {
-                if index == transparent_idx {
-                    image_data.extend_from_slice(&[0, 0, 0, 0]);
-                    continue;
-                }
-            }
-
-            if color_index + 2 <= color_table.len() {
-                image_data.push(*color_table.get(color_index).unwrap_or(&0));
-                image_data.push(*color_table.get(color_index + 1).unwrap_or(&0));
-                image_data.push(*color_table.get(color_index + 2).unwrap_or(&0));
-                image_data.push(255);
-            }
-        }
-
-        Ok(image_data)
-    }
-
-    fn deinterlace(width: u32, height: u32, data: &[u8]) -> Vec<u8> {
-        let mut result = vec![0; data.len()];
-
-        // GIF interlacing passes:
-        // Pass 1: Starting at row 0, every 8th row
-        // Pass 2: Starting at row 4, every 8th row
-        // Pass 3: Starting at row 2, every 4th row
-        // Pass 4: Starting at row 1, every 2nd row
-
-        let passes = [(0, 8), (4, 8), (2, 4), (1, 2)];
-
+    fn deinterlace_indices(width: u32, height: u32, indices: &[u8]) -> Vec<u8> {
+        let mut result = vec![0u8; indices.len()];
+        let passes = [(0usize, 8usize), (4, 8), (2, 4), (1, 2)];
+        let row_stride = width as usize;
         let mut source_pos = 0;
 
-        for pass in passes.iter() {
-            for y in (pass.0..height).step_by(pass.1) {
-                let row_start = (y * width * 4) as usize;
-                let row_end = row_start + (width * 4) as usize;
-                let source_pos_to = source_pos + (width * 4) as usize;
+        for (start, step) in passes {
+            let mut y = start;
+            while y < height as usize {
+                let dst_start = y * row_stride;
+                let dst_end = dst_start + row_stride;
+                let src_end = source_pos + row_stride;
 
-                if let Ok(source_slice) = data.get_range_safe(source_pos..source_pos_to) {
-                    if result.check_range(row_start..row_end).is_err() {
-                        log_warn!("Row end out of bounds: {} (len {})", row_end, result.len());
-                        continue;
-                    }
-
-                    result[row_start..row_end].copy_from_slice(source_slice);
+                if src_end <= indices.len() && dst_end <= result.len() {
+                    result[dst_start..dst_end].copy_from_slice(&indices[source_pos..src_end]);
                 } else {
-                    log_warn!("Failed to get source slice for row {}", y);
+                    log_warn!("Interlace index out of bounds at row {}", y);
                 }
 
-                source_pos += (width * 4) as usize;
+                source_pos += row_stride;
+                y += step;
             }
         }
 
         result
     }
 
-    fn compose_frame(&self, frame: &GifFrameInfo, previous_canvas: Option<Vec<u8>>) -> VexelResult<Vec<u8>> {
-        let canvas_size = (self.width * self.height * 4) as usize;
-
-        let mut canvas = match previous_canvas {
-            Some(prev) => prev,
-            None => vec![0u8; canvas_size],
+    fn compose_frame_from_indices(&self, frame: &GifFrameInfo, indices: &[u8], canvas: &mut Vec<u8>) {
+        let color_table = if frame.local_color_table_flag {
+            &frame.local_color_table
+        } else {
+            &self.global_color_table
         };
 
-        let frame_width = frame.width;
-        let frame_height = frame.height;
-        let left = frame.left;
-        let top = frame.top;
+        let clamped_h = frame.height.min(self.height.saturating_sub(frame.top)) as usize;
+        let clamped_w = frame.width.min(self.width.saturating_sub(frame.left)) as usize;
+        let index_row_stride = frame.width as usize;
+        let canvas_row_stride = self.width as usize * 4;
+        let valid_entries = color_table.len() / 3;
 
-        for y in 0..frame_height {
-            let canvas_y = top + y;
-            if canvas_y >= self.height {
+        for y in 0..clamped_h {
+            let index_row_start = y * index_row_stride;
+            let canvas_row_start = (frame.top as usize + y) * canvas_row_stride + frame.left as usize * 4;
+
+            if index_row_start + clamped_w > indices.len() || canvas_row_start + clamped_w * 4 > canvas.len() {
                 continue;
             }
 
-            for x in 0..frame_width {
-                let canvas_x = left + x;
-                if canvas_x >= self.width {
-                    continue;
-                }
+            let index_row = &indices[index_row_start..index_row_start + clamped_w];
+            let canvas_row = &mut canvas[canvas_row_start..canvas_row_start + clamped_w * 4];
 
-                let frame_pixel_index = ((y * frame_width + x) * 4) as usize;
-                let canvas_pixel_index = ((canvas_y * self.width + canvas_x) * 4) as usize;
-
-                let alpha = match frame.data.get_safe(frame_pixel_index + 3) {
-                    Ok(a) => *a,
-                    Err(_) => continue,
-                };
-
-                if alpha > 0 {
-                    if canvas.check_range(canvas_pixel_index..canvas_pixel_index + 4).is_err() {
-                        log_warn!(
-                            "Canvas pixel index out of bounds: {} (len {})",
-                            canvas_pixel_index,
-                            canvas.len()
-                        );
-                        continue;
+            match frame.transparent_index {
+                None => {
+                    for (idx, canvas_px) in index_row.iter().zip(canvas_row.chunks_exact_mut(4)) {
+                        if (*idx as usize) < valid_entries {
+                            let ci = *idx as usize * 3;
+                            canvas_px[0] = color_table[ci];
+                            canvas_px[1] = color_table[ci + 1];
+                            canvas_px[2] = color_table[ci + 2];
+                            canvas_px[3] = 255;
+                        }
                     }
-
-                    let src = match frame.data.get_range_safe(frame_pixel_index..frame_pixel_index + 4) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-
-                    canvas[canvas_pixel_index..canvas_pixel_index + 4].copy_from_slice(src);
+                }
+                Some(transparent) => {
+                    for (idx, canvas_px) in index_row.iter().zip(canvas_row.chunks_exact_mut(4)) {
+                        if *idx != transparent && (*idx as usize) < valid_entries {
+                            let ci = *idx as usize * 3;
+                            canvas_px[0] = color_table[ci];
+                            canvas_px[1] = color_table[ci + 1];
+                            canvas_px[2] = color_table[ci + 2];
+                            canvas_px[3] = 255;
+                        }
+                    }
                 }
             }
         }
-
-        Ok(canvas)
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -574,14 +527,12 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             }
         };
 
-        let mut previous_canvas: Option<Vec<u8>> = None;
-
-        let decoded_frames: Vec<GifFrameInfo> = self
+        let decoded_indices: Vec<Vec<u8>> = self
             .frames
             .par_iter()
             .map(|frame| {
-                let mut frame_pixels = match self.decode_frame(frame) {
-                    Ok(pixels) => pixels,
+                let mut indices = match decompress_lzw(frame) {
+                    Ok(i) => i,
                     Err(e) => {
                         log_warn!("Error decoding frame: {:?}", e);
                         return Err(e);
@@ -589,52 +540,37 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 };
 
                 if frame.interlace_flag {
-                    frame_pixels = Self::deinterlace(frame.width, frame.height, &frame_pixels);
+                    indices = Self::deinterlace_indices(frame.width, frame.height, &indices);
                 }
 
-                Ok(GifFrameInfo {
-                    left: frame.left,
-                    top: frame.top,
-                    width: frame.width,
-                    height: frame.height,
-                    local_color_table_flag: frame.local_color_table_flag,
-                    interlace_flag: frame.interlace_flag,
-                    sort_flag: frame.sort_flag,
-                    size_of_local_color_table: frame.size_of_local_color_table,
-                    local_color_table: frame.local_color_table.clone(),
-                    lzw_minimum_code_size: frame.lzw_minimum_code_size,
-                    transparent_index: frame.transparent_index,
-                    disposal_method: frame.disposal_method,
-                    delay: frame.delay,
-                    user_input: frame.user_input,
-                    data: frame_pixels,
-                })
+                Ok(indices)
             })
             .collect::<VexelResult<Vec<_>>>()?;
 
+        let canvas_size = (self.width * self.height * 4) as usize;
+        let mut canvas = vec![0u8; canvas_size];
         let mut image_frames = Vec::new();
 
-        for (frame_index, frame) in decoded_frames.iter().enumerate() {
+        for (frame, indices) in self.frames.iter().zip(decoded_indices) {
             let saved_canvas = match frame.disposal_method {
-                DisposalMethod::Previous | DisposalMethod::Background => previous_canvas.clone(),
+                DisposalMethod::Previous | DisposalMethod::Background => Some(canvas.clone()),
                 DisposalMethod::None => None,
             };
 
-            let canvas = match self.compose_frame(frame, previous_canvas) {
-                Ok(canvas) => canvas,
-                Err(e) => {
-                    log_warn!("Error composing frame. Skipping frame {}. Error: {:?}", frame_index, e);
-                    previous_canvas = saved_canvas;
-                    continue;
-                }
-            };
+            self.compose_frame_from_indices(frame, &indices, &mut canvas);
 
-            previous_canvas = match frame.disposal_method {
+            match frame.disposal_method {
                 DisposalMethod::None => {
-                    Some(canvas.clone())
+                    let next_canvas = canvas.clone();
+                    image_frames.push(ImageFrame {
+                        width: self.width,
+                        height: self.height,
+                        pixels: PixelData::RGBA8(canvas),
+                        delay: frame.delay as u32,
+                    });
+                    canvas = next_canvas;
                 }
                 DisposalMethod::Background => {
-                    let canvas_size = (self.width * self.height * 4) as usize;
                     let mut next_canvas = saved_canvas.unwrap_or_else(|| vec![0u8; canvas_size]);
                     let clamped_h = frame.height.min(self.height.saturating_sub(frame.top));
                     let clamped_w = frame.width.min(self.width.saturating_sub(frame.left));
@@ -646,17 +582,24 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                             next_canvas[row_base..row_end].fill(0);
                         }
                     }
-                    Some(next_canvas)
+                    image_frames.push(ImageFrame {
+                        width: self.width,
+                        height: self.height,
+                        pixels: PixelData::RGBA8(canvas),
+                        delay: frame.delay as u32,
+                    });
+                    canvas = next_canvas;
                 }
-                DisposalMethod::Previous => saved_canvas,
-            };
-
-            image_frames.push(ImageFrame {
-                width: self.width,
-                height: self.height,
-                pixels: PixelData::RGBA8(canvas),
-                delay: frame.delay as u32,
-            });
+                DisposalMethod::Previous => {
+                    image_frames.push(ImageFrame {
+                        width: self.width,
+                        height: self.height,
+                        pixels: PixelData::RGBA8(canvas),
+                        delay: frame.delay as u32,
+                    });
+                    canvas = saved_canvas.unwrap_or_else(|| vec![0u8; canvas_size]);
+                }
+            }
         }
 
         if self.width == 0 {
