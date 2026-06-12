@@ -6,6 +6,7 @@ use crate::decoders::bmp::types::{BitmapCompression, BitmapFileHeader, BitmapInf
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::VexelResult;
+use crate::utils::icc::ICCProfile;
 use crate::utils::info::BmpInfo;
 use crate::{log_error, log_warn, Image};
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -17,6 +18,7 @@ pub struct BmpDecoder<R: Read + Seek> {
     dib_header: DibHeader,
     extra_masks: Option<(u32, u32, u32, u32)>,
     color_table: Vec<ColorEntry>,
+    icc_profile: Option<ICCProfile>,
     data: Vec<u8>,
     rle_decoded: bool,
     reader: BitReader<R>,
@@ -47,6 +49,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }),
             extra_masks: None,
             color_table: Vec::new(),
+            icc_profile: None,
             data: Vec::new(),
             rle_decoded: false,
             reader: BitReader::with_le(reader),
@@ -68,6 +71,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             file_header: self.file_header.clone(),
             dib_header: self.dib_header.clone(),
             color_table: self.color_table.clone(),
+            icc_profile: self.icc_profile.clone(),
         }
     }
 
@@ -110,11 +114,13 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 1u32 << self.dib_header.bits_per_pixel()
             };
 
+            let is_core = matches!(self.dib_header, DibHeader::Core(_));
+
             for _ in 0..num_colors {
                 let blue = self.reader.read_u8()?;
                 let green = self.reader.read_u8()?;
                 let red = self.reader.read_u8()?;
-                let reserved = self.reader.read_u8()?;
+                let reserved = if is_core { 0 } else { self.reader.read_u8()? };
 
                 self.color_table.push(ColorEntry {
                     blue,
@@ -123,6 +129,23 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     reserved,
                 });
             }
+        }
+
+        Ok(())
+    }
+
+    fn read_icc_profile(&mut self) -> VexelResult<()> {
+        let (profile_data_offset, profile_size) = match &self.dib_header {
+            DibHeader::V5(h) if h.profile_size > 0 => (h.profile_data, h.profile_size),
+            _ => return Ok(()),
+        };
+
+        let file_offset = 14u64 + profile_data_offset as u64;
+        self.reader.seek(SeekFrom::Start(file_offset))?;
+        let data = self.reader.read_bytes(profile_size as usize)?;
+
+        if let Ok(profile) = ICCProfile::new(&data) {
+            self.icc_profile = Some(profile);
         }
 
         Ok(())
@@ -197,6 +220,13 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Ok(_) => (),
         };
 
+        match self.read_icc_profile() {
+            Err(e) => {
+                log_warn!("Error reading ICC profile: {}", e);
+            }
+            Ok(_) => (),
+        };
+
         match self.read_pixel_data() {
             Err(e) => {
                 log_error!("Error reading pixel data. This might be critical! Error: {}", e);
@@ -245,6 +275,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
         let image = match self.dib_header.bits_per_pixel() {
             1 => PixelDecoder::decode_1bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table),
+            2 => PixelDecoder::decode_2bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table),
             4 => {
                 if self.rle_decoded {
                     RleDecoder::decode_rle4_image(&self.data, self.width, self.height, &self.color_table)
@@ -260,8 +291,12 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 }
             }
             16 => {
+                let use_masks = matches!(
+                    self.dib_header.compression(),
+                    BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields
+                );
                 if let Some((red_mask, green_mask, blue_mask, alpha_mask)) =
-                    self.dib_header.color_masks().or(self.extra_masks)
+                    use_masks.then(|| self.dib_header.color_masks().or(self.extra_masks)).flatten()
                 {
                     PixelDecoder::decode_16bit_image_masked(
                         &self.data,
@@ -279,9 +314,13 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }
             24 => PixelDecoder::decode_24bit_image(&self.data, self.width, self.height, bottom_up),
             32 => {
-                let (red_mask, green_mask, blue_mask, alpha_mask) = self
-                    .dib_header
-                    .color_masks()
+                let use_masks = matches!(
+                    self.dib_header.compression(),
+                    BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields
+                );
+                let (red_mask, green_mask, blue_mask, alpha_mask) = use_masks
+                    .then(|| self.dib_header.color_masks().or(self.extra_masks))
+                    .flatten()
                     .unwrap_or((0x00FF0000, 0x0000FF00, 0x000000FF, 0));
                 PixelDecoder::decode_32bit_image(
                     &self.data,

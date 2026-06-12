@@ -7,6 +7,7 @@ use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::PngChunkInfo;
 use crate::decoders::webp::{AlphaChunkInfo, WebpAnimationInfo, WebpCompressionType, WebpExtendedInfo, WebpFrame};
 use crate::utils::exif::{ExifIfd, ExifValue};
+use crate::utils::icc::ICCProfile;
 use serde::Serialize;
 use std::fmt;
 use tsify::Tsify;
@@ -46,6 +47,7 @@ pub struct BmpInfo {
     pub file_header: BitmapFileHeader,
     pub dib_header: DibHeader,
     pub color_table: Vec<ColorEntry>,
+    pub icc_profile: Option<ICCProfile>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -452,6 +454,14 @@ impl fmt::Display for BmpInfo {
         writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
         writeln!(f, "File size: {} bytes", self.file_header.file_size)?;
         writeln!(f, "Color table entries: {}", self.color_table.len())?;
+        if let Some(profile) = &self.icc_profile {
+            writeln!(f, "ICC Profile:")?;
+            writeln!(f, "  Size: {} bytes", profile.header.size)?;
+            writeln!(f, "  Class: {}", profile.header.profile_class)?;
+            writeln!(f, "  Color space: {}", profile.header.color_space)?;
+            writeln!(f, "  PCS: {}", profile.header.pcs)?;
+            writeln!(f, "  Tags: {}", profile.tag_table.tag_count)?;
+        }
         Ok(())
     }
 }

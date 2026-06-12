@@ -222,6 +222,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
         last_frame_time: Instant,
         frame_delays: Vec<u32>,
         original_image_size: [usize; 2],
+        error_message: Option<String>,
     }
 
     impl App {
@@ -296,6 +297,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                 last_frame_time: Instant::now(),
                 frame_delays: Vec::new(),
                 original_image_size: [0, 0],
+                error_message: None,
             };
 
             let _ = app.load_current_file();
@@ -303,9 +305,11 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
             app
         }
 
-        fn load_image_from_path(path: &Path) -> Result<(Vec<egui::ColorImage>, Vec<u32>, [usize; 2]), Box<dyn std::error::Error>> {
-            let mut decoder = Vexel::open(path)?;
-            let image = decoder.decode()?;
+        fn load_image_from_path(path: &Path) -> Result<(Vec<egui::ColorImage>, Vec<u32>, [usize; 2]), String> {
+            let mut decoder = Vexel::open(path).map_err(|e| e.to_string())?;
+            let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.decode()))
+                .map_err(|_| "decoder panicked".to_string())?
+                .map_err(|e| e.to_string())?;
             Ok(Self::image_to_frames(&image))
         }
 
@@ -321,13 +325,19 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                     self.original_image_size = original_size;
                     self.current_frame = 0;
                     self.last_frame_time = Instant::now();
+                    self.error_message = None;
                     let options = self.texture_options();
                     if let Some(texture) = &mut self.texture {
                         texture.set(self.frames[0].clone(), options);
                     }
                     true
                 }
-                Err(_) => false,
+                Err(e) => {
+                    self.frames.clear();
+                    self.texture = None;
+                    self.error_message = Some(e);
+                    false
+                }
             }
         }
 
@@ -504,6 +514,24 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                         egui::FontId::proportional(16.0),
                         egui::Color32::WHITE,
                     );
+                } else {
+                    let file_name = self.files[self.current_file_index]
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Unknown");
+
+                    let error = self
+                        .error_message
+                        .as_deref()
+                        .unwrap_or("failed to decode image");
+
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{file_name}: {error}"))
+                                .color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b))
+                                .size(16.0),
+                        );
+                    });
                 }
             });
         }

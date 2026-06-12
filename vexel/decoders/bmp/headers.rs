@@ -38,6 +38,7 @@ impl HeaderReader {
 
         let dib_header = match header_size {
             12 => DibHeader::Core(Self::read_bitmap_core_header(reader)?),
+            16 => DibHeader::OS2V2(Self::read_os2_v2_short_header(reader)?),
             64 => DibHeader::OS2V2(Self::read_os2_v2_header(reader)?),
             40 => DibHeader::Info(Self::read_bitmap_info_header(reader)?),
             52 => DibHeader::V2(Self::read_v2_header(reader)?),
@@ -76,6 +77,29 @@ impl HeaderReader {
             height: reader.read_u16()?,
             planes: reader.read_u16()?,
             bits_per_pixel: reader.read_u16()?,
+        })
+    }
+
+    fn read_os2_v2_short_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<OS22XBitmapHeader> {
+        Ok(OS22XBitmapHeader {
+            width: reader.read_u32()? as i32,
+            height: reader.read_u32()? as i32,
+            planes: reader.read_u16()?,
+            bits_per_pixel: reader.read_u16()?,
+            compression: BitmapCompression::BiRgb,
+            image_size: 0,
+            x_pixels_per_meter: 0,
+            y_pixels_per_meter: 0,
+            colors_used: 0,
+            important_colors: 0,
+            units: 0,
+            reserved: 0,
+            recording: 0,
+            rendering: 0,
+            size1: 0,
+            size2: 0,
+            color_encoding: 0,
+            identifier: 0,
         })
     }
 

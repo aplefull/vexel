@@ -78,6 +78,81 @@ impl PixelDecoder {
         Image::from_pixels(width, height, PixelData::RGB8(image_data))
     }
 
+    pub fn decode_2bit_image(data: &[u8], width: u32, height: u32, bottom_up: bool, color_table: &[ColorEntry]) -> Image {
+        if color_table.len() < 4 {
+            log_warn!("Invalid color table for 2-bit image");
+        }
+
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let src_stride = (((width_usize + 3) / 4) + 3) & !3;
+
+        let mut image_data = vec![0u8; width_usize * height_usize * 3];
+
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width_usize * 3)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height_usize - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
+
+                    for x in 0..width_usize {
+                        let byte_index = row_offset + x / 4;
+                        let pixel_value = if byte_index < data.len() {
+                            let byte = data[byte_index];
+                            let bit_offset = 6 - (x % 4) * 2;
+                            ((byte >> bit_offset) & 0x03) as usize
+                        } else {
+                            0
+                        };
+                        let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
+                            red: 0,
+                            green: 0,
+                            blue: 0,
+                            reserved: 0,
+                        });
+                        dst[x * 3] = color.red;
+                        dst[x * 3 + 1] = color.green;
+                        dst[x * 3 + 2] = color.blue;
+                    }
+                });
+        }
+
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height_usize {
+                let src_row = if bottom_up { height_usize - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width_usize * 3;
+
+                for x in 0..width_usize {
+                    let byte_index = row_offset + x / 4;
+                    let pixel_value = if byte_index < data.len() {
+                        let byte = data[byte_index];
+                        let bit_offset = 6 - (x % 4) * 2;
+                        ((byte >> bit_offset) & 0x03) as usize
+                    } else {
+                        0
+                    };
+                    let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
+                        red: 0,
+                        green: 0,
+                        blue: 0,
+                        reserved: 0,
+                    });
+                    image_data[dst_offset + x * 3] = color.red;
+                    image_data[dst_offset + x * 3 + 1] = color.green;
+                    image_data[dst_offset + x * 3 + 2] = color.blue;
+                }
+            }
+        }
+
+        Image::from_pixels(width, height, PixelData::RGB8(image_data))
+    }
+
     pub fn decode_4bit_image(data: &[u8], width: u32, height: u32, bottom_up: bool, color_table: &[ColorEntry]) -> Image {
         if color_table.len() < 16 {
             log_warn!("Invalid color table for 4-bit image");
