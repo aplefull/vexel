@@ -3,16 +3,19 @@ use crate::decoders::bmp::compression::RleDecoder;
 use crate::decoders::bmp::headers::HeaderReader;
 use crate::decoders::bmp::pixels::PixelDecoder;
 use crate::decoders::bmp::types::{BitmapCompression, BitmapFileHeader, BitmapInfoHeader, ColorEntry, DibHeader};
+use crate::decoders::jpeg::decoder::JpegDecoder;
+use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::VexelResult;
 use crate::utils::info::BmpInfo;
 use crate::{log_error, log_warn, Image};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 pub struct BmpDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
     file_header: BitmapFileHeader,
     dib_header: DibHeader,
+    extra_masks: Option<(u32, u32, u32, u32)>,
     color_table: Vec<ColorEntry>,
     data: Vec<u8>,
     rle_decoded: bool,
@@ -42,6 +45,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 colors_used: 0,
                 important_colors: 0,
             }),
+            extra_masks: None,
             color_table: Vec::new(),
             data: Vec::new(),
             rle_decoded: false,
@@ -77,6 +81,24 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.dib_header = dib_header;
         self.width = width;
         self.height = height;
+        Ok(())
+    }
+
+    fn read_extra_masks(&mut self) -> VexelResult<()> {
+        if matches!(self.dib_header, DibHeader::Info(_)) {
+            let compression = self.dib_header.compression();
+            if matches!(compression, BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields) {
+                let r = self.reader.read_u32()?;
+                let g = self.reader.read_u32()?;
+                let b = self.reader.read_u32()?;
+                let a = if matches!(compression, BitmapCompression::BiAlphaBitfields) {
+                    self.reader.read_u32()?
+                } else {
+                    0
+                };
+                self.extra_masks = Some((r, g, b, a));
+            }
+        }
         Ok(())
     }
 
@@ -122,14 +144,28 @@ impl<R: Read + Seek> BmpDecoder<R> {
         Ok(())
     }
 
-    fn decode_jpeg(&self) -> VexelResult<Image> {
-        // TODO: Implement JPEG decompression
-        unimplemented!("JPEG compression not yet implemented");
+    fn decode_jpeg(&mut self) -> VexelResult<Image> {
+        self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
+        let image_size = self.dib_header.image_size();
+        let jpeg_bytes = if image_size > 0 {
+            self.reader.read_bytes(image_size as usize)?
+        } else {
+            self.reader.read_to_end()?
+        };
+        let mut jpeg_decoder = JpegDecoder::new(Cursor::new(jpeg_bytes));
+        jpeg_decoder.decode()
     }
 
-    fn decode_png(&self) -> VexelResult<Image> {
-        // TODO: Implement PNG decompression
-        unimplemented!("PNG compression not yet implemented");
+    fn decode_png(&mut self) -> VexelResult<Image> {
+        self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
+        let image_size = self.dib_header.image_size();
+        let png_bytes = if image_size > 0 {
+            self.reader.read_bytes(image_size as usize)?
+        } else {
+            self.reader.read_to_end()?
+        };
+        let mut png_decoder = PngDecoder::new(Cursor::new(png_bytes));
+        png_decoder.decode()
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -143,6 +179,13 @@ impl<R: Read + Seek> BmpDecoder<R> {
         match self.read_info_header() {
             Err(e) => {
                 log_error!("Error reading info header. This might be critical! Error: {}", e);
+            }
+            Ok(_) => (),
+        };
+
+        match self.read_extra_masks() {
+            Err(e) => {
+                log_error!("Error reading extra masks. This might be critical! Error: {}", e);
             }
             Ok(_) => (),
         };
@@ -185,6 +228,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 self.data = RleDecoder::decode_rle4(&self.data, self.width, self.height)?;
                 self.rle_decoded = true;
             }
+            BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields => (),
             BitmapCompression::BiJpeg => {
                 return self.decode_jpeg();
             }
@@ -215,7 +259,24 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     PixelDecoder::decode_8bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 }
             }
-            16 => PixelDecoder::decode_16bit_image(&self.data, self.width, self.height, bottom_up),
+            16 => {
+                if let Some((red_mask, green_mask, blue_mask, alpha_mask)) =
+                    self.dib_header.color_masks().or(self.extra_masks)
+                {
+                    PixelDecoder::decode_16bit_image_masked(
+                        &self.data,
+                        self.width,
+                        self.height,
+                        bottom_up,
+                        red_mask,
+                        green_mask,
+                        blue_mask,
+                        alpha_mask,
+                    )
+                } else {
+                    PixelDecoder::decode_16bit_image(&self.data, self.width, self.height, bottom_up)
+                }
+            }
             24 => PixelDecoder::decode_24bit_image(&self.data, self.width, self.height, bottom_up),
             32 => {
                 let (red_mask, green_mask, blue_mask, alpha_mask) = self

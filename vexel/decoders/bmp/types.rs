@@ -105,6 +105,18 @@ impl DibHeader {
         }
     }
 
+    pub fn image_size(&self) -> u32 {
+        match self {
+            DibHeader::Core(_) => 0,
+            DibHeader::OS2V2(h) => h.image_size,
+            DibHeader::Info(h) => h.image_size,
+            DibHeader::V2(h) => h.info.image_size,
+            DibHeader::V3(h) => h.v2.info.image_size,
+            DibHeader::V4(h) => h.v3.v2.info.image_size,
+            DibHeader::V5(h) => h.v4.v3.v2.info.image_size,
+        }
+    }
+
     pub fn color_masks(&self) -> Option<(u32, u32, u32, u32)> {
         match self {
             DibHeader::V2(h) => Some((h.red_mask, h.green_mask, h.blue_mask, 0)),

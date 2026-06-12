@@ -24,6 +24,23 @@ pub fn apply_palette_row(indices: &[u8], palette: &[ColorEntry], dst: &mut [u8],
     apply_palette_row_scalar(indices, palette, dst, width);
 }
 
+pub fn expand_rgb16_masked_row(
+    src: &[u8],
+    dst: &mut [u8],
+    width: usize,
+    r_shift: u32,
+    r_bits: u32,
+    g_shift: u32,
+    g_bits: u32,
+    b_shift: u32,
+    b_bits: u32,
+    a_shift: u32,
+    a_bits: u32,
+    has_alpha: bool,
+) {
+    expand_rgb16_masked_row_scalar(src, dst, width, r_shift, r_bits, g_shift, g_bits, b_shift, b_bits, a_shift, a_bits, has_alpha);
+}
+
 pub fn expand_rgb555_row(src: &[u8], dst: &mut [u8], width: usize) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
@@ -127,6 +144,40 @@ fn apply_palette_row_scalar(indices: &[u8], palette: &[ColorEntry], dst: &mut [u
         dst[x * 3] = color.red;
         dst[x * 3 + 1] = color.green;
         dst[x * 3 + 2] = color.blue;
+    }
+}
+
+fn expand_rgb16_masked_row_scalar(
+    src: &[u8],
+    dst: &mut [u8],
+    width: usize,
+    r_shift: u32,
+    r_bits: u32,
+    g_shift: u32,
+    g_bits: u32,
+    b_shift: u32,
+    b_bits: u32,
+    a_shift: u32,
+    a_bits: u32,
+    has_alpha: bool,
+) {
+    let channels = if has_alpha { 4 } else { 3 };
+    for x in 0..width {
+        let s = x * 2;
+        let pixel = if s + 1 < src.len() {
+            u16::from_le_bytes([src[s], src[s + 1]]) as u32
+        } else {
+            0
+        };
+        let r = extract_channel_scalar(pixel, r_shift, r_bits);
+        let g = extract_channel_scalar(pixel, g_shift, g_bits);
+        let b = extract_channel_scalar(pixel, b_shift, b_bits);
+        dst[x * channels] = r;
+        dst[x * channels + 1] = g;
+        dst[x * channels + 2] = b;
+        if has_alpha {
+            dst[x * channels + 3] = extract_channel_scalar(pixel, a_shift, a_bits);
+        }
     }
 }
 

@@ -192,6 +192,72 @@ impl PixelDecoder {
         Image::from_pixels(width, height, PixelData::RGB8(image_data))
     }
 
+    pub fn decode_16bit_image_masked(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        bottom_up: bool,
+        red_mask: u32,
+        green_mask: u32,
+        blue_mask: u32,
+        alpha_mask: u32,
+    ) -> Image {
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let src_stride = (((width_usize * 2) + 3) & !3) as usize;
+        let has_alpha = alpha_mask != 0;
+
+        let r_shift = if red_mask != 0 { red_mask.trailing_zeros() } else { 0 };
+        let r_bits = red_mask.count_ones();
+        let g_shift = if green_mask != 0 { green_mask.trailing_zeros() } else { 0 };
+        let g_bits = green_mask.count_ones();
+        let b_shift = if blue_mask != 0 { blue_mask.trailing_zeros() } else { 0 };
+        let b_bits = blue_mask.count_ones();
+        let a_shift = if alpha_mask != 0 { alpha_mask.trailing_zeros() } else { 0 };
+        let a_bits = alpha_mask.count_ones();
+
+        let channels = if has_alpha { 4 } else { 3 };
+        let mut image_data = vec![0u8; width_usize * height_usize * channels];
+
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            image_data
+                .par_chunks_mut(width_usize * channels)
+                .enumerate()
+                .for_each(|(dst_row, dst)| {
+                    let src_row = if bottom_up { height_usize - 1 - dst_row } else { dst_row };
+                    let row_offset = src_row * src_stride;
+                    let row_end = (row_offset + width_usize * 2).min(data.len());
+                    let src = if row_offset < data.len() { &data[row_offset..row_end] } else { &[] };
+                    simd::expand_rgb16_masked_row(src, dst, width_usize, r_shift, r_bits, g_shift, g_bits, b_shift, b_bits, a_shift, a_bits, has_alpha);
+                });
+        }
+
+        #[cfg(not(feature = "rayon"))]
+        {
+            for dst_row in 0..height_usize {
+                let src_row = if bottom_up { height_usize - 1 - dst_row } else { dst_row };
+                let row_offset = src_row * src_stride;
+                let dst_offset = dst_row * width_usize * channels;
+                let row_end = (row_offset + width_usize * 2).min(data.len());
+                let src = if row_offset < data.len() { &data[row_offset..row_end] } else { &[] };
+                simd::expand_rgb16_masked_row(
+                    src,
+                    &mut image_data[dst_offset..dst_offset + width_usize * channels],
+                    width_usize,
+                    r_shift, r_bits, g_shift, g_bits, b_shift, b_bits, a_shift, a_bits, has_alpha,
+                );
+            }
+        }
+
+        if has_alpha {
+            Image::from_pixels(width, height, PixelData::RGBA8(image_data))
+        } else {
+            Image::from_pixels(width, height, PixelData::RGB8(image_data))
+        }
+    }
+
     pub fn decode_16bit_image(data: &[u8], width: u32, height: u32, bottom_up: bool) -> Image {
         let width_usize = width as usize;
         let height_usize = height as usize;
