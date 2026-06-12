@@ -7,7 +7,7 @@ use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use crate::decoders::jpeg::idct::dequantize_and_idct;
 use crate::decoders::jpeg::bitreader::JpegBitReader;
 use std::fmt::Debug;
-use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
+use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
 use crate::decoders::jpeg::types::{ArithmeticCodingTable, ArithmeticCodingValue, ColorComponentInfo, DACData, DHTData, DQTData, HuffmanTable, JFIFData, JFIFHeader, JpegCodingMethod, JpegMode, JpegSegmentData, JpegSegmentInfo, Predictor, QuantizationTable, SOFData, SOSData, ScanComponent, ScanData, DEFAULT_QUANTIZATION_TABLE, ZIGZAG_MAP};
 
@@ -1204,7 +1204,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         t
     }
 
-    #[inline(always)]
     #[inline(always)]
     fn get_next_symbol(reader: &mut JpegBitReader<'_>, table: &HuffmanTable) -> u8 {
         if let Some(peek) = reader.peek9() {

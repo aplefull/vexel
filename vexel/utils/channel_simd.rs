@@ -164,7 +164,7 @@ unsafe fn rgba_to_rgb_avx2(src: &[u8], dst: &mut [u8]) {
     }
 }
 
-// ─── WASM ─────────────────────────────────────────────
+// ─── WASM SIMD128 ─────────────────────────────────────────────
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 fn rgb_to_rgba_wasm(src: &[u8], dst: &mut [u8]) {

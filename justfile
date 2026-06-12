@@ -34,9 +34,17 @@ bench *args="":
 corpus-bench:
     cargo test --package vexel --release corpus_bench -- --ignored --nocapture
 
+# Analyze a corpus result CSV (--stats, --top-slow N, --mse-above X, --errors); defaults to latest
+corpus-analyze file="" *args:
+    python3 scripts/corpus_diff.py analyze {{ if file != "" { "\"" + file + "\" " } else { "" } }}{{args}}
+
+# Diff two corpus result CSVs (--threshold PCT, --mse-delta X, --limit N); defaults to two latest
+corpus-diff baseline="" compare="" *args:
+    python3 scripts/corpus_diff.py diff {{ if baseline != "" { "\"" + baseline + "\" " } else { "" } }}{{ if compare != "" { "\"" + compare + "\" " } else { "" } }}{{args}}
+
 # Generate or verify AVIF reference images
 convert *args:
-    cd vexel/tests && python3 generate_references.py {{args}}
+    python3 scripts/generate_references.py {{args}}
 
 # Run vexel binary
 vexel *args:

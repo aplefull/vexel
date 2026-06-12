@@ -7,8 +7,9 @@ import imagecodecs
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
-IMAGES_DIR = SCRIPT_DIR / "images"
-REFERENCES_DIR = SCRIPT_DIR / "references"
+TESTS_DIR = SCRIPT_DIR.parent / "vexel" / "tests"
+IMAGES_DIR = TESTS_DIR / "images"
+REFERENCES_DIR = TESTS_DIR / "references"
 
 
 def usage() -> None:
