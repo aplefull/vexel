@@ -2,6 +2,7 @@ use crate::decoders::avif::{AvifColorInfo, AvifFrameInfo, AvifProperties};
 use crate::decoders::bmp::{BitmapFileHeader, ColorEntry, DibHeader};
 use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtension};
 use crate::decoders::hdr::HdrFormat;
+use crate::decoders::ico::{IconDirEntry, IcoType};
 use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::PngChunkInfo;
@@ -25,6 +26,7 @@ pub enum ImageInfo {
     Webp(WebpInfo),
     Avif(AvifInfo),
     Jbig1(Jbig1Info),
+    Ico(IcoInfo),
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -138,6 +140,15 @@ pub struct Jbig1Info {
     pub options: u8,
 }
 
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct IcoInfo {
+    pub width: u32,
+    pub height: u32,
+    pub ico_type: IcoType,
+    pub entries: Vec<IconDirEntry>,
+}
+
 impl fmt::Display for ImageInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -150,6 +161,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Webp(info) => write!(f, "{}", info),
             ImageInfo::Avif(info) => write!(f, "{}", info),
             ImageInfo::Jbig1(info) => write!(f, "{}", info),
+            ImageInfo::Ico(info) => write!(f, "{}", info),
         }
     }
 }
@@ -565,6 +577,20 @@ impl fmt::Display for Jbig1Info {
         writeln!(f, "Max ATMOVE y: {}", self.my)?;
         writeln!(f, "Order flags: 0x{:02X}", self.order)?;
         writeln!(f, "Options: 0x{:02X}", self.options)?;
+        Ok(())
+    }
+}
+
+impl fmt::Display for IcoInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "ICO/CUR Image Information")?;
+        writeln!(f, "=========================")?;
+        writeln!(f, "Type: {:?}", self.ico_type)?;
+        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
+        writeln!(f, "Images: {}", self.entries.len())?;
+        for (i, entry) in self.entries.iter().enumerate() {
+            writeln!(f, "  Image #{}: {}x{} {:?} {} bpp", i + 1, entry.width, entry.height, entry.image_format, entry.bit_count)?;
+        }
         Ok(())
     }
 }

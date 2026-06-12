@@ -5,7 +5,7 @@ use crate::decoders::bmp::pixels::PixelDecoder;
 use crate::decoders::bmp::types::{BitmapCompression, BitmapFileHeader, BitmapInfoHeader, ColorEntry, DibHeader};
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::png::decoder::PngDecoder;
-use crate::utils::error::VexelResult;
+use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::BmpInfo;
 use crate::{log_error, log_warn, Image};
@@ -196,6 +196,98 @@ impl<R: Read + Seek> BmpDecoder<R> {
         };
         let mut png_decoder = PngDecoder::new(Cursor::new(png_bytes));
         png_decoder.decode()
+    }
+
+    pub fn decode_ico_bmp(data: &[u8], dir_width: u32, dir_height: u32) -> VexelResult<(Image, Vec<u8>)> {
+        if data.len() < 4 {
+            return Err(VexelError::Custom("ICO BMP data too short".to_string()));
+        }
+
+        let header_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+        let (bpp, colors_used, compression_val, is_core) = if header_size == 12 && data.len() >= 12 {
+            let bpp = u16::from_le_bytes([data[10], data[11]]);
+            (bpp, 0u32, 0u32, true)
+        } else if data.len() >= 36 {
+            let bpp = u16::from_le_bytes([data[14], data[15]]);
+            let compression = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+            let colors_used = u32::from_le_bytes([data[32], data[33], data[34], data[35]]);
+            (bpp, colors_used, compression, false)
+        } else {
+            return Err(VexelError::Custom("ICO BMP header too short".to_string()));
+        };
+
+        let bytes_per_color = if is_core { 3 } else { 4 };
+        let num_colors = if bpp <= 8 {
+            if colors_used > 0 { colors_used } else { 1u32 << bpp }
+        } else {
+            0
+        };
+
+        let extra_mask_bytes = match compression_val {
+            3 => 12usize,
+            6 => 16usize,
+            _ => 0,
+        };
+
+        let pixel_offset = 14 + header_size + extra_mask_bytes + (num_colors as usize * bytes_per_color);
+
+        let xor_size = {
+            let row_size = (((bpp as u32 * dir_width) + 31) / 32) * 4;
+            (row_size * dir_height) as usize
+        };
+        let and_start = pixel_offset - 14 + xor_size;
+        let and_mask_row_size = ((dir_width + 31) / 32) * 4;
+        let and_size = (and_mask_row_size * dir_height) as usize;
+        let and_mask = if and_start < data.len() {
+            let end = (and_start + and_size).min(data.len());
+            data[and_start..end].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let inject_alpha_masks = bpp == 32 && compression_val == 0 && !is_core;
+        let adjusted_pixel_offset = if inject_alpha_masks { pixel_offset + 16 } else { pixel_offset };
+
+        let xor_end = (pixel_offset - 14 + xor_size).min(data.len());
+        let pre_pixel_data = &data[..pixel_offset - 14];
+        let pixel_data = &data[pixel_offset - 14..xor_end];
+
+        let total_size = (14 + pre_pixel_data.len() + if inject_alpha_masks { 16 } else { 0 } + pixel_data.len()) as u32;
+        let mut full_bmp = Vec::with_capacity(total_size as usize);
+        full_bmp.extend_from_slice(b"BM");
+        full_bmp.extend_from_slice(&total_size.to_le_bytes());
+        full_bmp.extend_from_slice(&0u16.to_le_bytes());
+        full_bmp.extend_from_slice(&0u16.to_le_bytes());
+        full_bmp.extend_from_slice(&(adjusted_pixel_offset as u32).to_le_bytes());
+        full_bmp.extend_from_slice(pre_pixel_data);
+
+        if inject_alpha_masks {
+            full_bmp[30] = 6;
+            for mask in [0x00FF0000u32, 0x0000FF00, 0x000000FF, 0xFF000000] {
+                full_bmp.extend_from_slice(&mask.to_le_bytes());
+            }
+        }
+
+        full_bmp.extend_from_slice(pixel_data);
+
+        let h_offset = if is_core { 20usize } else { 22usize };
+        if is_core && full_bmp.len() >= h_offset + 2 {
+            let bytes = (dir_height as u16).to_le_bytes();
+            full_bmp[h_offset] = bytes[0];
+            full_bmp[h_offset + 1] = bytes[1];
+        } else if !is_core && full_bmp.len() >= h_offset + 4 {
+            let bytes = (dir_height as i32).to_le_bytes();
+            full_bmp[h_offset] = bytes[0];
+            full_bmp[h_offset + 1] = bytes[1];
+            full_bmp[h_offset + 2] = bytes[2];
+            full_bmp[h_offset + 3] = bytes[3];
+        }
+
+        let mut decoder = BmpDecoder::new(Cursor::new(full_bmp));
+        let image = decoder.decode()?;
+
+        Ok((image, and_mask))
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {

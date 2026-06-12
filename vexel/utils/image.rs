@@ -127,6 +127,8 @@ pub enum ImageFormat {
     Avif,
     WebP,
     Jbig1,
+    Ico,
+    Cur,
     Unknown,
 }
 

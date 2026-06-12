@@ -5,6 +5,7 @@ use crate::decoders::avif::AvifDecoder;
 use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
+use crate::decoders::ico::IcoDecoder;
 use crate::decoders::jbig1::Jbig1Decoder;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
@@ -50,6 +51,7 @@ pub enum Decoders<R: Read + Seek> {
     Avif(AvifDecoder<R>),
     WebP(WebpDecoder<R>),
     Jbig1(Jbig1Decoder<R>),
+    Ico(IcoDecoder<R>),
     Unknown,
 }
 
@@ -88,6 +90,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Avif => Decoders::Avif(AvifDecoder::new(reader)),
             ImageFormat::WebP => Decoders::WebP(WebpDecoder::new(reader)),
             ImageFormat::Jbig1 => Decoders::Jbig1(Jbig1Decoder::new(reader)),
+            ImageFormat::Ico | ImageFormat::Cur => Decoders::Ico(IcoDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -108,6 +111,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Avif(decoder) => impl_decode!(decoder),
             Decoders::WebP(decoder) => impl_decode!(decoder),
             Decoders::Jbig1(decoder) => impl_decode!(decoder),
+            Decoders::Ico(decoder) => impl_decode!(decoder),
             Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
         }
     }
@@ -159,6 +163,10 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Jbig1(jbig1_decoder) => {
                 let image_data = jbig1_decoder.get_info();
                 ImageInfo::Jbig1(image_data)
+            }
+            Decoders::Ico(ico_decoder) => {
+                let image_data = ico_decoder.get_info();
+                ImageInfo::Ico(image_data)
             }
             _ => unimplemented!(),
         }
@@ -236,6 +244,16 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         match &header[0..2] {
             b"BM" | b"BA" | b"CI" | b"CP" | b"IC" | b"PT" => return Ok(ImageFormat::Bmp),
             _ => {}
+        }
+
+        // ICO / CUR
+        let ico_count = u16::from_le_bytes([header[4], header[5]]);
+        if header.starts_with(&[0x00, 0x00, 0x01, 0x00]) && ico_count > 0 {
+            return Ok(ImageFormat::Ico);
+        }
+
+        if header.starts_with(&[0x00, 0x00, 0x02, 0x00]) && ico_count > 0 {
+            return Ok(ImageFormat::Cur);
         }
 
         // HDR
