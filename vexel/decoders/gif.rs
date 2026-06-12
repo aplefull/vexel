@@ -5,7 +5,6 @@ use crate::utils::traits::SafeAccess;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{Read, Seek};
 use tsify::Tsify;
@@ -163,11 +162,9 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.version = String::from_utf8_lossy(buf.get(offset + (sig_len - 3)..offset + sig_len).unwrap_or(b"87a")).to_string();
         self.reader.seek(std::io::SeekFrom::Start((offset + sig_len) as u64))?;
 
-        // Read canvas width and height
         self.canvas_width = self.reader.read_u16()?.swap_bytes() as u32;
         self.canvas_height = self.reader.read_u16()?.swap_bytes() as u32;
 
-        // Read the packed fields
         let packed_fields = self.reader.read_u8()?;
 
         self.global_color_table_flag = (packed_fields & 0b10000000) != 0;
@@ -175,10 +172,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.sort_flag = (packed_fields & 0b00001000) != 0;
         self.size_of_global_color_table = packed_fields & 0b00000111;
 
-        // Read the background color index
         self.background_color_index = self.reader.read_u8()?;
 
-        // Read the pixel aspect ratio
         self.pixel_aspect_ratio = self.reader.read_u8()?;
 
         Ok(())
@@ -242,7 +237,6 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                         let count = self.reader.read_u16()?;
                         app_extension.loop_count = Some(count);
 
-                        // Skip remaining bytes in sub-block
                         for _ in 0..(sub_block_size - 3) {
                             self.reader.read_u8()?;
                         }
@@ -265,7 +259,6 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 self.app_extensions.push(app_extension);
             }
         } else {
-            // Read application data
             let mut data = Vec::new();
             loop {
                 let sub_block_size = self.reader.read_u8()? as usize;
@@ -435,14 +428,12 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             data: Vec::new(),
         };
 
-        // Read packed fields
         let packed_fields = self.reader.read_u8()?;
         frame.local_color_table_flag = (packed_fields & 0b10000000) != 0;
         frame.interlace_flag = (packed_fields & 0b01000000) != 0;
         frame.sort_flag = (packed_fields & 0b00100000) != 0;
         frame.size_of_local_color_table = packed_fields & 0b00000111;
 
-        // Read local color table if present
         if frame.local_color_table_flag {
             let table_size = 3 * (1 << (frame.size_of_local_color_table + 1));
             for _ in 0..table_size {
@@ -450,10 +441,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             }
         }
 
-        // Read LZW minimum code size
         frame.lzw_minimum_code_size = self.reader.read_u8()?;
 
-        // Read image data blocks
         loop {
             let block_size = match self.reader.read_u8() {
                 Ok(0) => break,
@@ -477,7 +466,6 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             frame.data.extend(buffer);
         }
 
-        // Update decoder dimensions based on first frame
         if self.frames.is_empty() {
             self.width = self.canvas_width;
             self.height = self.canvas_height;
@@ -489,13 +477,11 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     }
 
     fn read_graphics_control_extension(&mut self) -> VexelResult<GraphicsControlExtension> {
-        // Read block size (should be 4)
         let block_size = self.reader.read_u8()?;
         if block_size != 4 {
             log_warn!("Invalid graphics control extension block size: {}", block_size);
         }
 
-        // Read packed field
         let packed = self.reader.read_u8()?;
         let disposal_method = match (packed >> 2) & 0x07 {
             0 => DisposalMethod::None,
@@ -507,13 +493,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let user_input = (packed & 0x02) != 0;
         let transparency = (packed & 0x01) != 0;
 
-        // Read delay time
         let delay = (self.reader.read_u16()?).swap_bytes() * 10;
 
-        // Read transparent color index
         let transparent_color_index = self.reader.read_u8()?;
 
-        // Read block terminator
         let terminator = self.reader.read_u8()?;
         if terminator != 0 {
             log_warn!("Invalid graphics control extension block terminator: {}", terminator);
@@ -529,73 +512,59 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     }
 
     fn decompress_lzw(&self, frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
-        let min_code_size = frame.lzw_minimum_code_size;
-        let clear_code = 1 << min_code_size;
+        let min_code_size = frame.lzw_minimum_code_size.clamp(2, 8) as u32;
+        let clear_code = 1u32 << min_code_size;
         let end_code = clear_code + 1;
 
-        let mut code_size = min_code_size + 1;
-        let mut next_code = end_code + 1;
-        let mut dictionary: HashMap<u16, Vec<u8>> = HashMap::new();
-
+        let mut table: Vec<Vec<u8>> = Vec::with_capacity(4096);
         for i in 0..clear_code {
-            dictionary.insert(i, Vec::from([i as u8]));
+            table.push(vec![i as u8]);
         }
+        table.push(vec![]);
+        table.push(vec![]);
 
-        let mut result = Vec::new();
-        let mut current_bits = Vec::new();
-        let mut current_byte_pos = 0;
+        let data = &frame.data;
+        let data_len = data.len();
 
-        let read_code = |pos: &mut usize, bits: &Vec<u8>, code_size: u8| -> Option<u16> {
-            if *pos + code_size as usize > bits.len() * 8 {
-                return None;
-            }
+        let mut bit_buf: u64 = 0;
+        let mut n_bits: u32 = 0;
+        let mut byte_pos: usize = 0;
 
-            let mut code = 0u16;
-            let mut current_bit = 0;
-
-            while current_bit < code_size {
-                let byte_pos = *pos / 8;
-                if byte_pos >= bits.len() {
+        let read_code = |bit_buf: &mut u64, n_bits: &mut u32, byte_pos: &mut usize, width: u32| -> Option<u32> {
+            while *n_bits < width {
+                if *byte_pos >= data_len {
                     return None;
                 }
-
-                let bit_pos = *pos % 8;
-                let bit = match bits.get(byte_pos) {
-                    Some(byte) => (byte >> bit_pos) & 1,
-                    None => {
-                        log_warn!(
-                            "Invalid LZW code read position: {} (byte_pos: {}, bit_pos: {})",
-                            *pos,
-                            byte_pos,
-                            bit_pos
-                        );
-                        continue;
-                    }
-                };
-
-                code |= (bit as u16) << current_bit;
-
-                *pos += 1;
-                current_bit += 1;
+                let space = (64 - *n_bits) / 8;
+                let available = (data_len - *byte_pos).min(space as usize).min(4);
+                for _ in 0..available {
+                    *bit_buf |= (data[*byte_pos] as u64) << *n_bits;
+                    *byte_pos += 1;
+                    *n_bits += 8;
+                }
             }
-
+            let code = (*bit_buf & ((1u64 << width) - 1)) as u32;
+            *bit_buf >>= width;
+            *n_bits -= width;
             Some(code)
         };
 
-        for &byte in &frame.data {
-            current_bits.push(byte);
-        }
+        let mut result: Vec<u8> = Vec::with_capacity(frame.width as usize * frame.height as usize);
 
-        let mut prev_code: Option<u16> = None;
+        let mut code_size = min_code_size + 1;
+        let mut next_code = end_code + 1;
+        let mut prev_code: Option<u32> = None;
 
-        while let Some(code) = read_code(&mut current_byte_pos, &current_bits, code_size) {
+        loop {
+            let code = match read_code(&mut bit_buf, &mut n_bits, &mut byte_pos, code_size) {
+                Some(c) => c,
+                None => break,
+            };
+
             if code == clear_code {
                 code_size = min_code_size + 1;
                 next_code = end_code + 1;
-                dictionary.clear();
-                for i in 0..clear_code {
-                    dictionary.insert(i, Vec::from([i as u8]));
-                }
+                table.truncate(next_code as usize);
                 prev_code = None;
                 continue;
             }
@@ -606,30 +575,43 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
             if let Some(prev) = prev_code {
                 if code < next_code {
-                    let output = dictionary.get(&code).unwrap_or(&Vec::new()).clone();
-                    result.extend(&output);
-
+                    let (first, seq_clone) = match table.get(code as usize) {
+                        Some(seq) if !seq.is_empty() => (seq[0], seq.to_vec()),
+                        _ => {
+                            log_warn!("Invalid LZW code: {}", code);
+                            prev_code = Some(code);
+                            if next_code >= (1 << code_size) && code_size < 12 {
+                                code_size += 1;
+                            }
+                            continue;
+                        }
+                    };
+                    result.extend_from_slice(&seq_clone);
                     if next_code < 4096 {
-                        let mut new_sequence = dictionary.get(&prev).unwrap_or(&Vec::new()).clone();
-                        new_sequence.push(*output.get(0).unwrap_or(&0));
-                        dictionary.insert(next_code, new_sequence);
-                        next_code += 1;
+                        if let Some(prev_seq) = table.get(prev as usize) {
+                            let mut new_entry = prev_seq.to_vec();
+                            new_entry.push(first);
+                            table.push(new_entry);
+                            next_code += 1;
+                        }
                     }
                 } else if code == next_code {
-                    let mut output = dictionary.get(&prev).unwrap_or(&Vec::new()).clone();
-                    output.push(*output.get(0).unwrap_or(&0));
-                    result.extend(&output);
-
-                    if next_code < 4096 {
-                        dictionary.insert(next_code, output);
-                        next_code += 1;
+                    if let Some(prev_seq) = table.get(prev as usize) {
+                        let first = prev_seq.first().copied().unwrap_or(0);
+                        let mut seq = prev_seq.to_vec();
+                        seq.push(first);
+                        result.extend_from_slice(&seq);
+                        if next_code < 4096 {
+                            table.push(seq);
+                            next_code += 1;
+                        }
                     }
                 } else {
                     log_warn!("Invalid LZW code: {}", code);
                 }
             } else {
-                if let Some(sequence) = dictionary.get(&code) {
-                    result.extend(sequence);
+                if let Some(seq) = table.get(code as usize) {
+                    result.extend_from_slice(seq);
                 }
             }
 
@@ -711,11 +693,11 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(image_data)
     }
 
-    fn compose_frame(&self, frame: &GifFrameInfo, previous_canvas: Option<&Vec<u8>>) -> VexelResult<Vec<u8>> {
+    fn compose_frame(&self, frame: &GifFrameInfo, previous_canvas: Option<Vec<u8>>) -> VexelResult<Vec<u8>> {
         let canvas_size = (self.width * self.height * 4) as usize;
 
         let mut canvas = match previous_canvas {
-            Some(prev) => prev.clone(),
+            Some(prev) => prev,
             None => vec![0u8; canvas_size],
         };
 
@@ -793,7 +775,6 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             .frames
             .par_iter()
             .map(|frame| {
-                // Decode each frame
                 let mut frame_pixels = match self.decode_frame(frame) {
                     Ok(pixels) => pixels,
                     Err(e) => {
@@ -802,15 +783,26 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                     }
                 };
 
-                // Apply deinterlacing if needed
                 if frame.interlace_flag {
                     frame_pixels = Self::deinterlace(frame.width, frame.height, &frame_pixels);
                 }
 
-                // Create new frame with decoded pixels
                 Ok(GifFrameInfo {
+                    left: frame.left,
+                    top: frame.top,
+                    width: frame.width,
+                    height: frame.height,
+                    local_color_table_flag: frame.local_color_table_flag,
+                    interlace_flag: frame.interlace_flag,
+                    sort_flag: frame.sort_flag,
+                    size_of_local_color_table: frame.size_of_local_color_table,
+                    local_color_table: frame.local_color_table.clone(),
+                    lzw_minimum_code_size: frame.lzw_minimum_code_size,
+                    transparent_index: frame.transparent_index,
+                    disposal_method: frame.disposal_method,
+                    delay: frame.delay,
+                    user_input: frame.user_input,
                     data: frame_pixels,
-                    ..frame.clone()
                 })
             })
             .collect::<VexelResult<Vec<_>>>()?;
@@ -818,37 +810,40 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let mut image_frames = Vec::new();
 
         for (frame_index, frame) in decoded_frames.iter().enumerate() {
-            let canvas = match self.compose_frame(frame, previous_canvas.as_ref()) {
+            let saved_canvas = match frame.disposal_method {
+                DisposalMethod::Previous | DisposalMethod::Background => previous_canvas.clone(),
+                DisposalMethod::None => None,
+            };
+
+            let canvas = match self.compose_frame(frame, previous_canvas) {
                 Ok(canvas) => canvas,
                 Err(e) => {
                     log_warn!("Error composing frame. Skipping frame {}. Error: {:?}", frame_index, e);
+                    previous_canvas = saved_canvas;
                     continue;
                 }
             };
 
             previous_canvas = match frame.disposal_method {
-                DisposalMethod::None => Some(canvas.clone()),
+                DisposalMethod::None => {
+                    Some(canvas.clone())
+                }
                 DisposalMethod::Background => {
-                    let mut next_canvas = canvas.clone();
-                    for y in 0..frame.height {
+                    let canvas_size = (self.width * self.height * 4) as usize;
+                    let mut next_canvas = saved_canvas.unwrap_or_else(|| vec![0u8; canvas_size]);
+                    let clamped_h = frame.height.min(self.height.saturating_sub(frame.top));
+                    let clamped_w = frame.width.min(self.width.saturating_sub(frame.left));
+                    for y in 0..clamped_h {
                         let canvas_y = frame.top + y;
-                        if canvas_y >= self.height {
-                            continue;
-                        }
-                        for x in 0..frame.width {
-                            let canvas_x = frame.left + x;
-                            if canvas_x >= self.width {
-                                continue;
-                            }
-                            let idx = ((canvas_y * self.width + canvas_x) * 4) as usize;
-                            if idx + 4 <= next_canvas.len() {
-                                next_canvas[idx..idx + 4].copy_from_slice(&[0, 0, 0, 0]);
-                            }
+                        let row_base = (canvas_y * self.width + frame.left) as usize * 4;
+                        let row_end = row_base + clamped_w as usize * 4;
+                        if row_end <= next_canvas.len() {
+                            next_canvas[row_base..row_end].fill(0);
                         }
                     }
                     Some(next_canvas)
                 }
-                DisposalMethod::Previous => previous_canvas,
+                DisposalMethod::Previous => saved_canvas,
             };
 
             image_frames.push(ImageFrame {
