@@ -1,7 +1,7 @@
 use crate::decoders::bmp::simd as simd;
 use crate::decoders::bmp::types::ColorEntry;
 use crate::utils::error::VexelResult;
-use crate::{log_warn, Image, PixelData};
+use crate::{Image, PixelData};
 use crate::bitreader::BitReader;
 
 pub struct RleDecoder;
@@ -14,8 +14,14 @@ impl RleDecoder {
         let mut y = 0;
 
         while y < height {
-            let count = reader.read_u8()?;
-            let value = reader.read_u8()?;
+            let count = match reader.read_u8() {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let value = match reader.read_u8() {
+                Ok(v) => v,
+                Err(_) => break,
+            };
 
             if count == 0 {
                 // Escape sequence
@@ -39,22 +45,19 @@ impl RleDecoder {
                     n => {
                         // Absolute mode - next n bytes are literal values
                         for _ in 0..n {
-                            if x < width {
-                                let pos = (y * width + x) as usize;
-                                if pos < decoded.len() {
-                                    if pos >= decoded.len() {
-                                        log_warn!("Invalid pixel position: {}", pos);
-                                        break;
-                                    }
-
-                                    decoded[pos] = reader.read_u8()?;
-                                }
-                                x += 1;
+                            let byte = match reader.read_u8() {
+                                Ok(v) => v,
+                                Err(_) => break,
+                            };
+                            let pos = (y * width + x) as usize;
+                            if x < width && pos < decoded.len() {
+                                decoded[pos] = byte;
                             }
+                            x += 1;
                         }
                         // Pad to word boundary
                         if (n % 2) == 1 {
-                            reader.read_u8()?; // Skip padding byte
+                            let _ = reader.read_u8();
                         }
                     }
                 }
@@ -83,8 +86,14 @@ impl RleDecoder {
         let mut y = 0;
 
         while y < height {
-            let count = reader.read_u8()?;
-            let value = reader.read_u8()?;
+            let count = match reader.read_u8() {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let value = match reader.read_u8() {
+                Ok(v) => v,
+                Err(_) => break,
+            };
 
             if count == 0 {
                 // Escape sequence
@@ -109,19 +118,15 @@ impl RleDecoder {
                         // Absolute mode - next n pixels are literal values
                         let mut pixels_remaining = n;
                         while pixels_remaining > 0 {
-                            let byte = reader.read_u8()?;
-                            // Each byte contains two 4-bit pixels
-                            for i in 0..2 {
-                                if pixels_remaining > 0 && x < width {
-                                    let pixel = if i == 0 { (byte >> 4) & 0x0F } else { byte & 0x0F };
-
+                            let byte = match reader.read_u8() {
+                                Ok(v) => v,
+                                Err(_) => break,
+                            };
+                            for shift in [4u8, 0u8] {
+                                if pixels_remaining > 0 {
+                                    let pixel = (byte >> shift) & 0x0F;
                                     let pos = (y * width + x) as usize;
-                                    if pos < decoded.len() {
-                                        if pos >= decoded.len() {
-                                            log_warn!("Invalid pixel position: {}", pos);
-                                            break;
-                                        }
-
+                                    if x < width && pos < decoded.len() {
                                         decoded[pos] = pixel;
                                     }
                                     x += 1;
@@ -131,7 +136,7 @@ impl RleDecoder {
                         }
                         // Pad to word boundary
                         if ((n + 1) / 2) % 2 == 1 {
-                            reader.read_u8()?; // Skip padding byte
+                            let _ = reader.read_u8();
                         }
                     }
                 }

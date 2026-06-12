@@ -13,9 +13,16 @@ impl HeaderReader {
     pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapFileHeader> {
         let signature = reader.read_u16()?;
 
+        if signature == 0x4142 {
+            let _file_size = reader.read_u32()?;
+            let _next_offset = reader.read_u32()?;
+            let _screen_width = reader.read_u16()?;
+            let _screen_height = reader.read_u16()?;
+            return Self::read_file_header(reader);
+        }
+
         match signature {
             0x4D42 => (), // "BM" - Windows bitmap
-            0x4142 => (), // "BA" - OS/2 bitmap array
             0x4943 => (), // "CI" - OS/2 color icon
             0x5043 => (), // "CP" - OS/2 color pointer
             0x4349 => (), // "IC" - OS/2 icon

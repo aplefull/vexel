@@ -341,33 +341,20 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
             }
         }
 
-        fn try_move_file_index(&mut self, step: isize) -> bool {
+        fn try_move_file_index(&mut self, step: isize) {
             if self.files.len() <= 1 {
-                return false;
+                return;
             }
 
-            let start = self.current_file_index;
-            let mut index = self.current_file_index;
             let total = self.files.len();
 
-            loop {
-                if step >= 0 {
-                    index = (index + 1) % total;
-                } else {
-                    index = (index + total - 1) % total;
-                }
-
-                self.current_file_index = index;
-                if self.load_current_file() {
-                    return true;
-                }
-
-                if index == start {
-                    break;
-                }
+            if step >= 0 {
+                self.current_file_index = (self.current_file_index + 1) % total;
+            } else {
+                self.current_file_index = (self.current_file_index + total - 1) % total;
             }
 
-            false
+            self.load_current_file();
         }
 
         fn load_files(&mut self, files: Vec<PathBuf>, start_index: usize) {
@@ -377,12 +364,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
 
             self.files = files;
             self.current_file_index = start_index.min(self.files.len() - 1);
-
-            if self.load_current_file() {
-                return;
-            }
-
-            let _ = self.try_move_file_index(1);
+            self.load_current_file();
         }
 
         fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -413,14 +395,14 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                 input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowDown)
             });
             if next {
-                let _ = self.try_move_file_index(1);
+                self.try_move_file_index(1);
             }
 
             let previous = ctx.input(|input| {
                 input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::ArrowUp)
             });
             if previous {
-                let _ = self.try_move_file_index(-1);
+                self.try_move_file_index(-1);
             }
         }
 

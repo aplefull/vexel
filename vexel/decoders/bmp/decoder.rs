@@ -155,14 +155,21 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.reader
             .seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
 
-        let row_size = ((self.dib_header.bits_per_pixel() as u32 * self.width + 31) / 32) * 4;
-        let data_size = row_size * self.height;
+        let is_rle = matches!(
+            self.dib_header.compression(),
+            BitmapCompression::BiRle4 | BitmapCompression::BiRle8
+        );
 
         let bytes_until_eof = self.reader.bytes_left()?;
-        let bytes_to_read = std::cmp::min(data_size as u64, bytes_until_eof);
-        let data = self.reader.read_bytes(bytes_to_read as usize)?;
+        let bytes_to_read = if is_rle {
+            bytes_until_eof
+        } else {
+            let row_size = ((self.dib_header.bits_per_pixel() as u32 * self.width + 31) / 32) * 4;
+            let data_size = row_size * self.height;
+            std::cmp::min(data_size as u64, bytes_until_eof)
+        };
 
-        self.data = data;
+        self.data = self.reader.read_bytes(bytes_to_read as usize)?;
 
         Ok(())
     }
