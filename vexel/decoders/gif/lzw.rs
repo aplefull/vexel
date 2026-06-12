@@ -8,12 +8,20 @@ pub fn decompress_lzw(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
     let clear_code = 1u32 << min_code_size;
     let end_code = clear_code + 1;
 
-    let mut table: Vec<Vec<u8>> = Vec::with_capacity(4096);
+    let initial_entries = (end_code + 1) as usize;
+
+    let mut arena: Vec<u8> = Vec::with_capacity(65536);
+    let mut table: Vec<(u32, u32)> = Vec::with_capacity(4096);
+
     for i in 0..clear_code {
-        table.push(vec![i as u8]);
+        let offset = arena.len() as u32;
+        arena.push(i as u8);
+        table.push((offset, 1));
     }
-    table.push(vec![]);
-    table.push(vec![]);
+    table.push((0, 0));
+    table.push((0, 0));
+
+    let initial_arena_len = arena.len();
 
     let data = &frame.data;
     let data_len = data.len();
@@ -56,7 +64,8 @@ pub fn decompress_lzw(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
         if code == clear_code {
             code_size = min_code_size + 1;
             next_code = end_code + 1;
-            table.truncate(next_code as usize);
+            table.truncate(initial_entries);
+            arena.truncate(initial_arena_len);
             prev_code = None;
             continue;
         }
@@ -67,9 +76,8 @@ pub fn decompress_lzw(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
 
         if let Some(prev) = prev_code {
             if code < next_code {
-                let (first, seq_clone) = match table.get(code as usize) {
-                    Some(seq) if !seq.is_empty() => (seq[0], seq.to_vec()),
-                    _ => {
+                let (offset, len) = match table.get(code as usize) {
+                    Some(&(_, 0)) | None => {
                         log_warn!("Invalid LZW code: {}", code);
                         prev_code = Some(code);
                         if next_code >= (1 << code_size) && code_size < 12 {
@@ -77,33 +85,44 @@ pub fn decompress_lzw(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
                         }
                         continue;
                     }
+                    Some(&entry) => entry,
                 };
-                result.extend_from_slice(&seq_clone);
+
+                let first = arena[offset as usize];
+                result.extend_from_slice(&arena[offset as usize..offset as usize + len as usize]);
+
                 if next_code < 4096 {
-                    if let Some(prev_seq) = table.get(prev as usize) {
-                        let mut new_entry = prev_seq.to_vec();
-                        new_entry.push(first);
-                        table.push(new_entry);
-                        next_code += 1;
+                    if let Some(&(prev_off, prev_len)) = table.get(prev as usize) {
+                        if prev_len > 0 {
+                            let new_offset = arena.len() as u32;
+                            arena.extend_from_slice(&arena[prev_off as usize..prev_off as usize + prev_len as usize].to_vec());
+                            arena.push(first);
+                            table.push((new_offset, prev_len + 1));
+                            next_code += 1;
+                        }
                     }
                 }
             } else if code == next_code {
-                if let Some(prev_seq) = table.get(prev as usize) {
-                    let first = prev_seq.first().copied().unwrap_or(0);
-                    let mut seq = prev_seq.to_vec();
-                    seq.push(first);
-                    result.extend_from_slice(&seq);
-                    if next_code < 4096 {
-                        table.push(seq);
-                        next_code += 1;
+                if let Some(&(prev_off, prev_len)) = table.get(prev as usize) {
+                    if prev_len > 0 {
+                        let first = arena[prev_off as usize];
+                        let new_offset = arena.len() as u32;
+                        arena.extend_from_slice(&arena[prev_off as usize..prev_off as usize + prev_len as usize].to_vec());
+                        arena.push(first);
+                        let new_len = prev_len + 1;
+                        result.extend_from_slice(&arena[new_offset as usize..new_offset as usize + new_len as usize]);
+                        if next_code < 4096 {
+                            table.push((new_offset, new_len));
+                            next_code += 1;
+                        }
                     }
                 }
             } else {
                 log_warn!("Invalid LZW code: {}", code);
             }
         } else {
-            if let Some(seq) = table.get(code as usize) {
-                result.extend_from_slice(seq);
+            if let Some(&(offset, len)) = table.get(code as usize) {
+                result.extend_from_slice(&arena[offset as usize..offset as usize + len as usize]);
             }
         }
 

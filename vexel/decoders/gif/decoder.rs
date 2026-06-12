@@ -5,6 +5,7 @@ use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
 use rayon::prelude::*;
 use std::io::{Read, Seek};
 
+use super::compose_simd::compose_frame;
 use super::lzw::decompress_lzw;
 use super::types::{ApplicationExtension, DisposalMethod, GifDecoder, GifFrameInfo, GraphicsControlExtension, PlainTextExtension};
 
@@ -459,56 +460,6 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         result
     }
 
-    fn compose_frame_from_indices(&self, frame: &GifFrameInfo, indices: &[u8], canvas: &mut Vec<u8>) {
-        let color_table = if frame.local_color_table_flag {
-            &frame.local_color_table
-        } else {
-            &self.global_color_table
-        };
-
-        let clamped_h = frame.height.min(self.height.saturating_sub(frame.top)) as usize;
-        let clamped_w = frame.width.min(self.width.saturating_sub(frame.left)) as usize;
-        let index_row_stride = frame.width as usize;
-        let canvas_row_stride = self.width as usize * 4;
-        let valid_entries = color_table.len() / 3;
-
-        for y in 0..clamped_h {
-            let index_row_start = y * index_row_stride;
-            let canvas_row_start = (frame.top as usize + y) * canvas_row_stride + frame.left as usize * 4;
-
-            if index_row_start + clamped_w > indices.len() || canvas_row_start + clamped_w * 4 > canvas.len() {
-                continue;
-            }
-
-            let index_row = &indices[index_row_start..index_row_start + clamped_w];
-            let canvas_row = &mut canvas[canvas_row_start..canvas_row_start + clamped_w * 4];
-
-            match frame.transparent_index {
-                None => {
-                    for (idx, canvas_px) in index_row.iter().zip(canvas_row.chunks_exact_mut(4)) {
-                        if (*idx as usize) < valid_entries {
-                            let ci = *idx as usize * 3;
-                            canvas_px[0] = color_table[ci];
-                            canvas_px[1] = color_table[ci + 1];
-                            canvas_px[2] = color_table[ci + 2];
-                            canvas_px[3] = 255;
-                        }
-                    }
-                }
-                Some(transparent) => {
-                    for (idx, canvas_px) in index_row.iter().zip(canvas_row.chunks_exact_mut(4)) {
-                        if *idx != transparent && (*idx as usize) < valid_entries {
-                            let ci = *idx as usize * 3;
-                            canvas_px[0] = color_table[ci];
-                            canvas_px[1] = color_table[ci + 1];
-                            canvas_px[2] = color_table[ci + 2];
-                            canvas_px[3] = 255;
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         match self.read_header() {
@@ -557,7 +508,24 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 DisposalMethod::None => None,
             };
 
-            self.compose_frame_from_indices(frame, &indices, &mut canvas);
+            let color_table = if frame.local_color_table_flag {
+                &frame.local_color_table
+            } else {
+                &self.global_color_table
+            };
+
+            compose_frame(
+                &indices,
+                color_table,
+                frame.transparent_index,
+                frame.left as usize,
+                frame.top as usize,
+                frame.width as usize,
+                frame.height as usize,
+                self.width as usize,
+                self.height as usize,
+                &mut canvas,
+            );
 
             match frame.disposal_method {
                 DisposalMethod::None => {
