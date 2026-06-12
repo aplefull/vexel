@@ -1,3 +1,4 @@
+use crate::decoders::bmp::simd as simd;
 use crate::decoders::bmp::types::ColorEntry;
 use crate::utils::error::VexelResult;
 use crate::{log_warn, Image, PixelData};
@@ -59,19 +60,15 @@ impl RleDecoder {
                 }
             } else {
                 // Encoded mode - repeat value count times
-                for _ in 0..count {
-                    if x < width {
-                        let pos = (y * width + x) as usize;
-                        if pos < decoded.len() {
-                            if pos >= decoded.len() {
-                                log_warn!("Invalid pixel position: {}", pos);
-                                break;
-                            }
-
-                            decoded[pos] = value;
-                        }
-                        x += 1;
-                    }
+                let start = (y * width + x) as usize;
+                let available = (width - x) as usize;
+                let fill_count = (count as usize).min(available);
+                if start + fill_count <= decoded.len() {
+                    simd::fill_bytes(&mut decoded[start..start + fill_count], value);
+                    x += fill_count as u32;
+                } else if start < decoded.len() {
+                    simd::fill_bytes(&mut decoded[start..], value);
+                    x = width;
                 }
             }
         }
@@ -146,11 +143,6 @@ impl RleDecoder {
                     if x < width {
                         let pos = (y * width + x) as usize;
                         if pos < decoded.len() {
-                            if pos >= decoded.len() {
-                                log_warn!("Invalid pixel position: {}", pos);
-                                break;
-                            }
-
                             decoded[pos] = if i % 2 == 0 { high } else { low };
                         }
                         x += 1;
@@ -172,20 +164,9 @@ impl RleDecoder {
             let src_row = height_usize - 1 - dst_row;
             let src_offset = src_row * width_usize;
             let dst_offset = dst_row * width_usize * 3;
-
-            for x in 0..width_usize {
-                let idx = src_offset + x;
-                let pixel_value = if idx < data.len() { data[idx] as usize } else { 0 };
-                let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
-                    red: 0,
-                    green: 0,
-                    blue: 0,
-                    reserved: 0,
-                });
-                image_data[dst_offset + x * 3] = color.red;
-                image_data[dst_offset + x * 3 + 1] = color.green;
-                image_data[dst_offset + x * 3 + 2] = color.blue;
-            }
+            let src_end = (src_offset + width_usize).min(data.len());
+            let indices = if src_offset < data.len() { &data[src_offset..src_end] } else { &[] };
+            simd::apply_palette_row(indices, color_table, &mut image_data[dst_offset..dst_offset + width_usize * 3], width_usize);
         }
 
         Image::from_pixels(width, height, PixelData::RGB8(image_data))
@@ -201,20 +182,9 @@ impl RleDecoder {
             let src_row = height_usize - 1 - dst_row;
             let src_offset = src_row * width_usize;
             let dst_offset = dst_row * width_usize * 3;
-
-            for x in 0..width_usize {
-                let idx = src_offset + x;
-                let pixel_value = if idx < data.len() { data[idx] as usize } else { 0 };
-                let color = color_table.get(pixel_value).unwrap_or(&ColorEntry {
-                    red: 0,
-                    green: 0,
-                    blue: 0,
-                    reserved: 0,
-                });
-                image_data[dst_offset + x * 3] = color.red;
-                image_data[dst_offset + x * 3 + 1] = color.green;
-                image_data[dst_offset + x * 3 + 2] = color.blue;
-            }
+            let src_end = (src_offset + width_usize).min(data.len());
+            let indices = if src_offset < data.len() { &data[src_offset..src_end] } else { &[] };
+            simd::apply_palette_row(indices, color_table, &mut image_data[dst_offset..dst_offset + width_usize * 3], width_usize);
         }
 
         Image::from_pixels(width, height, PixelData::RGB8(image_data))
