@@ -135,16 +135,19 @@ def verify_folder(folder: str) -> None:
         sys.exit(1)
 
     files = sorted(f for f in src.iterdir() if f.is_file())
-    if not files:
-        return
+    if files:
+        max_name = max(len(f.name) for f in files)
+        for file in files:
+            mse, err = verify_file(file)
+            if err:
+                print(f"  {file.name:<{max_name}}  ERROR: {err}")
+            else:
+                print(f"  {file.name:<{max_name}}  MSE: {mse:.5f}")
 
-    max_name = max(len(f.name) for f in files)
-    for file in files:
-        mse, err = verify_file(file)
-        if err:
-            print(f"  {file.name:<{max_name}}  ERROR: {err}")
-        else:
-            print(f"  {file.name:<{max_name}}  MSE: {mse:.5f}")
+    corrupted = src / "_corrupted"
+    if corrupted.is_dir():
+        print(f"=== {folder}/_corrupted ===")
+        verify_folder(f"{folder}/_corrupted")
 
 
 def convert_folder(folder: str) -> None:
@@ -161,6 +164,10 @@ def convert_folder(folder: str) -> None:
         if not file.is_file():
             continue
         convert_file(file)
+
+    corrupted = src / "_corrupted"
+    if corrupted.is_dir():
+        convert_folder(f"{folder}/_corrupted")
 
 
 if "-h" in sys.argv:

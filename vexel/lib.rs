@@ -329,6 +329,16 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             return Ok(ImageFormat::Jpeg);
         }
 
+        // GIF
+        for i in 0..4 {
+            if header[i..].starts_with(b"GIF87a") || header[i..].starts_with(b"GIF89a") {
+                return Ok(ImageFormat::Gif);
+            }
+            if header[i..].starts_with(b"IF87a") || header[i..].starts_with(b"IF89a") {
+                return Ok(ImageFormat::Gif);
+            }
+        }
+
         // TODO other formats
 
         // We tried

@@ -279,7 +279,8 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                     &final_buffer,
                 ));
 
-                frame_delays.push((frame.delay() * 10).max(17));
+                let delay = frame.delay();
+                frame_delays.push(if delay <= 10 { 100 } else { delay }.max(17));
             }
 
             (frames, frame_delays, original_size)

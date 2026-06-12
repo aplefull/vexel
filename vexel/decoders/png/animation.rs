@@ -151,9 +151,9 @@ impl AnimationDecoder {
                 width: self.width,
                 height: self.height,
                 delay: if fctl.delay_den == 0 {
-                    fctl.delay_num as u32
+                    fctl.delay_num as u32 * 10
                 } else {
-                    (fctl.delay_num as f32 / fctl.delay_den as f32 * 100.0).round() as u32
+                    (fctl.delay_num as f32 / fctl.delay_den as f32 * 1000.0).round() as u32
                 },
                 pixels: canvas.clone(),
             });

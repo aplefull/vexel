@@ -140,12 +140,28 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     }
 
     fn read_header(&mut self) -> VexelResult<()> {
-        // Skip the magic number
-        self.reader.read_bits(24)?;
-
-        // Read the version
-        let version = self.reader.read_bits(24)?;
-        self.version = String::from_utf8(version.to_be_bytes().to_vec()).unwrap();
+        let mut buf = [0u8; 10];
+        let mut n = 0;
+        while n < buf.len() {
+            match self.reader.read_u8() {
+                Ok(b) => { buf[n] = b; n += 1; }
+                Err(_) => break,
+            }
+        }
+        let buf = &buf[..n];
+        let sig_offset = (0..4).find(|&i| {
+            buf[i..].starts_with(b"GIF87a")
+                || buf[i..].starts_with(b"GIF89a")
+                || buf[i..].starts_with(b"IF87a")
+                || buf[i..].starts_with(b"IF89a")
+        });
+        let offset = sig_offset.unwrap_or(0);
+        if offset > 0 || (!buf.starts_with(b"GIF87a") && !buf.starts_with(b"GIF89a")) {
+            log_warn!("GIF signature at offset {}, possibly corrupted header", offset);
+        }
+        let sig_len = if buf[offset..].starts_with(b"GIF") { 6 } else { 5 };
+        self.version = String::from_utf8_lossy(buf.get(offset + (sig_len - 3)..offset + sig_len).unwrap_or(b"87a")).to_string();
+        self.reader.seek(std::io::SeekFrom::Start((offset + sig_len) as u64))?;
 
         // Read canvas width and height
         self.canvas_width = self.reader.read_u16()?.swap_bytes() as u32;
@@ -439,14 +455,24 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
         // Read image data blocks
         loop {
-            let block_size = self.reader.read_u8()? as usize;
-            if block_size == 0 {
-                break;
-            }
+            let block_size = match self.reader.read_u8() {
+                Ok(0) => break,
+                Ok(size) => size as usize,
+                Err(e) => {
+                    log_warn!("Error reading image sub-block size: {:?}", e);
+                    break;
+                }
+            };
 
-            // Read block data
-            let mut buffer = vec![0; block_size];
-            self.reader.read_exact(&mut buffer)?;
+            let mut buffer = vec![0u8; block_size];
+            match self.reader.read_exact(&mut buffer) {
+                Ok(_) => {}
+                Err(e) => {
+                    log_warn!("Error reading image sub-block data: {:?}", e);
+                    frame.data.extend_from_slice(&buffer);
+                    break;
+                }
+            }
 
             frame.data.extend(buffer);
         }
@@ -716,7 +742,12 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 let canvas_pixel_index = ((canvas_y * self.width + canvas_x) * 4) as usize;
 
                 // Only copy non-transparent pixels
-                if *frame.data.get_safe(frame_pixel_index + 3)? > 0 {
+                let alpha = match frame.data.get_safe(frame_pixel_index + 3) {
+                    Ok(a) => *a,
+                    Err(_) => continue,
+                };
+
+                if alpha > 0 {
                     if canvas.check_range(canvas_pixel_index..canvas_pixel_index + 4).is_err() {
                         log_warn!(
                             "Canvas pixel index out of bounds: {} (len {})",
@@ -726,8 +757,12 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                         continue;
                     }
 
-                    canvas[canvas_pixel_index..canvas_pixel_index + 4]
-                        .copy_from_slice(frame.data.get_range_safe(frame_pixel_index..frame_pixel_index + 4)?);
+                    let src = match frame.data.get_range_safe(frame_pixel_index..frame_pixel_index + 4) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+
+                    canvas[canvas_pixel_index..canvas_pixel_index + 4].copy_from_slice(src);
                 }
             }
         }
@@ -821,6 +856,21 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 height: self.height,
                 pixels: PixelData::RGBA8(canvas),
                 delay: frame.delay as u32,
+            });
+        }
+
+        if self.width == 0 {
+            self.width = self.canvas_width;
+        }
+
+        if self.height == 0 {
+            self.height = self.canvas_height;
+        }
+
+        if self.width == 0 || self.height == 0 {
+            return Err(crate::utils::error::VexelError::InvalidDimensions {
+                width: self.width,
+                height: self.height,
             });
         }
 

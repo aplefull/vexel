@@ -28,7 +28,7 @@ pub enum Comparison {
 pub struct TestCase {
     pub name: &'static str,
     pub path: &'static str,
-    pub validation: Option<Box<dyn Fn(&Image)>>,
+    pub validation: Option<Box<dyn Fn(&Image) -> Result<(), String>>>,
     pub comparison: Comparison,
 }
 
@@ -49,6 +49,11 @@ pub fn get_in_path(path: &str) -> String {
 
 pub fn get_ref_path(reference_path: &str) -> PathBuf {
     Path::new(REFERENCES_PATH).join(reference_path)
+}
+
+pub fn get_pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
+    let idx = (y * width + x) * 4;
+    [pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]]
 }
 
 pub fn image_to_reference(image: &Image) -> ReferenceImage {
@@ -340,7 +345,9 @@ pub fn test_decode(test_case: TestCase) -> Result<TestResult, Box<dyn std::error
     match decoder.decode() {
         Ok(image) => {
             if let Some(validate) = test_case.validation {
-                validate(&image);
+                if let Err(msg) = validate(&image) {
+                    return Ok(TestResult::Fail(msg));
+                }
             }
             run_comparison(&image, &test_case.comparison)
         }

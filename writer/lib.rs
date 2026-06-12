@@ -204,6 +204,16 @@ impl Writer {
     }
 
     fn validate_pixel_count(image: &WriterImage) -> Result<(), Error> {
+        if image.frames.is_empty() {
+            return Err(Error::new(std::io::ErrorKind::InvalidData, "image has no frames"));
+        }
+        if image.width == 0 || image.height == 0 {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("image has zero dimensions: {}x{}", image.width, image.height),
+            ));
+        }
+
         let width = image.width;
         let height = image.height;
         let has_alpha = image.has_alpha;
