@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use libavif_sys as avif_sys;
 use vexel::{Image, Vexel};
 
 pub const BASE_PATH: &str = "./tests/images/";
@@ -11,6 +12,13 @@ pub enum Comparison {
     None,
     Exact { reference_path: &'static str },
     Fuzzy {
+        reference_path: &'static str,
+        mse_threshold: f64,
+        ssim_threshold: f64,
+    },
+    ExactFrames { reference_path: &'static str },
+    #[allow(dead_code)]
+    FuzzyFrames {
         reference_path: &'static str,
         mse_threshold: f64,
         ssim_threshold: f64,
@@ -48,6 +56,73 @@ pub fn image_to_reference(image: &Image) -> ReferenceImage {
         width: image.width(),
         height: image.height(),
         pixels: image.as_rgba8(),
+    }
+}
+
+pub fn read_reference_all_frames(path: &Path) -> Result<Vec<ReferenceImage>, Box<dyn std::error::Error>> {
+    let buf = std::fs::read(path)?;
+    unsafe {
+        let decoder = avif_sys::avifDecoderCreate();
+        if decoder.is_null() {
+            return Err("avifDecoderCreate returned null".into());
+        }
+
+        let set_io = avif_sys::avifDecoderSetIOMemory(decoder, buf.as_ptr(), buf.len());
+        if set_io != avif_sys::AVIF_RESULT_OK {
+            avif_sys::avifDecoderDestroy(decoder);
+            return Err(format!("avifDecoderSetIOMemory failed: {}", set_io).into());
+        }
+
+        let parse = avif_sys::avifDecoderParse(decoder);
+        if parse != avif_sys::AVIF_RESULT_OK {
+            avif_sys::avifDecoderDestroy(decoder);
+            return Err(format!("avifDecoderParse failed: {}", parse).into());
+        }
+
+        let frame_count = (*decoder).imageCount as usize;
+        let mut frames = Vec::with_capacity(frame_count);
+
+        loop {
+            let result = avif_sys::avifDecoderNextImage(decoder);
+            if result == avif_sys::AVIF_RESULT_NO_IMAGES_REMAINING {
+                break;
+            }
+            if result != avif_sys::AVIF_RESULT_OK {
+                avif_sys::avifDecoderDestroy(decoder);
+                return Err(format!("avifDecoderNextImage failed: {}", result).into());
+            }
+
+            let avif_image = (*decoder).image;
+            let width = (*avif_image).width;
+            let height = (*avif_image).height;
+
+            let mut rgb = avif_sys::avifRGBImage::default();
+            avif_sys::avifRGBImageSetDefaults(&mut rgb, avif_image);
+            rgb.format = avif_sys::AVIF_RGB_FORMAT_RGBA;
+            rgb.depth = 8;
+
+            let alloc = avif_sys::avifRGBImageAllocatePixels(&mut rgb);
+            if alloc != avif_sys::AVIF_RESULT_OK {
+                avif_sys::avifDecoderDestroy(decoder);
+                return Err(format!("avifRGBImageAllocatePixels failed: {}", alloc).into());
+            }
+
+            let convert = avif_sys::avifImageYUVToRGB(avif_image, &mut rgb);
+            if convert != avif_sys::AVIF_RESULT_OK {
+                avif_sys::avifRGBImageFreePixels(&mut rgb);
+                avif_sys::avifDecoderDestroy(decoder);
+                return Err(format!("avifImageYUVToRGB failed: {}", convert).into());
+            }
+
+            let pixel_count = (width * height * 4) as usize;
+            let pixels = std::slice::from_raw_parts(rgb.pixels, pixel_count).to_vec();
+            avif_sys::avifRGBImageFreePixels(&mut rgb);
+
+            frames.push(ReferenceImage { width, height, pixels });
+        }
+
+        avif_sys::avifDecoderDestroy(decoder);
+        Ok(frames)
     }
 }
 
@@ -197,6 +272,64 @@ pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResu
                 Ok((mse, ssim, psnr)) => Ok(TestResult::Ok { mse: Some(mse), ssim: Some(ssim), psnr: Some(psnr) }),
                 Err(msg) => Ok(TestResult::Fail(msg)),
             }
+        }
+        Comparison::ExactFrames { reference_path } => {
+            let ref_frames = read_reference_all_frames(&get_ref_path(reference_path))?;
+            let dec_frames = image.frames();
+            if dec_frames.len() != ref_frames.len() {
+                return Ok(TestResult::Fail(format!(
+                    "frame count mismatch: decoded={}, reference={}",
+                    dec_frames.len(),
+                    ref_frames.len()
+                )));
+            }
+            for (i, (dec_frame, ref_frame)) in dec_frames.iter().zip(ref_frames.iter()).enumerate() {
+                let actual = ReferenceImage {
+                    width: dec_frame.width(),
+                    height: dec_frame.height(),
+                    pixels: dec_frame.as_rgba8(),
+                };
+                if let Err(msg) = compare_exact(&actual, ref_frame) {
+                    return Ok(TestResult::Fail(format!("frame {}: {}", i, msg)));
+                }
+            }
+            Ok(TestResult::Ok { mse: None, ssim: None, psnr: None })
+        }
+        Comparison::FuzzyFrames { reference_path, mse_threshold, ssim_threshold } => {
+            let ref_frames = read_reference_all_frames(&get_ref_path(reference_path))?;
+            let dec_frames = image.frames();
+            if dec_frames.len() != ref_frames.len() {
+                return Ok(TestResult::Fail(format!(
+                    "frame count mismatch: decoded={}, reference={}",
+                    dec_frames.len(),
+                    ref_frames.len()
+                )));
+            }
+            let mut total_mse = 0.0f64;
+            let mut total_ssim = 0.0f64;
+            let mut total_psnr = 0.0f64;
+            let n = dec_frames.len();
+            for (i, (dec_frame, ref_frame)) in dec_frames.iter().zip(ref_frames.iter()).enumerate() {
+                let actual = ReferenceImage {
+                    width: dec_frame.width(),
+                    height: dec_frame.height(),
+                    pixels: dec_frame.as_rgba8(),
+                };
+                match compare_fuzzy(&actual, ref_frame, *mse_threshold, *ssim_threshold) {
+                    Ok((mse, ssim, psnr)) => {
+                        total_mse += mse;
+                        total_ssim += ssim;
+                        total_psnr += psnr;
+                    }
+                    Err(msg) => return Ok(TestResult::Fail(format!("frame {}: {}", i, msg))),
+                }
+            }
+            let count = n.max(1) as f64;
+            Ok(TestResult::Ok {
+                mse: Some(total_mse / count),
+                ssim: Some(total_ssim / count),
+                psnr: Some(total_psnr / count),
+            })
         }
     }
 }

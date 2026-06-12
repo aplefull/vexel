@@ -32,22 +32,36 @@ def usage() -> None:
 
 
 def decode_pixels(file: Path) -> tuple[int, int, np.ndarray]:
+    r2 = subprocess.run(
+        ["convert", str(file), "-coalesce", "-format", "%w %h\n", "-identify", "null:"],
+        capture_output=True,
+    )
+    if r2.returncode != 0:
+        raise RuntimeError(r2.stderr.decode().strip().splitlines()[0])
+
+    frame_dims = [tuple(map(int, line.split())) for line in r2.stdout.decode().strip().splitlines()]
+    frames = len(frame_dims)
+
     r = subprocess.run(
-        ["convert", "-strip", str(file), "-depth", "8", "rgba:-"],
+        ["convert", "-strip", str(file), "-coalesce", "-depth", "8", "rgba:-"],
         capture_output=True,
     )
     if r.returncode != 0:
         raise RuntimeError(r.stderr.decode().strip().splitlines()[0])
 
-    r2 = subprocess.run(
-        ["identify", "-format", "%w %h", str(file)],
-        capture_output=True,
-    )
-    if r2.returncode != 0:
-        raise RuntimeError(r2.stderr.decode().strip())
+    if frames == 1:
+        w, h = frame_dims[0]
+        pixels = np.frombuffer(r.stdout, dtype=np.uint8).reshape(h, w, 4)
+        return w, h, pixels
 
-    w, h = map(int, r2.stdout.decode().strip().split())
-    pixels = np.frombuffer(r.stdout, dtype=np.uint8).reshape(h, w, 4)
+    w, h = frame_dims[0]
+    total_expected = w * h * 4 * frames
+    if len(r.stdout) != total_expected:
+        raise RuntimeError(
+            f"raw pixel data size {len(r.stdout)} does not match expected {total_expected} for {frames} frames"
+        )
+
+    pixels = np.frombuffer(r.stdout, dtype=np.uint8).reshape(frames, h, w, 4)
     return w, h, pixels
 
 
@@ -66,6 +80,7 @@ def convert_file(file: Path) -> None:
         print(f"Skipping {file} (already exists)")
         return
 
+    frames_label = ""
     print(f"Converting {file} -> {output}")
 
     try:
@@ -74,8 +89,12 @@ def convert_file(file: Path) -> None:
         print(f"  ERROR decoding {file}: {e}", file=sys.stderr)
         return
 
+    if pixels.ndim == 4:
+        frames_label = f" ({pixels.shape[0]} frames)"
+
     encoded = imagecodecs.avif_encode(pixels, level=100, speed=6)
     output.write_bytes(encoded)
+    print(f"  Done{frames_label}")
 
 
 def verify_file(file: Path) -> tuple[float | None, str | None]:
@@ -98,12 +117,12 @@ def verify_file(file: Path) -> tuple[float | None, str | None]:
     except Exception as e:
         return None, f"AVIF decode error: {e}"
 
-    if src_pixels.shape[:2] != ref_pixels.shape[:2]:
+    if src_pixels.shape[:-1] != ref_pixels.shape[:-1]:
         return None, f"shape mismatch: src={src_pixels.shape} ref={ref_pixels.shape}"
 
-    c = min(src_pixels.shape[2], ref_pixels.shape[2])
-    src_pixels = src_pixels[:, :, :c]
-    ref_pixels = ref_pixels[:, :, :c]
+    c = min(src_pixels.shape[-1], ref_pixels.shape[-1])
+    src_pixels = src_pixels[..., :c]
+    ref_pixels = ref_pixels[..., :c]
 
     mse = float(np.mean((src_pixels.astype(np.int32) - ref_pixels.astype(np.int32)) ** 2))
     return mse, None

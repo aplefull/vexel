@@ -3638,6 +3638,7 @@ dependencies = [
  "criterion",
  "js-sys",
  "libavif",
+ "libavif-sys",
  "rayon",
  "serde",
  "serde-wasm-bindgen",

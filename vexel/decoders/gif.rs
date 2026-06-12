@@ -453,8 +453,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
         // Update decoder dimensions based on first frame
         if self.frames.is_empty() {
-            self.width = frame.width;
-            self.height = frame.height;
+            self.width = self.canvas_width;
+            self.height = self.canvas_height;
         }
 
         self.frames.push(frame);
@@ -674,7 +674,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 }
             }
 
-            if color_index + 2 < color_table.len() {
+            if color_index + 2 <= color_table.len() {
                 image_data.push(*color_table.get(color_index).unwrap_or(&0));
                 image_data.push(*color_table.get(color_index + 1).unwrap_or(&0));
                 image_data.push(*color_table.get(color_index + 2).unwrap_or(&0));
@@ -686,32 +686,11 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     }
 
     fn compose_frame(&self, frame: &GifFrameInfo, previous_canvas: Option<&Vec<u8>>) -> VexelResult<Vec<u8>> {
-        // Create a new canvas with the full GIF dimensions
         let canvas_size = (self.width * self.height * 4) as usize;
 
-        let mut canvas = match (frame.disposal_method, previous_canvas) {
-            (DisposalMethod::Previous, Some(prev)) => prev.clone(),
-            (DisposalMethod::None, Some(prev)) => prev.clone(),
-            (DisposalMethod::Background, _) => {
-                let mut canvas = vec![0; canvas_size];
-
-                if !self.global_color_table.is_empty() {
-                    let bg_index = self.background_color_index as usize * 3;
-                    let bg_color = [
-                        *self.global_color_table.get(bg_index).unwrap_or(&0),
-                        *self.global_color_table.get(bg_index + 1).unwrap_or(&0),
-                        *self.global_color_table.get(bg_index + 2).unwrap_or(&0),
-                        255,
-                    ];
-
-                    for pixel in canvas.chunks_mut(4) {
-                        pixel.copy_from_slice(&bg_color);
-                    }
-                }
-
-                canvas
-            }
-            _ => vec![0; canvas_size],
+        let mut canvas = match previous_canvas {
+            Some(prev) => prev.clone(),
+            None => vec![0u8; canvas_size],
         };
 
         // Calculate frame boundaries
@@ -813,8 +792,28 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             };
 
             previous_canvas = match frame.disposal_method {
-                DisposalMethod::None | DisposalMethod::Previous => Some(canvas.clone()),
-                DisposalMethod::Background => None,
+                DisposalMethod::None => Some(canvas.clone()),
+                DisposalMethod::Background => {
+                    let mut next_canvas = canvas.clone();
+                    for y in 0..frame.height {
+                        let canvas_y = frame.top + y;
+                        if canvas_y >= self.height {
+                            continue;
+                        }
+                        for x in 0..frame.width {
+                            let canvas_x = frame.left + x;
+                            if canvas_x >= self.width {
+                                continue;
+                            }
+                            let idx = ((canvas_y * self.width + canvas_x) * 4) as usize;
+                            if idx + 4 <= next_canvas.len() {
+                                next_canvas[idx..idx + 4].copy_from_slice(&[0, 0, 0, 0]);
+                            }
+                        }
+                    }
+                    Some(next_canvas)
+                }
+                DisposalMethod::Previous => previous_canvas,
             };
 
             image_frames.push(ImageFrame {
