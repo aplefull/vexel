@@ -1,0 +1,11 @@
+pub mod bmp;
+pub mod gif;
+pub mod hdr;
+pub mod ico;
+pub mod jbig1;
+pub mod jpeg;
+pub mod jpeg_ls;
+pub mod netpbm;
+pub mod png;
+pub mod tga;
+pub mod tiff;
