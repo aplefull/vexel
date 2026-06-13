@@ -420,7 +420,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 let (red_mask, green_mask, blue_mask, alpha_mask) = use_masks
                     .then(|| self.dib_header.color_masks().or(self.extra_masks))
                     .flatten()
-                    .unwrap_or((0x00FF0000, 0x0000FF00, 0x000000FF, 0));
+                    .unwrap_or_else(|| {
+                        let has_alpha = self.data.chunks_exact(4).any(|px| px[3] != 0);
+                        let a_mask = if has_alpha { 0xFF000000 } else { 0 };
+                        (0x00FF0000, 0x0000FF00, 0x000000FF, a_mask)
+                    });
                 PixelDecoder::decode_32bit_image(
                     &self.data,
                     self.width,

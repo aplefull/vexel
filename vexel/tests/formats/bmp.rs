@@ -436,5 +436,13 @@ pub fn test_cases() -> Vec<TestCase> {
                 reference_path: "bmp/pal8os2v2-16.avif",
             },
         },
+        TestCase {
+            name: "BMP ang00_000_007",
+            path: "bmp/ang00_000_007.bmp",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "bmp/ang00_000_007.avif",
+            },
+        }
     ]
 }
