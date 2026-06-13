@@ -32,6 +32,8 @@ use std::path::Path;
 use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
 
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 macro_rules! impl_decode {
     ($decoder:expr) => {
         $decoder.decode()

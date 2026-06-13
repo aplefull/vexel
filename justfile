@@ -1,3 +1,11 @@
+# Build native release
+build:
+    cargo build --release
+
+# Build WASM with rayon thread pool support
+build-wasm:
+    CARGO_PROFILE_RELEASE_DEBUG=false wasm-pack build vexel --target web --release -- -Z build-std=panic_abort,std
+
 # Set perf_event_paranoid to allow samply without root
 perf-allow:
     echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid

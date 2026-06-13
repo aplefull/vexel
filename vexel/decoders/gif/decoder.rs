@@ -2,7 +2,6 @@ use crate::bitreader::BitReader;
 use crate::utils::error::VexelResult;
 use crate::utils::info::GifInfo;
 use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
-use rayon::prelude::*;
 use std::io::{Read, Seek};
 
 use super::compose_simd::compose_frame;
@@ -478,9 +477,33 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             }
         };
 
+        #[cfg(feature = "rayon")]
+        let decoded_indices: Vec<Vec<u8>> = {
+            use rayon::prelude::*;
+            self.frames
+                .par_iter()
+                .map(|frame| {
+                    let mut indices = match decompress_lzw(frame) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            log_warn!("Error decoding frame: {:?}", e);
+                            return Err(e);
+                        }
+                    };
+
+                    if frame.interlace_flag {
+                        indices = Self::deinterlace_indices(frame.width, frame.height, &indices);
+                    }
+
+                    Ok(indices)
+                })
+                .collect::<VexelResult<Vec<_>>>()?
+        };
+
+        #[cfg(not(feature = "rayon"))]
         let decoded_indices: Vec<Vec<u8>> = self
             .frames
-            .par_iter()
+            .iter()
             .map(|frame| {
                 let mut indices = match decompress_lzw(frame) {
                     Ok(i) => i,
