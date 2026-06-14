@@ -225,6 +225,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
         error_message: Option<String>,
         panel_open: bool,
         pixelated: bool,
+        checkered_bg: bool,
     }
 
     impl App {
@@ -306,6 +307,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                 error_message: None,
                 panel_open: true,
                 pixelated: false,
+                checkered_bg: true,
             };
 
             let _ = app.load_current_file();
@@ -540,6 +542,12 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                             }
                         }
 
+                        ui.add_space(4.0);
+                        ui.checkbox(
+                            &mut self.checkered_bg,
+                            egui::RichText::new("Checkered background").color(value_color).size(13.0),
+                        );
+
                         let panel_rect = ui.min_rect();
                         let handle_width = 4.0;
                         let handle_rect = egui::Rect::from_min_size(
@@ -595,6 +603,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                     });
             }
 
+            let checkered_bg = self.checkered_bg;
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(texture) = &self.texture {
                     let available_size = ui.available_size();
@@ -606,6 +615,36 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                     } else {
                         egui::vec2(available_size.x, available_size.x / image_aspect)
                     };
+
+                    if checkered_bg {
+                        let panel_rect = ui.available_rect_before_wrap();
+                        let image_min = egui::pos2(
+                            panel_rect.center().x - display_size.x / 2.0,
+                            panel_rect.center().y - display_size.y / 2.0,
+                        );
+                        let image_rect = egui::Rect::from_min_size(image_min, display_size);
+                        let tile = 8.0;
+                        let light = egui::Color32::from_rgb(0xcc, 0xcc, 0xcc);
+                        let dark = egui::Color32::from_rgb(0x88, 0x88, 0x88);
+                        let col_start = (image_rect.left() / tile).floor() as i32;
+                        let col_end = (image_rect.right() / tile).ceil() as i32;
+                        let row_start = (image_rect.top() / tile).floor() as i32;
+                        let row_end = (image_rect.bottom() / tile).ceil() as i32;
+                        let painter = ui.painter();
+                        for row in row_start..row_end {
+                            for col in col_start..col_end {
+                                let color = if (row + col) % 2 == 0 { light } else { dark };
+                                let cell_rect = egui::Rect::from_min_size(
+                                    egui::pos2(col as f32 * tile, row as f32 * tile),
+                                    egui::vec2(tile, tile),
+                                );
+                                let clipped = cell_rect.intersect(image_rect);
+                                if !clipped.is_negative() {
+                                    painter.rect_filled(clipped, egui::Rounding::ZERO, color);
+                                }
+                            }
+                        }
+                    }
 
                     ui.with_layout(
                         egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
