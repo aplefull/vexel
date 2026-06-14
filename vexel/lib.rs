@@ -189,9 +189,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
         // JPEG-LS
         if header.starts_with(&[0xFF, 0xD8]) {
-            // TODO
-            //if header.windows(4).any(|window| window == [0xFF, 0xF7, 0x00, 0x0B]) {
             if header.windows(2).any(|window| window == [0xFF, 0xF7]) {
+                return Ok(ImageFormat::JpegLs);
+            }
+
+            if header.len() >= 12 && header[2] == 0xFF && header[3] == 0xE8 && &header[6..12] == b"SPIFF\0" {
                 return Ok(ImageFormat::JpegLs);
             }
         }
