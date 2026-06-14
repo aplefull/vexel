@@ -3,35 +3,9 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{ImageFrame, PixelFormat};
 use crate::utils::info::NetpbmInfo;
 use crate::{log_warn, Image, PixelData};
-use serde::Serialize;
-use std::cmp::PartialEq;
-use std::fmt::Debug;
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use tsify::Tsify;
-use wasm_bindgen::prelude::wasm_bindgen;
 
-#[wasm_bindgen]
-#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
-pub enum NetpbmFormat {
-    P1, // ASCII bitmap
-    P2, // ASCII graymap
-    P3, // ASCII pixmap
-    P4, // Binary bitmap
-    P5, // Binary graymap
-    P6, // Binary pixmap
-    P7, // PAM
-}
-
-#[wasm_bindgen]
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub enum TupleType {
-    BlackAndWhite,
-    Grayscale,
-    RGB,
-    BlackAndWhiteAlpha,
-    GrayscaleAlpha,
-    RGBAlpha,
-}
+use super::types::{NetpbmFormat, TupleType};
 
 pub struct NetPbmDecoder<R: Read + Seek> {
     width: u32,
