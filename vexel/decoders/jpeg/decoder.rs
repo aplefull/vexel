@@ -2440,7 +2440,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             } else {
                 let mut pixels16 = Vec::with_capacity(npixels);
                 for i in 0..npixels.min(src.len()) {
-                    pixels16.push((src[i] + 2048).clamp(0, 4095) as u16);
+                    pixels16.push(((src[i] + 2048).clamp(0, 4095) as u16) << 4);
                 }
                 pixels16.resize(npixels, 0);
                 Ok(PixelData::L16(pixels16))
@@ -2687,9 +2687,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         let cb = cb_row.get(col).copied().unwrap_or(0);
                         let cr = cr_row.get(col).copied().unwrap_or(0);
                         let y2048 = (y + 2048) << 16;
-                        pixels16[base + col * 3] = ((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16;
-                        pixels16[base + col * 3 + 1] = ((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16;
-                        pixels16[base + col * 3 + 2] = ((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16;
+                        pixels16[base + col * 3] = (((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                        pixels16[base + col * 3 + 1] = (((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                        pixels16[base + col * 3 + 2] = (((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16) << 4;
                     }
                 }
             }

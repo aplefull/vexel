@@ -19,20 +19,7 @@ fn add_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
 }
 
 fn u16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
-    let max_val = values.iter().max().unwrap_or(&0);
-    let min_val = values.iter().min().unwrap_or(&0);
-
-    if max_val == min_val {
-        return values.iter().map(|_| (*min_val >> 8) as u8).collect();
-    }
-
-    values
-        .iter()
-        .map(|&p| {
-            let scaled = (255.0 * (p - min_val) as f32 / (max_val - min_val) as f32) as u8;
-            scaled
-        })
-        .collect()
+    values.iter().map(|&p| (p as f32 * 255.0 / 65535.0).round() as u8).collect()
 }
 
 fn f32_to_u8_rgb(values: Vec<f32>) -> Vec<u8> {
@@ -60,48 +47,18 @@ fn la8_to_u8_rgba(values: Vec<u8>) -> Vec<u8> {
 }
 
 fn l16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
-    let max_val = values.iter().max().unwrap_or(&0);
-    let min_val = values.iter().min().unwrap_or(&0);
-
-    if max_val == min_val {
-        let gray_value = (*min_val >> 8) as u8;
-        return values
-            .iter()
-            .flat_map(|_| [gray_value, gray_value, gray_value])
-            .collect();
-    }
-
-    values
-        .iter()
-        .flat_map(|&p| {
-            let gray = (255.0 * (p - min_val) as f32 / (max_val - min_val) as f32) as u8;
-            [gray, gray, gray]
-        })
-        .collect()
+    values.iter().flat_map(|&p| {
+        let gray = (p as f32 * 255.0 / 65535.0).round() as u8;
+        [gray, gray, gray]
+    }).collect()
 }
 
 fn la16_to_u8_rgba(values: Vec<u16>) -> Vec<u8> {
-    let lum_values: Vec<&u16> = values.iter().step_by(2).collect();
-
-    let max_val = lum_values.iter().max().unwrap_or(&&0);
-    let min_val = lum_values.iter().min().unwrap_or(&&0);
-
-    if max_val == min_val {
-        return values
-            .chunks(2)
-            .flat_map(|chunk| {
-                let gray = (*min_val >> 8) as u8;
-                let alpha = (chunk[1] >> 8) as u8;
-                [gray, gray, gray, alpha]
-            })
-            .collect();
-    }
-
     values
         .chunks(2)
         .flat_map(|chunk| {
-            let gray = (255.0 * (chunk[0] - *min_val) as f32 / (*max_val - *min_val) as f32) as u8;
-            let alpha = (chunk[1] >> 8) as u8;
+            let gray = (chunk[0] as f32 * 255.0 / 65535.0).round() as u8;
+            let alpha = (chunk[1] as f32 * 255.0 / 65535.0).round() as u8;
             [gray, gray, gray, alpha]
         })
         .collect()
