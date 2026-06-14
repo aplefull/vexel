@@ -223,6 +223,8 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
         frame_delays: Vec<u32>,
         original_image_size: [usize; 2],
         error_message: Option<String>,
+        panel_open: bool,
+        pixelated: bool,
     }
 
     impl App {
@@ -287,6 +289,10 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
             (frames, frame_delays, original_size)
         }
 
+        fn is_small_image(size: [usize; 2]) -> bool {
+            size[0] < 64 || size[1] < 64
+        }
+
         fn new(files: Vec<PathBuf>) -> Self {
             let mut app = Self {
                 texture: None,
@@ -298,6 +304,8 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                 frame_delays: Vec::new(),
                 original_image_size: [0, 0],
                 error_message: None,
+                panel_open: true,
+                pixelated: false,
             };
 
             let _ = app.load_current_file();
@@ -323,6 +331,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                     self.frames = frames;
                     self.frame_delays = frame_delays;
                     self.original_image_size = original_size;
+                    self.pixelated = Self::is_small_image(original_size);
                     self.current_frame = 0;
                     self.last_frame_time = Instant::now();
                     self.error_message = None;
@@ -407,11 +416,10 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
         }
 
         fn texture_options(&self) -> egui::TextureOptions {
-            const PIXELATED_THRESHOLD: usize = 64;
-            if self.original_image_size[0] < PIXELATED_THRESHOLD || self.original_image_size[1] < PIXELATED_THRESHOLD {
+            if self.pixelated {
                 egui::TextureOptions::NEAREST
             } else {
-                egui::TextureOptions::default()
+                egui::TextureOptions::LINEAR
             }
         }
 
@@ -452,16 +460,140 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
 
     impl eframe::App for App {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            let panel_bg = egui::Color32::from_rgb(0x1e, 0x22, 0x27);
+            let main_bg = egui::Color32::from_rgb(0x28, 0x2c, 0x34);
+            let separator_color = egui::Color32::from_rgb(0x3a, 0x3f, 0x4b);
+            let label_color = egui::Color32::from_rgb(0x7a, 0x84, 0x96);
+            let value_color = egui::Color32::WHITE;
+            let handle_color = egui::Color32::from_rgb(0x4a, 0x50, 0x5e);
+            let handle_hover_color = egui::Color32::from_rgb(0x6a, 0x72, 0x82);
+
             let mut visuals = ctx.style().visuals.clone();
-            visuals.panel_fill = egui::Color32::from_rgb(0x28, 0x2c, 0x34);
+            visuals.panel_fill = main_bg;
+            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x3a, 0x3f, 0x4b);
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x4a, 0x50, 0x5e);
+            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x52, 0x58, 0x68);
             ctx.set_visuals(visuals);
 
             self.handle_dropped_files(ctx);
             self.handle_keyboard_navigation(ctx);
             self.refresh_texture(ctx);
-
-            // Update animation frame
             self.update_frame(ctx);
+
+            let file_name = self.files[self.current_file_index]
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+
+            if self.panel_open {
+                let panel_frame = egui::Frame {
+                    fill: panel_bg,
+                    inner_margin: egui::Margin { left: 20.0, right: 16.0, top: 16.0, bottom: 16.0 },
+                    ..Default::default()
+                };
+
+                egui::SidePanel::right("info_panel")
+                    .resizable(false)
+                    .exact_width(220.0)
+                    .frame(panel_frame)
+                    .show(ctx, |ui| {
+                        let add_row = |ui: &mut egui::Ui, label: &str, value: &str| {
+                            ui.label(egui::RichText::new(label).color(label_color).size(11.0));
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new(value).color(value_color).size(13.0));
+                            ui.add_space(10.0);
+                        };
+
+                        add_row(ui, "FILENAME", &file_name);
+
+                        let [w, h] = self.original_image_size;
+                        add_row(ui, "DIMENSIONS", &format!("{w} × {h}"));
+
+                        let frame_count = self.frames.len();
+                        if frame_count > 1 {
+                            add_row(ui, "FRAMES", &frame_count.to_string());
+                        }
+
+                        ui.add_space(4.0);
+                        ui.painter().hline(
+                            ui.available_rect_before_wrap().x_range(),
+                            ui.cursor().top(),
+                            egui::Stroke::new(1.0, separator_color),
+                        );
+                        ui.add_space(12.0);
+
+                        ui.label(egui::RichText::new("DISPLAY").color(label_color).size(11.0));
+                        ui.add_space(6.0);
+
+                        let pixelated_changed = ui
+                            .checkbox(
+                                &mut self.pixelated,
+                                egui::RichText::new("Pixelated").color(value_color).size(13.0),
+                            )
+                            .changed();
+
+                        if pixelated_changed {
+                            let options = self.texture_options();
+                            if let Some(texture) = &mut self.texture {
+                                texture.set(self.frames[self.current_frame].clone(), options);
+                            }
+                        }
+
+                        let panel_rect = ui.min_rect();
+                        let handle_width = 4.0;
+                        let handle_rect = egui::Rect::from_min_size(
+                            egui::pos2(panel_rect.left() - 20.0, panel_rect.top()),
+                            egui::vec2(handle_width, panel_rect.height()),
+                        );
+                        let handle_id = ui.id().with("panel_handle");
+                        let handle_resp = ui.interact(handle_rect, handle_id, egui::Sense::click());
+                        let bar_color = if handle_resp.hovered() { handle_hover_color } else { handle_color };
+                        let grip_h = 32.0;
+                        let grip_y = handle_rect.center().y - grip_h / 2.0;
+                        let bar_rect = egui::Rect::from_min_size(
+                            egui::pos2(handle_rect.left(), grip_y),
+                            egui::vec2(handle_width, grip_h),
+                        );
+                        ui.painter().rect_filled(bar_rect, egui::Rounding::same(2.0), bar_color);
+                        if handle_resp.clicked() {
+                            self.panel_open = false;
+                        }
+                        if handle_resp.hovered() {
+                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                    });
+            } else {
+                egui::SidePanel::right("handle_panel")
+                    .resizable(false)
+                    .exact_width(12.0)
+                    .frame(egui::Frame {
+                        fill: panel_bg,
+                        inner_margin: egui::Margin::ZERO,
+                        ..Default::default()
+                    })
+                    .show(ctx, |ui| {
+                        let rect = ui.available_rect_before_wrap();
+                        let handle_width = 4.0;
+                        let handle_x = rect.left() + (rect.width() - handle_width) / 2.0;
+                        let grip_h = 32.0;
+                        let grip_y = rect.center().y - grip_h / 2.0;
+                        let bar_rect = egui::Rect::from_min_size(
+                            egui::pos2(handle_x, grip_y),
+                            egui::vec2(handle_width, grip_h),
+                        );
+                        let handle_id = ui.id().with("collapsed_handle");
+                        let handle_resp = ui.interact(rect, handle_id, egui::Sense::click());
+                        let bar_color = if handle_resp.hovered() { handle_hover_color } else { handle_color };
+                        ui.painter().rect_filled(bar_rect, egui::Rounding::same(2.0), bar_color);
+                        if handle_resp.clicked() {
+                            self.panel_open = true;
+                        }
+                        if handle_resp.hovered() {
+                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                    });
+            }
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 if let Some(texture) = &self.texture {
@@ -481,27 +613,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
                             ui.image((texture.id(), display_size));
                         },
                     );
-
-                    let file_name = self.files[self.current_file_index]
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("Unknown");
-
-                    let painter = ui.painter();
-                    let text_pos = egui::pos2(10.0, 10.0);
-                    painter.text(
-                        text_pos,
-                        egui::Align2::LEFT_TOP,
-                        file_name,
-                        egui::FontId::proportional(16.0),
-                        egui::Color32::WHITE,
-                    );
                 } else {
-                    let file_name = self.files[self.current_file_index]
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("Unknown");
-
                     let error = self
                         .error_message
                         .as_deref()
