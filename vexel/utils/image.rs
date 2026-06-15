@@ -81,8 +81,6 @@ pub enum ImageFormat {
     Hdr,
     Tiff,
     Tga,
-    Avif,
-    WebP,
     Jbig1,
     Ico,
     Cur,

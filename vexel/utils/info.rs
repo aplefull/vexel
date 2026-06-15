@@ -1,4 +1,3 @@
-use crate::decoders::avif::{AvifColorInfo, AvifFrameInfo, AvifProperties};
 use crate::decoders::bmp::{BitmapFileHeader, ColorEntry, DibHeader};
 use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtension};
 use crate::decoders::hdr::HdrFormat;
@@ -6,7 +5,6 @@ use crate::decoders::ico::{IconDirEntry, IcoType};
 use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::PngChunkInfo;
-use crate::decoders::webp::{AlphaChunkInfo, WebpAnimationInfo, WebpCompressionType, WebpExtendedInfo, WebpFrame};
 use crate::utils::exif::{ExifIfd, ExifValue};
 use crate::utils::icc::ICCProfile;
 use serde::Serialize;
@@ -23,8 +21,6 @@ pub enum ImageInfo {
     Gif(GifInfo),
     Netpbm(NetpbmInfo),
     Hdr(HdrInfo),
-    Webp(WebpInfo),
-    Avif(AvifInfo),
     Jbig1(Jbig1Info),
     Ico(IcoInfo),
 }
@@ -100,33 +96,6 @@ pub struct HdrInfo {
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
-pub struct WebpInfo {
-    pub width: u32,
-    pub height: u32,
-    pub compression_type: WebpCompressionType,
-    pub has_alpha: bool,
-    pub has_animation: bool,
-    pub animation_info: Option<WebpAnimationInfo>,
-    pub frames: Vec<WebpFrame>,
-    pub extended_info: Option<WebpExtendedInfo>,
-    pub background_color: Option<[u8; 4]>,
-    pub alpha_info: Option<AlphaChunkInfo>,
-}
-
-#[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
-pub struct AvifInfo {
-    pub width: u32,
-    pub height: u32,
-    pub color_info: AvifColorInfo,
-    pub is_animated: bool,
-    pub loop_count: u32,
-    pub properties: AvifProperties,
-    pub frames: Vec<AvifFrameInfo>,
-}
-
-#[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Jbig1Info {
     pub width: u32,
     pub height: u32,
@@ -158,8 +127,6 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Gif(info) => write!(f, "{}", info),
             ImageInfo::Netpbm(info) => write!(f, "{}", info),
             ImageInfo::Hdr(info) => write!(f, "{}", info),
-            ImageInfo::Webp(info) => write!(f, "{}", info),
-            ImageInfo::Avif(info) => write!(f, "{}", info),
             ImageInfo::Jbig1(info) => write!(f, "{}", info),
             ImageInfo::Ico(info) => write!(f, "{}", info),
         }
@@ -531,35 +498,6 @@ impl fmt::Display for HdrInfo {
             for comment in &self.comments {
                 writeln!(f, "  {}", comment)?;
             }
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Display for WebpInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "WebP Image Information")?;
-        writeln!(f, "======================")?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "Compression: {:?}", self.compression_type)?;
-        writeln!(f, "Has alpha: {}", self.has_alpha)?;
-        writeln!(f, "Has animation: {}", self.has_animation)?;
-        if self.has_animation {
-            writeln!(f, "Frames: {}", self.frames.len())?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Display for AvifInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "AVIF Image Information")?;
-        writeln!(f, "======================")?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "Animated: {}", self.is_animated)?;
-        if self.is_animated {
-            writeln!(f, "Frames: {}", self.frames.len())?;
-            writeln!(f, "Loop count: {}", self.loop_count)?;
         }
         Ok(())
     }

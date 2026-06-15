@@ -1,4 +1,3 @@
-pub mod avif;
 pub mod bmp;
 pub mod gif;
 pub mod hdr;
@@ -10,4 +9,3 @@ pub mod netpbm;
 pub mod png;
 pub mod tga;
 pub mod tiff;
-pub mod webp;
