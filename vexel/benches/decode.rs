@@ -53,5 +53,27 @@ fn bench_png(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_jpeg, bench_png);
+fn bench_hdr(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hdr");
+
+    let cases = [
+        BenchCase { name: "venice_sunset_8k", path: "hdr/venice_sunset_8k.hdr" },
+    ];
+
+    for case in &cases {
+        let full_path = format!("{}/{}", IMAGES_PATH, case.path);
+        let data = fs::read(&full_path).unwrap_or_else(|_| panic!("Missing {full_path}"));
+
+        group.bench_function(case.name, |b| {
+            b.iter(|| {
+                let cursor = std::io::Cursor::new(&data);
+                vexel::Vexel::new(cursor).unwrap().decode().unwrap()
+            });
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_jpeg, bench_png, bench_hdr);
 criterion_main!(benches);

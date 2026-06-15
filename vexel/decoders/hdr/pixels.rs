@@ -1,6 +1,7 @@
 use crate::utils::error::VexelResult;
 use crate::{log_warn, PixelData};
 
+use super::simd;
 use super::types::HdrFormat;
 
 pub struct PixelDecoder {
@@ -15,66 +16,95 @@ impl PixelDecoder {
     }
 
     pub fn decode(&self, rgbe_data: &[u8]) -> VexelResult<PixelData> {
-        let num_pixels = (self.width * self.height) as usize;
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let num_pixels = width * height;
         let mut rgb_data = vec![0f32; num_pixels * 3];
 
-        for i in 0..num_pixels {
-            if i * 4 + 3 >= rgbe_data.len() {
-                log_warn!("Pixel index out of bounds: {} >= {}", i * 4 + 3, rgbe_data.len());
-                continue;
-            }
-
-            if i * 3 + 2 >= rgb_data.len() {
-                log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, rgb_data.len());
-                continue;
-            }
-
-            let rgbe = &rgbe_data[i * 4..(i + 1) * 4];
-            let rgb = &mut rgb_data[i * 3..(i + 1) * 3];
-
-            if rgbe[3] != 0 {
-                let scale = f32::exp2(rgbe[3] as f32 - 128.0 - 8.0);
-
-                rgb[0] = rgbe[0] as f32 * scale;
-                rgb[1] = rgbe[1] as f32 * scale;
-                rgb[2] = rgbe[2] as f32 * scale;
-            } else {
-                rgb[0] = 0.0;
-                rgb[1] = 0.0;
-                rgb[2] = 0.0;
-            }
-        }
+        decode_rgbe(rgbe_data, &mut rgb_data, width);
 
         match self.format {
             HdrFormat::RGBE => Ok(PixelData::RGB32F(rgb_data)),
             HdrFormat::XYZE => {
                 let mut final_data = vec![0f32; num_pixels * 3];
-
-                for i in 0..num_pixels {
-                    if i * 3 + 2 >= rgb_data.len() {
-                        log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, rgb_data.len());
-                        continue;
-                    }
-
-                    if i * 3 + 2 >= final_data.len() {
-                        log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, final_data.len());
-                        continue;
-                    }
-
-                    let xyz = &rgb_data[i * 3..(i + 1) * 3];
-                    let rgb = &mut final_data[i * 3..(i + 1) * 3];
-
-                    rgb[0] = 3.2404542 * xyz[0] - 1.5371385 * xyz[1] - 0.4985314 * xyz[2];
-                    rgb[1] = -0.9692660 * xyz[0] + 1.8760108 * xyz[1] + 0.0415560 * xyz[2];
-                    rgb[2] = 0.0556434 * xyz[0] - 0.2040259 * xyz[1] + 1.0572252 * xyz[2];
-
-                    rgb[0] = rgb[0].max(0.0);
-                    rgb[1] = rgb[1].max(0.0);
-                    rgb[2] = rgb[2].max(0.0);
-                }
-
+                convert_xyze_to_rgb(&rgb_data, &mut final_data, width);
                 Ok(PixelData::RGB32F(final_data))
             }
         }
+    }
+}
+
+fn decode_rgbe(rgbe_data: &[u8], rgb_data: &mut [f32], width: usize) {
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+
+        rgb_data
+            .par_chunks_mut(width * 3)
+            .enumerate()
+            .for_each(|(row, rgb_row)| {
+                let rgbe_row = &rgbe_data[row * width * 4..];
+                decode_rgbe_row(rgbe_row, rgb_row, width);
+            });
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        for row in 0..rgb_data.len() / (width * 3) {
+            let rgbe_row = &rgbe_data[row * width * 4..];
+            let rgb_row = &mut rgb_data[row * width * 3..(row + 1) * width * 3];
+            decode_rgbe_row(rgbe_row, rgb_row, width);
+        }
+    }
+}
+
+fn decode_rgbe_row(rgbe_row: &[u8], rgb_row: &mut [f32], width: usize) {
+    for x in 0..width {
+        let src = x * 4;
+        let dst = x * 3;
+
+        if src + 3 >= rgbe_row.len() {
+            log_warn!("RGBE row index out of bounds: {} >= {}", src + 3, rgbe_row.len());
+            continue;
+        }
+
+        if dst + 2 >= rgb_row.len() {
+            log_warn!("RGB row index out of bounds: {} >= {}", dst + 2, rgb_row.len());
+            continue;
+        }
+
+        let e = rgbe_row[src + 3];
+
+        if e != 0 {
+            let scale = f32::exp2(e as f32 - 128.0 - 8.0);
+            rgb_row[dst] = rgbe_row[src] as f32 * scale;
+            rgb_row[dst + 1] = rgbe_row[src + 1] as f32 * scale;
+            rgb_row[dst + 2] = rgbe_row[src + 2] as f32 * scale;
+        } else {
+            rgb_row[dst] = 0.0;
+            rgb_row[dst + 1] = 0.0;
+            rgb_row[dst + 2] = 0.0;
+        }
+    }
+}
+
+fn convert_xyze_to_rgb(xyz_data: &[f32], rgb_data: &mut [f32], width: usize) {
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+
+        let row_floats = width * 3;
+
+        xyz_data
+            .par_chunks(row_floats)
+            .zip(rgb_data.par_chunks_mut(row_floats))
+            .for_each(|(src_row, dst_row)| {
+                simd::xyz_to_rgb(src_row, dst_row);
+            });
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        simd::xyz_to_rgb(xyz_data, rgb_data);
     }
 }
