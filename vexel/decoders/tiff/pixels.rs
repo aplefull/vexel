@@ -108,10 +108,7 @@ impl PixelReader {
             (8, SampleFormat::SignedInt, false) => {
                 let pixels: Vec<u8> = data
                     .iter()
-                    .map(|&b| {
-                        let normalized = (b as i8 as f32 + 128.0).round() as u8;
-                        if invert { 255 - normalized } else { normalized }
-                    })
+                    .map(|&b| if invert { 255 - b } else { b })
                     .collect();
                 Ok(PixelData::L8(pixels))
             }
@@ -120,9 +117,8 @@ impl PixelReader {
                 let pixels: Vec<u16> = data
                     .chunks_exact(2)
                     .map(|chunk| {
-                        let v = u16_from_bytes(chunk, self.byte_order) as i16;
-                        let normalized = (v as f32 + 32768.0).round() as u16;
-                        if invert { u16::MAX - normalized } else { normalized }
+                        let v = (u16_from_bytes(chunk, self.byte_order) as i16 as f32 + 32768.0).round() as u16;
+                        if invert { u16::MAX - v } else { v }
                     })
                     .collect();
                 Ok(PixelData::L16(pixels))
@@ -132,11 +128,8 @@ impl PixelReader {
                 let pixels: Vec<u8> = data
                     .chunks_exact(4)
                     .map(|chunk| {
-                        let v = match self.byte_order {
-                            ByteOrder::LittleEndian => i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-                            ByteOrder::BigEndian => i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-                        } as i64;
-                        let normalized = ((v + i32::MAX as i64 + 1) as f64 / u32::MAX as f64 * 255.0).round() as u8;
+                        let v = u32_from_bytes(chunk, self.byte_order);
+                        let normalized = (v as f64 / u32::MAX as f64 * 255.0).round() as u8;
                         if invert { 255 - normalized } else { normalized }
                     })
                     .collect();
@@ -148,10 +141,10 @@ impl PixelReader {
                     .chunks_exact(8)
                     .map(|chunk| {
                         let v = match self.byte_order {
-                            ByteOrder::LittleEndian => i64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]),
-                            ByteOrder::BigEndian => i64::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]),
-                        } as i128;
-                        let normalized = ((v + i64::MAX as i128 + 1) as f64 / u64::MAX as f64 * 255.0).round() as u8;
+                            ByteOrder::LittleEndian => u64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]),
+                            ByteOrder::BigEndian => u64::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]),
+                        };
+                        let normalized = (v as f64 / u64::MAX as f64 * 255.0).round() as u8;
                         if invert { 255 - normalized } else { normalized }
                     })
                     .collect();
@@ -360,14 +353,52 @@ impl PixelReader {
             }
 
             (8, SampleFormat::SignedInt) => {
+                if has_alpha {
+                    let pixels: Vec<u8> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3]])
+                        .collect();
+                    Ok(PixelData::RGBA8(pixels))
+                } else {
+                    let pixels: Vec<u8> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
+                        .collect();
+                    Ok(PixelData::RGB8(pixels))
+                }
+            }
+
+            (16, SampleFormat::SignedInt) => {
+                let pixels: Vec<u16> = data
+                    .chunks_exact(bytes_per_pixel)
+                    .flat_map(|chunk| {
+                        let r = u16_from_bytes(&chunk[0..2], self.byte_order);
+                        let g = u16_from_bytes(&chunk[2..4], self.byte_order);
+                        let b = u16_from_bytes(&chunk[4..6], self.byte_order);
+                        if has_alpha && chunk.len() >= 8 {
+                            let a = u16_from_bytes(&chunk[6..8], self.byte_order);
+                            vec![r, g, b, a]
+                        } else {
+                            vec![r, g, b]
+                        }
+                    })
+                    .collect();
+                if has_alpha {
+                    Ok(PixelData::RGBA16(pixels))
+                } else {
+                    Ok(PixelData::RGB16(pixels))
+                }
+            }
+
+            (32, SampleFormat::SignedInt) => {
                 let pixels: Vec<u8> = data
                     .chunks_exact(bytes_per_pixel)
                     .flat_map(|chunk| {
-                        let r = (chunk[0] as i8 as f32 + 128.0).round() as u8;
-                        let g = (chunk[1] as i8 as f32 + 128.0).round() as u8;
-                        let b = (chunk[2] as i8 as f32 + 128.0).round() as u8;
-                        if has_alpha && chunk.len() >= 4 {
-                            let a = (chunk[3] as i8 as f32 + 128.0).round() as u8;
+                        let r = (u32_from_bytes(&chunk[0..4], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
+                        let g = (u32_from_bytes(&chunk[4..8], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
+                        let b = (u32_from_bytes(&chunk[8..12], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
+                        if has_alpha && chunk.len() >= 16 {
+                            let a = (u32_from_bytes(&chunk[12..16], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
                             vec![r, g, b, a]
                         } else {
                             vec![r, g, b]
@@ -381,15 +412,27 @@ impl PixelReader {
                 }
             }
 
-            (16, SampleFormat::SignedInt) => {
-                let pixels: Vec<u16> = data
+            (64, SampleFormat::SignedInt) => {
+                let pixels: Vec<u8> = data
                     .chunks_exact(bytes_per_pixel)
                     .flat_map(|chunk| {
-                        let r = (u16_from_bytes(&chunk[0..2], self.byte_order) as i16 as f32 + 32768.0).round() as u16;
-                        let g = (u16_from_bytes(&chunk[2..4], self.byte_order) as i16 as f32 + 32768.0).round() as u16;
-                        let b = (u16_from_bytes(&chunk[4..6], self.byte_order) as i16 as f32 + 32768.0).round() as u16;
-                        if has_alpha && chunk.len() >= 8 {
-                            let a = (u16_from_bytes(&chunk[6..8], self.byte_order) as i16 as f32 + 32768.0).round() as u16;
+                        let r = (match self.byte_order {
+                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                        } as f64 / u64::MAX as f64 * 255.0).round() as u8;
+                        let g = (match self.byte_order {
+                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                        } as f64 / u64::MAX as f64 * 255.0).round() as u8;
+                        let b = (match self.byte_order {
+                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[16..24].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[16..24].try_into().unwrap_or_default()),
+                        } as f64 / u64::MAX as f64 * 255.0).round() as u8;
+                        if has_alpha && chunk.len() >= 32 {
+                            let a = (match self.byte_order {
+                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[24..32].try_into().unwrap_or_default()),
+                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[24..32].try_into().unwrap_or_default()),
+                            } as f64 / u64::MAX as f64 * 255.0).round() as u8;
                             vec![r, g, b, a]
                         } else {
                             vec![r, g, b]
@@ -397,9 +440,9 @@ impl PixelReader {
                     })
                     .collect();
                 if has_alpha {
-                    Ok(PixelData::RGBA16(pixels))
+                    Ok(PixelData::RGBA8(pixels))
                 } else {
-                    Ok(PixelData::RGB16(pixels))
+                    Ok(PixelData::RGB8(pixels))
                 }
             }
 

@@ -1,12 +1,18 @@
 use crate::bitreader::BitReader;
+use crate::decoders::jpeg::decoder::JpegDecoder;
+use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::types::ByteOrder;
 use crate::Image;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
+use super::compression::{
+    apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
+    decompress_lzw, decompress_packbits,
+};
 use super::pixels::PixelReader;
 use super::reader::{read_multiple_rationals, read_multiple_values, read_rational, read_single_value};
-use super::types::{Compression, SampleFormat, TiffHeader};
+use super::types::{Compression, Predictor, SampleFormat, TiffHeader};
 
 pub struct TiffDecoder<R: Read + Seek> {
     width: u32,
@@ -75,16 +81,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?
                 }
                 259 => {
-                    self.header.compression = match read_single_value(type_, value_offset, &mut self.reader)? {
-                        1u32 => Compression::None,
-                        2 => Compression::CCITT1D,
-                        3 => Compression::Group3Fax,
-                        4 => Compression::Group4Fax,
-                        5 => Compression::LZW,
-                        6 => Compression::JPEG,
-                        32773 => Compression::PackBits,
-                        _ => Compression::None,
-                    }
+                    let compression_value: u32 = read_single_value(type_, value_offset, &mut self.reader)?;
+                    self.header.compression =
+                        Compression::try_from(compression_value as u16).unwrap_or(Compression::None);
                 }
                 262 => {
                     self.header.photometric_interpretation = read_single_value(type_, value_offset, &mut self.reader)?
@@ -103,6 +102,10 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 283 => self.header.y_resolution = read_rational(value_offset, &mut self.reader)?,
                 284 => self.header.planar_configuration = read_single_value(type_, value_offset, &mut self.reader)?,
                 296 => self.header.resolution_unit = read_single_value(type_, value_offset, &mut self.reader)?,
+                317 => {
+                    let predictor_value: u32 = read_single_value(type_, value_offset, &mut self.reader)?;
+                    self.header.predictor = Predictor::try_from(predictor_value).unwrap_or(Predictor::None);
+                }
                 320 => {
                     self.reader.seek(SeekFrom::Start(value_offset as u64))?;
                     let mut color_map = Vec::with_capacity(count as usize);
@@ -136,6 +139,12 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         .into_iter()
                         .map(|v| SampleFormat::try_from(v).unwrap_or(SampleFormat::UnsignedInt))
                         .collect();
+                }
+                347 => {
+                    self.reader.seek(SeekFrom::Start(value_offset as u64))?;
+                    let mut jpeg_tables = vec![0u8; count as usize];
+                    self.reader.read_exact(&mut jpeg_tables)?;
+                    self.header.jpeg_tables = jpeg_tables;
                 }
                 529 => {
                     let rationals = read_multiple_rationals(count, value_offset, &mut self.reader)?;
@@ -179,25 +188,130 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.header.bits_per_sample.get(channel).copied().unwrap_or(8)
     }
 
+    fn decompress_chunk(&self, data: Vec<u8>) -> Vec<u8> {
+        match self.header.compression {
+            Compression::None => data,
+            Compression::LZW => decompress_lzw(&data),
+            Compression::PackBits => decompress_packbits(&data),
+            Compression::AdobeDeflate | Compression::Deflate => decompress_deflate(&data),
+            Compression::JPEG => self.decompress_jpeg_strip(data),
+            Compression::OldJPEG => self.decompress_jpeg_strip(data),
+            Compression::PNG => self.decompress_png_strip(data),
+            _ => data,
+        }
+    }
+
+    fn decompress_png_strip(&self, strip_data: Vec<u8>) -> Vec<u8> {
+        let cursor = Cursor::new(strip_data);
+        let mut png_decoder = PngDecoder::new(cursor);
+
+        match png_decoder.decode() {
+            Ok(image) => image.as_rgb8(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn decompress_jpeg_strip(&self, strip_data: Vec<u8>) -> Vec<u8> {
+        let jpeg_data = if !self.header.jpeg_tables.is_empty() {
+            self.splice_jpeg_tables(&self.header.jpeg_tables, &strip_data)
+        } else {
+            strip_data
+        };
+
+        let cursor = Cursor::new(jpeg_data);
+        let mut jpeg_decoder = JpegDecoder::new(cursor);
+
+        match jpeg_decoder.decode() {
+            Ok(image) => image.as_rgb8(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn splice_jpeg_tables(&self, tables: &[u8], strip: &[u8]) -> Vec<u8> {
+        if tables.len() < 4 || strip.len() < 2 {
+            return strip.to_vec();
+        }
+
+        let tables_body = if tables.starts_with(&[0xFF, 0xD8]) && tables.ends_with(&[0xFF, 0xD9]) {
+            &tables[2..tables.len() - 2]
+        } else {
+            tables
+        };
+
+        if strip.starts_with(&[0xFF, 0xD8]) {
+            let mut result = Vec::with_capacity(2 + tables_body.len() + strip.len() - 2);
+            result.extend_from_slice(&[0xFF, 0xD8]);
+            result.extend_from_slice(tables_body);
+            result.extend_from_slice(&strip[2..]);
+            result
+        } else {
+            let mut result = Vec::with_capacity(2 + tables_body.len() + strip.len());
+            result.extend_from_slice(&[0xFF, 0xD8]);
+            result.extend_from_slice(tables_body);
+            result.extend_from_slice(strip);
+            result
+        }
+    }
+
+    fn apply_predictor(&self, data: &mut Vec<u8>, strip_width: u32) {
+        let bps = self.bits_for(0);
+        let spp = self.header.samples_per_pixel;
+        match self.header.predictor {
+            Predictor::HorizontalDifferencing => {
+                if self.byte_order == ByteOrder::BigEndian {
+                    apply_predictor_horizontal_be(data, strip_width, spp, bps);
+                } else {
+                    apply_predictor_horizontal(data, strip_width, spp, bps);
+                }
+            }
+            Predictor::FloatingPoint => {
+                apply_predictor_float(data, strip_width, spp, bps, self.byte_order == ByteOrder::BigEndian);
+            }
+            _ => {}
+        }
+    }
+
     fn read_strip_data(&mut self) -> VexelResult<Vec<u8>> {
+        let is_jpeg = matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG);
+
+        if is_jpeg {
+            return self.read_strip_data_jpeg();
+        }
+
+        let rows_per_strip = self.header.rows_per_strip;
+        let image_width = self.width;
         let mut bytes = Vec::new();
 
-        for (offset, byte_count) in self
-            .header
-            .strip_offsets
-            .clone()
-            .iter()
-            .zip(self.header.strip_byte_counts.clone().iter())
-        {
+        let offsets = self.header.strip_offsets.clone();
+        let byte_counts = self.header.strip_byte_counts.clone();
+
+        for (strip_idx, (offset, byte_count)) in offsets.iter().zip(byte_counts.iter()).enumerate() {
             self.reader.seek(SeekFrom::Start(*offset as u64))?;
 
             let mut strip_data = vec![0u8; *byte_count as usize];
             self.reader.read_exact(&mut strip_data)?;
 
-            let decompressed = match self.header.compression {
-                Compression::None => strip_data,
-                _ => return Err(VexelError::Custom("Unsupported compression".to_string())),
+            let mut decompressed = self.decompress_chunk(strip_data);
+
+            let strip_row_start = strip_idx as u32 * rows_per_strip;
+            let strip_row_end = (strip_row_start + rows_per_strip).min(self.height);
+            let strip_rows = strip_row_end - strip_row_start;
+            let strip_width = if self.header.planar_configuration == super::types::PlanarConfiguration::Planar {
+                image_width
+            } else {
+                image_width
             };
+
+            if self.header.predictor != Predictor::None {
+                let bps = self.bits_for(0);
+                if bps >= 8 {
+                    let spp = self.header.samples_per_pixel;
+                    let row_bytes = strip_width as usize * spp as usize * (bps as usize / 8);
+                    let expected_len = strip_rows as usize * row_bytes;
+                    decompressed.truncate(expected_len);
+                    self.apply_predictor(&mut decompressed, strip_width);
+                }
+            }
 
             bytes.extend_from_slice(&decompressed);
         }
@@ -205,7 +319,61 @@ impl<R: Read + Seek> TiffDecoder<R> {
         Ok(bytes)
     }
 
+    fn read_strip_data_jpeg(&mut self) -> VexelResult<Vec<u8>> {
+        let image_width = self.width as usize;
+        let image_height = self.height as usize;
+        let rows_per_strip = self.header.rows_per_strip as usize;
+        let spp = self.header.samples_per_pixel as usize;
+        let bytes_per_pixel = spp.max(3);
+
+        let mut image_data = vec![0u8; image_width * image_height * bytes_per_pixel];
+
+        let offsets = self.header.strip_offsets.clone();
+        let byte_counts = self.header.strip_byte_counts.clone();
+        let jpeg_tables = self.header.jpeg_tables.clone();
+
+        for (strip_idx, (offset, byte_count)) in offsets.iter().zip(byte_counts.iter()).enumerate() {
+            self.reader.seek(SeekFrom::Start(*offset as u64))?;
+
+            let mut strip_data = vec![0u8; *byte_count as usize];
+            self.reader.read_exact(&mut strip_data)?;
+
+            let jpeg_data = if !jpeg_tables.is_empty() {
+                self.splice_jpeg_tables(&jpeg_tables, &strip_data)
+            } else {
+                strip_data
+            };
+
+            let cursor = Cursor::new(jpeg_data);
+            let mut jpeg_decoder = JpegDecoder::new(cursor);
+
+            let strip_pixels = match jpeg_decoder.decode() {
+                Ok(image) => image.as_rgb8(),
+                Err(_) => continue,
+            };
+
+            let strip_row_start = strip_idx * rows_per_strip;
+            let strip_row_end = (strip_row_start + rows_per_strip).min(image_height);
+            let decoded_rows = strip_row_end - strip_row_start;
+            let row_bytes = image_width * bytes_per_pixel;
+
+            for row in 0..decoded_rows {
+                let src_start = row * row_bytes;
+                let dst_start = (strip_row_start + row) * row_bytes;
+
+                if src_start + row_bytes <= strip_pixels.len() && dst_start + row_bytes <= image_data.len() {
+                    image_data[dst_start..dst_start + row_bytes]
+                        .copy_from_slice(&strip_pixels[src_start..src_start + row_bytes]);
+                }
+            }
+        }
+
+        Ok(image_data)
+    }
+
     fn read_tile_data(&mut self) -> VexelResult<Vec<u8>> {
+        let is_jpeg = matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG);
+
         let tile_width = self.header.tile_width.unwrap_or(self.width) as usize;
         let tile_height = self.header.tile_length.unwrap_or(self.height) as usize;
         let image_width = self.width as usize;
@@ -213,24 +381,49 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let spp = self.header.samples_per_pixel as usize;
         let bps = self.bits_for(0);
         let bytes_per_sample = (bps as usize).div_ceil(8);
-        let bytes_per_pixel = bytes_per_sample * spp;
+        let bytes_per_pixel = if is_jpeg { spp.max(3) } else { bytes_per_sample * spp };
 
         let tiles_x = image_width.div_ceil(tile_width);
 
         let mut image_data = vec![0u8; image_width * image_height * bytes_per_pixel];
 
-        for tile_idx in 0..self.header.tile_offsets.len() {
-            let offset = self.header.tile_offsets[tile_idx];
-            let byte_count = self.header.tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
+        let tile_offsets = self.header.tile_offsets.clone();
+        let tile_byte_counts = self.header.tile_byte_counts.clone();
+        let jpeg_tables = self.header.jpeg_tables.clone();
+
+        for tile_idx in 0..tile_offsets.len() {
+            let offset = tile_offsets[tile_idx];
+            let byte_count = tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
 
             self.reader.seek(SeekFrom::Start(offset as u64))?;
-            let mut tile_data = vec![0u8; byte_count as usize];
-            self.reader.read_exact(&mut tile_data)?;
+            let mut raw_tile = vec![0u8; byte_count as usize];
+            self.reader.read_exact(&mut raw_tile)?;
 
-            let tile_data = match self.header.compression {
-                Compression::None => tile_data,
-                _ => return Err(VexelError::Custom("Unsupported compression in tiled image".to_string())),
+            let mut tile_data = if is_jpeg {
+                let jpeg_data = if !jpeg_tables.is_empty() {
+                    self.splice_jpeg_tables(&jpeg_tables, &raw_tile)
+                } else {
+                    raw_tile
+                };
+
+                let cursor = Cursor::new(jpeg_data);
+                let mut jpeg_decoder = JpegDecoder::new(cursor);
+                match jpeg_decoder.decode() {
+                    Ok(image) => image.as_rgb8(),
+                    Err(_) => vec![0u8; tile_width * tile_height * bytes_per_pixel],
+                }
+            } else {
+                let mut d = self.decompress_chunk(raw_tile);
+                if self.header.predictor != Predictor::None && self.bits_for(0) >= 8 {
+                    self.apply_predictor(&mut d, tile_width as u32);
+                }
+                d
             };
+
+            let expected_tile_bytes = tile_width * tile_height * bytes_per_pixel;
+            if tile_data.len() < expected_tile_bytes {
+                tile_data.resize(expected_tile_bytes, 0);
+            }
 
             let tile_col = tile_idx % tiles_x;
             let tile_row = tile_idx / tiles_x;
@@ -270,12 +463,24 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.read_header()?;
 
         let is_tiled = self.header.tile_width.is_some() && !self.header.tile_offsets.is_empty();
+        let is_jpeg = matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG);
 
         let bytes = if is_tiled {
             self.read_tile_data()?
         } else {
             self.read_strip_data()?
         };
+
+        if is_jpeg {
+            let spp = self.header.samples_per_pixel.max(3);
+            let pixel_data = if spp >= 4 {
+                crate::utils::image::PixelData::RGBA8(bytes)
+            } else {
+                crate::utils::image::PixelData::RGB8(bytes)
+            };
+
+            return Ok(Image::from_pixels(self.width, self.height, pixel_data));
+        }
 
         let header = TiffHeader {
             image_width: self.header.image_width,
@@ -301,6 +506,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
             tile_length: self.header.tile_length,
             tile_offsets: Vec::new(),
             tile_byte_counts: Vec::new(),
+            predictor: self.header.predictor,
+            jpeg_tables: self.header.jpeg_tables.clone(),
         };
 
         let pixel_reader = PixelReader {

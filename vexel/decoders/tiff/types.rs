@@ -356,15 +356,40 @@ pub enum TiffTags {
     DefaultUserCrop = 51125,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Compression {
     None = 1,
-    CCITT1D = 2,
-    Group3Fax = 3,
-    Group4Fax = 4,
+    CCITTRLE = 2,
+    CCITTFax3 = 3,
+    CCITTFax4 = 4,
     LZW = 5,
-    JPEG = 6,
+    OldJPEG = 6,
+    JPEG = 7,
+    AdobeDeflate = 8,
+    T85JBIG = 9,
+    T43JBIG = 10,
+    NeXT = 32766,
+    CCITTRLEWord = 32771,
     PackBits = 32773,
+    ThunderScan = 32809,
+    IT8CTPAD = 32895,
+    IT8LW = 32896,
+    IT8MP = 32897,
+    IT8BL = 32898,
+    PixarFilm = 32908,
+    PixarLog = 32909,
+    Deflate = 32946,
+    DCS = 32947,
+    JBIG = 34661,
+    SGILog = 34676,
+    SGILog24 = 34677,
+    JPEG2000 = 34712,
+    LERC = 34887,
+    LZMA = 34925,
+    ZSTD = 50000,
+    WebP = 50001,
+    JXL = 50002,
+    PNG = 34933,
 }
 
 impl TryFrom<u16> for Compression {
@@ -373,12 +398,37 @@ impl TryFrom<u16> for Compression {
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::None),
-            2 => Ok(Self::CCITT1D),
-            3 => Ok(Self::Group3Fax),
-            4 => Ok(Self::Group4Fax),
+            2 => Ok(Self::CCITTRLE),
+            3 => Ok(Self::CCITTFax3),
+            4 => Ok(Self::CCITTFax4),
             5 => Ok(Self::LZW),
-            6 => Ok(Self::JPEG),
+            6 => Ok(Self::OldJPEG),
+            7 => Ok(Self::JPEG),
+            8 => Ok(Self::AdobeDeflate),
+            9 => Ok(Self::T85JBIG),
+            10 => Ok(Self::T43JBIG),
+            32766 => Ok(Self::NeXT),
+            32771 => Ok(Self::CCITTRLEWord),
             32773 => Ok(Self::PackBits),
+            32809 => Ok(Self::ThunderScan),
+            32895 => Ok(Self::IT8CTPAD),
+            32896 => Ok(Self::IT8LW),
+            32897 => Ok(Self::IT8MP),
+            32898 => Ok(Self::IT8BL),
+            32908 => Ok(Self::PixarFilm),
+            32909 => Ok(Self::PixarLog),
+            32946 => Ok(Self::Deflate),
+            32947 => Ok(Self::DCS),
+            34661 => Ok(Self::JBIG),
+            34676 => Ok(Self::SGILog),
+            34677 => Ok(Self::SGILog24),
+            34712 => Ok(Self::JPEG2000),
+            34887 => Ok(Self::LERC),
+            34925 => Ok(Self::LZMA),
+            50000 => Ok(Self::ZSTD),
+            50001 => Ok(Self::WebP),
+            50002 => Ok(Self::JXL),
+            34933 => Ok(Self::PNG),
             _ => Err(VexelError::Custom(format!("Invalid compression value: {}", value))),
         }
     }
@@ -515,6 +565,32 @@ impl TryFrom<u32> for PlanarConfiguration {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Predictor {
+    None = 1,
+    HorizontalDifferencing = 2,
+    FloatingPoint = 3,
+}
+
+impl Default for Predictor {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl TryFrom<u32> for Predictor {
+    type Error = VexelError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::None),
+            2 => Ok(Self::HorizontalDifferencing),
+            3 => Ok(Self::FloatingPoint),
+            _ => Err(VexelError::Custom(format!("Invalid predictor value: {}", value))),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct TiffHeader {
     pub image_width: u32,
@@ -540,6 +616,8 @@ pub struct TiffHeader {
     pub tile_length: Option<u32>,
     pub tile_offsets: Vec<u32>,
     pub tile_byte_counts: Vec<u32>,
+    pub predictor: Predictor,
+    pub jpeg_tables: Vec<u8>,
 }
 
 impl Default for TiffHeader {
@@ -568,6 +646,8 @@ impl Default for TiffHeader {
             tile_length: None,
             tile_offsets: Vec::new(),
             tile_byte_counts: Vec::new(),
+            predictor: Predictor::None,
+            jpeg_tables: Vec::new(),
         }
     }
 }
