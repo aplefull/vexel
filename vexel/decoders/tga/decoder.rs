@@ -3,45 +3,12 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::{log_warn, Image, PixelData};
 use std::io::{Read, Seek, SeekFrom};
 
-const FLAG_ORIGIN_RIGHT: u8 = 1 << 4;
-const FLAG_ORIGIN_TOP: u8 = 1 << 5;
-const FLAG_ALPHA_SIZE_MASK: u8 = 0x0f;
-
-const IMAGE_TYPE_PALETTED: u8 = 1;
-const IMAGE_TYPE_MONOCHROME: u8 = 3;
-const IMAGE_TYPE_MASK: u8 = 3;
-const IMAGE_TYPE_FLAG_RLE: u8 = 1 << 3;
-
-const ATTR_TYPE_ALPHA: u8 = 3;
-const ATTR_TYPE_PREMULTIPLIED_ALPHA: u8 = 4;
-
-const TGA_FOOTER_SIZE: i64 = 26;
-const TGA_SIGNATURE: &[u8] = b"TRUEVISION-XFILE.\x00";
-const EXT_AREA_ATTR_TYPE_OFFSET: u64 = 0x1ee;
-
-#[derive(Debug, Default)]
-#[allow(dead_code)]
-struct TgaHeader {
-    id_length: u8,
-    palette_type: u8,
-    image_type_raw: u8,
-    palette_first: u16,
-    palette_length: u16,
-    palette_bpp: u8,
-    x_origin: u16,
-    y_origin: u16,
-    width: u16,
-    height: u16,
-    bpp: u8,
-    flags: u8,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ExtAlphaType {
-    Alpha,
-    PremultipliedAlpha,
-    NoAlpha,
-}
+use super::types::{
+    ATTR_TYPE_ALPHA, ATTR_TYPE_PREMULTIPLIED_ALPHA, EXT_AREA_ATTR_TYPE_OFFSET, FLAG_ALPHA_SIZE_MASK,
+    FLAG_ORIGIN_RIGHT, FLAG_ORIGIN_TOP, IMAGE_TYPE_FLAG_RLE, IMAGE_TYPE_MASK, IMAGE_TYPE_MONOCHROME,
+    IMAGE_TYPE_PALETTED, TGA_FOOTER_SIZE, TGA_SIGNATURE,
+};
+use super::types::{ExtAlphaType, TgaHeader};
 
 pub struct TgaDecoder<R: Read + Seek> {
     reader: BitReader<R>,
@@ -332,8 +299,6 @@ impl<R: Read + Seek> TgaDecoder<R> {
         let ext_alpha = self.read_ext_alpha_type();
         self.reader.seek(SeekFrom::Start(18 + header.id_length as u64))?;
 
-
-        
         if header.width == 0 || header.height == 0 {
             return Err(VexelError::InvalidDimensions {
                 width: header.width as u32,
