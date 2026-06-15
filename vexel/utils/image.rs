@@ -23,7 +23,7 @@ fn u16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
 }
 
 fn f32_to_u8_rgb(values: Vec<f32>) -> Vec<u8> {
-    values.iter().map(|v| ((*v).clamp(0.0, 1.0) * 255.0) as u8).collect()
+    values.iter().map(|v| ((*v).clamp(0.0, 1.0) * 255.0).round() as u8).collect()
 }
 
 fn l1_to_u8_rgb(values: Vec<u8>) -> Vec<u8> {
