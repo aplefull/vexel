@@ -385,15 +385,55 @@ impl TryFrom<u16> for Compression {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SampleFormat {
+    UnsignedInt = 1,
+    SignedInt = 2,
+    Float = 3,
+    Void = 4,
+}
+
+impl Default for SampleFormat {
+    fn default() -> Self {
+        Self::UnsignedInt
+    }
+}
+
+impl TryFrom<u32> for SampleFormat {
+    type Error = VexelError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::UnsignedInt),
+            2 => Ok(Self::SignedInt),
+            3 => Ok(Self::Float),
+            4 => Ok(Self::Void),
+            _ => Err(VexelError::Custom(format!("Invalid sample format value: {}", value))),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExtraSampleType {
+    Unspecified = 0,
+    AssociatedAlpha = 1,
+    UnassociatedAlpha = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PhotometricInterpretation {
-    WhiteIsZero = 0,      // For bilevel and grayscale images: 0 is white
-    BlackIsZero = 1,      // For bilevel and grayscale images: 0 is black
-    RGB = 2,              // RGB color model
-    Palette = 3,          // Color map indexed
-    TransparencyMask = 4, // Transparency mask
-    CMYK = 5,             // CMYK color model
-    YCbCr = 6,            // YCbCr color model
-    CIELab = 8,           // CIE L*a*b* color model
+    WhiteIsZero = 0,
+    BlackIsZero = 1,
+    RGB = 2,
+    Palette = 3,
+    TransparencyMask = 4,
+    CMYK = 5,
+    YCbCr = 6,
+    CIELab = 8,
+    ICCLab = 9,
+    ITULab = 10,
+    LogL = 32844,
+    LogLuv = 32845,
 }
 
 impl TryFrom<u32> for PhotometricInterpretation {
@@ -409,6 +449,10 @@ impl TryFrom<u32> for PhotometricInterpretation {
             5 => Ok(Self::CMYK),
             6 => Ok(Self::YCbCr),
             8 => Ok(Self::CIELab),
+            9 => Ok(Self::ICCLab),
+            10 => Ok(Self::ITULab),
+            32844 => Ok(Self::LogL),
+            32845 => Ok(Self::LogLuv),
             _ => Err(VexelError::Custom(format!(
                 "Invalid photometric interpretation value: {}",
                 value
@@ -486,6 +530,16 @@ pub struct TiffHeader {
     pub y_resolution: f32,
     pub planar_configuration: PlanarConfiguration,
     pub resolution_unit: ResolutionUnit,
+    pub sample_format: Vec<SampleFormat>,
+    pub extra_samples: Vec<u16>,
+    pub color_map: Vec<u16>,
+    pub ycbcr_coefficients: [f32; 3],
+    pub ycbcr_sub_sampling: [u16; 2],
+    pub reference_black_white: [f32; 6],
+    pub tile_width: Option<u32>,
+    pub tile_length: Option<u32>,
+    pub tile_offsets: Vec<u32>,
+    pub tile_byte_counts: Vec<u32>,
 }
 
 impl Default for TiffHeader {
@@ -504,6 +558,16 @@ impl Default for TiffHeader {
             y_resolution: 0.0,
             planar_configuration: PlanarConfiguration::Chunky,
             resolution_unit: ResolutionUnit::Inch,
+            sample_format: Vec::new(),
+            extra_samples: Vec::new(),
+            color_map: Vec::new(),
+            ycbcr_coefficients: [0.299, 0.587, 0.114],
+            ycbcr_sub_sampling: [2, 2],
+            reference_black_white: [0.0, 255.0, 128.0, 255.0, 128.0, 255.0],
+            tile_width: None,
+            tile_length: None,
+            tile_offsets: Vec::new(),
+            tile_byte_counts: Vec::new(),
         }
     }
 }
