@@ -1,16 +1,11 @@
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::HdrInfo;
-use crate::{log_warn, Image, PixelData};
-use serde::Serialize;
+use crate::{log_warn, Image};
 use std::io::{Read, Seek, SeekFrom};
-use tsify::Tsify;
 
-#[derive(Debug, Clone, Copy, Serialize, Tsify)]
-pub enum HdrFormat {
-    RGBE,
-    XYZE,
-}
+use super::pixels::PixelDecoder;
+use super::types::HdrFormat;
 
 pub struct HdrDecoder<R: Read + Seek> {
     width: u32,
@@ -160,7 +155,6 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 continue;
             }
 
-            // We have reached the end of the header
             if line.trim().is_empty() {
                 break;
             }
@@ -233,7 +227,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
         }
     }
 
-    fn decode_pixels(&mut self) -> VexelResult<PixelData> {
+    fn read_scanlines(&mut self) -> VexelResult<Vec<u8>> {
         let num_pixels = (self.width * self.height) as usize;
         let mut rgbe_data = vec![0u8; num_pixels * 4];
 
@@ -242,7 +236,6 @@ impl<R: Read + Seek> HdrDecoder<R> {
             let rle_width = self.reader.read_u16()?;
 
             if rle_header == 0x0202 && rle_width == self.width as u16 {
-                // RLE encoded scanline
                 let mut channel_data = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
 
                 for component in 0..4 {
@@ -296,7 +289,6 @@ impl<R: Read + Seek> HdrDecoder<R> {
                     }
                 }
             } else {
-                // Uncompressed scanline
                 self.reader.seek(SeekFrom::Current(-4))?;
 
                 let scanline_start = (y * self.width) as usize * 4;
@@ -329,66 +321,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
             }
         }
 
-        let mut rgb_data = vec![0f32; num_pixels * 3];
-
-        for i in 0..num_pixels {
-            if i * 4 + 3 >= rgbe_data.len() {
-                log_warn!("Pixel index out of bounds: {} >= {}", i * 4 + 3, rgbe_data.len());
-                continue;
-            }
-
-            if i * 3 + 2 >= rgb_data.len() {
-                log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, rgb_data.len());
-                continue;
-            }
-
-            let rgbe = &rgbe_data[i * 4..(i + 1) * 4];
-            let rgb = &mut rgb_data[i * 3..(i + 1) * 3];
-
-            if rgbe[3] != 0 {
-                let scale = f32::exp2(rgbe[3] as f32 - 128.0 - 8.0);
-
-                rgb[0] = rgbe[0] as f32 * scale;
-                rgb[1] = rgbe[1] as f32 * scale;
-                rgb[2] = rgbe[2] as f32 * scale;
-            } else {
-                rgb[0] = 0.0;
-                rgb[1] = 0.0;
-                rgb[2] = 0.0;
-            }
-        }
-
-        match self.format {
-            HdrFormat::RGBE => Ok(PixelData::RGB32F(rgb_data)),
-            HdrFormat::XYZE => {
-                let mut final_data = vec![0f32; num_pixels * 3];
-
-                for i in 0..num_pixels {
-                    if i * 3 + 2 >= rgb_data.len() {
-                        log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, rgb_data.len());
-                        continue;
-                    }
-
-                    if i * 3 + 2 >= final_data.len() {
-                        log_warn!("Pixel index out of bounds: {} >= {}", i * 3 + 2, final_data.len());
-                        continue;
-                    }
-
-                    let xyz = &rgb_data[i * 3..(i + 1) * 3];
-                    let rgb = &mut final_data[i * 3..(i + 1) * 3];
-
-                    rgb[0] = 3.2404542 * xyz[0] - 1.5371385 * xyz[1] - 0.4985314 * xyz[2];
-                    rgb[1] = -0.9692660 * xyz[0] + 1.8760108 * xyz[1] + 0.0415560 * xyz[2];
-                    rgb[2] = 0.0556434 * xyz[0] - 0.2040259 * xyz[1] + 1.0572252 * xyz[2];
-
-                    rgb[0] = rgb[0].max(0.0);
-                    rgb[1] = rgb[1].max(0.0);
-                    rgb[2] = rgb[2].max(0.0);
-                }
-
-                Ok(PixelData::RGB32F(final_data))
-            }
-        }
+        Ok(rgbe_data)
     }
 
     pub fn get_info(&self) -> HdrInfo {
@@ -408,7 +341,9 @@ impl<R: Read + Seek> HdrDecoder<R> {
     pub fn decode(&mut self) -> VexelResult<Image> {
         self.read_header()?;
 
-        let mut pixel_data = self.decode_pixels()?;
+        let rgbe_data = self.read_scanlines()?;
+        let pixel_decoder = PixelDecoder::new(self.width, self.height, self.format);
+        let mut pixel_data = pixel_decoder.decode(&rgbe_data)?;
         pixel_data.correct_pixels(self.width, self.height);
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
