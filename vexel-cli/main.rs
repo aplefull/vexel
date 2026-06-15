@@ -12,22 +12,41 @@ use std::time::{Duration, Instant};
 use vexel::{Image, LogLevel, Vexel};
 use writer::Writer;
 
+const AFTER_HELP: &str = "\
+The PATH argument supports glob patterns (e.g. \"*.png\") to process multiple files at once. When no
+output format is specified, files are written as JXL next to the source with the same name. Use
+--output-dir to specify an output directory, or --output to specify an exact path for a single file.
+
+Examples:
+  vexel image.png
+  vexel -f webp image.png
+  vexel image.png -O output.webp
+  vexel \"*.png\" -f webp -o ./converted
+  vexel --frames -f webp image.gif
+  vexel --info image.png
+  vexel --gui image.png
+  vexel --gui ./images\
+";
+
 #[derive(Parser, Debug)]
-#[clap(name = "vexel")]
+#[clap(name = "vexel", after_help = AFTER_HELP)]
 struct Cli {
     #[arg(required = true)]
     path: String,
 
-    #[arg(short, long, value_parser = ["ppm", "pam", "webp", "jxl"], help = "Output format")]
+    #[arg(short, long, value_parser = ["ppm", "pam", "webp", "jxl"], help = "Output format [default: jxl]")]
     format: Option<String>,
 
     #[arg(short = 'o', long = "output-dir", help = "Output directory for converted files")]
     output_dir: Option<String>,
 
+    #[arg(short = 'O', long = "output", help = "Output file path (single file only)", conflicts_with = "output_dir")]
+    output: Option<String>,
+
     #[arg(long, help = "Display the image")]
     gui: bool,
 
-    #[arg(long)]
+    #[arg(long, help = "Print format-specific metadata for the image")]
     info: bool,
 
     #[arg(long, help = "Decode the image without writing to a file")]
@@ -87,12 +106,20 @@ fn get_directory_files(path: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn collect_gui_files(path: &str) -> Vec<PathBuf> {
+fn collect_gui_files(path: &str) -> (Vec<PathBuf>, usize) {
     let input = Path::new(path);
     if input.is_dir() {
-        get_directory_files(input)
+        (get_directory_files(input), 0)
     } else {
-        get_files(path)
+        let resolved = if input.is_relative() {
+            std::env::current_dir().unwrap_or_default().join(input)
+        } else {
+            input.to_path_buf()
+        };
+        let parent = resolved.parent().unwrap_or(Path::new("."));
+        let files = get_directory_files(parent);
+        let start = files.iter().position(|f| f == &resolved).unwrap_or(0);
+        (files, start)
     }
 }
 
@@ -150,7 +177,16 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     let image = decoder.decode()?;
 
     let format = cli.format.as_deref().unwrap_or("jxl");
-    let output_path = get_output_path(file, cli.output_dir.as_deref(), format)?;
+    let output_path = if let Some(output) = cli.output.as_deref() {
+        let p = Path::new(output);
+        if p.is_relative() {
+            std::env::current_dir()?.join(p)
+        } else {
+            p.to_path_buf()
+        }
+    } else {
+        get_output_path(file, cli.output_dir.as_deref(), format)?
+    };
 
     if let Some(parent) = output_path.parent() {
         if !parent.exists() {
@@ -168,7 +204,7 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn std::error::Error>> {
     struct App {
         texture: Option<egui::TextureHandle>,
         files: Vec<PathBuf>,
@@ -250,11 +286,11 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
             size[0] < 64 || size[1] < 64
         }
 
-        fn new(files: Vec<PathBuf>) -> Self {
+        fn new(files: Vec<PathBuf>, start_index: usize) -> Self {
             let mut app = Self {
                 texture: None,
                 files,
-                current_file_index: 0,
+                current_file_index: start_index,
                 frames: Vec::new(),
                 current_frame: 0,
                 last_frame_time: Instant::now(),
@@ -634,7 +670,7 @@ fn display_image(files: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> 
         ..Default::default()
     };
 
-    eframe::run_native("Vexel", options, Box::new(|_cc| Ok(Box::new(App::new(files)))))?;
+    eframe::run_native("Vexel", options, Box::new(move |_cc| Ok(Box::new(App::new(files, start_index)))))?;
 
     Ok(())
 }
@@ -650,13 +686,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     vexel::set_log_level(log_level);
 
     if cli.gui {
-        let files = collect_gui_files(&cli.path);
+        let (files, start_index) = collect_gui_files(&cli.path);
         if files.is_empty() {
             eprintln!("No files found matching path: {}", cli.path);
             return Ok(());
         }
 
-        display_image(files)?;
+        display_image(files, start_index)?;
 
         return Ok(());
     }
@@ -665,6 +701,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if files.is_empty() {
         eprintln!("No files found matching pattern: {}", cli.path);
+        return Ok(());
+    }
+
+    if cli.output.is_some() && files.len() > 1 {
+        eprintln!("--output cannot be used with multiple files; use --output-dir instead");
         return Ok(());
     }
 
