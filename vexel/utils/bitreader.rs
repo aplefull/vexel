@@ -283,7 +283,8 @@ impl<R: Read + Seek> BitReader<R> {
     /// - A vector of bytes containing the remaining bits in the bitstream
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_to_end(&mut self) -> Result<Vec<u8>, std::io::Error> {
-        let mut bytes = Vec::new();
+        let capacity = self.bytes_left().unwrap_or(0) as usize;
+        let mut bytes = Vec::with_capacity(capacity);
 
         self.reader.read_to_end(&mut bytes)?;
         self.clear_buffer();

@@ -65,7 +65,7 @@ pub struct Vexel<R: Read + Seek> {
 impl Vexel<File> {
     pub fn open<P: AsRef<Path>>(path: P) -> VexelResult<Vexel<BufReader<File>>> {
         let file = File::open(path)?;
-        Vexel::new(BufReader::new(file))
+        Vexel::new(BufReader::with_capacity(256 * 1024, file))
     }
 }
 

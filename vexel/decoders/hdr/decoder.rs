@@ -2,7 +2,7 @@ use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::HdrInfo;
 use crate::{log_warn, Image};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 
 use super::pixels::PixelDecoder;
 use super::types::HdrFormat;
@@ -228,96 +228,126 @@ impl<R: Read + Seek> HdrDecoder<R> {
     }
 
     fn read_scanlines(&mut self) -> VexelResult<Vec<u8>> {
-        let num_pixels = (self.width * self.height) as usize;
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let num_pixels = width * height;
         let mut rgbe_data = vec![0u8; num_pixels * 4];
 
-        for y in 0..self.height {
-            let rle_header = self.reader.read_u16()?;
-            let rle_width = self.reader.read_u16()?;
+        let compressed = self.reader.read_to_end()?;
+        let mut cursor = 0usize;
+
+        let read_byte = |cursor: &mut usize| -> Option<u8> {
+            if *cursor < compressed.len() {
+                let b = compressed[*cursor];
+                *cursor += 1;
+                Some(b)
+            } else {
+                None
+            }
+        };
+
+        let mut channel_buf = [
+            vec![0u8; width],
+            vec![0u8; width],
+            vec![0u8; width],
+            vec![0u8; width],
+        ];
+
+        for y in 0..height {
+            let b0 = match read_byte(&mut cursor) {
+                Some(b) => b,
+                None => break,
+            };
+            let b1 = match read_byte(&mut cursor) {
+                Some(b) => b,
+                None => break,
+            };
+            let b2 = match read_byte(&mut cursor) {
+                Some(b) => b,
+                None => break,
+            };
+            let b3 = match read_byte(&mut cursor) {
+                Some(b) => b,
+                None => break,
+            };
+
+            let rle_header = (b0 as u16) << 8 | b1 as u16;
+            let rle_width = (b2 as u16) << 8 | b3 as u16;
 
             if rle_header == 0x0202 && rle_width == self.width as u16 {
-                let mut channel_data = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-
                 for component in 0..4 {
+                    let dst = &mut channel_buf[component];
                     let mut pos = 0;
 
-                    while pos < self.width as usize {
-                        let count = self.reader.read_u8()? as usize;
+                    while pos < width {
+                        let count = match read_byte(&mut cursor) {
+                            Some(b) => b as usize,
+                            None => break,
+                        };
 
                         if count > 128 {
                             let run_length = count - 128;
-                            let value = self.reader.read_u8()?;
-
-                            for _ in 0..run_length {
-                                channel_data[component].push(value);
-                            }
-
+                            let value = match read_byte(&mut cursor) {
+                                Some(b) => b,
+                                None => break,
+                            };
+                            let end = (pos + run_length).min(width);
+                            dst[pos..end].fill(value);
                             pos += run_length;
                         } else {
-                            for _ in 0..count {
-                                let value = self.reader.read_u8()?;
-                                channel_data[component].push(value);
+                            let end = (pos + count).min(width);
+                            let src_end = cursor + (end - pos);
+                            if src_end <= compressed.len() {
+                                dst[pos..end].copy_from_slice(&compressed[cursor..src_end]);
+                                cursor = src_end;
+                            } else {
+                                let available = compressed.len() - cursor;
+                                dst[pos..pos + available].copy_from_slice(&compressed[cursor..]);
+                                cursor = compressed.len();
                             }
-
                             pos += count;
                         }
                     }
                 }
 
-                let scanline_start = (y * self.width) as usize * 4;
-                for x in 0..self.width as usize {
-                    for component_index in 0..4 {
-                        if scanline_start + x * 4 + component_index >= rgbe_data.len() {
-                            log_warn!(
-                                "Scanline index out of bounds: {} >= {}",
-                                scanline_start + x * 4 + component_index,
-                                rgbe_data.len()
-                            );
-                            break;
-                        }
+                let scanline_start = y * width * 4;
+                let scanline = &mut rgbe_data[scanline_start..scanline_start + width * 4];
 
-                        if x >= channel_data[component_index].len() {
-                            log_warn!(
-                                "Scanline index out of bounds: {} >= {}",
-                                x,
-                                channel_data[component_index].len()
-                            );
-                            break;
-                        }
-
-                        rgbe_data[scanline_start + x * 4 + component_index] = channel_data[component_index][x];
-                    }
+                for x in 0..width {
+                    scanline[x * 4] = channel_buf[0][x];
+                    scanline[x * 4 + 1] = channel_buf[1][x];
+                    scanline[x * 4 + 2] = channel_buf[2][x];
+                    scanline[x * 4 + 3] = channel_buf[3][x];
                 }
             } else {
-                self.reader.seek(SeekFrom::Current(-4))?;
+                cursor -= 4;
 
-                let scanline_start = (y * self.width) as usize * 4;
+                let scanline_start = y * width * 4;
+                let scanline_bytes = width * 4;
 
-                if scanline_start + 4 >= rgbe_data.len() {
+                if scanline_start + scanline_bytes > rgbe_data.len() {
                     log_warn!(
                         "Scanline index out of bounds: {} >= {}",
-                        scanline_start + 4,
+                        scanline_start + scanline_bytes,
                         rgbe_data.len()
                     );
                     break;
                 }
 
-                self.reader
-                    .read_exact(&mut rgbe_data[scanline_start..scanline_start + 4])?;
-
-                let bytes_to_read = (self.width as usize - 1) * 4;
-
-                if scanline_start + bytes_to_read + 4 >= rgbe_data.len() {
+                let src_end = cursor + scanline_bytes;
+                if src_end > compressed.len() {
                     log_warn!(
-                        "Scanline index out of bounds: {} >= {}",
-                        scanline_start + bytes_to_read + 4,
-                        rgbe_data.len()
+                        "Compressed data too short for scanline {}: need {} bytes, have {}",
+                        y,
+                        scanline_bytes,
+                        compressed.len() - cursor
                     );
                     break;
                 }
 
-                self.reader
-                    .read_exact(&mut rgbe_data[scanline_start + 4..scanline_start + bytes_to_read + 4])?;
+                rgbe_data[scanline_start..scanline_start + scanline_bytes]
+                    .copy_from_slice(&compressed[cursor..src_end]);
+                cursor = src_end;
             }
         }
 

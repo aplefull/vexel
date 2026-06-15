@@ -1,5 +1,5 @@
 use crate::utils::error::VexelResult;
-use crate::{log_warn, PixelData};
+use crate::PixelData;
 
 use super::simd;
 use super::types::HdrFormat;
@@ -34,7 +34,17 @@ impl PixelDecoder {
     }
 }
 
+fn build_exp2_table() -> [f32; 256] {
+    let mut table = [0.0f32; 256];
+    for e in 1u8..=255 {
+        table[e as usize] = f32::exp2(e as f32 - 128.0 - 8.0);
+    }
+    table
+}
+
 fn decode_rgbe(rgbe_data: &[u8], rgb_data: &mut [f32], width: usize) {
+    let exp2_table = build_exp2_table();
+
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
@@ -44,7 +54,7 @@ fn decode_rgbe(rgbe_data: &[u8], rgb_data: &mut [f32], width: usize) {
             .enumerate()
             .for_each(|(row, rgb_row)| {
                 let rgbe_row = &rgbe_data[row * width * 4..];
-                decode_rgbe_row(rgbe_row, rgb_row, width);
+                decode_rgbe_row(rgbe_row, rgb_row, width, &exp2_table);
             });
     }
 
@@ -53,37 +63,26 @@ fn decode_rgbe(rgbe_data: &[u8], rgb_data: &mut [f32], width: usize) {
         for row in 0..rgb_data.len() / (width * 3) {
             let rgbe_row = &rgbe_data[row * width * 4..];
             let rgb_row = &mut rgb_data[row * width * 3..(row + 1) * width * 3];
-            decode_rgbe_row(rgbe_row, rgb_row, width);
+            decode_rgbe_row(rgbe_row, rgb_row, width, &exp2_table);
         }
     }
 }
 
-fn decode_rgbe_row(rgbe_row: &[u8], rgb_row: &mut [f32], width: usize) {
-    for x in 0..width {
-        let src = x * 4;
-        let dst = x * 3;
+fn decode_rgbe_row(rgbe_row: &[u8], rgb_row: &mut [f32], width: usize, exp2_table: &[f32; 256]) {
+    let pixels = &rgbe_row[..width * 4];
+    let out = &mut rgb_row[..width * 3];
 
-        if src + 3 >= rgbe_row.len() {
-            log_warn!("RGBE row index out of bounds: {} >= {}", src + 3, rgbe_row.len());
-            continue;
-        }
-
-        if dst + 2 >= rgb_row.len() {
-            log_warn!("RGB row index out of bounds: {} >= {}", dst + 2, rgb_row.len());
-            continue;
-        }
-
-        let e = rgbe_row[src + 3];
-
+    for (rgbe, rgb) in pixels.chunks_exact(4).zip(out.chunks_exact_mut(3)) {
+        let e = rgbe[3];
         if e != 0 {
-            let scale = f32::exp2(e as f32 - 128.0 - 8.0);
-            rgb_row[dst] = rgbe_row[src] as f32 * scale;
-            rgb_row[dst + 1] = rgbe_row[src + 1] as f32 * scale;
-            rgb_row[dst + 2] = rgbe_row[src + 2] as f32 * scale;
+            let scale = exp2_table[e as usize];
+            rgb[0] = rgbe[0] as f32 * scale;
+            rgb[1] = rgbe[1] as f32 * scale;
+            rgb[2] = rgbe[2] as f32 * scale;
         } else {
-            rgb_row[dst] = 0.0;
-            rgb_row[dst + 1] = 0.0;
-            rgb_row[dst + 2] = 0.0;
+            rgb[0] = 0.0;
+            rgb[1] = 0.0;
+            rgb[2] = 0.0;
         }
     }
 }
