@@ -26,9 +26,9 @@ gui path loglevel="":
 info path loglevel="":
     cargo run --package vexel-cli --release -- --info {{ if loglevel != "" { "--log-level " + loglevel + " " } else { "" } }}"{{path}}"
 
-# Decode image and save as WebP
+# Decode image and save as JPEG XL
 save path loglevel="":
-    cargo run --package vexel-cli --release -- --format webp {{ if loglevel != "" { "--log-level " + loglevel + " " } else { "" } }}"{{path}}"
+    cargo run --package vexel-cli --release -- --format jxl {{ if loglevel != "" { "--log-level " + loglevel + " " } else { "" } }}"{{path}}"
 
 # Run all tests or a specific test with output captured
 test name="" loglevel="":

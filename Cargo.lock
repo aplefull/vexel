@@ -2013,6 +2013,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpegxl-src"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "902ce3ffcd089c3c02a74a44bdd4fd01ad18ecc63ec582b9c84b12418cdeba1e"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
+name = "jpegxl-sys"
+version = "0.12.1+libjxl-0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00cb4f7ffb45ee4327e9ec6ca1a732f3abef470ee008f7d4be3afb414075cd7d"
+dependencies = [
+ "jpegxl-src",
+ "pkg-config",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2735,9 +2754,9 @@ dependencies = [
 
 [[package]]
 name = "pkg-config"
-version = "0.3.31"
+version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plotters"
@@ -3668,8 +3687,9 @@ dependencies = [
  "eframe",
  "egui",
  "glob",
+ "jpegxl-sys",
  "vexel",
- "writer",
+ "webp",
 ]
 
 [[package]]
@@ -4432,13 +4452,6 @@ name = "writeable"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
-
-[[package]]
-name = "writer"
-version = "0.1.0"
-dependencies = [
- "webp",
-]
 
 [[package]]
 name = "x11-dl"

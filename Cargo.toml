@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "vexel",
     "vexel-cli",
-    "writer"
 ]
 
 [profile.release]

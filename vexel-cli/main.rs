@@ -1,3 +1,5 @@
+mod writer;
+
 use clap::Parser;
 use eframe;
 use egui;
@@ -7,8 +9,8 @@ use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use vexel::{Image, LogLevel, PixelData, Vexel};
-use writer::{Writer, WriterImage, WriterImageFrame, WriterPixelData};
+use vexel::{Image, LogLevel, Vexel};
+use writer::Writer;
 
 #[derive(Parser, Debug)]
 #[clap(name = "vexel")]
@@ -16,7 +18,7 @@ struct Cli {
     #[arg(required = true)]
     path: String,
 
-    #[arg(short, long, value_parser = ["ppm", "pam", "webp"], help = "Output format")]
+    #[arg(short, long, value_parser = ["ppm", "pam", "webp", "jxl"], help = "Output format")]
     format: Option<String>,
 
     #[arg(short = 'o', long = "output-dir", help = "Output directory for converted files")]
@@ -30,6 +32,9 @@ struct Cli {
 
     #[arg(long, help = "Decode the image without writing to a file")]
     void: bool,
+
+    #[arg(long, help = "Write each frame as a separate file")]
+    frames: bool,
 
     #[arg(long, value_parser = ["error", "warn", "info", "debug"], default_value = "error", help = "Minimum log level to display")]
     log_level: String,
@@ -124,30 +129,6 @@ fn get_output_path(file: &Path, output_dir: Option<&str>, format: &str) -> Resul
     Ok(output_path)
 }
 
-fn image_to_writer_image(image: &Image) -> WriterImage {
-    let mut frames = Vec::new();
-
-    for frame in image.frames() {
-        frames.push(WriterImageFrame {
-            width: frame.width(),
-            height: frame.height(),
-            has_alpha: frame.has_alpha(),
-            delay: frame.delay(),
-            pixels: if frame.has_alpha() {
-                frame.as_rgba8()
-            } else {
-                frame.as_rgb8()
-            },
-        });
-    }
-
-    WriterImage {
-        width: image.width(),
-        height: image.height(),
-        has_alpha: image.has_alpha(),
-        frames,
-    }
-}
 
 fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("File: {}", file.display());
@@ -168,8 +149,7 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
 
     let image = decoder.decode()?;
 
-    // Determine output format
-    let format = cli.format.as_deref().unwrap_or("webp");
+    let format = cli.format.as_deref().unwrap_or("jxl");
     let output_path = get_output_path(file, cli.output_dir.as_deref(), format)?;
 
     if let Some(parent) = output_path.parent() {
@@ -179,34 +159,10 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     }
 
     println!("Writing to: {}", output_path.display());
-    let writer_image = image_to_writer_image(&image);
-    match format {
-        "pam" => {
-            let pixel_data = match image.pixels() {
-                PixelData::RGB8(data) => WriterPixelData::RGB8(data),
-                PixelData::RGBA8(data) => WriterPixelData::RGBA8(data),
-                PixelData::RGB16(data) => WriterPixelData::RGB16(data),
-                PixelData::RGBA16(data) => WriterPixelData::RGBA16(data),
-                PixelData::RGB32F(data) => WriterPixelData::RGB32F(data),
-                PixelData::RGBA32F(data) => WriterPixelData::RGBA32F(data),
-                PixelData::L1(data) => WriterPixelData::L1(data),
-                PixelData::L8(data) => WriterPixelData::L8(data),
-                PixelData::L16(data) => WriterPixelData::L16(data),
-                PixelData::LA8(data) => WriterPixelData::LA8(data),
-                PixelData::LA16(data) => WriterPixelData::LA16(data),
-            };
-
-            Writer::write_pam(&output_path, image.width(), image.height(), &pixel_data)?;
-        }
-        "ppm" => {
-            Writer::write_ppm(&output_path, &writer_image)?;
-        }
-        "webp" => {
-            Writer::write_webp(&output_path, &writer_image)?;
-        }
-        _ => {
-            Writer::write_webp(&output_path, &writer_image)?;
-        }
+    if cli.frames {
+        Writer::write_frames(&output_path, format, &image)?;
+    } else {
+        Writer::write_image(&image, format, &output_path)?;
     }
 
     Ok(())
