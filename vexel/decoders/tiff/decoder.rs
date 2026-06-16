@@ -293,9 +293,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
             let mut decompressed = self.decompress_chunk(strip_data);
 
-            let strip_row_start = strip_idx as u32 * rows_per_strip;
-            let strip_row_end = (strip_row_start + rows_per_strip).min(self.height);
-            let strip_rows = strip_row_end - strip_row_start;
+            let strip_row_start = (strip_idx as u32).saturating_mul(rows_per_strip);
+            let strip_row_end = strip_row_start.saturating_add(rows_per_strip).min(self.height);
+            let strip_rows = strip_row_end.saturating_sub(strip_row_start);
             let strip_width = if self.header.planar_configuration == super::types::PlanarConfiguration::Planar {
                 image_width
             } else {
@@ -382,10 +382,16 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let bps = self.bits_for(0);
         let bytes_per_sample = (bps as usize).div_ceil(8);
         let bytes_per_pixel = if is_jpeg { spp.max(3) } else { bytes_per_sample * spp };
+        let is_sub_byte = bps < 8 && !is_jpeg;
 
         let tiles_x = image_width.div_ceil(tile_width);
 
-        let mut image_data = vec![0u8; image_width * image_height * bytes_per_pixel];
+        let img_data_size = if is_sub_byte {
+            image_width.div_ceil(8) * image_height
+        } else {
+            image_width * image_height * bytes_per_pixel
+        };
+        let mut image_data = vec![0u8; img_data_size];
 
         let tile_offsets = self.header.tile_offsets.clone();
         let tile_byte_counts = self.header.tile_byte_counts.clone();
@@ -399,7 +405,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             let mut raw_tile = vec![0u8; byte_count as usize];
             self.reader.read_exact(&mut raw_tile)?;
 
-            let mut tile_data = if is_jpeg {
+            let tile_data = if is_jpeg {
                 let jpeg_data = if !jpeg_tables.is_empty() {
                     self.splice_jpeg_tables(&jpeg_tables, &raw_tile)
                 } else {
@@ -420,37 +426,65 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 d
             };
 
-            let expected_tile_bytes = tile_width * tile_height * bytes_per_pixel;
-            if tile_data.len() < expected_tile_bytes {
-                tile_data.resize(expected_tile_bytes, 0);
-            }
-
             let tile_col = tile_idx % tiles_x;
             let tile_row = tile_idx / tiles_x;
 
             let img_x = tile_col * tile_width;
             let img_y = tile_row * tile_height;
 
-            for row in 0..tile_height {
-                let py = img_y + row;
-                if py >= image_height {
-                    break;
+            if is_sub_byte {
+                let tile_row_bytes = tile_width.div_ceil(8);
+                let img_row_bytes = image_width.div_ceil(8);
+                for row in 0..tile_height {
+                    let py = img_y + row;
+                    if py >= image_height {
+                        break;
+                    }
+                    let tile_row_start = row * tile_row_bytes;
+                    let img_row_start = py * img_row_bytes;
+                    for col in 0..tile_width {
+                        let px = img_x + col;
+                        if px >= image_width {
+                            continue;
+                        }
+                        let src_byte_idx = tile_row_start + col / 8;
+                        let src_byte = tile_data.get(src_byte_idx).copied().unwrap_or(0);
+                        let bit = (src_byte >> (7 - (col % 8))) & 1;
+                        let dst_byte_idx = img_row_start + px / 8;
+                        let dst_bit_pos = 7 - (px % 8);
+                        if dst_byte_idx < image_data.len() {
+                            image_data[dst_byte_idx] = (image_data[dst_byte_idx] & !(1 << dst_bit_pos)) | (bit << dst_bit_pos);
+                        }
+                    }
+                }
+            } else {
+                let expected_tile_bytes = tile_width * tile_height * bytes_per_pixel;
+                let mut tile_data = tile_data;
+                if tile_data.len() < expected_tile_bytes {
+                    tile_data.resize(expected_tile_bytes, 0);
                 }
 
-                for col in 0..tile_width {
-                    let px = img_x + col;
-                    if px >= image_width {
-                        continue;
+                for row in 0..tile_height {
+                    let py = img_y + row;
+                    if py >= image_height {
+                        break;
                     }
 
-                    let tile_pixel_offset = (row * tile_width + col) * bytes_per_pixel;
-                    let img_pixel_offset = (py * image_width + px) * bytes_per_pixel;
+                    for col in 0..tile_width {
+                        let px = img_x + col;
+                        if px >= image_width {
+                            continue;
+                        }
 
-                    if tile_pixel_offset + bytes_per_pixel <= tile_data.len()
-                        && img_pixel_offset + bytes_per_pixel <= image_data.len()
-                    {
-                        image_data[img_pixel_offset..img_pixel_offset + bytes_per_pixel]
-                            .copy_from_slice(&tile_data[tile_pixel_offset..tile_pixel_offset + bytes_per_pixel]);
+                        let tile_pixel_offset = (row * tile_width + col) * bytes_per_pixel;
+                        let img_pixel_offset = (py * image_width + px) * bytes_per_pixel;
+
+                        if tile_pixel_offset + bytes_per_pixel <= tile_data.len()
+                            && img_pixel_offset + bytes_per_pixel <= image_data.len()
+                        {
+                            image_data[img_pixel_offset..img_pixel_offset + bytes_per_pixel]
+                                .copy_from_slice(&tile_data[tile_pixel_offset..tile_pixel_offset + bytes_per_pixel]);
+                        }
                     }
                 }
             }

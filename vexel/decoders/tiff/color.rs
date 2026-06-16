@@ -19,6 +19,28 @@ pub fn f32_from_bytes(bytes: &[u8], byte_order: ByteOrder) -> f32 {
     f32::from_bits(bits)
 }
 
+pub fn float24_to_f32(bytes: &[u8], byte_order: ByteOrder) -> f32 {
+    let (b0, b1, b2) = match byte_order {
+        ByteOrder::LittleEndian => (bytes[0], bytes[1], bytes[2]),
+        ByteOrder::BigEndian => (bytes[2], bytes[1], bytes[0]),
+    };
+
+    if (b0 | b1 | b2) == 0 {
+        return 0.0;
+    }
+
+    let sign_bit = b2 & 0x80;
+    let exponent = b2 & 0x7f;
+    let exponent_f32 = exponent.wrapping_sub(63).wrapping_add(127);
+
+    let q3 = sign_bit | (exponent_f32 >> 1);
+    let q2 = ((exponent_f32 & 1) << 7) | ((b1 & 0xfe) >> 1);
+    let q1 = ((b1 & 0x01) << 7) | ((b0 & 0xfe) >> 1);
+    let q0 = (b0 & 0x01) << 7;
+
+    f32::from_bits(u32::from_le_bytes([q0, q1, q2, q3]))
+}
+
 pub fn f64_from_bytes(bytes: &[u8], byte_order: ByteOrder) -> f64 {
     let bits = match byte_order {
         ByteOrder::LittleEndian => {

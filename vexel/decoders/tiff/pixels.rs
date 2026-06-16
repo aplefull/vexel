@@ -3,8 +3,8 @@ use crate::utils::types::ByteOrder;
 use crate::PixelData;
 
 use super::color::{
-    cielab_to_rgb, cmyk_to_rgb, f32_from_bytes, f64_from_bytes, half_to_f32, icclab_to_rgb, itulab_to_rgb,
-    lab_to_xyz, u16_from_bytes, u32_from_bytes, xyz_to_srgb, D50_WHITE, D65_WHITE, YCbCrTables,
+    cielab_to_rgb, cmyk_to_rgb, f32_from_bytes, f64_from_bytes, float24_to_f32, half_to_f32, icclab_to_rgb,
+    itulab_to_rgb, lab_to_xyz, u16_from_bytes, u32_from_bytes, xyz_to_srgb, D50_WHITE, D65_WHITE, YCbCrTables,
 };
 use super::types::{ExtraSampleType, PhotometricInterpretation, PlanarConfiguration, SampleFormat, TiffHeader};
 
@@ -41,10 +41,17 @@ impl PixelReader {
 
         match (bps, fmt, has_alpha) {
             (1, SampleFormat::UnsignedInt, false) => {
-                if invert {
-                    return Ok(PixelData::L1(data.iter().map(|&b| !b).collect()));
+                let width = self.width as usize;
+                let row_bytes = width.div_ceil(8);
+                let mut pixels = Vec::with_capacity(width * self.height as usize);
+                for row in data.chunks(row_bytes) {
+                    for col in 0..width {
+                        let byte = row.get(col / 8).copied().unwrap_or(0);
+                        let bit = (byte >> (7 - (col % 8))) & 1;
+                        pixels.push(if invert { 1 - bit } else { bit });
+                    }
                 }
-                Ok(PixelData::L1(data.to_vec()))
+                Ok(PixelData::L1(pixels))
             }
 
             (2, SampleFormat::UnsignedInt, false) => {
@@ -156,6 +163,18 @@ impl PixelReader {
                     .chunks_exact(2)
                     .map(|chunk| {
                         let v = half_to_f32(u16_from_bytes(chunk, self.byte_order));
+                        let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        if invert { 255 - out } else { out }
+                    })
+                    .collect();
+                Ok(PixelData::L8(pixels))
+            }
+
+            (24, SampleFormat::Float, false) => {
+                let pixels: Vec<u8> = data
+                    .chunks_exact(3)
+                    .map(|chunk| {
+                        let v = float24_to_f32(chunk, self.byte_order);
                         let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         if invert { 255 - out } else { out }
                     })
