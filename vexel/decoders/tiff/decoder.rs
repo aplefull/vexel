@@ -271,6 +271,23 @@ impl<R: Read + Seek> TiffDecoder<R> {
         }
     }
 
+    fn apply_predictor_planar(&self, data: &mut Vec<u8>, strip_width: u32) {
+        let bps = self.bits_for(0);
+        match self.header.predictor {
+            Predictor::HorizontalDifferencing => {
+                if self.byte_order == ByteOrder::BigEndian {
+                    apply_predictor_horizontal_be(data, strip_width, 1, bps);
+                } else {
+                    apply_predictor_horizontal(data, strip_width, 1, bps);
+                }
+            }
+            Predictor::FloatingPoint => {
+                apply_predictor_float(data, strip_width, 1, bps, self.byte_order == ByteOrder::BigEndian);
+            }
+            _ => {}
+        }
+    }
+
     fn read_strip_data(&mut self) -> VexelResult<Vec<u8>> {
         let is_jpeg = matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG);
 
@@ -280,10 +297,18 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         let rows_per_strip = self.header.rows_per_strip;
         let image_width = self.width;
+        let is_planar = self.header.planar_configuration == super::types::PlanarConfiguration::Planar
+            && self.header.samples_per_pixel > 1;
         let mut bytes = Vec::new();
 
         let offsets = self.header.strip_offsets.clone();
         let byte_counts = self.header.strip_byte_counts.clone();
+        let total_strips = offsets.len();
+        let strips_per_plane = if is_planar && self.header.samples_per_pixel > 0 {
+            total_strips / self.header.samples_per_pixel as usize
+        } else {
+            total_strips
+        };
 
         for (strip_idx, (offset, byte_count)) in offsets.iter().zip(byte_counts.iter()).enumerate() {
             self.reader.seek(SeekFrom::Start(*offset as u64))?;
@@ -293,23 +318,27 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
             let mut decompressed = self.decompress_chunk(strip_data);
 
-            let strip_row_start = (strip_idx as u32).saturating_mul(rows_per_strip);
+            let strip_within_plane = if is_planar && strips_per_plane > 0 {
+                strip_idx % strips_per_plane
+            } else {
+                strip_idx
+            };
+            let strip_row_start = (strip_within_plane as u32).saturating_mul(rows_per_strip);
             let strip_row_end = strip_row_start.saturating_add(rows_per_strip).min(self.height);
             let strip_rows = strip_row_end.saturating_sub(strip_row_start);
-            let strip_width = if self.header.planar_configuration == super::types::PlanarConfiguration::Planar {
-                image_width
-            } else {
-                image_width
-            };
 
             if self.header.predictor != Predictor::None {
                 let bps = self.bits_for(0);
                 if bps >= 8 {
-                    let spp = self.header.samples_per_pixel;
-                    let row_bytes = strip_width as usize * spp as usize * (bps as usize / 8);
+                    let stride = if is_planar { 1u16 } else { self.header.samples_per_pixel };
+                    let row_bytes = image_width as usize * stride as usize * (bps as usize / 8);
                     let expected_len = strip_rows as usize * row_bytes;
                     decompressed.truncate(expected_len);
-                    self.apply_predictor(&mut decompressed, strip_width);
+                    if is_planar {
+                        self.apply_predictor_planar(&mut decompressed, image_width);
+                    } else {
+                        self.apply_predictor(&mut decompressed, image_width);
+                    }
                 }
             }
 
@@ -373,6 +402,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
     fn read_tile_data(&mut self) -> VexelResult<Vec<u8>> {
         let is_jpeg = matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG);
+        let is_planar = self.header.planar_configuration == super::types::PlanarConfiguration::Planar
+            && self.header.samples_per_pixel > 1;
 
         let tile_width = self.header.tile_width.unwrap_or(self.width) as usize;
         let tile_height = self.header.tile_length.unwrap_or(self.height) as usize;
@@ -382,20 +413,80 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let bps = self.bits_for(0);
         let bytes_per_sample = (bps as usize).div_ceil(8);
         let bytes_per_pixel = if is_jpeg { spp.max(3) } else { bytes_per_sample * spp };
+        let bytes_per_plane_sample = bytes_per_sample;
         let is_sub_byte = bps < 8 && !is_jpeg;
 
         let tiles_x = image_width.div_ceil(tile_width);
+        let tiles_y = image_height.div_ceil(tile_height);
+        let tiles_per_plane = tiles_x * tiles_y;
 
         let img_data_size = if is_sub_byte {
             image_width.div_ceil(8) * image_height
         } else {
             image_width * image_height * bytes_per_pixel
         };
-        let mut image_data = vec![0u8; img_data_size];
 
         let tile_offsets = self.header.tile_offsets.clone();
         let tile_byte_counts = self.header.tile_byte_counts.clone();
         let jpeg_tables = self.header.jpeg_tables.clone();
+
+        if is_planar && !is_jpeg && !is_sub_byte {
+            let plane_size = image_width * image_height * bytes_per_plane_sample;
+            let mut planar_data = vec![0u8; plane_size * spp];
+
+            for tile_idx in 0..tile_offsets.len() {
+                let offset = tile_offsets[tile_idx];
+                let byte_count = tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
+
+                self.reader.seek(SeekFrom::Start(offset as u64))?;
+                let mut raw_tile = vec![0u8; byte_count as usize];
+                self.reader.read_exact(&mut raw_tile)?;
+
+                let mut tile_data = self.decompress_chunk(raw_tile);
+                if self.header.predictor != Predictor::None && bps >= 8 {
+                    self.apply_predictor_planar(&mut tile_data, tile_width as u32);
+                }
+
+                let sample = tile_idx / tiles_per_plane;
+                let within_plane = tile_idx % tiles_per_plane;
+                let tile_col = within_plane % tiles_x;
+                let tile_row = within_plane / tiles_x;
+
+                let img_x = tile_col * tile_width;
+                let img_y = tile_row * tile_height;
+                let plane_offset = sample * plane_size;
+
+                let expected_tile_bytes = tile_width * tile_height * bytes_per_plane_sample;
+                if tile_data.len() < expected_tile_bytes {
+                    tile_data.resize(expected_tile_bytes, 0);
+                }
+
+                for row in 0..tile_height {
+                    let py = img_y + row;
+                    if py >= image_height {
+                        break;
+                    }
+                    for col in 0..tile_width {
+                        let px = img_x + col;
+                        if px >= image_width {
+                            continue;
+                        }
+                        let src = (row * tile_width + col) * bytes_per_plane_sample;
+                        let dst = plane_offset + (py * image_width + px) * bytes_per_plane_sample;
+                        if src + bytes_per_plane_sample <= tile_data.len()
+                            && dst + bytes_per_plane_sample <= planar_data.len()
+                        {
+                            planar_data[dst..dst + bytes_per_plane_sample]
+                                .copy_from_slice(&tile_data[src..src + bytes_per_plane_sample]);
+                        }
+                    }
+                }
+            }
+
+            return Ok(planar_data);
+        }
+
+        let mut image_data = vec![0u8; img_data_size];
 
         for tile_idx in 0..tile_offsets.len() {
             let offset = tile_offsets[tile_idx];
