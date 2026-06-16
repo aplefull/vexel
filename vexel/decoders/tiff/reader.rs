@@ -3,13 +3,24 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::types::ByteOrder;
 use std::io::{Read, Seek, SeekFrom};
 
-pub fn read_single_value<T, R: Read + Seek>(type_: u16, value_offset: u32, reader: &mut BitReader<R>) -> VexelResult<T>
+pub fn read_single_value<T, R: Read + Seek>(
+    type_: u16,
+    value_offset: u32,
+    byte_order: ByteOrder,
+    reader: &mut BitReader<R>,
+) -> VexelResult<T>
 where
     T: TryFrom<u32>,
 {
     let value = match type_ {
-        1 => value_offset & 0xFF,
-        3 => value_offset & 0xFFFF,
+        1 => match byte_order {
+            ByteOrder::BigEndian => (value_offset >> 24) & 0xFF,
+            ByteOrder::LittleEndian => value_offset & 0xFF,
+        },
+        3 => match byte_order {
+            ByteOrder::BigEndian => (value_offset >> 16) & 0xFFFF,
+            ByteOrder::LittleEndian => value_offset & 0xFFFF,
+        },
         4 => value_offset,
         _ => {
             reader.seek(SeekFrom::Start(value_offset as u64))?;
@@ -33,7 +44,7 @@ where
     let mut values = Vec::with_capacity(count as usize);
 
     if count == 1 {
-        values.push(read_single_value(type_, value_offset, reader)?);
+        values.push(read_single_value(type_, value_offset, byte_order, reader)?);
         return Ok(values);
     }
 

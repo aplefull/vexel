@@ -4,7 +4,8 @@ use crate::PixelData;
 
 use super::color::{
     cielab_to_rgb, cmyk_to_rgb, f32_from_bytes, f64_from_bytes, float24_to_f32, half_to_f32, icclab_to_rgb,
-    itulab_to_rgb, lab_to_xyz, u16_from_bytes, u32_from_bytes, xyz_to_srgb, D50_WHITE, D65_WHITE, YCbCrTables,
+    itulab_to_rgb, lab_to_xyz, logluv32_to_rgb, u16_from_bytes, u32_from_bytes, xyz_to_srgb, D50_WHITE, D65_WHITE,
+    YCbCrTables,
 };
 use super::types::{ExtraSampleType, PhotometricInterpretation, PlanarConfiguration, SampleFormat, TiffHeader};
 
@@ -1006,9 +1007,34 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
             PhotometricInterpretation::CIELab => self.read_cielab(&data, header),
             PhotometricInterpretation::ICCLab => self.read_icclab(&data, header),
             PhotometricInterpretation::ITULab => self.read_itulab(&data, header),
-            PhotometricInterpretation::LogL | PhotometricInterpretation::LogLuv => Err(VexelError::Custom(
-                "LogL/LogLuv requires SGI log compression, which is not supported".to_string(),
-            )),
+            PhotometricInterpretation::LogLuv => {
+                let pixels: Vec<u8> = data
+                    .chunks_exact(4)
+                    .flat_map(|chunk| {
+                        let p = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        let (r, g, b) = logluv32_to_rgb(p);
+                        [r, g, b]
+                    })
+                    .collect();
+                Ok(PixelData::RGB8(pixels))
+            }
+            PhotometricInterpretation::LogL => {
+                let pixels: Vec<u8> = data
+                    .chunks_exact(2)
+                    .map(|chunk| {
+                        let p = u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+                        let le = p & 0x7fff;
+                        if le == 0 {
+                            return 0u8;
+                        }
+                        let y = (std::f64::consts::LN_2 / 256.0 * (le as f64 + 0.5)
+                            - std::f64::consts::LN_2 * 64.0)
+                            .exp();
+                        if y <= 0.0 { 0 } else if y >= 1.0 { 255 } else { (256.0 * y.sqrt()) as u8 }
+                    })
+                    .collect();
+                Ok(PixelData::L8(pixels))
+            }
         }
     }
 }

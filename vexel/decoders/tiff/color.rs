@@ -264,3 +264,36 @@ pub fn itulab_to_rgb(l_raw: u8, a_raw: u8, b_raw: u8) -> (u8, u8, u8) {
     let (x, y, z) = lab_to_xyz(l, a, b, D65_WHITE);
     xyz_to_srgb(x, y, z)
 }
+
+const UVSCALE: f64 = 410.0;
+
+fn logl16_to_y(p16: u32) -> f64 {
+    let le = p16 & 0x7fff;
+    if le == 0 {
+        return 0.0;
+    }
+    let y = (std::f64::consts::LN_2 / 256.0 * (le as f64 + 0.5) - std::f64::consts::LN_2 * 64.0).exp();
+    if p16 & 0x8000 != 0 { -y } else { y }
+}
+
+fn logluv_gamma(c: f64) -> u8 {
+    if c <= 0.0 { 0 } else if c >= 1.0 { 255 } else { (256.0 * c.sqrt()) as u8 }
+}
+
+pub fn logluv32_to_rgb(p: u32) -> (u8, u8, u8) {
+    let l = logl16_to_y(p >> 16);
+    if l <= 0.0 {
+        return (0, 0, 0);
+    }
+    let u = (((p >> 8) & 0xff) as f64 + 0.5) / UVSCALE;
+    let v = ((p & 0xff) as f64 + 0.5) / UVSCALE;
+    let s = 1.0 / (6.0 * u - 16.0 * v + 12.0);
+    let x = 9.0 * u * s;
+    let yc = 4.0 * v * s;
+    let xyz_x = x / yc * l;
+    let xyz_z = (1.0 - x - yc) / yc * l;
+    let r = 2.690 * xyz_x - 1.276 * l - 0.414 * xyz_z;
+    let g = -1.022 * xyz_x + 1.978 * l + 0.044 * xyz_z;
+    let b = 0.061 * xyz_x - 0.224 * l + 1.163 * xyz_z;
+    (logluv_gamma(r), logluv_gamma(g), logluv_gamma(b))
+}

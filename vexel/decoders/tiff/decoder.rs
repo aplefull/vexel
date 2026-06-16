@@ -3,12 +3,12 @@ use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::types::ByteOrder;
-use crate::Image;
+use crate::{Image, log_warn};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use super::compression::{
     apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
-    decompress_lzw, decompress_packbits,
+    decompress_lzw, decompress_packbits, decompress_sgilog, decompress_sgilog24,
 };
 use super::pixels::PixelReader;
 use super::reader::{read_multiple_rationals, read_multiple_values, read_rational, read_single_value};
@@ -74,36 +74,36 @@ impl<R: Read + Seek> TiffDecoder<R> {
             let current_pos = self.reader.stream_position()?;
 
             match tag {
-                256 => self.header.image_width = read_single_value(type_, value_offset, &mut self.reader)?,
-                257 => self.header.image_length = read_single_value(type_, value_offset, &mut self.reader)?,
+                256 => self.header.image_width = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
+                257 => self.header.image_length = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
                 258 => {
                     self.header.bits_per_sample =
                         read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?
                 }
                 259 => {
-                    let compression_value: u32 = read_single_value(type_, value_offset, &mut self.reader)?;
+                    let compression_value: u32 = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
                     self.header.compression =
                         Compression::try_from(compression_value as u16).unwrap_or(Compression::None);
                 }
                 262 => {
-                    self.header.photometric_interpretation = read_single_value(type_, value_offset, &mut self.reader)?
+                    self.header.photometric_interpretation = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?
                 }
                 273 => {
                     self.header.strip_offsets =
                         read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?
                 }
-                277 => self.header.samples_per_pixel = read_single_value(type_, value_offset, &mut self.reader)?,
-                278 => self.header.rows_per_strip = read_single_value(type_, value_offset, &mut self.reader)?,
+                277 => self.header.samples_per_pixel = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
+                278 => self.header.rows_per_strip = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
                 279 => {
                     self.header.strip_byte_counts =
                         read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?
                 }
                 282 => self.header.x_resolution = read_rational(value_offset, &mut self.reader)?,
                 283 => self.header.y_resolution = read_rational(value_offset, &mut self.reader)?,
-                284 => self.header.planar_configuration = read_single_value(type_, value_offset, &mut self.reader)?,
-                296 => self.header.resolution_unit = read_single_value(type_, value_offset, &mut self.reader)?,
+                284 => self.header.planar_configuration = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
+                296 => self.header.resolution_unit = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
                 317 => {
-                    let predictor_value: u32 = read_single_value(type_, value_offset, &mut self.reader)?;
+                    let predictor_value: u32 = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
                     self.header.predictor = Predictor::try_from(predictor_value).unwrap_or(Predictor::None);
                 }
                 320 => {
@@ -115,10 +115,10 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     self.header.color_map = color_map;
                 }
                 322 => {
-                    self.header.tile_width = Some(read_single_value(type_, value_offset, &mut self.reader)?);
+                    self.header.tile_width = Some(read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?);
                 }
                 323 => {
-                    self.header.tile_length = Some(read_single_value(type_, value_offset, &mut self.reader)?);
+                    self.header.tile_length = Some(read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?);
                 }
                 324 => {
                     self.header.tile_offsets =
@@ -197,7 +197,10 @@ impl<R: Read + Seek> TiffDecoder<R> {
             Compression::JPEG => self.decompress_jpeg_strip(data),
             Compression::OldJPEG => self.decompress_jpeg_strip(data),
             Compression::PNG => self.decompress_png_strip(data),
-            _ => data,
+            _ => {
+                log_warn!("Unsupported compression method {:?}, using raw data, image will be incorrect", self.header.compression);
+                data
+            },
         }
     }
 
@@ -295,6 +298,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
             return self.read_strip_data_jpeg();
         }
 
+        let is_sgilog = matches!(self.header.compression, Compression::SGILog | Compression::SGILog24);
+
         let rows_per_strip = self.header.rows_per_strip;
         let image_width = self.width;
         let is_planar = self.header.planar_configuration == super::types::PlanarConfiguration::Planar
@@ -316,8 +321,6 @@ impl<R: Read + Seek> TiffDecoder<R> {
             let mut strip_data = vec![0u8; *byte_count as usize];
             self.reader.read_exact(&mut strip_data)?;
 
-            let mut decompressed = self.decompress_chunk(strip_data);
-
             let strip_within_plane = if is_planar && strips_per_plane > 0 {
                 strip_idx % strips_per_plane
             } else {
@@ -325,14 +328,24 @@ impl<R: Read + Seek> TiffDecoder<R> {
             };
             let strip_row_start = (strip_within_plane as u32).saturating_mul(rows_per_strip);
             let strip_row_end = strip_row_start.saturating_add(rows_per_strip).min(self.height);
-            let strip_rows = strip_row_end.saturating_sub(strip_row_start);
+            let strip_rows = strip_row_end.saturating_sub(strip_row_start) as usize;
 
-            if self.header.predictor != Predictor::None {
+            let mut decompressed = if is_sgilog {
+                if matches!(self.header.compression, Compression::SGILog24) {
+                    decompress_sgilog24(&strip_data, image_width as usize, strip_rows)
+                } else {
+                    decompress_sgilog(&strip_data, image_width as usize, strip_rows)
+                }
+            } else {
+                self.decompress_chunk(strip_data)
+            };
+
+            if self.header.predictor != Predictor::None && !is_sgilog {
                 let bps = self.bits_for(0);
                 if bps >= 8 {
                     let stride = if is_planar { 1u16 } else { self.header.samples_per_pixel };
                     let row_bytes = image_width as usize * stride as usize * (bps as usize / 8);
-                    let expected_len = strip_rows as usize * row_bytes;
+                    let expected_len = strip_rows * row_bytes;
                     decompressed.truncate(expected_len);
                     if is_planar {
                         self.apply_predictor_planar(&mut decompressed, image_width);

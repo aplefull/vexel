@@ -11,6 +11,22 @@ pub fn test_cases() -> Vec<TestCase> {
             },
         },
         TestCase {
+            name: "TIFF RAW_NIKON_D800_M",
+            path: "tiff/RAW_NIKON_D800_M.tiff",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/RAW_NIKON_D800_M.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF memorial_luv32",
+            path: "tiff/memorial_luv32.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/memorial_luv32.avif",
+            },
+        },
+        TestCase {
             name: "TIFF rgb_u1",
             path: "tiff/rgb_u1.tif",
             validation: None,
@@ -70,6 +86,22 @@ pub fn test_cases() -> Vec<TestCase> {
             validation: None,
             comparison: Comparison::Exact {
                 reference_path: "tiff/rgb_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_u2_lzw",
+            path: "tiff/rgb_u2_lzw.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_u2_lzw.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_u2_packbits",
+            path: "tiff/rgb_u2_packbits.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_u2_packbits.avif",
             },
         },
         TestCase {
