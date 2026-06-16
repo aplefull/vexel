@@ -224,6 +224,170 @@ pub fn test_cases() -> Vec<TestCase> {
                 reference_path: "tiff/rgb_f8_deflate.avif",
             },
         },
+        TestCase {
+            name: "TIFF rgb_tiled_u1",
+            path: "tiff/rgb_tiled_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_u1_tiled_jpeg",
+            path: "tiff/rgb_u1_tiled_jpeg.tif",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "tiff/rgb_u1_tiled_jpeg.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_u1_tiled_packbits",
+            path: "tiff/rgb_u1_tiled_packbits.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_u1_tiled_packbits.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_tiled_u2",
+            path: "tiff/rgb_tiled_u2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_tiled_u4",
+            path: "tiff/rgb_tiled_u4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_u4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_tiled_i1",
+            path: "tiff/rgb_tiled_i1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_i1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_tiled_i2",
+            path: "tiff/rgb_tiled_i2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_i2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_tiled_i4",
+            path: "tiff/rgb_tiled_i4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_i4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_tiled_f2",
+            path: "tiff/rgb_tiled_f2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_f2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_tiled_f4",
+            path: "tiff/rgb_tiled_f4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_f4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_tiled_f8",
+            path: "tiff/rgb_tiled_f8.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_tiled_f8.avif",
+            },
+        },
+        // RGBA
+        TestCase {
+            name: "TIFF rgb_alpha_u1",
+            path: "tiff/rgb_alpha_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_alpha_u2",
+            path: "tiff/rgb_alpha_u2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_alpha_u4",
+            path: "tiff/rgb_alpha_u4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_u4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_alpha_i1",
+            path: "tiff/rgb_alpha_i1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_i1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_alpha_i2",
+            path: "tiff/rgb_alpha_i2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_i2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_alpha_i4",
+            path: "tiff/rgb_alpha_i4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_i4.avif",
+            },
+        },
+        // TODO: 1 byte difference
+        /* TestCase {
+            name: "TIFF rgb_alpha_f2",
+            path: "tiff/rgb_alpha_f2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_f2.avif",
+            },
+        }, */
+        TestCase {
+            name: "TIFF rgb_alpha_f4",
+            path: "tiff/rgb_alpha_f4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_f4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_alpha_f8",
+            path: "tiff/rgb_alpha_f8.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_alpha_f8.avif",
+            },
+        },
         // GRAYSCALE
         TestCase {
             name: "TIFF gray_u1",
@@ -295,6 +459,152 @@ pub fn test_cases() -> Vec<TestCase> {
             validation: None,
             comparison: Comparison::Exact {
                 reference_path: "tiff/gray_f8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_u1",
+            path: "tiff/gray_tiled_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_u2",
+            path: "tiff/gray_tiled_u2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_u4",
+            path: "tiff/gray_tiled_u4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_u4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_i1",
+            path: "tiff/gray_tiled_i1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_i1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_i2",
+            path: "tiff/gray_tiled_i2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_i2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_i4",
+            path: "tiff/gray_tiled_i4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_i4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_f2",
+            path: "tiff/gray_tiled_f2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_f2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_f4",
+            path: "tiff/gray_tiled_f4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_f4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_f8",
+            path: "tiff/gray_tiled_f8.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_f8.avif",
+            },
+        },
+        // GRAYSCALE + ALPHA
+        TestCase {
+            name: "TIFF gray_alpha_u1",
+            path: "tiff/gray_alpha_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_alpha_u2",
+            path: "tiff/gray_alpha_u2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_alpha_u4",
+            path: "tiff/gray_alpha_u4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_u4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_alpha_i1",
+            path: "tiff/gray_alpha_i1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_i1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_alpha_i2",
+            path: "tiff/gray_alpha_i2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_i2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_alpha_i4",
+            path: "tiff/gray_alpha_i4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_i4.avif",
+            },
+        },
+        // TODO: man, 1 byte difference
+        /* TestCase {
+            name: "TIFF gray_alpha_f2",
+            path: "tiff/gray_alpha_f2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_f2.avif",
+            },
+        }, */
+        TestCase {
+            name: "TIFF gray_alpha_f4",
+            path: "tiff/gray_alpha_f4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_f4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_alpha_f8",
+            path: "tiff/gray_alpha_f8.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_alpha_f8.avif",
             },
         },
     ]

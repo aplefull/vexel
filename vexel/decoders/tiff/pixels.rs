@@ -260,13 +260,43 @@ impl PixelReader {
                 let pixels: Vec<u16> = data
                     .chunks_exact(spp * 2)
                     .flat_map(|chunk| {
-                        let gray = (u16_from_bytes(&chunk[0..2], self.byte_order) as i16 as f32 + 32768.0).round() as u16;
+                        let gray = u16_from_bytes(&chunk[0..2], self.byte_order);
                         let alpha = u16_from_bytes(&chunk[2..4], self.byte_order);
                         let gray_out = if invert { u16::MAX - gray } else { gray };
                         [gray_out, alpha]
                     })
                     .collect();
                 Ok(PixelData::LA16(pixels))
+            }
+
+            (32, SampleFormat::UnsignedInt, true) if spp >= 2 => {
+                let pixels: Vec<u8> = data
+                    .chunks_exact(spp * 4)
+                    .flat_map(|chunk| {
+                        let gray = u32_from_bytes(&chunk[0..4], self.byte_order);
+                        let alpha = u32_from_bytes(&chunk[4..8], self.byte_order);
+                        let gray_out = (gray as f64 / u32::MAX as f64 * 255.0).round() as u8;
+                        let gray_out = if invert { 255 - gray_out } else { gray_out };
+                        let alpha_out = (alpha as f64 / u32::MAX as f64 * 255.0).round() as u8;
+                        [gray_out, alpha_out]
+                    })
+                    .collect();
+                Ok(PixelData::LA8(pixels))
+            }
+
+            (32, SampleFormat::SignedInt, true) if spp >= 2 => {
+                let pixels: Vec<u8> = data
+                    .chunks_exact(spp * 4)
+                    .flat_map(|chunk| {
+                        let gray = u32_from_bytes(&chunk[0..4], self.byte_order);
+                        let alpha = u32_from_bytes(&chunk[4..8], self.byte_order);
+                        let gray_out = (gray as f64 / u32::MAX as f64 * 255.0).round() as u8;
+                        let gray_out = if invert { 255 - gray_out } else { gray_out };
+                        let alpha_out = (alpha as f64 / u32::MAX as f64 * 255.0).round() as u8;
+                        [gray_out, alpha_out]
+                    })
+                    .collect();
+                Ok(PixelData::LA8(pixels))
             }
 
             _ => Ok(PixelData::L8(
