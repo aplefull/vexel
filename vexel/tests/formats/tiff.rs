@@ -11,6 +11,14 @@ pub fn test_cases() -> Vec<TestCase> {
             },
         },
         TestCase {
+            name: "TIFF rgb_u1",
+            path: "tiff/rgb_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_u1.avif",
+            },
+        },
+        TestCase {
             name: "TIFF rgb_u1_jpeg",
             path: "tiff/rgb_u1_jpeg.tif",
             validation: None,
@@ -54,6 +62,14 @@ pub fn test_cases() -> Vec<TestCase> {
             validation: None,
             comparison: Comparison::Exact {
                 reference_path: "tiff/rgb_u1_deflate.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_u2",
+            path: "tiff/rgb_u2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/rgb_u2.avif",
             },
         },
         TestCase {
@@ -390,6 +406,14 @@ pub fn test_cases() -> Vec<TestCase> {
         },
         // GRAYSCALE
         TestCase {
+            name: "TIFF gray_b1",
+            path: "tiff/gray_b1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_b1.avif",
+            },
+        },
+        TestCase {
             name: "TIFF gray_u1",
             path: "tiff/gray_u1.tif",
             validation: None,
@@ -446,6 +470,14 @@ pub fn test_cases() -> Vec<TestCase> {
             },
         },
         TestCase {
+            name: "TIFF gray_f3",
+            path: "tiff/gray_f3.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_f3.avif",
+            },
+        },
+        TestCase {
             name: "TIFF gray_f4",
             path: "tiff/gray_f4.tif",
             validation: None,
@@ -459,6 +491,14 @@ pub fn test_cases() -> Vec<TestCase> {
             validation: None,
             comparison: Comparison::Exact {
                 reference_path: "tiff/gray_f8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_tiled_b1",
+            path: "tiff/gray_tiled_b1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_tiled_b1.avif",
             },
         },
         TestCase {
@@ -533,6 +573,78 @@ pub fn test_cases() -> Vec<TestCase> {
                 reference_path: "tiff/gray_tiled_f8.avif",
             },
         },
+        TestCase {
+            name: "TIFF gray_extrasamples_u1",
+            path: "tiff/gray_extrasamples_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_extrasamples_u2",
+            path: "tiff/gray_extrasamples_u2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_extrasamples_u4",
+            path: "tiff/gray_extrasamples_u4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_u4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_extrasamples_i1",
+            path: "tiff/gray_extrasamples_i1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_i1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_extrasamples_i2",
+            path: "tiff/gray_extrasamples_i2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_i2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_extrasamples_i4",
+            path: "tiff/gray_extrasamples_i4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_i4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_extrasamples_f2",
+            path: "tiff/gray_extrasamples_f2.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_f2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_extrasamples_f4",
+            path: "tiff/gray_extrasamples_f4.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_f4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_extrasamples_f8",
+            path: "tiff/gray_extrasamples_f8.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/gray_extrasamples_f8.avif",
+            },
+        },
         // GRAYSCALE + ALPHA
         TestCase {
             name: "TIFF gray_alpha_u1",
@@ -605,6 +717,39 @@ pub fn test_cases() -> Vec<TestCase> {
             validation: None,
             comparison: Comparison::Exact {
                 reference_path: "tiff/gray_alpha_f8.avif",
+            },
+        },
+        // CMYK
+        TestCase {
+            name: "TIFF cmyk_u1",
+            path: "tiff/cmyk_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/cmyk_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF cmyk_alpha_u1",
+            path: "tiff/cmyk_alpha_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/cmyk_alpha_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF cmyk_planar_u1",
+            path: "tiff/cmyk_planar_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/cmyk_planar_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF cmyk_alpha_planar_u1",
+            path: "tiff/cmyk_alpha_planar_u1.tif",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/cmyk_alpha_planar_u1.avif",
             },
         },
     ]

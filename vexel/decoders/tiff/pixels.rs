@@ -21,7 +21,7 @@ impl PixelReader {
         })
     }
 
-    pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
+pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
         header
             .sample_format
             .get(channel)
@@ -42,19 +42,34 @@ impl PixelReader {
         match (bps, fmt, has_alpha) {
             (1, SampleFormat::UnsignedInt, false) => {
                 let width = self.width as usize;
-                let row_bytes = width.div_ceil(8);
+                let row_bytes = if spp > 1 {
+                    (width * spp).div_ceil(8)
+                } else {
+                    width.div_ceil(8)
+                };
                 let mut pixels = Vec::with_capacity(width * self.height as usize);
-                for row in data.chunks(row_bytes) {
-                    for col in 0..width {
-                        let byte = row.get(col / 8).copied().unwrap_or(0);
-                        let bit = (byte >> (7 - (col % 8))) & 1;
-                        pixels.push(if invert { 1 - bit } else { bit });
+                if spp > 1 {
+                    for row in data.chunks(row_bytes) {
+                        for col in 0..width {
+                            let bit_idx = col * spp;
+                            let byte = row.get(bit_idx / 8).copied().unwrap_or(0);
+                            let bit = (byte >> (7 - (bit_idx % 8))) & 1;
+                            pixels.push(if invert { 1 - bit } else { bit });
+                        }
+                    }
+                } else {
+                    for row in data.chunks(row_bytes) {
+                        for col in 0..width {
+                            let byte = row.get(col / 8).copied().unwrap_or(0);
+                            let bit = (byte >> (7 - (col % 8))) & 1;
+                            pixels.push(if invert { 1 - bit } else { bit });
+                        }
                     }
                 }
                 Ok(PixelData::L1(pixels))
             }
 
-            (2, SampleFormat::UnsignedInt, false) => {
+            (2, SampleFormat::UnsignedInt, false) if spp == 1 => {
                 let pixels: Vec<u8> = data
                     .iter()
                     .flat_map(|&byte| {
@@ -68,7 +83,20 @@ impl PixelReader {
                 Ok(PixelData::L8(pixels))
             }
 
-            (4, SampleFormat::UnsignedInt, false) => {
+            (2, SampleFormat::UnsignedInt, false) => {
+                let bytes_per_pixel = (spp * 2).div_ceil(8);
+                let pixels: Vec<u8> = data
+                    .chunks(bytes_per_pixel)
+                    .map(|chunk| {
+                        let val = (chunk[0] >> 6) & 0x3;
+                        let expanded = val * 85;
+                        if invert { 255 - expanded } else { expanded }
+                    })
+                    .collect();
+                Ok(PixelData::L8(pixels))
+            }
+
+            (4, SampleFormat::UnsignedInt, false) if spp == 1 => {
                 let pixels: Vec<u8> = data
                     .iter()
                     .flat_map(|&byte| {
@@ -82,18 +110,36 @@ impl PixelReader {
                 Ok(PixelData::L8(pixels))
             }
 
+            (4, SampleFormat::UnsignedInt, false) => {
+                let bytes_per_pixel = (spp * 4).div_ceil(8);
+                let pixels: Vec<u8> = data
+                    .chunks(bytes_per_pixel)
+                    .map(|chunk| {
+                        let hi = (chunk[0] >> 4) & 0xF;
+                        let out = if invert { 255 - hi * 17 } else { hi * 17 };
+                        out
+                    })
+                    .collect();
+                Ok(PixelData::L8(pixels))
+            }
+
             (8, SampleFormat::UnsignedInt, false) => {
-                if invert {
-                    return Ok(PixelData::L8(data.iter().map(|&b| 255 - b).collect()));
-                }
-                Ok(PixelData::L8(data.to_vec()))
+                let pixels: Vec<u8> = data
+                    .chunks(spp)
+                    .map(|chunk| {
+                        let b = chunk[0];
+                        if invert { 255 - b } else { b }
+                    })
+                    .collect();
+                Ok(PixelData::L8(pixels))
             }
 
             (16, SampleFormat::UnsignedInt, false) => {
+                let bytes_per_pixel = spp * 2;
                 let pixels: Vec<u16> = data
-                    .chunks_exact(2)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = u16_from_bytes(chunk, self.byte_order);
+                        let v = u16_from_bytes(&chunk[0..2], self.byte_order);
                         if invert { u16::MAX - v } else { v }
                     })
                     .collect();
@@ -101,10 +147,11 @@ impl PixelReader {
             }
 
             (32, SampleFormat::UnsignedInt, false) => {
+                let bytes_per_pixel = spp * 4;
                 let pixels: Vec<u8> = data
-                    .chunks_exact(4)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = u32_from_bytes(chunk, self.byte_order);
+                        let v = u32_from_bytes(&chunk[0..4], self.byte_order);
                         let normalized = (v as f64 / u32::MAX as f64 * 255.0).round() as u8;
                         if invert { 255 - normalized } else { normalized }
                     })
@@ -114,17 +161,21 @@ impl PixelReader {
 
             (8, SampleFormat::SignedInt, false) => {
                 let pixels: Vec<u8> = data
-                    .iter()
-                    .map(|&b| if invert { 255 - b } else { b })
+                    .chunks(spp)
+                    .map(|chunk| {
+                        let b = chunk[0];
+                        if invert { 255 - b } else { b }
+                    })
                     .collect();
                 Ok(PixelData::L8(pixels))
             }
 
             (16, SampleFormat::SignedInt, false) => {
+                let bytes_per_pixel = spp * 2;
                 let pixels: Vec<u16> = data
-                    .chunks_exact(2)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = (u16_from_bytes(chunk, self.byte_order) as i16 as f32 + 32768.0).round() as u16;
+                        let v = u16_from_bytes(&chunk[0..2], self.byte_order);
                         if invert { u16::MAX - v } else { v }
                     })
                     .collect();
@@ -132,10 +183,11 @@ impl PixelReader {
             }
 
             (32, SampleFormat::SignedInt, false) => {
+                let bytes_per_pixel = spp * 4;
                 let pixels: Vec<u8> = data
-                    .chunks_exact(4)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = u32_from_bytes(chunk, self.byte_order);
+                        let v = u32_from_bytes(&chunk[0..4], self.byte_order);
                         let normalized = (v as f64 / u32::MAX as f64 * 255.0).round() as u8;
                         if invert { 255 - normalized } else { normalized }
                     })
@@ -144,8 +196,9 @@ impl PixelReader {
             }
 
             (64, SampleFormat::SignedInt, false) => {
+                let bytes_per_pixel = spp * 8;
                 let pixels: Vec<u8> = data
-                    .chunks_exact(8)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = match self.byte_order {
                             ByteOrder::LittleEndian => u64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]),
@@ -159,10 +212,11 @@ impl PixelReader {
             }
 
             (16, SampleFormat::Float, false) => {
+                let bytes_per_pixel = spp * 2;
                 let pixels: Vec<u8> = data
-                    .chunks_exact(2)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = half_to_f32(u16_from_bytes(chunk, self.byte_order));
+                        let v = half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order));
                         let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         if invert { 255 - out } else { out }
                     })
@@ -171,10 +225,11 @@ impl PixelReader {
             }
 
             (24, SampleFormat::Float, false) => {
+                let bytes_per_pixel = spp * 3;
                 let pixels: Vec<u8> = data
-                    .chunks_exact(3)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = float24_to_f32(chunk, self.byte_order);
+                        let v = float24_to_f32(&chunk[0..3], self.byte_order);
                         let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         if invert { 255 - out } else { out }
                     })
@@ -183,10 +238,11 @@ impl PixelReader {
             }
 
             (32, SampleFormat::Float, false) => {
+                let bytes_per_pixel = spp * 4;
                 let pixels: Vec<u8> = data
-                    .chunks_exact(4)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = f32_from_bytes(chunk, self.byte_order);
+                        let v = f32_from_bytes(&chunk[0..4], self.byte_order);
                         let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         if invert { 255 - out } else { out }
                     })
@@ -195,10 +251,11 @@ impl PixelReader {
             }
 
             (64, SampleFormat::Float, false) => {
+                let bytes_per_pixel = spp * 8;
                 let pixels: Vec<u8> = data
-                    .chunks_exact(8)
+                    .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = f64_from_bytes(chunk, self.byte_order) as f32;
+                        let v = f64_from_bytes(&chunk[0..8], self.byte_order) as f32;
                         let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         if invert { 255 - out } else { out }
                     })
