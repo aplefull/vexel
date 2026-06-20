@@ -81,5 +81,21 @@ pub fn test_cases() -> Vec<TestCase> {
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
         },
+        TestCase {
+            name: "JPEG lossless arithmetic",
+            path: "jpeg/2x2_lossless_arithmetic.jpg",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/2x2_lossless_arithmetic.avif",
+            },
+        },
+        TestCase {
+            name: "JPEG lossless arithmetic 2",
+            path: "jpeg/cat_lossless_arithmetic.jpg",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/cat_lossless_arithmetic.avif",
+            },
+        },
     ]
 }

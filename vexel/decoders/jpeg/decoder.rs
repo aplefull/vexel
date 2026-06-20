@@ -525,6 +525,73 @@ impl<'a> ArithmeticDecoder<'a> {
             k += 1;
         }
     }
+
+    fn decode_lossless_difference(
+        &mut self,
+        contexts: &mut [u8; 160],
+        da: i32,
+        db: i32,
+        l: u8,
+        u: u8,
+    ) -> i32 {
+        fn classify(diff: i32, l: u8, u: u8) -> usize {
+            let abs = diff.unsigned_abs() as i64;
+            let threshold_l = if l == 0 { 0i64 } else { (1i64 << l) >> 1 };
+            let threshold_u = 1i64 << u;
+            if abs <= threshold_l {
+                2
+            } else if abs <= threshold_u {
+                if diff < 0 { 1 } else { 3 }
+            } else {
+                if diff < 0 { 0 } else { 4 }
+            }
+        }
+
+        let da_cls = classify(da, l, u);
+        let db_cls = classify(db, l, u);
+        let base = da_cls * 5 + db_cls;
+
+        let s0_idx = base;
+        let ss_idx = 25 + base;
+        let sp_idx = 50 + base;
+        let sn_idx = 75 + base;
+
+        if self.arith_decode(&mut contexts[s0_idx]) == 0 {
+            return 0;
+        }
+
+        let sign = self.arith_decode(&mut contexts[ss_idx]) != 0;
+
+        let magnitude_base = if db.unsigned_abs() > (1u32 << u) { 130usize } else { 100usize };
+
+        let sz = if self.arith_decode(&mut contexts[if sign { sn_idx } else { sp_idx }]) != 0 {
+            let mut i = 0usize;
+            let mut m = 2i32;
+            while self.arith_decode(&mut contexts[magnitude_base + i]) != 0 {
+                m <<= 1;
+                i += 1;
+                if i >= 15 {
+                    log_warn!("Arithmetic lossless magnitude overflow");
+                    self.error = true;
+                    return 0;
+                }
+            }
+            m >>= 1;
+            let mut sz = m;
+            let refinement_base = magnitude_base + 15;
+            while m > 1 {
+                m >>= 1;
+                if self.arith_decode(&mut contexts[refinement_base + i]) != 0 {
+                    sz |= m;
+                }
+            }
+            sz
+        } else {
+            0
+        };
+
+        if sign { -(sz + 1) } else { sz + 1 }
+    }
 }
 
 pub struct JpegDecoder<R: Read + Seek> {
@@ -1732,6 +1799,70 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(differences)
     }
 
+    fn decode_differences_arithmetic(&mut self, scan: &ScanData) -> VexelResult<Vec<Vec<i32>>> {
+        let num_components = scan.components.len();
+        let width = self.width as usize;
+        let height = self.height as usize;
+
+        let mut differences: Vec<Vec<i32>> = vec![vec![0i32; width * height]; num_components];
+
+        let l_values: Vec<u8> = scan.components.iter().map(|sc| {
+            scan.arith_dc_tables
+                .iter()
+                .find(|t| t.identifier == sc.dc_table_selector)
+                .and_then(|t| t.values.first())
+                .map(|v| v.length)
+                .unwrap_or(0)
+        }).collect();
+
+        let u_values: Vec<u8> = scan.components.iter().map(|sc| {
+            scan.arith_dc_tables
+                .iter()
+                .find(|t| t.identifier == sc.dc_table_selector)
+                .and_then(|t| t.values.first())
+                .map(|v| v.value)
+                .unwrap_or(1)
+        }).collect();
+
+        let ctx_table_indices: Vec<usize> = scan.components.iter().map(|sc| {
+            (sc.dc_table_selector & 0x3) as usize
+        }).collect();
+
+        let mut all_contexts = vec![[0u8; 160]; 4];
+        let mut arith = ArithmeticDecoder::new(&scan.data);
+
+        let mut da: Vec<i32> = vec![0i32; num_components];
+        let mut db: Vec<Vec<i32>> = vec![vec![0i32; width]; num_components];
+
+        for y in 0..height {
+            for c in 0..num_components {
+                da[c] = 0;
+            }
+
+            for x in 0..width {
+                for c in 0..num_components {
+                    let l = l_values[c];
+                    let u = u_values[c];
+                    let ctx_idx = ctx_table_indices[c];
+
+                    let v = arith.decode_lossless_difference(
+                        &mut all_contexts[ctx_idx],
+                        da[c],
+                        db[c][x],
+                        l,
+                        u,
+                    );
+
+                    differences[c][y * width + x] = v;
+                    da[c] = v;
+                    db[c][x] = v;
+                }
+            }
+        }
+
+        Ok(differences)
+    }
+
     fn predict(
         ra: i32,
         rb: i32,
@@ -1921,7 +2052,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         };
 
-        let differences = self.decode_differences(&scan)?;
+        let differences = if self.coding_method == JpegCodingMethod::Arithmetic {
+            self.decode_differences_arithmetic(&scan)?
+        } else {
+            self.decode_differences(&scan)?
+        };
 
         let point_transform = self.successive_approximation_low;
         let predictor = match scan.start_spectral {
