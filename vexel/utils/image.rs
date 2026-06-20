@@ -18,50 +18,19 @@ fn add_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
     out
 }
 
-fn u16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
-    values.iter().map(|&p| (p as f32 * 255.0 / 65535.0).round() as u8).collect()
+#[inline(always)]
+fn scale_u16(v: u16) -> u8 {
+    (v as f32 * 255.0 / 65535.0).round() as u8
 }
 
-fn f32_to_u8_rgb(values: Vec<f32>) -> Vec<u8> {
-    values.iter().map(|v| ((*v).clamp(0.0, 1.0) * 255.0).round() as u8).collect()
+#[inline(always)]
+fn scale_f32(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
-fn l1_to_u8_rgb(values: Vec<u8>) -> Vec<u8> {
-    values
-        .iter()
-        .map(|v| *v * 255)
-        .flat_map(|v| Vec::from([v, v, v]))
-        .collect()
-}
-
-fn l8_to_u8_rgb(values: Vec<u8>) -> Vec<u8> {
-    values.iter().map(|v| *v).flat_map(|v| Vec::from([v, v, v])).collect()
-}
-
-fn la8_to_u8_rgba(values: Vec<u8>) -> Vec<u8> {
-    values
-        .chunks_exact(2)
-        .map(|chunk| Vec::from([chunk[0], chunk[0], chunk[0], chunk[1]]))
-        .flatten()
-        .collect()
-}
-
-fn l16_to_u8_rgb(values: Vec<u16>) -> Vec<u8> {
-    values.iter().flat_map(|&p| {
-        let gray = (p as f32 * 255.0 / 65535.0).round() as u8;
-        [gray, gray, gray]
-    }).collect()
-}
-
-fn la16_to_u8_rgba(values: Vec<u16>) -> Vec<u8> {
-    values
-        .chunks(2)
-        .flat_map(|chunk| {
-            let gray = (chunk[0] as f32 * 255.0 / 65535.0).round() as u8;
-            let alpha = (chunk[1] as f32 * 255.0 / 65535.0).round() as u8;
-            [gray, gray, gray, alpha]
-        })
-        .collect()
+#[inline(always)]
+fn scale_f64(v: f64) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -95,11 +64,17 @@ pub enum PixelFormat {
     RGBA16,
     RGB32F,
     RGBA32F,
+    RGB64F,
+    RGBA64F,
     L1,
     L8,
     L16,
     LA8,
     LA16,
+    L32F,
+    LA32F,
+    L64F,
+    LA64F,
 }
 
 #[derive(Debug)]
@@ -165,7 +140,7 @@ impl Image {
 
     pub fn has_alpha(&self) -> bool {
         match self.pixel_format {
-            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::LA8 | PixelFormat::LA16 => {
+            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::RGBA64F | PixelFormat::LA8 | PixelFormat::LA16 | PixelFormat::LA32F | PixelFormat::LA64F => {
                 true
             }
             _ => false,
@@ -252,8 +227,11 @@ impl ImageFrame {
             PixelData::RGBA8(_)
             | PixelData::RGBA16(_)
             | PixelData::RGBA32F(_)
+            | PixelData::RGBA64F(_)
             | PixelData::LA8(_)
-            | PixelData::LA16(_) => true,
+            | PixelData::LA16(_)
+            | PixelData::LA32F(_)
+            | PixelData::LA64F(_) => true,
             _ => false,
         }
     }
@@ -299,11 +277,17 @@ pub enum PixelData {
     RGBA16(Vec<u16>),
     RGB32F(Vec<f32>),
     RGBA32F(Vec<f32>),
+    RGB64F(Vec<f64>),
+    RGBA64F(Vec<f64>),
     L1(Vec<u8>),
     L8(Vec<u8>),
     L16(Vec<u16>),
     LA8(Vec<u8>),
     LA16(Vec<u16>),
+    L32F(Vec<f32>),
+    LA32F(Vec<f32>),
+    L64F(Vec<f64>),
+    LA64F(Vec<f64>),
 }
 
 impl PixelData {
@@ -315,44 +299,110 @@ impl PixelData {
             PixelData::RGBA16(_) => PixelFormat::RGBA16,
             PixelData::RGB32F(_) => PixelFormat::RGB32F,
             PixelData::RGBA32F(_) => PixelFormat::RGBA32F,
+            PixelData::RGB64F(_) => PixelFormat::RGB64F,
+            PixelData::RGBA64F(_) => PixelFormat::RGBA64F,
             PixelData::L1(_) => PixelFormat::L1,
             PixelData::L8(_) => PixelFormat::L8,
             PixelData::L16(_) => PixelFormat::L16,
             PixelData::LA8(_) => PixelFormat::LA8,
             PixelData::LA16(_) => PixelFormat::LA16,
+            PixelData::L32F(_) => PixelFormat::L32F,
+            PixelData::LA32F(_) => PixelFormat::LA32F,
+            PixelData::L64F(_) => PixelFormat::L64F,
+            PixelData::LA64F(_) => PixelFormat::LA64F,
         }
     }
 
     pub fn into_rgb8(self) -> PixelData {
-        match self {
-            PixelData::RGB8(pixels) => PixelData::RGB8(pixels),
-            PixelData::RGBA8(pixels) => PixelData::RGB8(drop_transparency_channel(pixels)),
-            PixelData::RGB16(pixels) => PixelData::RGB8(u16_to_u8_rgb(pixels)),
-            PixelData::RGBA16(pixels) => PixelData::RGB8(drop_transparency_channel(u16_to_u8_rgb(pixels))),
-            PixelData::RGB32F(pixels) => PixelData::RGB8(f32_to_u8_rgb(pixels)),
-            PixelData::RGBA32F(pixels) => PixelData::RGB8(drop_transparency_channel(f32_to_u8_rgb(pixels))),
-            PixelData::L1(pixels) => PixelData::RGB8(l1_to_u8_rgb(pixels)),
-            PixelData::L8(pixels) => PixelData::RGB8(l8_to_u8_rgb(pixels)),
-            PixelData::LA8(pixels) => PixelData::RGB8(drop_transparency_channel(l8_to_u8_rgb(pixels))),
-            PixelData::L16(pixels) => PixelData::RGB8(l16_to_u8_rgb(pixels)),
-            PixelData::LA16(pixels) => PixelData::RGB8(drop_transparency_channel(l16_to_u8_rgb(pixels))),
-        }
+        PixelData::RGB8(match self {
+            PixelData::RGB8(p) => p,
+            PixelData::RGBA8(p) => drop_transparency_channel(p),
+            PixelData::RGB16(p) => {
+                let mut dst = vec![0u8; p.len()];
+                channel_simd::scale_u16_to_u8(&p, &mut dst);
+                dst
+            }
+            PixelData::RGBA16(p) => {
+                let mut scaled = vec![0u8; p.len()];
+                channel_simd::scale_u16_to_u8(&p, &mut scaled);
+                drop_transparency_channel(scaled)
+            }
+            PixelData::RGB32F(p) => {
+                let mut dst = vec![0u8; p.len()];
+                channel_simd::scale_f32_to_u8(&p, &mut dst);
+                dst
+            }
+            PixelData::RGBA32F(p) => {
+                let mut scaled = vec![0u8; p.len()];
+                channel_simd::scale_f32_to_u8(&p, &mut scaled);
+                drop_transparency_channel(scaled)
+            }
+            PixelData::RGB64F(p) => p.iter().map(|&v| scale_f64(v)).collect(),
+            PixelData::RGBA64F(p) => drop_transparency_channel(p.iter().map(|&v| scale_f64(v)).collect()),
+            PixelData::L1(p) => p.iter().flat_map(|&v| [v * 255, v * 255, v * 255]).collect(),
+            PixelData::L8(p) => p.iter().flat_map(|&v| [v, v, v]).collect(),
+            PixelData::L16(p) => {
+                let mut scaled = vec![0u8; p.len()];
+                channel_simd::scale_u16_to_u8(&p, &mut scaled);
+                scaled.iter().flat_map(|&g| [g, g, g]).collect()
+            }
+            PixelData::LA8(p) => p.chunks_exact(2).flat_map(|c| [c[0], c[0], c[0]]).collect(),
+            PixelData::LA16(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_u16(c[0]); [g, g, g] }).collect(),
+            PixelData::L32F(p) => {
+                let mut scaled = vec![0u8; p.len()];
+                channel_simd::scale_f32_to_u8(&p, &mut scaled);
+                scaled.iter().flat_map(|&g| [g, g, g]).collect()
+            }
+            PixelData::LA32F(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_f32(c[0]); [g, g, g] }).collect(),
+            PixelData::L64F(p) => p.iter().flat_map(|&v| { let g = scale_f64(v); [g, g, g] }).collect(),
+            PixelData::LA64F(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_f64(c[0]); [g, g, g] }).collect(),
+        })
     }
 
     pub fn into_rgba8(self) -> PixelData {
-        match self {
-            PixelData::RGB8(pixels) => PixelData::RGBA8(add_transparency_channel(pixels)),
-            PixelData::RGBA8(pixels) => PixelData::RGBA8(pixels),
-            PixelData::RGB16(pixels) => PixelData::RGBA8(add_transparency_channel(u16_to_u8_rgb(pixels))),
-            PixelData::RGBA16(pixels) => PixelData::RGBA8(u16_to_u8_rgb(pixels)),
-            PixelData::RGB32F(pixels) => PixelData::RGBA8(add_transparency_channel(f32_to_u8_rgb(pixels))),
-            PixelData::RGBA32F(pixels) => PixelData::RGBA8(f32_to_u8_rgb(pixels)),
-            PixelData::L1(pixels) => PixelData::RGBA8(add_transparency_channel(l1_to_u8_rgb(pixels))),
-            PixelData::L8(pixels) => PixelData::RGBA8(add_transparency_channel(l8_to_u8_rgb(pixels))),
-            PixelData::LA8(pixels) => PixelData::RGBA8(la8_to_u8_rgba(pixels)),
-            PixelData::L16(pixels) => PixelData::RGBA8(add_transparency_channel(l16_to_u8_rgb(pixels))),
-            PixelData::LA16(pixels) => PixelData::RGBA8(la16_to_u8_rgba(pixels)),
-        }
+        PixelData::RGBA8(match self {
+            PixelData::RGB8(p) => add_transparency_channel(p),
+            PixelData::RGBA8(p) => p,
+            PixelData::RGB16(p) => {
+                let mut scaled = vec![0u8; p.len()];
+                channel_simd::scale_u16_to_u8(&p, &mut scaled);
+                add_transparency_channel(scaled)
+            }
+            PixelData::RGBA16(p) => {
+                let mut dst = vec![0u8; p.len()];
+                channel_simd::scale_u16_to_u8(&p, &mut dst);
+                dst
+            }
+            PixelData::RGB32F(p) => {
+                let mut scaled = vec![0u8; p.len()];
+                channel_simd::scale_f32_to_u8(&p, &mut scaled);
+                add_transparency_channel(scaled)
+            }
+            PixelData::RGBA32F(p) => {
+                let mut dst = vec![0u8; p.len()];
+                channel_simd::scale_f32_to_u8(&p, &mut dst);
+                dst
+            }
+            PixelData::RGB64F(p) => add_transparency_channel(p.iter().map(|&v| scale_f64(v)).collect()),
+            PixelData::RGBA64F(p) => p.iter().map(|&v| scale_f64(v)).collect(),
+            PixelData::L1(p) => p.iter().flat_map(|&v| [v * 255, v * 255, v * 255, 255]).collect(),
+            PixelData::L8(p) => p.iter().flat_map(|&v| [v, v, v, 255]).collect(),
+            PixelData::L16(p) => {
+                let mut scaled = vec![0u8; p.len()];
+                channel_simd::scale_u16_to_u8(&p, &mut scaled);
+                scaled.iter().flat_map(|&g| [g, g, g, 255]).collect()
+            }
+            PixelData::LA8(p) => p.chunks_exact(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+            PixelData::LA16(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_u16(c[0]); let a = scale_u16(c[1]); [g, g, g, a] }).collect(),
+            PixelData::L32F(p) => {
+                let mut scaled = vec![0u8; p.len()];
+                channel_simd::scale_f32_to_u8(&p, &mut scaled);
+                scaled.iter().flat_map(|&g| [g, g, g, 255]).collect()
+            }
+            PixelData::LA32F(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_f32(c[0]); let a = scale_f32(c[1]); [g, g, g, a] }).collect(),
+            PixelData::L64F(p) => p.iter().flat_map(|&v| { let g = scale_f64(v); [g, g, g, 255] }).collect(),
+            PixelData::LA64F(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_f64(c[0]); let a = scale_f64(c[1]); [g, g, g, a] }).collect(),
+        })
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -371,6 +421,12 @@ impl PixelData {
             PixelData::RGBA32F(pixels) => unsafe {
                 std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
             },
+            PixelData::RGB64F(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 8)
+            },
+            PixelData::RGBA64F(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 8)
+            },
             PixelData::L1(pixels) => pixels,
             PixelData::L8(pixels) => pixels,
             PixelData::L16(pixels) => unsafe {
@@ -379,6 +435,18 @@ impl PixelData {
             PixelData::LA8(pixels) => pixels,
             PixelData::LA16(pixels) => unsafe {
                 std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 2)
+            },
+            PixelData::L32F(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+            },
+            PixelData::LA32F(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4)
+            },
+            PixelData::L64F(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 8)
+            },
+            PixelData::LA64F(pixels) => unsafe {
+                std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 8)
             },
         }
     }
@@ -399,6 +467,12 @@ impl PixelData {
             PixelData::RGBA32F(pixels) => unsafe {
                 std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
             },
+            PixelData::RGB64F(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 8)
+            },
+            PixelData::RGBA64F(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 8)
+            },
             PixelData::L1(pixels) => pixels,
             PixelData::L8(pixels) => pixels,
             PixelData::L16(pixels) => unsafe {
@@ -408,6 +482,18 @@ impl PixelData {
             PixelData::LA16(pixels) => unsafe {
                 std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
             },
+            PixelData::L32F(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
+            },
+            PixelData::LA32F(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
+            },
+            PixelData::L64F(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 8)
+            },
+            PixelData::LA64F(pixels) => unsafe {
+                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 8)
+            },
         }
     }
 
@@ -415,10 +501,10 @@ impl PixelData {
     // in case something went wrong during decoding
     pub fn correct_pixels(&mut self, width: u32, height: u32) -> () {
         let components_per_pixel = match self {
-            PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) => 3,
-            PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) => 4,
-            PixelData::L1(_) | PixelData::L8(_) | PixelData::L16(_) => 1,
-            PixelData::LA8(_) | PixelData::LA16(_) => 2,
+            PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) | PixelData::RGB64F(_) => 3,
+            PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::RGBA64F(_) => 4,
+            PixelData::L1(_) | PixelData::L8(_) | PixelData::L16(_) | PixelData::L32F(_) | PixelData::L64F(_) => 1,
+            PixelData::LA8(_) | PixelData::LA16(_) | PixelData::LA32F(_) | PixelData::LA64F(_) => 2,
         };
 
         let expected_len = (width * height) as usize * components_per_pixel;
@@ -430,11 +516,17 @@ impl PixelData {
             PixelData::RGBA16(pixels) => correct_vec(pixels, expected_len, 4),
             PixelData::RGB32F(pixels) => correct_vec(pixels, expected_len, 3),
             PixelData::RGBA32F(pixels) => correct_vec(pixels, expected_len, 4),
+            PixelData::RGB64F(pixels) => correct_vec(pixels, expected_len, 3),
+            PixelData::RGBA64F(pixels) => correct_vec(pixels, expected_len, 4),
             PixelData::L1(pixels) => correct_vec(pixels, expected_len, 1),
             PixelData::L8(pixels) => correct_vec(pixels, expected_len, 1),
             PixelData::L16(pixels) => correct_vec(pixels, expected_len, 1),
+            PixelData::L32F(pixels) => correct_vec(pixels, expected_len, 1),
+            PixelData::L64F(pixels) => correct_vec(pixels, expected_len, 1),
             PixelData::LA8(pixels) => correct_vec(pixels, expected_len, 2),
             PixelData::LA16(pixels) => correct_vec(pixels, expected_len, 2),
+            PixelData::LA32F(pixels) => correct_vec(pixels, expected_len, 2),
+            PixelData::LA64F(pixels) => correct_vec(pixels, expected_len, 2),
         }
 
         fn correct_vec<T: Clone + Default>(pixels: &mut Vec<T>, expected_len: usize, components_per_pixel: usize) {

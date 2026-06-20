@@ -3,9 +3,9 @@ use crate::utils::types::ByteOrder;
 use crate::PixelData;
 
 use super::color::{
-    cielab_to_rgb, cmyk_to_rgb, f32_from_bytes, f64_from_bytes, float24_to_f32, half_to_f32, icclab_to_rgb,
-    itulab_to_rgb, lab_to_xyz, logluv32_to_rgb, u16_from_bytes, u32_from_bytes, xyz_to_srgb, D50_WHITE, D65_WHITE,
-    YCbCrTables,
+    cielab_to_rgb, cmyk_to_rgb, cmyk_to_rgb_f32, f32_from_bytes, f64_from_bytes, float24_to_f32, half_to_f32,
+    icclab_to_rgb, itulab_to_rgb, lab_to_xyz, logluv32_to_rgb, u16_from_bytes, u32_from_bytes,
+    xyz_to_srgb_f32, D50_WHITE, D65_WHITE, YCbCrTables,
 };
 use super::types::{ExtraSampleType, PhotometricInterpretation, PlanarConfiguration, SampleFormat, TiffHeader};
 
@@ -149,15 +149,15 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
 
             (32, SampleFormat::UnsignedInt, false) => {
                 let bytes_per_pixel = spp * 4;
-                let pixels: Vec<u8> = data
+                let pixels: Vec<f32> = data
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = u32_from_bytes(&chunk[0..4], self.byte_order);
-                        let normalized = (v as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        if invert { 255 - normalized } else { normalized }
+                        let v = u32_from_bytes(&chunk[0..4], self.byte_order) as f64 / u32::MAX as f64;
+                        let v = if invert { 1.0 - v } else { v };
+                        v as f32
                     })
                     .collect();
-                Ok(PixelData::L8(pixels))
+                Ok(PixelData::L32F(pixels))
             }
 
             (8, SampleFormat::SignedInt, false) => {
@@ -185,83 +185,97 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
 
             (32, SampleFormat::SignedInt, false) => {
                 let bytes_per_pixel = spp * 4;
-                let pixels: Vec<u8> = data
+                let pixels: Vec<f32> = data
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = u32_from_bytes(&chunk[0..4], self.byte_order);
-                        let normalized = (v as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        if invert { 255 - normalized } else { normalized }
+                        let raw = u32_from_bytes(&chunk[0..4], self.byte_order);
+                        let v = i32::from_ne_bytes(raw.to_ne_bytes());
+                        let normalized = (v as f64 - i32::MIN as f64) / u32::MAX as f64;
+                        let normalized = if invert { 1.0 - normalized } else { normalized };
+                        normalized as f32
                     })
                     .collect();
-                Ok(PixelData::L8(pixels))
+                Ok(PixelData::L32F(pixels))
+            }
+
+            (64, SampleFormat::UnsignedInt, false) => {
+                let bytes_per_pixel = spp * 8;
+                let pixels: Vec<f64> = data
+                    .chunks(bytes_per_pixel)
+                    .map(|chunk| {
+                        let v = match self.byte_order {
+                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                        };
+                        let normalized = v as f64 / u64::MAX as f64;
+                        if invert { 1.0 - normalized } else { normalized }
+                    })
+                    .collect();
+                Ok(PixelData::L64F(pixels))
             }
 
             (64, SampleFormat::SignedInt, false) => {
                 let bytes_per_pixel = spp * 8;
-                let pixels: Vec<u8> = data
+                let pixels: Vec<f64> = data
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = match self.byte_order {
-                            ByteOrder::LittleEndian => u64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]),
-                            ByteOrder::BigEndian => u64::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]),
+                            ByteOrder::LittleEndian => i64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => i64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
                         };
-                        let normalized = (v as f64 / u64::MAX as f64 * 255.0).round() as u8;
-                        if invert { 255 - normalized } else { normalized }
+                        let normalized = (v as f64 - i64::MIN as f64) / u64::MAX as f64;
+                        if invert { 1.0 - normalized } else { normalized }
                     })
                     .collect();
-                Ok(PixelData::L8(pixels))
+                Ok(PixelData::L64F(pixels))
             }
 
             (16, SampleFormat::Float, false) => {
                 let bytes_per_pixel = spp * 2;
-                let pixels: Vec<u8> = data
+                let pixels: Vec<f32> = data
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order));
-                        let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        if invert { 255 - out } else { out }
+                        if invert { 1.0 - v } else { v }
                     })
                     .collect();
-                Ok(PixelData::L8(pixels))
+                Ok(PixelData::L32F(pixels))
             }
 
             (24, SampleFormat::Float, false) => {
                 let bytes_per_pixel = spp * 3;
-                let pixels: Vec<u8> = data
+                let pixels: Vec<f32> = data
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = float24_to_f32(&chunk[0..3], self.byte_order);
-                        let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        if invert { 255 - out } else { out }
+                        if invert { 1.0 - v } else { v }
                     })
                     .collect();
-                Ok(PixelData::L8(pixels))
+                Ok(PixelData::L32F(pixels))
             }
 
             (32, SampleFormat::Float, false) => {
                 let bytes_per_pixel = spp * 4;
-                let pixels: Vec<u8> = data
+                let pixels: Vec<f32> = data
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = f32_from_bytes(&chunk[0..4], self.byte_order);
-                        let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        if invert { 255 - out } else { out }
+                        if invert { 1.0 - v } else { v }
                     })
                     .collect();
-                Ok(PixelData::L8(pixels))
+                Ok(PixelData::L32F(pixels))
             }
 
             (64, SampleFormat::Float, false) => {
                 let bytes_per_pixel = spp * 8;
-                let pixels: Vec<u8> = data
+                let pixels: Vec<f64> = data
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
-                        let v = f64_from_bytes(&chunk[0..8], self.byte_order) as f32;
-                        let out = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        if invert { 255 - out } else { out }
+                        let v = f64_from_bytes(&chunk[0..8], self.byte_order);
+                        if invert { 1.0 - v } else { v }
                     })
                     .collect();
-                Ok(PixelData::L8(pixels))
+                Ok(PixelData::L64F(pixels))
             }
 
             (8, _, true) if spp >= 2 => {
@@ -288,51 +302,6 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 Ok(PixelData::LA16(pixels))
             }
 
-            (16, SampleFormat::Float, true) if spp >= 2 => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(spp * 2)
-                    .flat_map(|chunk| {
-                        let gray = half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order));
-                        let alpha = half_to_f32(u16_from_bytes(&chunk[2..4], self.byte_order));
-                        let gray_out = (gray.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        let gray_out = if invert { 255 - gray_out } else { gray_out };
-                        let alpha_out = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        [gray_out, alpha_out]
-                    })
-                    .collect();
-                Ok(PixelData::LA8(pixels))
-            }
-
-            (32, SampleFormat::Float, true) if spp >= 2 => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(spp * 4)
-                    .flat_map(|chunk| {
-                        let gray = f32_from_bytes(&chunk[0..4], self.byte_order);
-                        let alpha = f32_from_bytes(&chunk[4..8], self.byte_order);
-                        let gray_out = (gray.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        let gray_out = if invert { 255 - gray_out } else { gray_out };
-                        let alpha_out = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        [gray_out, alpha_out]
-                    })
-                    .collect();
-                Ok(PixelData::LA8(pixels))
-            }
-
-            (64, SampleFormat::Float, true) if spp >= 2 => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(spp * 8)
-                    .flat_map(|chunk| {
-                        let gray = f64_from_bytes(&chunk[0..8], self.byte_order) as f32;
-                        let alpha = f64_from_bytes(&chunk[8..16], self.byte_order) as f32;
-                        let gray_out = (gray.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        let gray_out = if invert { 255 - gray_out } else { gray_out };
-                        let alpha_out = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        [gray_out, alpha_out]
-                    })
-                    .collect();
-                Ok(PixelData::LA8(pixels))
-            }
-
             (16, SampleFormat::SignedInt, true) if spp >= 2 => {
                 let pixels: Vec<u16> = data
                     .chunks_exact(spp * 2)
@@ -346,34 +315,111 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 Ok(PixelData::LA16(pixels))
             }
 
-            (32, SampleFormat::UnsignedInt, true) if spp >= 2 => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(spp * 4)
+            (16, SampleFormat::Float, true) if spp >= 2 => {
+                let pixels: Vec<f32> = data
+                    .chunks_exact(spp * 2)
                     .flat_map(|chunk| {
-                        let gray = u32_from_bytes(&chunk[0..4], self.byte_order);
-                        let alpha = u32_from_bytes(&chunk[4..8], self.byte_order);
-                        let gray_out = (gray as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        let gray_out = if invert { 255 - gray_out } else { gray_out };
-                        let alpha_out = (alpha as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        [gray_out, alpha_out]
+                        let gray = half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order));
+                        let alpha = half_to_f32(u16_from_bytes(&chunk[2..4], self.byte_order));
+                        let gray_out = if invert { 1.0 - gray } else { gray };
+                        [gray_out, alpha]
                     })
                     .collect();
-                Ok(PixelData::LA8(pixels))
+                Ok(PixelData::LA32F(pixels))
+            }
+
+            (32, SampleFormat::UnsignedInt, true) if spp >= 2 => {
+                let pixels: Vec<f32> = data
+                    .chunks_exact(spp * 4)
+                    .flat_map(|chunk| {
+                        let gray = u32_from_bytes(&chunk[0..4], self.byte_order) as f64 / u32::MAX as f64;
+                        let alpha = u32_from_bytes(&chunk[4..8], self.byte_order) as f64 / u32::MAX as f64;
+                        let gray_out = if invert { 1.0 - gray } else { gray };
+                        [gray_out as f32, alpha as f32]
+                    })
+                    .collect();
+                Ok(PixelData::LA32F(pixels))
             }
 
             (32, SampleFormat::SignedInt, true) if spp >= 2 => {
-                let pixels: Vec<u8> = data
+                let pixels: Vec<f32> = data
                     .chunks_exact(spp * 4)
                     .flat_map(|chunk| {
-                        let gray = u32_from_bytes(&chunk[0..4], self.byte_order);
-                        let alpha = u32_from_bytes(&chunk[4..8], self.byte_order);
-                        let gray_out = (gray as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        let gray_out = if invert { 255 - gray_out } else { gray_out };
-                        let alpha_out = (alpha as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        [gray_out, alpha_out]
+                        let raw_g = u32_from_bytes(&chunk[0..4], self.byte_order);
+                        let raw_a = u32_from_bytes(&chunk[4..8], self.byte_order);
+                        let gray = (i32::from_ne_bytes(raw_g.to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                        let alpha = (i32::from_ne_bytes(raw_a.to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                        let gray_out = if invert { 1.0 - gray } else { gray };
+                        [gray_out as f32, alpha as f32]
                     })
                     .collect();
-                Ok(PixelData::LA8(pixels))
+                Ok(PixelData::LA32F(pixels))
+            }
+
+            (32, SampleFormat::Float, true) if spp >= 2 => {
+                let pixels: Vec<f32> = data
+                    .chunks_exact(spp * 4)
+                    .flat_map(|chunk| {
+                        let gray = f32_from_bytes(&chunk[0..4], self.byte_order);
+                        let alpha = f32_from_bytes(&chunk[4..8], self.byte_order);
+                        let gray_out = if invert { 1.0 - gray } else { gray };
+                        [gray_out, alpha]
+                    })
+                    .collect();
+                Ok(PixelData::LA32F(pixels))
+            }
+
+            (64, SampleFormat::UnsignedInt, true) if spp >= 2 => {
+                let pixels: Vec<f64> = data
+                    .chunks_exact(spp * 8)
+                    .flat_map(|chunk| {
+                        let gray = match self.byte_order {
+                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                        } as f64 / u64::MAX as f64;
+                        let alpha = match self.byte_order {
+                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                        } as f64 / u64::MAX as f64;
+                        let gray_out = if invert { 1.0 - gray } else { gray };
+                        [gray_out, alpha]
+                    })
+                    .collect();
+                Ok(PixelData::LA64F(pixels))
+            }
+
+            (64, SampleFormat::SignedInt, true) if spp >= 2 => {
+                let pixels: Vec<f64> = data
+                    .chunks_exact(spp * 8)
+                    .flat_map(|chunk| {
+                        let gray = match self.byte_order {
+                            ByteOrder::LittleEndian => i64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => i64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                        };
+                        let alpha = match self.byte_order {
+                            ByteOrder::LittleEndian => i64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                            ByteOrder::BigEndian => i64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                        };
+                        let gray = (gray as f64 - i64::MIN as f64) / u64::MAX as f64;
+                        let alpha = (alpha as f64 - i64::MIN as f64) / u64::MAX as f64;
+                        let gray_out = if invert { 1.0 - gray } else { gray };
+                        [gray_out, alpha]
+                    })
+                    .collect();
+                Ok(PixelData::LA64F(pixels))
+            }
+
+            (64, SampleFormat::Float, true) if spp >= 2 => {
+                let pixels: Vec<f64> = data
+                    .chunks_exact(spp * 8)
+                    .flat_map(|chunk| {
+                        let gray = f64_from_bytes(&chunk[0..8], self.byte_order);
+                        let alpha = f64_from_bytes(&chunk[8..16], self.byte_order);
+                        let gray_out = if invert { 1.0 - gray } else { gray };
+                        [gray_out, alpha]
+                    })
+                    .collect();
+                Ok(PixelData::LA64F(pixels))
             }
 
             _ => Ok(PixelData::L8(
@@ -438,24 +484,33 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
             }
 
             (32, SampleFormat::UnsignedInt) => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(bytes_per_pixel)
-                    .flat_map(|chunk| {
-                        let r = (u32_from_bytes(&chunk[0..4], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        let g = (u32_from_bytes(&chunk[4..8], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        let b = (u32_from_bytes(&chunk[8..12], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        if has_alpha && chunk.len() >= 16 {
-                            let a = (u32_from_bytes(&chunk[12..16], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                            vec![r, g, b, a]
-                        } else {
-                            vec![r, g, b]
-                        }
-                    })
-                    .collect();
                 if has_alpha {
-                    Ok(PixelData::RGBA8(pixels))
+                    let pixels: Vec<f32> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = u32_from_bytes(&chunk[0..4], self.byte_order) as f64 / u32::MAX as f64;
+                            let g = u32_from_bytes(&chunk[4..8], self.byte_order) as f64 / u32::MAX as f64;
+                            let b = u32_from_bytes(&chunk[8..12], self.byte_order) as f64 / u32::MAX as f64;
+                            let a = if chunk.len() >= 16 {
+                                u32_from_bytes(&chunk[12..16], self.byte_order) as f64 / u32::MAX as f64
+                            } else {
+                                1.0
+                            };
+                            [r as f32, g as f32, b as f32, a as f32]
+                        })
+                        .collect();
+                    Ok(PixelData::RGBA32F(pixels))
                 } else {
-                    Ok(PixelData::RGB8(pixels))
+                    let pixels: Vec<f32> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = u32_from_bytes(&chunk[0..4], self.byte_order) as f64 / u32::MAX as f64;
+                            let g = u32_from_bytes(&chunk[4..8], self.byte_order) as f64 / u32::MAX as f64;
+                            let b = u32_from_bytes(&chunk[8..12], self.byte_order) as f64 / u32::MAX as f64;
+                            [r as f32, g as f32, b as f32]
+                        })
+                        .collect();
+                    Ok(PixelData::RGB32F(pixels))
                 }
             }
 
@@ -476,146 +531,230 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
             }
 
             (16, SampleFormat::SignedInt) => {
-                let pixels: Vec<u16> = data
-                    .chunks_exact(bytes_per_pixel)
-                    .flat_map(|chunk| {
-                        let r = u16_from_bytes(&chunk[0..2], self.byte_order);
-                        let g = u16_from_bytes(&chunk[2..4], self.byte_order);
-                        let b = u16_from_bytes(&chunk[4..6], self.byte_order);
-                        if has_alpha && chunk.len() >= 8 {
-                            let a = u16_from_bytes(&chunk[6..8], self.byte_order);
-                            vec![r, g, b, a]
-                        } else {
-                            vec![r, g, b]
-                        }
-                    })
-                    .collect();
                 if has_alpha {
+                    let pixels: Vec<u16> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            [
+                                u16_from_bytes(&chunk[0..2], self.byte_order),
+                                u16_from_bytes(&chunk[2..4], self.byte_order),
+                                u16_from_bytes(&chunk[4..6], self.byte_order),
+                                u16_from_bytes(&chunk[6..8], self.byte_order),
+                            ]
+                        })
+                        .collect();
                     Ok(PixelData::RGBA16(pixels))
                 } else {
+                    let pixels: Vec<u16> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            [
+                                u16_from_bytes(&chunk[0..2], self.byte_order),
+                                u16_from_bytes(&chunk[2..4], self.byte_order),
+                                u16_from_bytes(&chunk[4..6], self.byte_order),
+                            ]
+                        })
+                        .collect();
                     Ok(PixelData::RGB16(pixels))
                 }
             }
 
             (32, SampleFormat::SignedInt) => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(bytes_per_pixel)
-                    .flat_map(|chunk| {
-                        let r = (u32_from_bytes(&chunk[0..4], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        let g = (u32_from_bytes(&chunk[4..8], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        let b = (u32_from_bytes(&chunk[8..12], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                        if has_alpha && chunk.len() >= 16 {
-                            let a = (u32_from_bytes(&chunk[12..16], self.byte_order) as f64 / u32::MAX as f64 * 255.0).round() as u8;
-                            vec![r, g, b, a]
-                        } else {
-                            vec![r, g, b]
-                        }
-                    })
-                    .collect();
                 if has_alpha {
-                    Ok(PixelData::RGBA8(pixels))
+                    let pixels: Vec<f32> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = (i32::from_ne_bytes(u32_from_bytes(&chunk[0..4], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                            let g = (i32::from_ne_bytes(u32_from_bytes(&chunk[4..8], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                            let b = (i32::from_ne_bytes(u32_from_bytes(&chunk[8..12], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                            let a = if chunk.len() >= 16 {
+                                (i32::from_ne_bytes(u32_from_bytes(&chunk[12..16], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64
+                            } else {
+                                1.0
+                            };
+                            [r as f32, g as f32, b as f32, a as f32]
+                        })
+                        .collect();
+                    Ok(PixelData::RGBA32F(pixels))
                 } else {
-                    Ok(PixelData::RGB8(pixels))
+                    let pixels: Vec<f32> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = (i32::from_ne_bytes(u32_from_bytes(&chunk[0..4], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                            let g = (i32::from_ne_bytes(u32_from_bytes(&chunk[4..8], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                            let b = (i32::from_ne_bytes(u32_from_bytes(&chunk[8..12], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                            [r as f32, g as f32, b as f32]
+                        })
+                        .collect();
+                    Ok(PixelData::RGB32F(pixels))
+                }
+            }
+
+            (64, SampleFormat::UnsignedInt) => {
+                if has_alpha {
+                    let pixels: Vec<f64> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = match self.byte_order {
+                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                            } as f64 / u64::MAX as f64;
+                            let g = match self.byte_order {
+                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                            } as f64 / u64::MAX as f64;
+                            let b = match self.byte_order {
+                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[16..24].try_into().unwrap_or_default()),
+                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[16..24].try_into().unwrap_or_default()),
+                            } as f64 / u64::MAX as f64;
+                            let a = if chunk.len() >= 32 {
+                                (match self.byte_order {
+                                    ByteOrder::LittleEndian => u64::from_le_bytes(chunk[24..32].try_into().unwrap_or_default()),
+                                    ByteOrder::BigEndian => u64::from_be_bytes(chunk[24..32].try_into().unwrap_or_default()),
+                                }) as f64 / u64::MAX as f64
+                            } else {
+                                1.0
+                            };
+                            [r, g, b, a]
+                        })
+                        .collect();
+                    Ok(PixelData::RGBA64F(pixels))
+                } else {
+                    let pixels: Vec<f64> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = match self.byte_order {
+                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                            } as f64 / u64::MAX as f64;
+                            let g = match self.byte_order {
+                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                            } as f64 / u64::MAX as f64;
+                            let b = match self.byte_order {
+                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[16..24].try_into().unwrap_or_default()),
+                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[16..24].try_into().unwrap_or_default()),
+                            } as f64 / u64::MAX as f64;
+                            [r, g, b]
+                        })
+                        .collect();
+                    Ok(PixelData::RGB64F(pixels))
                 }
             }
 
             (64, SampleFormat::SignedInt) => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(bytes_per_pixel)
-                    .flat_map(|chunk| {
-                        let r = (match self.byte_order {
-                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
-                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
-                        } as f64 / u64::MAX as f64 * 255.0).round() as u8;
-                        let g = (match self.byte_order {
-                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
-                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
-                        } as f64 / u64::MAX as f64 * 255.0).round() as u8;
-                        let b = (match self.byte_order {
-                            ByteOrder::LittleEndian => u64::from_le_bytes(chunk[16..24].try_into().unwrap_or_default()),
-                            ByteOrder::BigEndian => u64::from_be_bytes(chunk[16..24].try_into().unwrap_or_default()),
-                        } as f64 / u64::MAX as f64 * 255.0).round() as u8;
-                        if has_alpha && chunk.len() >= 32 {
-                            let a = (match self.byte_order {
-                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[24..32].try_into().unwrap_or_default()),
-                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[24..32].try_into().unwrap_or_default()),
-                            } as f64 / u64::MAX as f64 * 255.0).round() as u8;
-                            vec![r, g, b, a]
-                        } else {
-                            vec![r, g, b]
-                        }
-                    })
-                    .collect();
+                let read_i64 = |b: &[u8]| -> i64 {
+                    match self.byte_order {
+                        ByteOrder::LittleEndian => i64::from_le_bytes(b.try_into().unwrap_or_default()),
+                        ByteOrder::BigEndian => i64::from_be_bytes(b.try_into().unwrap_or_default()),
+                    }
+                };
+                let norm_i64 = |v: i64| -> f64 { (v as f64 - i64::MIN as f64) / u64::MAX as f64 };
+
                 if has_alpha {
-                    Ok(PixelData::RGBA8(pixels))
+                    let pixels: Vec<f64> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = norm_i64(read_i64(&chunk[0..8]));
+                            let g = norm_i64(read_i64(&chunk[8..16]));
+                            let b = norm_i64(read_i64(&chunk[16..24]));
+                            let a = if chunk.len() >= 32 { norm_i64(read_i64(&chunk[24..32])) } else { 1.0 };
+                            [r, g, b, a]
+                        })
+                        .collect();
+                    Ok(PixelData::RGBA64F(pixels))
                 } else {
-                    Ok(PixelData::RGB8(pixels))
+                    let pixels: Vec<f64> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = norm_i64(read_i64(&chunk[0..8]));
+                            let g = norm_i64(read_i64(&chunk[8..16]));
+                            let b = norm_i64(read_i64(&chunk[16..24]));
+                            [r, g, b]
+                        })
+                        .collect();
+                    Ok(PixelData::RGB64F(pixels))
                 }
             }
 
             (16, SampleFormat::Float) => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(bytes_per_pixel)
-                    .flat_map(|chunk| {
-                        let r = (half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order)).clamp(0.0, 1.0) * 255.0).round() as u8;
-                        let g = (half_to_f32(u16_from_bytes(&chunk[2..4], self.byte_order)).clamp(0.0, 1.0) * 255.0).round() as u8;
-                        let b = (half_to_f32(u16_from_bytes(&chunk[4..6], self.byte_order)).clamp(0.0, 1.0) * 255.0).round() as u8;
-                        if has_alpha && chunk.len() >= 8 {
-                            let a = (half_to_f32(u16_from_bytes(&chunk[6..8], self.byte_order)).clamp(0.0, 1.0) * 255.0).round() as u8;
-                            vec![r, g, b, a]
-                        } else {
-                            vec![r, g, b]
-                        }
-                    })
-                    .collect();
                 if has_alpha {
-                    Ok(PixelData::RGBA8(pixels))
+                    let pixels: Vec<f32> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order));
+                            let g = half_to_f32(u16_from_bytes(&chunk[2..4], self.byte_order));
+                            let b = half_to_f32(u16_from_bytes(&chunk[4..6], self.byte_order));
+                            let a = if chunk.len() >= 8 { half_to_f32(u16_from_bytes(&chunk[6..8], self.byte_order)) } else { 1.0 };
+                            [r, g, b, a]
+                        })
+                        .collect();
+                    Ok(PixelData::RGBA32F(pixels))
                 } else {
-                    Ok(PixelData::RGB8(pixels))
+                    let pixels: Vec<f32> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order));
+                            let g = half_to_f32(u16_from_bytes(&chunk[2..4], self.byte_order));
+                            let b = half_to_f32(u16_from_bytes(&chunk[4..6], self.byte_order));
+                            [r, g, b]
+                        })
+                        .collect();
+                    Ok(PixelData::RGB32F(pixels))
                 }
             }
 
             (32, SampleFormat::Float) => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(bytes_per_pixel)
-                    .flat_map(|chunk| {
-                        let r = (f32_from_bytes(&chunk[0..4], self.byte_order).clamp(0.0, 1.0) * 255.0).round() as u8;
-                        let g = (f32_from_bytes(&chunk[4..8], self.byte_order).clamp(0.0, 1.0) * 255.0).round() as u8;
-                        let b = (f32_from_bytes(&chunk[8..12], self.byte_order).clamp(0.0, 1.0) * 255.0).round() as u8;
-                        if has_alpha && chunk.len() >= 16 {
-                            let a = (f32_from_bytes(&chunk[12..16], self.byte_order).clamp(0.0, 1.0) * 255.0).round() as u8;
-                            vec![r, g, b, a]
-                        } else {
-                            vec![r, g, b]
-                        }
-                    })
-                    .collect();
                 if has_alpha {
-                    Ok(PixelData::RGBA8(pixels))
+                    let pixels: Vec<f32> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = f32_from_bytes(&chunk[0..4], self.byte_order);
+                            let g = f32_from_bytes(&chunk[4..8], self.byte_order);
+                            let b = f32_from_bytes(&chunk[8..12], self.byte_order);
+                            let a = if chunk.len() >= 16 { f32_from_bytes(&chunk[12..16], self.byte_order) } else { 1.0 };
+                            [r, g, b, a]
+                        })
+                        .collect();
+                    Ok(PixelData::RGBA32F(pixels))
                 } else {
-                    Ok(PixelData::RGB8(pixels))
+                    let pixels: Vec<f32> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = f32_from_bytes(&chunk[0..4], self.byte_order);
+                            let g = f32_from_bytes(&chunk[4..8], self.byte_order);
+                            let b = f32_from_bytes(&chunk[8..12], self.byte_order);
+                            [r, g, b]
+                        })
+                        .collect();
+                    Ok(PixelData::RGB32F(pixels))
                 }
             }
 
             (64, SampleFormat::Float) => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(bytes_per_pixel)
-                    .flat_map(|chunk| {
-                        let r = (f64_from_bytes(&chunk[0..8], self.byte_order).clamp(0.0, 1.0) as f32 * 255.0).round() as u8;
-                        let g = (f64_from_bytes(&chunk[8..16], self.byte_order).clamp(0.0, 1.0) as f32 * 255.0).round() as u8;
-                        let b = (f64_from_bytes(&chunk[16..24], self.byte_order).clamp(0.0, 1.0) as f32 * 255.0).round() as u8;
-                        if has_alpha && chunk.len() >= 32 {
-                            let a = (f64_from_bytes(&chunk[24..32], self.byte_order).clamp(0.0, 1.0) as f32 * 255.0).round() as u8;
-                            vec![r, g, b, a]
-                        } else {
-                            vec![r, g, b]
-                        }
-                    })
-                    .collect();
                 if has_alpha {
-                    Ok(PixelData::RGBA8(pixels))
+                    let pixels: Vec<f64> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = f64_from_bytes(&chunk[0..8], self.byte_order);
+                            let g = f64_from_bytes(&chunk[8..16], self.byte_order);
+                            let b = f64_from_bytes(&chunk[16..24], self.byte_order);
+                            let a = if chunk.len() >= 32 { f64_from_bytes(&chunk[24..32], self.byte_order) } else { 1.0 };
+                            [r, g, b, a]
+                        })
+                        .collect();
+                    Ok(PixelData::RGBA64F(pixels))
                 } else {
-                    Ok(PixelData::RGB8(pixels))
+                    let pixels: Vec<f64> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let r = f64_from_bytes(&chunk[0..8], self.byte_order);
+                            let g = f64_from_bytes(&chunk[8..16], self.byte_order);
+                            let b = f64_from_bytes(&chunk[16..24], self.byte_order);
+                            [r, g, b]
+                        })
+                        .collect();
+                    Ok(PixelData::RGB64F(pixels))
                 }
             }
 
@@ -637,20 +776,75 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
         let n_colors = 1usize << bps;
         let is_16bit = color_map.iter().take(n_colors * 3).any(|&v| v >= 256);
 
-        let get_rgb = |idx: usize| -> (u8, u8, u8) {
+        let get_rgb16 = |idx: usize| -> (u16, u16, u16) {
+            if idx >= n_colors {
+                return (0, 0, 0);
+            }
+            (
+                color_map.get(idx).copied().unwrap_or(0),
+                color_map.get(idx + n_colors).copied().unwrap_or(0),
+                color_map.get(idx + 2 * n_colors).copied().unwrap_or(0),
+            )
+        };
+
+        let get_rgb8_direct = |idx: usize| -> (u8, u8, u8) {
             if idx >= n_colors {
                 return (0, 0, 0);
             }
             let r_raw = color_map.get(idx).copied().unwrap_or(0);
             let g_raw = color_map.get(idx + n_colors).copied().unwrap_or(0);
             let b_raw = color_map.get(idx + 2 * n_colors).copied().unwrap_or(0);
-
-            if is_16bit {
-                ((r_raw >> 8) as u8, (g_raw >> 8) as u8, (b_raw >> 8) as u8)
-            } else {
-                (r_raw as u8, g_raw as u8, b_raw as u8)
-            }
+            (r_raw as u8, g_raw as u8, b_raw as u8)
         };
+
+        if is_16bit {
+            let pixels: Vec<u16> = match bps {
+                1 => data
+                    .iter()
+                    .flat_map(|&byte| {
+                        (0..8u8).flat_map(move |i| {
+                            let idx = ((byte >> (7 - i)) & 1) as usize;
+                            let (r, g, b) = get_rgb16(idx);
+                            [r, g, b]
+                        })
+                    })
+                    .collect(),
+                2 => data
+                    .iter()
+                    .flat_map(|&byte| {
+                        (0..4u8).flat_map(move |i| {
+                            let idx = ((byte >> (6 - i * 2)) & 0x3) as usize;
+                            let (r, g, b) = get_rgb16(idx);
+                            [r, g, b]
+                        })
+                    })
+                    .collect(),
+                4 => data
+                    .iter()
+                    .flat_map(|&byte| {
+                        let hi = (byte >> 4) as usize;
+                        let lo = (byte & 0xF) as usize;
+                        let (r1, g1, b1) = get_rgb16(hi);
+                        let (r2, g2, b2) = get_rgb16(lo);
+                        [r1, g1, b1, r2, g2, b2]
+                    })
+                    .collect(),
+                8 => data
+                    .iter()
+                    .flat_map(|&byte| {
+                        let (r, g, b) = get_rgb16(byte as usize);
+                        [r, g, b]
+                    })
+                    .collect(),
+                _ => {
+                    return Err(VexelError::Custom(format!(
+                        "Unsupported bit depth for Palette: {}",
+                        bps
+                    )))
+                }
+            };
+            return Ok(PixelData::RGB16(pixels));
+        }
 
         let pixels: Vec<u8> = match bps {
             1 => data
@@ -658,7 +852,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 .flat_map(|&byte| {
                     (0..8u8).flat_map(move |i| {
                         let idx = ((byte >> (7 - i)) & 1) as usize;
-                        let (r, g, b) = get_rgb(idx);
+                        let (r, g, b) = get_rgb8_direct(idx);
                         [r, g, b]
                     })
                 })
@@ -668,7 +862,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 .flat_map(|&byte| {
                     (0..4u8).flat_map(move |i| {
                         let idx = ((byte >> (6 - i * 2)) & 0x3) as usize;
-                        let (r, g, b) = get_rgb(idx);
+                        let (r, g, b) = get_rgb8_direct(idx);
                         [r, g, b]
                     })
                 })
@@ -678,15 +872,15 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 .flat_map(|&byte| {
                     let hi = (byte >> 4) as usize;
                     let lo = (byte & 0xF) as usize;
-                    let (r1, g1, b1) = get_rgb(hi);
-                    let (r2, g2, b2) = get_rgb(lo);
+                    let (r1, g1, b1) = get_rgb8_direct(hi);
+                    let (r2, g2, b2) = get_rgb8_direct(lo);
                     [r1, g1, b1, r2, g2, b2]
                 })
                 .collect(),
             8 => data
                 .iter()
                 .flat_map(|&byte| {
-                    let (r, g, b) = get_rgb(byte as usize);
+                    let (r, g, b) = get_rgb8_direct(byte as usize);
                     [r, g, b]
                 })
                 .collect(),
@@ -732,26 +926,37 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 }
             }
             16 => {
-                let pixels: Vec<u8> = data
-                    .chunks_exact(bytes_per_pixel)
-                    .flat_map(|chunk| {
-                        let c = (u16_from_bytes(&chunk[0..2], self.byte_order) as f32 / 65535.0 * 255.0).round() as u8;
-                        let m = (u16_from_bytes(&chunk[2..4], self.byte_order) as f32 / 65535.0 * 255.0).round() as u8;
-                        let y = (u16_from_bytes(&chunk[4..6], self.byte_order) as f32 / 65535.0 * 255.0).round() as u8;
-                        let k = (u16_from_bytes(&chunk[6..8], self.byte_order) as f32 / 65535.0 * 255.0).round() as u8;
-                        let (r, g, b) = cmyk_to_rgb(c, m, y, k);
-                        if has_alpha && chunk.len() >= 10 {
-                            let a = (u16_from_bytes(&chunk[8..10], self.byte_order) as f32 / 65535.0 * 255.0).round() as u8;
-                            vec![r, g, b, a]
-                        } else {
-                            vec![r, g, b]
-                        }
-                    })
-                    .collect();
                 if has_alpha {
-                    Ok(PixelData::RGBA8(pixels))
+                    let pixels: Vec<u16> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let c = u16_from_bytes(&chunk[0..2], self.byte_order) as f32 / 65535.0;
+                            let m = u16_from_bytes(&chunk[2..4], self.byte_order) as f32 / 65535.0;
+                            let y = u16_from_bytes(&chunk[4..6], self.byte_order) as f32 / 65535.0;
+                            let k = u16_from_bytes(&chunk[6..8], self.byte_order) as f32 / 65535.0;
+                            let (r, g, b) = cmyk_to_rgb_f32(c, m, y, k);
+                            let a = if chunk.len() >= 10 {
+                                u16_from_bytes(&chunk[8..10], self.byte_order) as f32 / 65535.0
+                            } else {
+                                1.0
+                            };
+                            [(r * 65535.0).round() as u16, (g * 65535.0).round() as u16, (b * 65535.0).round() as u16, (a * 65535.0).round() as u16]
+                        })
+                        .collect();
+                    Ok(PixelData::RGBA16(pixels))
                 } else {
-                    Ok(PixelData::RGB8(pixels))
+                    let pixels: Vec<u16> = data
+                        .chunks_exact(bytes_per_pixel)
+                        .flat_map(|chunk| {
+                            let c = u16_from_bytes(&chunk[0..2], self.byte_order) as f32 / 65535.0;
+                            let m = u16_from_bytes(&chunk[2..4], self.byte_order) as f32 / 65535.0;
+                            let y = u16_from_bytes(&chunk[4..6], self.byte_order) as f32 / 65535.0;
+                            let k = u16_from_bytes(&chunk[6..8], self.byte_order) as f32 / 65535.0;
+                            let (r, g, b) = cmyk_to_rgb_f32(c, m, y, k);
+                            [(r * 65535.0).round() as u16, (g * 65535.0).round() as u16, (b * 65535.0).round() as u16]
+                        })
+                        .collect();
+                    Ok(PixelData::RGB16(pixels))
                 }
             }
             _ => Err(VexelError::Custom(format!(
@@ -854,7 +1059,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 Ok(PixelData::RGB8(pixels))
             }
             16 => {
-                let pixels: Vec<u8> = data
+                let pixels: Vec<u16> = data
                     .chunks_exact(bytes_per_pixel)
                     .flat_map(|chunk| {
                         let l_raw = u16_from_bytes(&chunk[0..2], self.byte_order);
@@ -866,11 +1071,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         let b = b_raw as f32 / 256.0;
 
                         let (x, y, z) = lab_to_xyz(l, a, b, D50_WHITE);
-                        let (r, g, b_out) = xyz_to_srgb(x, y, z);
-                        [r, g, b_out]
+                        let (r, g, b_out) = xyz_to_srgb_f32(x, y, z);
+                        [(r * 65535.0).round() as u16, (g * 65535.0).round() as u16, (b_out * 65535.0).round() as u16]
                     })
                     .collect();
-                Ok(PixelData::RGB8(pixels))
+                Ok(PixelData::RGB16(pixels))
             }
             _ => Err(VexelError::Custom(format!(
                 "Unsupported CIELab bit depth: {}",
@@ -897,7 +1102,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 Ok(PixelData::RGB8(pixels))
             }
             16 => {
-                let pixels: Vec<u8> = data
+                let pixels: Vec<u16> = data
                     .chunks_exact(bytes_per_pixel)
                     .flat_map(|chunk| {
                         let l_raw = u16_from_bytes(&chunk[0..2], self.byte_order);
@@ -909,11 +1114,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         let b = (b_raw as f32 / 257.0) - 128.0;
 
                         let (x, y, z) = lab_to_xyz(l, a, b, D50_WHITE);
-                        let (r, g, b_out) = xyz_to_srgb(x, y, z);
-                        [r, g, b_out]
+                        let (r, g, b_out) = xyz_to_srgb_f32(x, y, z);
+                        [(r * 65535.0).round() as u16, (g * 65535.0).round() as u16, (b_out * 65535.0).round() as u16]
                     })
                     .collect();
-                Ok(PixelData::RGB8(pixels))
+                Ok(PixelData::RGB16(pixels))
             }
             _ => Err(VexelError::Custom(format!(
                 "Unsupported ICCLab bit depth: {}",
@@ -940,7 +1145,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 Ok(PixelData::RGB8(pixels))
             }
             16 => {
-                let pixels: Vec<u8> = data
+                let pixels: Vec<u16> = data
                     .chunks_exact(bytes_per_pixel)
                     .flat_map(|chunk| {
                         let l_raw = u16_from_bytes(&chunk[0..2], self.byte_order);
@@ -952,11 +1157,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         let b = (b_raw as f32 / 257.0) - 128.0;
 
                         let (x, y, z) = lab_to_xyz(l, a, b, D65_WHITE);
-                        let (r, g, b_out) = xyz_to_srgb(x, y, z);
-                        [r, g, b_out]
+                        let (r, g, b_out) = xyz_to_srgb_f32(x, y, z);
+                        [(r * 65535.0).round() as u16, (g * 65535.0).round() as u16, (b_out * 65535.0).round() as u16]
                     })
                     .collect();
-                Ok(PixelData::RGB8(pixels))
+                Ok(PixelData::RGB16(pixels))
             }
             _ => Err(VexelError::Custom(format!(
                 "Unsupported ITULab bit depth: {}",

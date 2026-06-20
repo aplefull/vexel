@@ -241,6 +241,28 @@ pub fn xyz_to_srgb(x: f32, y: f32, z: f32) -> (u8, u8, u8) {
     (linear_to_srgb(r_lin), linear_to_srgb(g_lin), linear_to_srgb(b_lin))
 }
 
+pub fn xyz_to_srgb_f32(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+    let m = &SRGB_MATRIX;
+    let r_lin = m[0][0] * x + m[0][1] * y + m[0][2] * z;
+    let g_lin = m[1][0] * x + m[1][1] * y + m[1][2] * z;
+    let b_lin = m[2][0] * x + m[2][1] * y + m[2][2] * z;
+
+    fn linear_to_srgb_f32(v: f32) -> f32 {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.0031308 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    (linear_to_srgb_f32(r_lin), linear_to_srgb_f32(g_lin), linear_to_srgb_f32(b_lin))
+}
+
+pub fn cmyk_to_rgb_f32(c: f32, m: f32, y: f32, k: f32) -> (f32, f32, f32) {
+    ((1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k))
+}
+
 pub fn cielab_to_rgb(l_raw: u8, a_raw: i8, b_raw: i8) -> (u8, u8, u8) {
     let l = l_raw as f32 * 100.0 / 255.0;
     let a = a_raw as f32;

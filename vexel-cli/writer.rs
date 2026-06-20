@@ -130,6 +130,20 @@ impl Writer {
                     file.write_all(&value16.to_be_bytes())?;
                 }
             }
+            PixelData::RGB64F(pixels) => {
+                file.write_all(b"DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\nENDHDR\n")?;
+                for &value in pixels {
+                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
+                    file.write_all(&value16.to_be_bytes())?;
+                }
+            }
+            PixelData::RGBA64F(pixels) => {
+                file.write_all(b"DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n")?;
+                for &value in pixels {
+                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
+                    file.write_all(&value16.to_be_bytes())?;
+                }
+            }
             PixelData::L1(pixels) => {
                 file.write_all(b"DEPTH 1\nMAXVAL 1\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
                 file.write_all(pixels)?;
@@ -152,6 +166,34 @@ impl Writer {
                 file.write_all(b"DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
                 for value in pixels {
                     file.write_all(&value.to_be_bytes())?;
+                }
+            }
+            PixelData::L32F(pixels) => {
+                file.write_all(b"DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
+                for &value in pixels {
+                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
+                    file.write_all(&value16.to_be_bytes())?;
+                }
+            }
+            PixelData::LA32F(pixels) => {
+                file.write_all(b"DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
+                for &value in pixels {
+                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
+                    file.write_all(&value16.to_be_bytes())?;
+                }
+            }
+            PixelData::L64F(pixels) => {
+                file.write_all(b"DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
+                for &value in pixels {
+                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
+                    file.write_all(&value16.to_be_bytes())?;
+                }
+            }
+            PixelData::LA64F(pixels) => {
+                file.write_all(b"DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
+                for &value in pixels {
+                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
+                    file.write_all(&value16.to_be_bytes())?;
                 }
             }
         }
@@ -234,6 +276,8 @@ impl Writer {
     }
 
     fn validate_image(image: &Image) -> Result<(), Error> {
+        use vexel::PixelFormat;
+
         if image.frames().is_empty() {
             return Err(Error::new(ErrorKind::InvalidData, "image has no frames"));
         }
@@ -245,20 +289,41 @@ impl Writer {
             ));
         }
 
-        let has_alpha = image.has_alpha();
         let width = image.width();
         let height = image.height();
-        let expected_size = width * height * if has_alpha { 4 } else { 3 };
-        let actual_size = image.pixels().as_bytes().len() as u32;
+        let expected_pixels = (width * height) as usize;
 
-        if actual_size != expected_size {
+        let (channels, bytes_per_element) = match image.pixel_format() {
+            PixelFormat::RGB8 => (3usize, 1usize),
+            PixelFormat::RGBA8 => (4, 1),
+            PixelFormat::RGB16 => (3, 2),
+            PixelFormat::RGBA16 => (4, 2),
+            PixelFormat::RGB32F => (3, 4),
+            PixelFormat::RGBA32F => (4, 4),
+            PixelFormat::RGB64F => (3, 8),
+            PixelFormat::RGBA64F => (4, 8),
+            PixelFormat::L1 => (1, 1),
+            PixelFormat::L8 => (1, 1),
+            PixelFormat::L16 => (1, 2),
+            PixelFormat::LA8 => (2, 1),
+            PixelFormat::LA16 => (2, 2),
+            PixelFormat::L32F => (1, 4),
+            PixelFormat::LA32F => (2, 4),
+            PixelFormat::L64F => (1, 8),
+            PixelFormat::LA64F => (2, 8),
+        };
+
+        let expected_bytes = expected_pixels * channels * bytes_per_element;
+        let actual_bytes = image.pixels().as_bytes().len();
+
+        if actual_bytes != expected_bytes {
             let msg = format!(
-                "Invalid pixel data size for {}x{} image with {} channels: expected {} pixels, got {}",
+                "Invalid pixel data size for {}x{} {:?} image: expected {} bytes, got {}",
                 width,
                 height,
-                if has_alpha { "RGBA" } else { "RGB" },
-                expected_size,
-                actual_size
+                image.pixel_format(),
+                expected_bytes,
+                actual_bytes
             );
 
             return Err(Error::new(ErrorKind::InvalidData, msg));
@@ -282,8 +347,11 @@ fn pixel_data_ptr_and_len(pixel_data: &PixelData) -> (*const c_void, usize) {
         PixelData::L16(d) | PixelData::LA16(d) => {
             (d.as_ptr() as *const c_void, d.len() * 2)
         }
-        PixelData::RGB32F(d) | PixelData::RGBA32F(d) => {
+        PixelData::RGB32F(d) | PixelData::RGBA32F(d) | PixelData::L32F(d) | PixelData::LA32F(d) => {
             (d.as_ptr() as *const c_void, d.len() * 4)
+        }
+        PixelData::RGB64F(d) | PixelData::RGBA64F(d) | PixelData::L64F(d) | PixelData::LA64F(d) => {
+            (d.as_ptr() as *const c_void, d.len() * 8)
         }
     }
 }
@@ -338,6 +406,22 @@ fn pixel_info_for(pixel_data: &PixelData) -> PixelInfo {
             has_alpha: true,
             is_gray: false,
         },
+        PixelData::RGB64F(_) => PixelInfo {
+            data_type: JxlDataType::Float,
+            num_channels: 3,
+            bits_per_sample: 32,
+            exponent_bits_per_sample: 8,
+            has_alpha: false,
+            is_gray: false,
+        },
+        PixelData::RGBA64F(_) => PixelInfo {
+            data_type: JxlDataType::Float,
+            num_channels: 4,
+            bits_per_sample: 32,
+            exponent_bits_per_sample: 8,
+            has_alpha: true,
+            is_gray: false,
+        },
         PixelData::L1(_) => PixelInfo {
             data_type: JxlDataType::Uint8,
             num_channels: 1,
@@ -375,6 +459,38 @@ fn pixel_info_for(pixel_data: &PixelData) -> PixelInfo {
             num_channels: 2,
             bits_per_sample: 16,
             exponent_bits_per_sample: 0,
+            has_alpha: true,
+            is_gray: true,
+        },
+        PixelData::L32F(_) => PixelInfo {
+            data_type: JxlDataType::Float,
+            num_channels: 1,
+            bits_per_sample: 32,
+            exponent_bits_per_sample: 8,
+            has_alpha: false,
+            is_gray: true,
+        },
+        PixelData::LA32F(_) => PixelInfo {
+            data_type: JxlDataType::Float,
+            num_channels: 2,
+            bits_per_sample: 32,
+            exponent_bits_per_sample: 8,
+            has_alpha: true,
+            is_gray: true,
+        },
+        PixelData::L64F(_) => PixelInfo {
+            data_type: JxlDataType::Float,
+            num_channels: 1,
+            bits_per_sample: 32,
+            exponent_bits_per_sample: 8,
+            has_alpha: false,
+            is_gray: true,
+        },
+        PixelData::LA64F(_) => PixelInfo {
+            data_type: JxlDataType::Float,
+            num_channels: 2,
+            bits_per_sample: 32,
+            exponent_bits_per_sample: 8,
             has_alpha: true,
             is_gray: true,
         },
@@ -463,7 +579,20 @@ unsafe fn jxl_encode(
             }
         }
 
-        let (ptr, len) = pixel_data_ptr_and_len(&frame.pixels);
+        let f32_converted: Option<Vec<f32>>;
+        let (ptr, len) = match &frame.pixels {
+            PixelData::RGB64F(d) | PixelData::RGBA64F(d) | PixelData::L64F(d) | PixelData::LA64F(d) => {
+                let converted: Vec<f32> = d.iter().map(|&v| v as f32).collect();
+                f32_converted = Some(converted);
+                let v = f32_converted.as_ref().unwrap();
+                (v.as_ptr() as *const c_void, v.len() * 4)
+            }
+            other => {
+                f32_converted = None;
+                pixel_data_ptr_and_len(other)
+            }
+        };
+
         if JxlEncoderAddImageFrame(frame_settings, &pixel_format, ptr, len)
             != JxlEncoderStatus::Success
         {
