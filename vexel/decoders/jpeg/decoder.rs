@@ -2800,9 +2800,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         let cb = cb_row.get(col).copied().unwrap_or(0);
                         let cr = cr_row.get(col).copied().unwrap_or(0);
                         let y2048 = (y + 2048) << 16;
-                        dst[col * 3] = ((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16;
-                        dst[col * 3 + 1] = ((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16;
-                        dst[col * 3 + 2] = ((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16;
+                        dst[col * 3] = (((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                        dst[col * 3 + 1] = (((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                        dst[col * 3 + 2] = (((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16) << 4;
                     }
                 });
             }

@@ -16,7 +16,9 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "JPEG Lossless",
             path: "jpeg/2x2_lossless.jpg",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/2x2_lossless.avif",
+            },
         },
         TestCase {
             name: "JPEG arithmetic (cat)",
@@ -95,6 +97,36 @@ pub fn test_cases() -> Vec<TestCase> {
             validation: None,
             comparison: Comparison::Exact {
                 reference_path: "jpeg/cat_lossless_arithmetic.avif",
+            },
+        },
+        TestCase {
+            name: "JPEG extended sequential",
+            path: "jpeg/lena_extended_sequential.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/lena_extended_sequential.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG extended sequential",
+            path: "jpeg/rose_extended_sequential.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/rose_extended_sequential.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG progressive 12-bit",
+            path: "jpeg/rose_progressive_12bit.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/rose_progressive_12bit.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
         },
     ]
