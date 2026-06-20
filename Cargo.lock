@@ -3666,6 +3666,7 @@ name = "vexel"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "jpegxl-sys",
  "js-sys",
  "libavif",
  "libavif-sys",

@@ -54,6 +54,10 @@ corpus-diff baseline="" compare="" *args:
 convert *args:
     python3 scripts/generate_references.py {{args}}
 
+# Generate a lossless JXL reference
+gen-jxl input output:
+    cjxl --lossless_jpeg=0 --distance=0 --effort=1 "{{input}}" "{{output}}"
+
 # Run vexel binary
 vexel *args:
     target/release/vexel {{args}}
