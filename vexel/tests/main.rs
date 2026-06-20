@@ -25,21 +25,25 @@ fn load_env_file() {
 
 fn run_test_cases(test_cases: Vec<TestCase>) -> Result<(), Box<dyn std::error::Error>> {
     let name_width = test_cases.iter().map(|t| t.name.len()).max().unwrap_or(0);
+    let total = test_cases.len();
 
-    let mut any_failed = false;
+    let mut passed = 0usize;
+    let mut failures: Vec<(&str, String)> = Vec::new();
+
     for test_case in test_cases {
         let name = test_case.name;
         match test_decode(test_case) {
             Err(e) => {
                 println!("  {:<width$}  FAIL  {}", name, e, width = name_width);
-                any_failed = true;
+                failures.push((name, e.to_string()));
             }
             Ok(harness::TestResult::Fail(msg)) => {
                 println!("  {:<width$}  FAIL  {}", name, msg, width = name_width);
-                any_failed = true;
+                failures.push((name, msg.to_string()));
             }
             Ok(harness::TestResult::Ok { mse: None, ssim: None, psnr: None }) => {
                 println!("  {:<width$}  OK", name, width = name_width);
+                passed += 1;
             }
             Ok(harness::TestResult::Ok { mse, ssim, psnr }) => {
                 let mse_str = mse.map(|v| format!("MSE={:.5}", v)).unwrap_or_default();
@@ -49,11 +53,20 @@ fn run_test_cases(test_cases: Vec<TestCase>) -> Result<(), Box<dyn std::error::E
                     false => format!("PSNR={:.2} dB", v),
                 }).unwrap_or_default();
                 println!("  {:<width$}  OK    {} {} {}", name, mse_str, ssim_str, psnr_str, width = name_width);
+                passed += 1;
             }
         }
     }
 
-    if any_failed {
+    println!();
+    println!("  {}/{} passed", passed, total);
+
+    if !failures.is_empty() {
+        println!();
+        println!("  Failed:");
+        for (name, reason) in &failures {
+            println!("    {} — {}", name, reason);
+        }
         return Err("one or more test cases failed".into());
     }
 

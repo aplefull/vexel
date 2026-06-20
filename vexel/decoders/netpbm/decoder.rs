@@ -3,8 +3,9 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{ImageFrame, PixelFormat};
 use crate::utils::info::NetpbmInfo;
 use crate::{log_warn, Image, PixelData};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek};
 
+use super::simd;
 use super::types::{NetpbmFormat, TupleType};
 
 pub struct NetPbmDecoder<R: Read + Seek> {
@@ -16,6 +17,7 @@ pub struct NetPbmDecoder<R: Read + Seek> {
     tuple_type: Option<TupleType>,
     tuple_type_raw: Option<String>,
     reader: BitReader<R>,
+    lookahead: Option<u8>,
 }
 
 impl<R: Read + Seek> NetPbmDecoder<R> {
@@ -29,6 +31,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             tuple_type: None,
             tuple_type_raw: None,
             reader: BitReader::new(reader),
+            lookahead: None,
         }
     }
 
@@ -59,69 +62,67 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         ((value as f32 * 65535.0 / max_value as f32).round() as u32).min(65535) as u16
     }
 
-    fn skip_whitespace_and_comments<T: Read + Seek>(reader: &mut BitReader<T>) -> VexelResult<()> {
+    fn next_byte(&mut self) -> Option<u8> {
+        if let Some(b) = self.lookahead.take() {
+            return Some(b);
+        }
+        self.reader.read_u8().ok()
+    }
+
+    fn skip_whitespace_and_comments(&mut self) -> VexelResult<u8> {
         loop {
-            let byte = reader.read_u8()?;
+            let byte = match self.next_byte() {
+                Some(b) => b,
+                None => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()),
+            };
             match byte {
                 b'#' => loop {
-                    let b = reader.read_u8()?;
-                    if b == b'\n' || b == b'\r' {
-                        break;
+                    match self.next_byte() {
+                        Some(b'\n') | Some(b'\r') | None => break,
+                        _ => {}
                     }
                 },
                 b' ' | b'\t' | b'\n' | b'\r' => continue,
-                _ => {
-                    reader.seek(SeekFrom::Current(-1))?;
-                    break;
-                }
+                _ => return Ok(byte),
             }
         }
-
-        Ok(())
     }
 
-    fn read_decimal<T: Read + Seek>(reader: &mut BitReader<T>) -> VexelResult<u32> {
-        let mut number = 0u32;
-        let mut has_digits = false;
+    fn read_decimal(&mut self, first: u8) -> VexelResult<u32> {
+        let mut number = (first - b'0') as u32;
 
         loop {
-            let byte = reader.read_u8()?;
+            let byte = match self.next_byte() {
+                Some(b) => b,
+                None => break,
+            };
             match byte {
                 b'0'..=b'9' => {
-                    has_digits = true;
                     number = match number.checked_mul(10).and_then(|n| n.checked_add((byte - b'0') as u32)) {
                         Some(n) => n,
                         None => {
                             log_warn!("Number is too large: {} + {}", number, (byte - b'0') as u32);
-
                             number
                         }
                     };
                 }
                 _ => {
-                    reader.seek(SeekFrom::Current(-1))?;
+                    self.lookahead = Some(byte);
                     break;
                 }
             }
         }
 
-        if !has_digits {
-            log_warn!("No digits found in decimal number");
-
-            return Ok(0);
-        }
-
         Ok(number)
     }
 
-    fn read_pam_tuple(&mut self) -> VexelResult<(String, String)> {
+    fn read_pam_tuple(&mut self, first: u8) -> VexelResult<(String, String)> {
         let mut key = String::new();
         let mut value = String::new();
         let mut reading_key = true;
 
+        let mut byte = first;
         loop {
-            let byte = self.reader.read_u8()?;
-
             match byte {
                 b'\n' => break,
                 b' ' | b'\t' if reading_key => {
@@ -135,6 +136,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                     }
                 }
             }
+            byte = match self.next_byte() {
+                Some(b) => b,
+                None => break,
+            };
         }
 
         Ok((key.trim().to_string(), value.trim().to_string()))
@@ -151,7 +156,9 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn read_header(&mut self) -> VexelResult<()> {
-        let magick = self.reader.read_bits(16)? as u16;
+        let b0 = self.next_byte().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))? as u16;
+        let b1 = self.next_byte().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))? as u16;
+        let magick = (b0 << 8) | b1;
 
         let format = match magick {
             0x5031 => NetpbmFormat::P1,
@@ -178,22 +185,19 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn read_standard_header(&mut self, format: NetpbmFormat) -> VexelResult<()> {
-        Self::skip_whitespace_and_comments(&mut self.reader)?;
+        let first = self.skip_whitespace_and_comments()?;
+        self.width = self.read_decimal(first)?;
 
-        self.width = Self::read_decimal(&mut self.reader)?;
-
-        Self::skip_whitespace_and_comments(&mut self.reader)?;
-
-        self.height = Self::read_decimal(&mut self.reader)?;
+        let first = self.skip_whitespace_and_comments()?;
+        self.height = self.read_decimal(first)?;
 
         match format {
             NetpbmFormat::P1 | NetpbmFormat::P4 => {
                 self.max_value = 1;
             }
             _ => {
-                Self::skip_whitespace_and_comments(&mut self.reader)?;
-
-                self.max_value = Self::read_decimal(&mut self.reader)?;
+                let first = self.skip_whitespace_and_comments()?;
+                self.max_value = self.read_decimal(first)?;
 
                 if self.max_value == 0 {
                     log_warn!("Invalid MAXVAL value: {}", self.max_value);
@@ -207,16 +211,16 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             }
         }
 
-        self.reader.read_u8()?;
+        self.lookahead = None;
 
         Ok(())
     }
 
     fn read_pam_header(&mut self) -> VexelResult<()> {
         loop {
-            Self::skip_whitespace_and_comments(&mut self.reader)?;
+            let first = self.skip_whitespace_and_comments()?;
 
-            let (key, value) = self.read_pam_tuple()?;
+            let (key, value) = self.read_pam_tuple(first)?;
 
             match key.as_str() {
                 "ENDHDR" => break,
@@ -278,400 +282,188 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         Ok(())
     }
 
-    fn read_ascii_number<T: Read + Seek>(reader: &mut BitReader<T>) -> VexelResult<u32> {
-        Self::skip_whitespace_and_comments(reader)?;
-
-        Ok(Self::read_decimal(reader)?)
+    fn read_ascii_number(&mut self) -> VexelResult<u32> {
+        let first = self.skip_whitespace_and_comments()?;
+        self.read_decimal(first)
     }
 
     fn read_binary_frame_data(&mut self, byte_count: usize) -> VexelResult<Vec<u8>> {
         let mut buf = vec![0u8; byte_count];
-        let mut total = 0;
-
-        while total < byte_count {
-            match self.reader.read_u8() {
-                Ok(b) => {
-                    buf[total] = b;
-                    total += 1;
-                }
-                Err(_) => break,
-            }
+        match self.reader.read_exact(&mut buf) {
+            Ok(()) => Ok(buf),
+            Err(_) => Ok(self.reader.read_to_end().unwrap_or_default()),
         }
-
-        buf.truncate(total);
-        Ok(buf)
     }
 
-    fn read_ascii_frame_data(&mut self) -> VexelResult<Vec<u8>> {
-        let mut buf = Vec::new();
-        let mut prev_was_newline = false;
+    fn decode_ascii_bitmap(&mut self) -> VexelResult<PixelData> {
+        let pixel_count = (self.width * self.height) as usize;
+        let mut image_data = Vec::with_capacity(pixel_count);
 
-        loop {
-            let byte = match self.reader.read_u8() {
-                Ok(b) => b,
-                Err(_) => break,
+        for _ in 0..pixel_count {
+            let value = match self.read_ascii_number() {
+                Ok(v) => v.clamp(0, self.max_value),
+                Err(e) => {
+                    log_warn!("Error reading ASCII number: {:?}", e);
+                    0
+                }
             };
-
-            if prev_was_newline && byte == b'P' {
-                let next = match self.reader.read_u8() {
-                    Ok(b) => b,
-                    Err(_) => {
-                        buf.push(byte);
-                        break;
-                    }
-                };
-
-                if next >= b'1' && next <= b'7' {
-                    self.reader.seek(SeekFrom::Current(-2))?;
-                    break;
-                }
-
-                buf.push(byte);
-                buf.push(next);
-                prev_was_newline = false;
-                continue;
-            }
-
-            prev_was_newline = byte == b'\n';
-            buf.push(byte);
-        }
-
-        Ok(buf)
-    }
-
-    fn decode_ascii_bitmap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let mut image_data: Vec<u8> = Vec::new();
-        let mut reader = BitReader::new(Cursor::new(data));
-
-        for _ in 0..self.height {
-            for _ in 0..self.width {
-                let value = match Self::read_ascii_number(&mut reader) {
-                    Ok(v) => v.clamp(0, self.max_value),
-                    Err(e) => {
-                        log_warn!("Error reading ASCII number: {:?}", e);
-                        0
-                    }
-                };
-
-                image_data.push(!(value as u8) & 1);
-            }
+            image_data.push(!(value as u8) & 1);
         }
 
         Ok(PixelData::L1(image_data))
     }
 
-    fn decode_ascii_graymap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
-        let mut reader = BitReader::new(Cursor::new(data));
+    fn read_ascii_samples(&mut self, count: usize) -> Vec<u32> {
+        let max_value = self.max_value;
+        let mut samples = Vec::with_capacity(count);
+        for _ in 0..count {
+            let v = self.read_ascii_number().map(|v| v.clamp(0, max_value)).unwrap_or_else(|e| {
+                log_warn!("Error reading ASCII number: {:?}", e);
+                0
+            });
+            samples.push(v);
+        }
+        samples
+    }
 
+    fn decode_ascii_graymap(&mut self) -> VexelResult<PixelData> {
         let pixel_count = (self.width * self.height) as usize;
-        let values: Vec<_> = (0..pixel_count)
-            .map(|_| {
-                Self::read_ascii_number(&mut reader)
-                    .map(|v| v.clamp(0, self.max_value))
-                    .unwrap_or_else(|e| {
-                        log_warn!("Error reading ASCII number: {:?}", e);
-                        0
-                    })
-            })
-            .collect();
+        let samples = self.read_ascii_samples(pixel_count);
 
-        if bits_per_sample == 8 {
-            Ok(PixelData::L8(
-                values.iter().map(|&v| Self::scale_to_8bit(v, self.max_value)).collect(),
-            ))
+        if self.max_value > 255 {
+            let mut image_data = vec![0u16; pixel_count];
+            simd::scale_u32_to_u16(&samples, &mut image_data, self.max_value);
+            Ok(PixelData::L16(image_data))
         } else {
-            Ok(PixelData::L16(
-                values
-                    .iter()
-                    .map(|&v| Self::scale_to_16bit(v, self.max_value))
-                    .collect(),
-            ))
+            let mut image_data = vec![0u8; pixel_count];
+            simd::scale_u32_to_u8(&samples, &mut image_data, self.max_value);
+            Ok(PixelData::L8(image_data))
         }
     }
 
-    fn decode_ascii_pixmap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
-        let mut reader = BitReader::new(Cursor::new(data));
+    fn decode_ascii_pixmap(&mut self) -> VexelResult<PixelData> {
+        let sample_count = (self.width * self.height) as usize * 3;
+        let samples = self.read_ascii_samples(sample_count);
 
-        let pixel_count = (self.width * self.height) as usize;
-        let values: Vec<_> = (0..pixel_count * 3)
-            .map(|_| {
-                Self::read_ascii_number(&mut reader)
-                    .map(|v| v.clamp(0, self.max_value))
-                    .unwrap_or_else(|e| {
-                        log_warn!("Error reading ASCII number: {:?}", e);
-                        0
-                    })
-            })
-            .collect();
-
-        if bits_per_sample == 8 {
-            Ok(PixelData::RGB8(
-                values.iter().map(|&v| Self::scale_to_8bit(v, self.max_value)).collect(),
-            ))
+        if self.max_value > 255 {
+            let mut image_data = vec![0u16; sample_count];
+            simd::scale_u32_to_u16(&samples, &mut image_data, self.max_value);
+            Ok(PixelData::RGB16(image_data))
         } else {
-            Ok(PixelData::RGB16(
-                values
-                    .iter()
-                    .map(|&v| Self::scale_to_16bit(v, self.max_value))
-                    .collect(),
-            ))
+            let mut image_data = vec![0u8; sample_count];
+            simd::scale_u32_to_u8(&samples, &mut image_data, self.max_value);
+            Ok(PixelData::RGB8(image_data))
         }
     }
 
     fn decode_binary_bitmap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let mut image_data: Vec<u8> = Vec::new();
-        let mut reader = BitReader::new(Cursor::new(data));
-
-        let bytes_per_row = (self.width + 7) / 8;
-        let padding_bits = bytes_per_row * 8 - self.width;
-
-        for _ in 0..self.height {
-            for _ in 0..self.width {
-                image_data.push(!reader.read_bit()? as u8);
-            }
-
-            for _ in 0..padding_bits {
-                let _ = reader.read_bit();
-            }
-        }
-
+        let mut image_data = vec![0u8; (self.width * self.height) as usize];
+        simd::unpack_bits(data, &mut image_data, self.width, self.height);
         Ok(PixelData::L1(image_data))
     }
 
     fn decode_binary_graymap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
-        let mut reader = BitReader::new(Cursor::new(data));
+        let pixel_count = (self.width * self.height) as usize;
 
-        if bits_per_sample == 8 {
-            let mut image_data = Vec::new();
-
-            for _ in 0..self.height {
-                for _ in 0..self.width {
-                    let value = reader.read_u8()?.clamp(0, self.max_value as u8);
-                    image_data.push(Self::scale_to_8bit(value as u32, self.max_value));
-                }
-            }
-
+        if self.max_value <= 255 {
+            let mut image_data = vec![0u8; pixel_count];
+            simd::scale_u8(data, &mut image_data, self.max_value as u8);
             return Ok(PixelData::L8(image_data));
         }
 
-        let mut image_data = Vec::new();
-
-        for _ in 0..self.height {
-            for _ in 0..self.width {
-                let value = reader.read_u16()?.clamp(0, self.max_value as u16);
-                image_data.push(Self::scale_to_16bit(value as u32, self.max_value));
-            }
-        }
-
+        let mut image_data = vec![0u16; pixel_count];
+        simd::scale_u16_be(data, &mut image_data, self.max_value as u16);
         Ok(PixelData::L16(image_data))
     }
 
     fn decode_binary_pixmap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let bits_per_sample = if self.max_value > 255 { 16 } else { 8 };
-        let mut reader = BitReader::new(Cursor::new(data));
+        let sample_count = (self.width * self.height) as usize * 3;
 
-        if bits_per_sample == 8 {
-            let mut image_data = Vec::new();
-
-            for _ in 0..self.height {
-                for _ in 0..self.width {
-                    let r = reader.read_u8().unwrap_or(0).clamp(0, self.max_value as u8);
-                    let g = reader.read_u8().unwrap_or(0).clamp(0, self.max_value as u8);
-                    let b = reader.read_u8().unwrap_or(0).clamp(0, self.max_value as u8);
-
-                    image_data.push(Self::scale_to_8bit(r as u32, self.max_value));
-                    image_data.push(Self::scale_to_8bit(g as u32, self.max_value));
-                    image_data.push(Self::scale_to_8bit(b as u32, self.max_value));
-                }
-            }
-
+        if self.max_value <= 255 {
+            let mut image_data = vec![0u8; sample_count];
+            simd::scale_u8(data, &mut image_data, self.max_value as u8);
             return Ok(PixelData::RGB8(image_data));
         }
 
-        let mut image_data = Vec::new();
-
-        for _ in 0..self.height {
-            for _ in 0..self.width {
-                let r = reader.read_u16()?.clamp(0, self.max_value as u16);
-                let g = reader.read_u16()?.clamp(0, self.max_value as u16);
-                let b = reader.read_u16()?.clamp(0, self.max_value as u16);
-
-                image_data.push(Self::scale_to_16bit(r as u32, self.max_value));
-                image_data.push(Self::scale_to_16bit(g as u32, self.max_value));
-                image_data.push(Self::scale_to_16bit(b as u32, self.max_value));
-            }
-        }
-
+        let mut image_data = vec![0u16; sample_count];
+        simd::scale_u16_be(data, &mut image_data, self.max_value as u16);
         Ok(PixelData::RGB16(image_data))
     }
 
     fn decode_pam(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let mut reader = BitReader::new(Cursor::new(data));
-
         let depth = self.depth;
         let max_value = self.max_value;
-        let bits_per_sample = if max_value > 255 { 16 } else { 8 };
+        let pixel_count = (self.width * self.height) as usize;
+        let is_16bit = max_value > 255;
 
         match (&self.tuple_type, depth) {
-            // BLACKANDWHITE format (1 channel, maxval must be 1)
             (Some(TupleType::BlackAndWhite), 1) => {
-                let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
-                for _ in 0..self.height {
-                    for _ in 0..self.width {
-                        let value = reader.read_u8()?;
-                        image_data.push(value & 1);
-                    }
+                let mut image_data = vec![0u8; pixel_count];
+                for (d, s) in image_data.iter_mut().zip(data.iter()) {
+                    *d = s & 1;
                 }
                 Ok(PixelData::L1(image_data))
             }
 
-            // GRAYSCALE format (1 channel)
             (Some(TupleType::Grayscale), 1) => {
-                if bits_per_sample == 8 {
-                    let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
-                    for _ in 0..self.height {
-                        for _ in 0..self.width {
-                            let value = reader.read_u8()?;
-                            image_data.push(Self::scale_to_8bit(value as u32, max_value));
-                        }
-                    }
-
+                if !is_16bit {
+                    let mut image_data = vec![0u8; pixel_count];
+                    simd::scale_u8(data, &mut image_data, max_value as u8);
                     Ok(PixelData::L8(image_data))
                 } else {
-                    let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
-                    for _ in 0..self.height {
-                        for _ in 0..self.width {
-                            let value = reader.read_u16()?;
-                            image_data.push(Self::scale_to_16bit(value as u32, max_value));
-                        }
-                    }
-
+                    let mut image_data = vec![0u16; pixel_count];
+                    simd::scale_u16_be(data, &mut image_data, max_value as u16);
                     Ok(PixelData::L16(image_data))
                 }
             }
 
-            // RGB format (3 channels)
             (Some(TupleType::RGB), 3) => {
-                if bits_per_sample == 8 {
-                    let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-                    for _ in 0..self.height {
-                        for _ in 0..self.width {
-                            let r = reader.read_u8()?;
-                            let g = reader.read_u8()?;
-                            let b = reader.read_u8()?;
-
-                            image_data.push(Self::scale_to_8bit(r as u32, max_value));
-                            image_data.push(Self::scale_to_8bit(g as u32, max_value));
-                            image_data.push(Self::scale_to_8bit(b as u32, max_value));
-                        }
-                    }
-
+                let sample_count = pixel_count * 3;
+                if !is_16bit {
+                    let mut image_data = vec![0u8; sample_count];
+                    simd::scale_u8(data, &mut image_data, max_value as u8);
                     Ok(PixelData::RGB8(image_data))
                 } else {
-                    let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-                    for _ in 0..self.height {
-                        for _ in 0..self.width {
-                            let r = reader.read_u16()?;
-                            let g = reader.read_u16()?;
-                            let b = reader.read_u16()?;
-
-                            image_data.push(Self::scale_to_16bit(r as u32, max_value));
-                            image_data.push(Self::scale_to_16bit(g as u32, max_value));
-                            image_data.push(Self::scale_to_16bit(b as u32, max_value));
-                        }
-                    }
-
+                    let mut image_data = vec![0u16; sample_count];
+                    simd::scale_u16_be(data, &mut image_data, max_value as u16);
                     Ok(PixelData::RGB16(image_data))
                 }
             }
 
-            // BLACKANDWHITE_ALPHA format (2 channels)
             (Some(TupleType::BlackAndWhiteAlpha), 2) => {
-                let bw_maxval = 1u32;
-                let alpha_maxval = max_value;
-
-                let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
-                for _ in 0..self.height {
-                    for _ in 0..self.width {
-                        let value = reader.read_u8()?;
-                        let alpha = reader.read_u8()?;
-                        image_data.push(Self::scale_to_8bit((value & 1) as u32, bw_maxval));
-                        image_data.push(Self::scale_to_8bit(alpha as u32, alpha_maxval));
-                    }
+                let mut image_data = vec![0u8; pixel_count * 2];
+                let mut reader = BitReader::new(Cursor::new(data));
+                for chunk in image_data.chunks_exact_mut(2) {
+                    let value = reader.read_u8().unwrap_or(0);
+                    let alpha = reader.read_u8().unwrap_or(0);
+                    chunk[0] = Self::scale_to_8bit((value & 1) as u32, 1);
+                    chunk[1] = Self::scale_to_8bit(alpha as u32, max_value);
                 }
-
                 Ok(PixelData::LA8(image_data))
             }
 
-            // GRAYSCALE_ALPHA format (2 channels)
             (Some(TupleType::GrayscaleAlpha), 2) => {
-                if bits_per_sample == 8 {
-                    let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
-                    for _ in 0..self.height {
-                        for _ in 0..self.width {
-                            let gray = reader.read_u8()?;
-                            let alpha = reader.read_u8()?;
-
-                            image_data.push(Self::scale_to_8bit(gray as u32, max_value));
-                            image_data.push(Self::scale_to_8bit(alpha as u32, max_value));
-                        }
-                    }
-
+                let sample_count = pixel_count * 2;
+                if !is_16bit {
+                    let mut image_data = vec![0u8; sample_count];
+                    simd::scale_u8(data, &mut image_data, max_value as u8);
                     Ok(PixelData::LA8(image_data))
                 } else {
-                    let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
-                    for _ in 0..self.height {
-                        for _ in 0..self.width {
-                            let gray = reader.read_u16()?;
-                            let alpha = reader.read_u16()?;
-
-                            image_data.push(Self::scale_to_16bit(gray as u32, max_value));
-                            image_data.push(Self::scale_to_16bit(alpha as u32, max_value));
-                        }
-                    }
-
+                    let mut image_data = vec![0u16; sample_count];
+                    simd::scale_u16_be(data, &mut image_data, max_value as u16);
                     Ok(PixelData::LA16(image_data))
                 }
             }
 
-            // RGB_ALPHA format (4 channels)
             (Some(TupleType::RGBAlpha), 4) => {
-                if bits_per_sample == 8 {
-                    let mut image_data = Vec::with_capacity((self.width * self.height * 4) as usize);
-                    for _ in 0..self.height {
-                        for _ in 0..self.width {
-                            let r = reader.read_u8()?;
-                            let g = reader.read_u8()?;
-                            let b = reader.read_u8()?;
-                            let a = reader.read_u8()?;
-
-                            image_data.push(Self::scale_to_8bit(r as u32, max_value));
-                            image_data.push(Self::scale_to_8bit(g as u32, max_value));
-                            image_data.push(Self::scale_to_8bit(b as u32, max_value));
-                            image_data.push(Self::scale_to_8bit(a as u32, max_value));
-                        }
-                    }
-
+                let sample_count = pixel_count * 4;
+                if !is_16bit {
+                    let mut image_data = vec![0u8; sample_count];
+                    simd::scale_u8(data, &mut image_data, max_value as u8);
                     Ok(PixelData::RGBA8(image_data))
                 } else {
-                    let mut image_data = Vec::with_capacity((self.width * self.height * 4) as usize);
-                    for _ in 0..self.height {
-                        for _ in 0..self.width {
-                            let r = reader.read_u16()?;
-                            let g = reader.read_u16()?;
-                            let b = reader.read_u16()?;
-                            let a = reader.read_u16()?;
-
-                            image_data.push(Self::scale_to_16bit(r as u32, max_value));
-                            image_data.push(Self::scale_to_16bit(g as u32, max_value));
-                            image_data.push(Self::scale_to_16bit(b as u32, max_value));
-                            image_data.push(Self::scale_to_16bit(a as u32, max_value));
-                        }
-                    }
-
+                    let mut image_data = vec![0u16; sample_count];
+                    simd::scale_u16_be(data, &mut image_data, max_value as u16);
                     Ok(PixelData::RGBA16(image_data))
                 }
             }
@@ -685,145 +477,69 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
                 let depth = depth as usize;
 
-                match depth {
-                    1 => {
-                        if bits_per_sample == 8 {
-                            let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let value = reader.read_u8().unwrap_or(0);
-                                    image_data.push(Self::scale_to_8bit(value as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::L8(image_data))
-                        } else {
-                            let mut image_data = Vec::with_capacity((self.width * self.height) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let value = reader.read_u16().unwrap_or(0);
-                                    image_data.push(Self::scale_to_16bit(value as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::L16(image_data))
-                        }
+                match (depth, is_16bit) {
+                    (1, false) => {
+                        let mut image_data = vec![0u8; pixel_count];
+                        simd::scale_u8(data, &mut image_data, max_value as u8);
+                        Ok(PixelData::L8(image_data))
                     }
-                    2 => {
-                        if bits_per_sample == 8 {
-                            let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let gray = reader.read_u8().unwrap_or(0);
-                                    let alpha = reader.read_u8().unwrap_or(0);
-                                    image_data.push(Self::scale_to_8bit(gray as u32, max_value));
-                                    image_data.push(Self::scale_to_8bit(alpha as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::LA8(image_data))
-                        } else {
-                            let mut image_data = Vec::with_capacity((self.width * self.height * 2) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let gray = reader.read_u16().unwrap_or(0);
-                                    let alpha = reader.read_u16().unwrap_or(0);
-                                    image_data.push(Self::scale_to_16bit(gray as u32, max_value));
-                                    image_data.push(Self::scale_to_16bit(alpha as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::LA16(image_data))
-                        }
+                    (1, true) => {
+                        let mut image_data = vec![0u16; pixel_count];
+                        simd::scale_u16_be(data, &mut image_data, max_value as u16);
+                        Ok(PixelData::L16(image_data))
                     }
-                    3 => {
-                        if bits_per_sample == 8 {
-                            let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let r = reader.read_u8().unwrap_or(0);
-                                    let g = reader.read_u8().unwrap_or(0);
-                                    let b = reader.read_u8().unwrap_or(0);
-                                    image_data.push(Self::scale_to_8bit(r as u32, max_value));
-                                    image_data.push(Self::scale_to_8bit(g as u32, max_value));
-                                    image_data.push(Self::scale_to_8bit(b as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::RGB8(image_data))
-                        } else {
-                            let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let r = reader.read_u16().unwrap_or(0);
-                                    let g = reader.read_u16().unwrap_or(0);
-                                    let b = reader.read_u16().unwrap_or(0);
-                                    image_data.push(Self::scale_to_16bit(r as u32, max_value));
-                                    image_data.push(Self::scale_to_16bit(g as u32, max_value));
-                                    image_data.push(Self::scale_to_16bit(b as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::RGB16(image_data))
-                        }
+                    (2, false) => {
+                        let mut image_data = vec![0u8; pixel_count * 2];
+                        simd::scale_u8(data, &mut image_data, max_value as u8);
+                        Ok(PixelData::LA8(image_data))
                     }
-                    4 => {
-                        if bits_per_sample == 8 {
-                            let mut image_data = Vec::with_capacity((self.width * self.height * 4) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let r = reader.read_u8().unwrap_or(0);
-                                    let g = reader.read_u8().unwrap_or(0);
-                                    let b = reader.read_u8().unwrap_or(0);
-                                    let a = reader.read_u8().unwrap_or(0);
-                                    image_data.push(Self::scale_to_8bit(r as u32, max_value));
-                                    image_data.push(Self::scale_to_8bit(g as u32, max_value));
-                                    image_data.push(Self::scale_to_8bit(b as u32, max_value));
-                                    image_data.push(Self::scale_to_8bit(a as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::RGBA8(image_data))
-                        } else {
-                            let mut image_data = Vec::with_capacity((self.width * self.height * 4) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let r = reader.read_u16().unwrap_or(0);
-                                    let g = reader.read_u16().unwrap_or(0);
-                                    let b = reader.read_u16().unwrap_or(0);
-                                    let a = reader.read_u16().unwrap_or(0);
-                                    image_data.push(Self::scale_to_16bit(r as u32, max_value));
-                                    image_data.push(Self::scale_to_16bit(g as u32, max_value));
-                                    image_data.push(Self::scale_to_16bit(b as u32, max_value));
-                                    image_data.push(Self::scale_to_16bit(a as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::RGBA16(image_data))
-                        }
+                    (2, true) => {
+                        let mut image_data = vec![0u16; pixel_count * 2];
+                        simd::scale_u16_be(data, &mut image_data, max_value as u16);
+                        Ok(PixelData::LA16(image_data))
                     }
-                    _ => {
-                        if bits_per_sample == 8 {
-                            let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let mut samples = vec![0u8; depth];
-                                    for s in samples.iter_mut() {
-                                        *s = reader.read_u8().unwrap_or(0);
-                                    }
-                                    image_data.push(Self::scale_to_8bit(samples[0] as u32, max_value));
-                                    image_data.push(Self::scale_to_8bit(samples[1] as u32, max_value));
-                                    image_data.push(Self::scale_to_8bit(samples[2] as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::RGB8(image_data))
-                        } else {
-                            let mut image_data = Vec::with_capacity((self.width * self.height * 3) as usize);
-                            for _ in 0..self.height {
-                                for _ in 0..self.width {
-                                    let mut samples = vec![0u16; depth];
-                                    for s in samples.iter_mut() {
-                                        *s = reader.read_u16().unwrap_or(0);
-                                    }
-                                    image_data.push(Self::scale_to_16bit(samples[0] as u32, max_value));
-                                    image_data.push(Self::scale_to_16bit(samples[1] as u32, max_value));
-                                    image_data.push(Self::scale_to_16bit(samples[2] as u32, max_value));
-                                }
-                            }
-                            Ok(PixelData::RGB16(image_data))
+                    (3, false) => {
+                        let mut image_data = vec![0u8; pixel_count * 3];
+                        simd::scale_u8(data, &mut image_data, max_value as u8);
+                        Ok(PixelData::RGB8(image_data))
+                    }
+                    (3, true) => {
+                        let mut image_data = vec![0u16; pixel_count * 3];
+                        simd::scale_u16_be(data, &mut image_data, max_value as u16);
+                        Ok(PixelData::RGB16(image_data))
+                    }
+                    (4, false) => {
+                        let mut image_data = vec![0u8; pixel_count * 4];
+                        simd::scale_u8(data, &mut image_data, max_value as u8);
+                        Ok(PixelData::RGBA8(image_data))
+                    }
+                    (4, true) => {
+                        let mut image_data = vec![0u16; pixel_count * 4];
+                        simd::scale_u16_be(data, &mut image_data, max_value as u16);
+                        Ok(PixelData::RGBA16(image_data))
+                    }
+                    (_, false) => {
+                        let mut image_data = vec![0u8; pixel_count * 3];
+                        let src = &data[..pixel_count * depth];
+                        for (px, chunk) in src.chunks_exact(depth).zip(image_data.chunks_exact_mut(3)) {
+                            chunk[0] = Self::scale_to_8bit(px[0] as u32, max_value);
+                            chunk[1] = Self::scale_to_8bit(px[1] as u32, max_value);
+                            chunk[2] = Self::scale_to_8bit(px[2] as u32, max_value);
                         }
+                        Ok(PixelData::RGB8(image_data))
+                    }
+                    (_, true) => {
+                        let mut image_data = vec![0u16; pixel_count * 3];
+                        let mut reader = BitReader::new(Cursor::new(data));
+                        for chunk in image_data.chunks_exact_mut(3) {
+                            for i in 0..depth {
+                                let v = reader.read_u16().unwrap_or(0);
+                                if i < 3 {
+                                    chunk[i] = Self::scale_to_16bit(v as u32, max_value);
+                                }
+                            }
+                        }
+                        Ok(PixelData::RGB16(image_data))
                     }
                 }
             }
@@ -834,18 +550,9 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         let bytes_per_sample = if self.max_value > 255 { 2usize } else { 1usize };
 
         match &self.format {
-            Some(NetpbmFormat::P1) => {
-                let data = self.read_ascii_frame_data()?;
-                self.decode_ascii_bitmap(&data)
-            }
-            Some(NetpbmFormat::P2) => {
-                let data = self.read_ascii_frame_data()?;
-                self.decode_ascii_graymap(&data)
-            }
-            Some(NetpbmFormat::P3) => {
-                let data = self.read_ascii_frame_data()?;
-                self.decode_ascii_pixmap(&data)
-            }
+            Some(NetpbmFormat::P1) => self.decode_ascii_bitmap(),
+            Some(NetpbmFormat::P2) => self.decode_ascii_graymap(),
+            Some(NetpbmFormat::P3) => self.decode_ascii_pixmap(),
             Some(NetpbmFormat::P4) => {
                 let bytes_per_row = ((self.width + 7) / 8) as usize;
                 let byte_count = bytes_per_row * self.height as usize;
@@ -891,9 +598,9 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn has_more_data(&mut self) -> bool {
-        match self.reader.read_u8() {
+        match self.skip_whitespace_and_comments() {
             Ok(byte) => {
-                let _ = self.reader.seek(SeekFrom::Current(-1));
+                self.lookahead = Some(byte);
                 byte == b'P'
             }
             Err(_) => false,
