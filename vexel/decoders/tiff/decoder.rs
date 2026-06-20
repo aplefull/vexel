@@ -2,6 +2,7 @@ use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::image::ImageFrame;
 use crate::utils::types::ByteOrder;
 use crate::{Image, log_warn};
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -41,7 +42,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.height
     }
 
-    fn read_header(&mut self) -> VexelResult<()> {
+    fn read_file_header(&mut self) -> VexelResult<u32> {
         let mut byte_order_marker = [0u8; 2];
         self.reader.read_exact(&mut byte_order_marker)?;
 
@@ -60,6 +61,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
         }
 
         let ifd_offset = self.reader.read_u32()?;
+        Ok(ifd_offset)
+    }
+
+    fn read_ifd(&mut self, ifd_offset: u32) -> VexelResult<u32> {
+        self.header = TiffHeader::default();
 
         self.reader.seek(SeekFrom::Start(ifd_offset as u64))?;
 
@@ -128,6 +134,12 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     self.header.tile_byte_counts =
                         read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?;
                 }
+                32997 => {
+                    self.header.image_depth = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
+                }
+                32998 => {
+                    self.header.tile_depth = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
+                }
                 338 => {
                     self.header.extra_samples =
                         read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?;
@@ -181,7 +193,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.width = self.header.image_width;
         self.height = self.header.image_length;
 
-        Ok(())
+        let next_ifd_offset = self.reader.read_u32().unwrap_or(0);
+        Ok(next_ifd_offset)
     }
 
     fn bits_for(&self, channel: usize) -> u16 {
@@ -413,6 +426,115 @@ impl<R: Read + Seek> TiffDecoder<R> {
         Ok(image_data)
     }
 
+    fn read_tile_data_volumetric(&mut self) -> VexelResult<Vec<Vec<u8>>> {
+        let tile_width = self.header.tile_width.unwrap_or(self.width) as usize;
+        let tile_height = self.header.tile_length.unwrap_or(self.height) as usize;
+        let tile_depth = self.header.tile_depth.max(1) as usize;
+        let image_width = self.width as usize;
+        let image_height = self.height as usize;
+        let image_depth = self.header.image_depth.max(1) as usize;
+        let bps = self.bits_for(0);
+        let bytes_per_sample = (bps as usize).div_ceil(8);
+        let spp = self.header.samples_per_pixel as usize;
+        let bytes_per_pixel = bytes_per_sample * spp;
+        let is_sub_byte = bps < 8;
+
+        let tiles_x = image_width.div_ceil(tile_width);
+        let tiles_y = image_height.div_ceil(tile_height);
+        let tiles_z = image_depth.div_ceil(tile_depth);
+
+        let slice_size = if is_sub_byte {
+            image_width.div_ceil(8) * image_height
+        } else {
+            image_width * image_height * bytes_per_pixel
+        };
+
+        let mut slices = vec![vec![0u8; slice_size]; image_depth];
+
+        let tile_offsets = self.header.tile_offsets.clone();
+        let tile_byte_counts = self.header.tile_byte_counts.clone();
+
+        for tz in 0..tiles_z {
+            for ty in 0..tiles_y {
+                for tx in 0..tiles_x {
+                    let tile_idx = tz * (tiles_x * tiles_y) + ty * tiles_x + tx;
+                    let offset = match tile_offsets.get(tile_idx) {
+                        Some(&o) => o,
+                        None => continue,
+                    };
+                    let byte_count = tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
+
+                    self.reader.seek(SeekFrom::Start(offset as u64))?;
+                    let mut raw_tile = vec![0u8; byte_count as usize];
+                    self.reader.read_exact(&mut raw_tile)?;
+
+                    let mut tile_data = self.decompress_chunk(raw_tile);
+                    if self.header.predictor != Predictor::None && bps >= 8 {
+                        self.apply_predictor(&mut tile_data, tile_width as u32);
+                    }
+
+                    let img_x = tx * tile_width;
+                    let img_y = ty * tile_height;
+                    let img_z_start = tz * tile_depth;
+
+                    for dz in 0..tile_depth {
+                        let slice_z = img_z_start + dz;
+                        if slice_z >= image_depth {
+                            break;
+                        }
+                        let slice = &mut slices[slice_z];
+
+                        if is_sub_byte {
+                            let tile_row_bytes = tile_width.div_ceil(8);
+                            let img_row_bytes = image_width.div_ceil(8);
+                            for row in 0..tile_height {
+                                let py = img_y + row;
+                                if py >= image_height {
+                                    break;
+                                }
+                                for col in 0..tile_width {
+                                    let px = img_x + col;
+                                    if px >= image_width {
+                                        continue;
+                                    }
+                                    let src_byte_idx = dz * tile_height * tile_row_bytes + row * tile_row_bytes + col / 8;
+                                    let src_byte = tile_data.get(src_byte_idx).copied().unwrap_or(0);
+                                    let bit = (src_byte >> (7 - (col % 8))) & 1;
+                                    let dst_byte_idx = py * img_row_bytes + px / 8;
+                                    let dst_bit_pos = 7 - (px % 8);
+                                    if dst_byte_idx < slice.len() {
+                                        slice[dst_byte_idx] = (slice[dst_byte_idx] & !(1 << dst_bit_pos)) | (bit << dst_bit_pos);
+                                    }
+                                }
+                            }
+                        } else {
+                            let tile_slice_pixels = tile_width * tile_height;
+                            for row in 0..tile_height {
+                                let py = img_y + row;
+                                if py >= image_height {
+                                    break;
+                                }
+                                for col in 0..tile_width {
+                                    let px = img_x + col;
+                                    if px >= image_width {
+                                        continue;
+                                    }
+                                    let src = (dz * tile_slice_pixels + row * tile_width + col) * bytes_per_pixel;
+                                    let dst = (py * image_width + px) * bytes_per_pixel;
+                                    if src + bytes_per_pixel <= tile_data.len() && dst + bytes_per_pixel <= slice.len() {
+                                        slice[dst..dst + bytes_per_pixel].copy_from_slice(&tile_data[src..src + bytes_per_pixel]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(slices)
+    }
+
     fn read_tile_data(&mut self) -> VexelResult<Vec<u8>> {
         let is_jpeg = matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG);
         let is_planar = self.header.planar_configuration == super::types::PlanarConfiguration::Planar
@@ -597,11 +719,59 @@ impl<R: Read + Seek> TiffDecoder<R> {
         Ok(image_data)
     }
 
-    pub fn decode(&mut self) -> VexelResult<Image> {
-        self.read_header()?;
-
+    fn decode_current_ifd(&mut self) -> VexelResult<Vec<ImageFrame>> {
         let is_tiled = self.header.tile_width.is_some() && !self.header.tile_offsets.is_empty();
         let is_jpeg = matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG);
+        let image_depth = self.header.image_depth.max(1);
+        let is_volumetric = is_tiled && image_depth > 1;
+
+        let make_header = |h: &TiffHeader| TiffHeader {
+            image_width: h.image_width,
+            image_length: h.image_length,
+            bits_per_sample: h.bits_per_sample.clone(),
+            compression: h.compression,
+            photometric_interpretation: h.photometric_interpretation,
+            strip_offsets: Vec::new(),
+            samples_per_pixel: h.samples_per_pixel,
+            rows_per_strip: h.rows_per_strip,
+            strip_byte_counts: Vec::new(),
+            x_resolution: h.x_resolution,
+            y_resolution: h.y_resolution,
+            planar_configuration: h.planar_configuration,
+            resolution_unit: h.resolution_unit,
+            sample_format: h.sample_format.clone(),
+            extra_samples: h.extra_samples.clone(),
+            color_map: h.color_map.clone(),
+            ycbcr_coefficients: h.ycbcr_coefficients,
+            ycbcr_sub_sampling: h.ycbcr_sub_sampling,
+            reference_black_white: h.reference_black_white,
+            tile_width: h.tile_width,
+            tile_length: h.tile_length,
+            tile_offsets: Vec::new(),
+            tile_byte_counts: Vec::new(),
+            predictor: h.predictor,
+            jpeg_tables: h.jpeg_tables.clone(),
+            image_depth: h.image_depth,
+            tile_depth: h.tile_depth,
+        };
+
+        if is_volumetric {
+            let slices = self.read_tile_data_volumetric()?;
+            let header = make_header(&self.header);
+            let pixel_reader = PixelReader {
+                byte_order: self.byte_order,
+                width: self.width,
+                height: self.height,
+            };
+
+            let mut frames = Vec::with_capacity(slices.len());
+            for slice_data in slices {
+                let mut pd = pixel_reader.convert_to_pixel_data(slice_data, &header)?;
+                pd.correct_pixels(self.width, self.height);
+                frames.push(ImageFrame::new(self.width, self.height, pd, 0));
+            }
+            return Ok(frames);
+        }
 
         let bytes = if is_tiled {
             self.read_tile_data()?
@@ -609,54 +779,58 @@ impl<R: Read + Seek> TiffDecoder<R> {
             self.read_strip_data()?
         };
 
-        if is_jpeg {
+        let pixel_data = if is_jpeg {
             let spp = self.header.samples_per_pixel.max(3);
-            let pixel_data = if spp >= 4 {
+            if spp >= 4 {
                 crate::utils::image::PixelData::RGBA8(bytes)
             } else {
                 crate::utils::image::PixelData::RGB8(bytes)
+            }
+        } else {
+            let header = make_header(&self.header);
+            let pixel_reader = PixelReader {
+                byte_order: self.byte_order,
+                width: self.width,
+                height: self.height,
             };
 
-            return Ok(Image::from_pixels(self.width, self.height, pixel_data));
+            let mut pd = pixel_reader.convert_to_pixel_data(bytes, &header)?;
+            pd.correct_pixels(self.width, self.height);
+            pd
+        };
+
+        Ok(vec![ImageFrame::new(self.width, self.height, pixel_data, 0)])
+    }
+
+    pub fn decode(&mut self) -> VexelResult<Image> {
+        let first_ifd_offset = self.read_file_header()?;
+
+        let mut frames: Vec<ImageFrame> = Vec::new();
+        let mut next_ifd_offset = first_ifd_offset;
+
+        while next_ifd_offset != 0 {
+            next_ifd_offset = self.read_ifd(next_ifd_offset)?;
+
+            match self.decode_current_ifd() {
+                Ok(ifd_frames) => frames.extend(ifd_frames),
+                Err(e) => {
+                    log_warn!("Failed to decode TIFF frame: {}", e);
+                    if frames.is_empty() {
+                        return Err(e);
+                    }
+                    break;
+                }
+            }
         }
 
-        let header = TiffHeader {
-            image_width: self.header.image_width,
-            image_length: self.header.image_length,
-            bits_per_sample: self.header.bits_per_sample.clone(),
-            compression: self.header.compression,
-            photometric_interpretation: self.header.photometric_interpretation,
-            strip_offsets: Vec::new(),
-            samples_per_pixel: self.header.samples_per_pixel,
-            rows_per_strip: self.header.rows_per_strip,
-            strip_byte_counts: Vec::new(),
-            x_resolution: self.header.x_resolution,
-            y_resolution: self.header.y_resolution,
-            planar_configuration: self.header.planar_configuration,
-            resolution_unit: self.header.resolution_unit,
-            sample_format: self.header.sample_format.clone(),
-            extra_samples: self.header.extra_samples.clone(),
-            color_map: self.header.color_map.clone(),
-            ycbcr_coefficients: self.header.ycbcr_coefficients,
-            ycbcr_sub_sampling: self.header.ycbcr_sub_sampling,
-            reference_black_white: self.header.reference_black_white,
-            tile_width: self.header.tile_width,
-            tile_length: self.header.tile_length,
-            tile_offsets: Vec::new(),
-            tile_byte_counts: Vec::new(),
-            predictor: self.header.predictor,
-            jpeg_tables: self.header.jpeg_tables.clone(),
-        };
+        if frames.is_empty() {
+            return Err(VexelError::Custom("No frames decoded from TIFF".to_string()));
+        }
 
-        let pixel_reader = PixelReader {
-            byte_order: self.byte_order,
-            width: self.width,
-            height: self.height,
-        };
+        let width = frames[0].width();
+        let height = frames[0].height();
+        let pixel_format = frames[0].pixel_format();
 
-        let mut pixel_data = pixel_reader.convert_to_pixel_data(bytes, &header)?;
-        pixel_data.correct_pixels(self.width, self.height);
-
-        Ok(Image::from_pixels(self.width, self.height, pixel_data))
+        Ok(Image::new(width, height, pixel_format, frames))
     }
 }

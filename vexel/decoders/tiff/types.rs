@@ -618,6 +618,8 @@ pub struct TiffHeader {
     pub tile_byte_counts: Vec<u32>,
     pub predictor: Predictor,
     pub jpeg_tables: Vec<u8>,
+    pub image_depth: u32,
+    pub tile_depth: u32,
 }
 
 impl Default for TiffHeader {
@@ -648,6 +650,8 @@ impl Default for TiffHeader {
             tile_byte_counts: Vec::new(),
             predictor: Predictor::None,
             jpeg_tables: Vec::new(),
+            image_depth: 1,
+            tile_depth: 1,
         }
     }
 }

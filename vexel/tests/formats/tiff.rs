@@ -1204,5 +1204,271 @@ pub fn test_cases() -> Vec<TestCase> {
                 reference_path: "tiff/cmyk_alpha_planar_u1.avif",
             },
         },
+        // FRAMES
+        TestCase {
+            name: "TIFF rgb_frames_u1",
+            path: "tiff/rgb_frames_u1.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_u2",
+            path: "tiff/rgb_frames_u2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_u4",
+            path: "tiff/rgb_frames_u4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_u4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_u8",
+            path: "tiff/rgb_frames_u8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_u8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_i1",
+            path: "tiff/rgb_frames_i1.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_i1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_i2",
+            path: "tiff/rgb_frames_i2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_i2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_i4",
+            path: "tiff/rgb_frames_i4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_i4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_i8",
+            path: "tiff/rgb_frames_i8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_i8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_f2",
+            path: "tiff/rgb_frames_f2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_f2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_f4",
+            path: "tiff/rgb_frames_f4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_f4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF rgb_frames_f8",
+            path: "tiff/rgb_frames_f8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/rgb_frames_f8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_u1",
+            path: "tiff/gray_frames_u1.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_u2",
+            path: "tiff/gray_frames_u2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_u4",
+            path: "tiff/gray_frames_u4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_u4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_u8",
+            path: "tiff/gray_frames_u8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_u8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_i1",
+            path: "tiff/gray_frames_i1.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_i1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_i2",
+            path: "tiff/gray_frames_i2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_i2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_i4",
+            path: "tiff/gray_frames_i4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_i4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_i8",
+            path: "tiff/gray_frames_i8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_i8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_f2",
+            path: "tiff/gray_frames_f2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_f2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_f4",
+            path: "tiff/gray_frames_f4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_f4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_frames_f8",
+            path: "tiff/gray_frames_f8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_frames_f8.avif",
+            },
+        },
+        // VOLUMETRIC
+        TestCase {
+            name: "TIFF gray_volumetric_u1",
+            path: "tiff/gray_volumetric_u1.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_u1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_u2",
+            path: "tiff/gray_volumetric_u2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_u2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_u4",
+            path: "tiff/gray_volumetric_u4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_u4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_u8",
+            path: "tiff/gray_volumetric_u8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_u8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_i1",
+            path: "tiff/gray_volumetric_i1.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_i1.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_i2",
+            path: "tiff/gray_volumetric_i2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_i2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_i4",
+            path: "tiff/gray_volumetric_i4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_i4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_i8",
+            path: "tiff/gray_volumetric_i8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_i8.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_f2",
+            path: "tiff/gray_volumetric_f2.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_f2.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_f4",
+            path: "tiff/gray_volumetric_f4.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_f4.avif",
+            },
+        },
+        TestCase {
+            name: "TIFF gray_volumetric_f8",
+            path: "tiff/gray_volumetric_f8.tif",
+            validation: None,
+            comparison: Comparison::ExactFrames {
+                reference_path: "tiff/gray_volumetric_f8.avif",
+            },
+        },
     ]
 }
