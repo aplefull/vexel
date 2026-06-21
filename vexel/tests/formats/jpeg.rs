@@ -169,5 +169,15 @@ pub fn test_cases() -> Vec<TestCase> {
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
         },
+        TestCase {
+            name: "JPEG YCCK",
+            path: "jpeg/ycck.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/ycck.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
     ]
 }

@@ -55,8 +55,8 @@ convert *args:
     python3 scripts/generate_references.py {{args}}
 
 # Generate a lossless JXL reference
-gen-jxl input output:
-    cjxl --lossless_jpeg=0 --distance=0 --effort=1 "{{input}}" "{{output}}"
+jxl input output="":
+    cjxl --lossless_jpeg=0 --distance=0 --effort=1 "{{input}}" "{{ if output != "" { output } else { without_extension(input) + ".jxl" } }}"
 
 # Run vexel binary
 vexel *args:

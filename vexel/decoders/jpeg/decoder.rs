@@ -603,6 +603,16 @@ impl<'a> ArithmeticDecoder<'a> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum JpegColorspace {
+    Grayscale,
+    RGB,
+    YCbCr,
+    CMYK,
+    YCCK,
+    Unknown,
+}
+
 struct HierarchicalFrame {
     width: u32,
     height: u32,
@@ -886,24 +896,41 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
-    fn should_convert_ycbcr(&self) -> bool {
+    fn detect_colorspace(&self) -> JpegColorspace {
         let nc = self.components.len();
-        if nc == 1 {
-            return false;
-        }
+        let ids: Vec<u8> = self.components.iter().map(|c| c.id).collect();
 
-        if let Some(ct) = self.adobe_color_transform {
-            return ct != 0;
-        }
-
-        if nc == 3 {
-            let ids: Vec<u8> = self.components.iter().map(|c| c.id).collect();
-            if ids == [82, 71, 66] {
-                return false;
+        match nc {
+            1 => JpegColorspace::Grayscale,
+            3 => {
+                if ids == [0x52, 0x47, 0x42] {
+                    return JpegColorspace::RGB;
+                }
+                if self.jfif_header.is_some() {
+                    return JpegColorspace::YCbCr;
+                }
+                if let Some(ct) = self.adobe_color_transform {
+                    return match ct {
+                        0 => JpegColorspace::RGB,
+                        _ => JpegColorspace::YCbCr,
+                    };
+                }
+                JpegColorspace::YCbCr
             }
+            4 => {
+                if ids == [0x43, 0x4D, 0x59, 0x4B] {
+                    return JpegColorspace::CMYK;
+                }
+                if let Some(ct) = self.adobe_color_transform {
+                    return match ct {
+                        2 => JpegColorspace::YCCK,
+                        _ => JpegColorspace::CMYK,
+                    };
+                }
+                JpegColorspace::CMYK
+            }
+            _ => JpegColorspace::Unknown,
         }
-
-        true
     }
 
     fn read_start_of_frame(&mut self, sof_marker: &str, segment_start: u64) -> VexelResult<()> {
@@ -2662,6 +2689,98 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
+    fn convert_4component_to_rgb(
+        &self,
+        deinterleaved: &[Vec<i32>],
+        source_dims: &[(usize, usize)],
+        tw: usize,
+        th: usize,
+        npixels: usize,
+        colorspace: JpegColorspace,
+    ) -> VexelResult<PixelData> {
+        let empty: Vec<i32> = vec![];
+        let ch0 = deinterleaved.get(0).map(|v| v.as_slice()).unwrap_or(&empty);
+        let ch1 = deinterleaved.get(1).map(|v| v.as_slice()).unwrap_or(&empty);
+        let ch2 = deinterleaved.get(2).map(|v| v.as_slice()).unwrap_or(&empty);
+        let ch3 = deinterleaved.get(3).map(|v| v.as_slice()).unwrap_or(&empty);
+
+        let (y0_sw, y0_sh) = source_dims.get(0).copied().unwrap_or((tw, th));
+
+        let upsample_chroma = |plane: &[i32], dims: (usize, usize), dx: usize, dy: usize| -> i32 {
+            let (sw, sh) = dims;
+            if sw == tw && sh == th {
+                return plane.get(dy * tw + dx).copied().unwrap_or(0);
+            }
+            let h2x = tw == sw * 2 || tw == sw * 2 - 1;
+            let v2x = th == sh * 2 || th == sh * 2 - 1;
+            if h2x && v2x {
+                let sy = (dy / 2).min(sh.saturating_sub(1));
+                let sx = dx / 2;
+                plane.get(sy * sw + sx.min(sw.saturating_sub(1))).copied().unwrap_or(0)
+            } else if h2x {
+                let sx = dx / 2;
+                plane.get(dy * sw + sx.min(sw.saturating_sub(1))).copied().unwrap_or(0)
+            } else if v2x {
+                let sy = (dy / 2).min(sh.saturating_sub(1));
+                plane.get(sy * sw + dx.min(sw.saturating_sub(1))).copied().unwrap_or(0)
+            } else {
+                let sx = (dx * sw / tw).min(sw.saturating_sub(1));
+                let sy = (dy * sh / th).min(sh.saturating_sub(1));
+                plane.get(sy * sw + sx).copied().unwrap_or(0)
+            }
+        };
+
+        let mut pixels = vec![0u8; npixels * 3];
+
+        for dy in 0..th {
+            for dx in 0..tw {
+                let y0_val = if y0_sw == tw && y0_sh == th {
+                    ch0.get(dy * tw + dx).copied().unwrap_or(0)
+                } else {
+                    let sx = (dx * y0_sw / tw).min(y0_sw.saturating_sub(1));
+                    let sy = (dy * y0_sh / th).min(y0_sh.saturating_sub(1));
+                    ch0.get(sy * y0_sw + sx).copied().unwrap_or(0)
+                };
+                let c1_val = upsample_chroma(ch1, source_dims.get(1).copied().unwrap_or((tw, th)), dx, dy);
+                let c2_val = upsample_chroma(ch2, source_dims.get(2).copied().unwrap_or((tw, th)), dx, dy);
+                let k_val  = upsample_chroma(ch3, source_dims.get(3).copied().unwrap_or((tw, th)), dx, dy);
+
+                let k_inv = (k_val + 128).clamp(0, 255);
+
+                let (c_inv, m_inv, y_inv) = if colorspace == JpegColorspace::YCCK {
+                    let cb = c1_val;
+                    let cr = c2_val;
+                    let y_luma = (y0_val + 128) << 16;
+                    let r_inv = (255 << 16) - y_luma - 91881 * cr;
+                    let g_inv = (255 << 16) - y_luma + 22554 * cb + 46802 * cr;
+                    let b_inv = (255 << 16) - y_luma - 116130 * cb;
+                    (
+                        ((r_inv + 32768) >> 16).clamp(0, 255),
+                        ((g_inv + 32768) >> 16).clamp(0, 255),
+                        ((b_inv + 32768) >> 16).clamp(0, 255),
+                    )
+                } else {
+                    (
+                        (y0_val + 128).clamp(0, 255),
+                        (c1_val + 128).clamp(0, 255),
+                        (c2_val + 128).clamp(0, 255),
+                    )
+                };
+
+                let idx = dy * tw + dx;
+                let r_out = ((c_inv * k_inv + 127) / 255).clamp(0, 255) as u8;
+                let g_out = ((m_inv * k_inv + 127) / 255).clamp(0, 255) as u8;
+                let b_out = ((y_inv * k_inv + 127) / 255).clamp(0, 255) as u8;
+
+                pixels[idx * 3]     = r_out;
+                pixels[idx * 3 + 1] = g_out;
+                pixels[idx * 3 + 2] = b_out;
+            }
+        }
+
+        Ok(PixelData::RGB8(pixels))
+    }
+
     fn upsample_and_convert(&self, planes: &[ComponentPlane]) -> VexelResult<PixelData> {
         use crate::decoders::jpeg::upsample as up;
 
@@ -2725,6 +2844,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 pixels16.resize(npixels, 0);
                 Ok(PixelData::L16(pixels16))
             };
+        }
+
+        let colorspace = self.detect_colorspace();
+
+        if colorspace == JpegColorspace::CMYK || colorspace == JpegColorspace::YCCK {
+            return self.convert_4component_to_rgb(&deinterleaved, &source_dims, tw, th, npixels, colorspace);
         }
 
         if deinterleaved.len() < 3 {
@@ -2833,7 +2958,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }};
         }
 
-        let convert_ycbcr = self.should_convert_ycbcr();
+        let convert_ycbcr = colorspace == JpegColorspace::YCbCr;
 
         macro_rules! fill_row_8 {
             ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr) => {{
@@ -3298,7 +3423,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let max_val = if precision <= 8 { 255i32 } else { 65535i32 };
         let npixels = out_w * out_h;
-        let convert_ycbcr = self.should_convert_ycbcr();
+        let colorspace = self.detect_colorspace();
 
         if nc == 1 {
             if precision <= 8 {
@@ -3314,7 +3439,35 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 }
                 Ok(Image::from_pixels(final_width, final_height, PixelData::L16(pixels)))
             }
-        } else if nc == 3 {
+        } else if nc == 4 {
+            let mut pixels = vec![0u8; npixels * 3];
+            for i in 0..npixels {
+                let c0 = current_pixels[0].get(i).copied().unwrap_or(128);
+                let c1 = current_pixels[1].get(i).copied().unwrap_or(128);
+                let c2 = current_pixels[2].get(i).copied().unwrap_or(128);
+                let k_inv = current_pixels[3].get(i).copied().unwrap_or(128).clamp(0, 255);
+                let (c_inv, m_inv, y_inv) = if colorspace == JpegColorspace::YCCK {
+                    let cb = c1 - 128;
+                    let cr = c2 - 128;
+                    let y_luma = c0 << 16;
+                    let r_inv = (255 << 16) - y_luma - 91881 * cr;
+                    let g_inv = (255 << 16) - y_luma + 22554 * cb + 46802 * cr;
+                    let b_inv = (255 << 16) - y_luma - 116130 * cb;
+                    (
+                        ((r_inv + 32768) >> 16).clamp(0, 255),
+                        ((g_inv + 32768) >> 16).clamp(0, 255),
+                        ((b_inv + 32768) >> 16).clamp(0, 255),
+                    )
+                } else {
+                    (c0.clamp(0, 255), c1.clamp(0, 255), c2.clamp(0, 255))
+                };
+                pixels[i * 3]     = ((c_inv * k_inv + 127) / 255).clamp(0, 255) as u8;
+                pixels[i * 3 + 1] = ((m_inv * k_inv + 127) / 255).clamp(0, 255) as u8;
+                pixels[i * 3 + 2] = ((y_inv * k_inv + 127) / 255).clamp(0, 255) as u8;
+            }
+            Ok(Image::from_pixels(final_width, final_height, PixelData::RGB8(pixels)))
+        } else {
+            let convert_ycbcr = colorspace == JpegColorspace::YCbCr;
             if precision <= 8 {
                 let mut pixels = vec![0u8; npixels * 3];
                 for i in 0..npixels {
@@ -3352,24 +3505,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         pixels[i * 3]     = (c0.clamp(0, 65535) as u16) << 4;
                         pixels[i * 3 + 1] = (c1.clamp(0, 65535) as u16) << 4;
                         pixels[i * 3 + 2] = (c2.clamp(0, 65535) as u16) << 4;
-                    }
-                }
-                Ok(Image::from_pixels(final_width, final_height, PixelData::RGB16(pixels)))
-            }
-        } else {
-            if precision <= 8 {
-                let mut pixels = vec![0u8; npixels * nc];
-                for i in 0..npixels {
-                    for c in 0..nc {
-                        pixels[i * nc + c] = current_pixels[c].get(i).copied().unwrap_or(0).clamp(0, max_val) as u8;
-                    }
-                }
-                Ok(Image::from_pixels(final_width, final_height, PixelData::RGB8(pixels)))
-            } else {
-                let mut pixels = vec![0u16; npixels * nc];
-                for i in 0..npixels {
-                    for c in 0..nc {
-                        pixels[i * nc + c] = current_pixels[c].get(i).copied().unwrap_or(0).clamp(0, max_val) as u16;
                     }
                 }
                 Ok(Image::from_pixels(final_width, final_height, PixelData::RGB16(pixels)))
