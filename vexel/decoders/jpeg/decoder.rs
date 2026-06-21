@@ -197,6 +197,7 @@ impl<'a> ArithmeticDecoder<'a> {
         dc_context: &mut [usize],
         last_dc_val: &mut [i32],
         dc_stats: &mut [Vec<u8>],
+        is_differential: bool,
     ) -> i32 {
         if self.error || dc_tbl >= dc_stats.len() || comp_idx >= dc_context.len() {
             return last_dc_val.get(comp_idx).copied().unwrap_or(0);
@@ -230,16 +231,6 @@ impl<'a> ArithmeticDecoder<'a> {
                 }
             }
 
-            let threshold_l = if dc_l == 0 { 0 } else { (1i32 << dc_l) >> 1 };
-            let threshold_u = if dc_u == 0 { 0 } else { (1i32 << dc_u) >> 1 };
-            dc_context[comp_idx] = if m < threshold_l {
-                0
-            } else if m > threshold_u {
-                12 + sign as usize * 4
-            } else {
-                4 + sign as usize * 4
-            };
-
             st = (st + 14).min(tbl_len - 1);
             let mut v = m;
             let mut bit_m = m;
@@ -253,7 +244,23 @@ impl<'a> ArithmeticDecoder<'a> {
             if sign != 0 {
                 v = -v;
             }
-            last_dc_val[comp_idx] = (last_dc_val[comp_idx] + v) & 0xFFFF;
+
+            let abs_v = v.unsigned_abs() as i32;
+            let threshold_l = (1i32 << dc_l) >> 1;
+            let threshold_u = 1i32 << dc_u;
+            dc_context[comp_idx] = if abs_v <= threshold_l {
+                0
+            } else if abs_v > threshold_u {
+                12 + sign as usize * 4
+            } else {
+                4 + sign as usize * 4
+            };
+
+            if is_differential {
+                last_dc_val[comp_idx] = v & 0xFFFF;
+            } else {
+                last_dc_val[comp_idx] = (last_dc_val[comp_idx] + v) & 0xFFFF;
+            }
         }
 
         let raw = last_dc_val[comp_idx];
@@ -271,8 +278,9 @@ impl<'a> ArithmeticDecoder<'a> {
         dc_context: &mut Vec<usize>,
         last_dc_val: &mut Vec<i32>,
         dc_stats: &mut Vec<Vec<u8>>,
+        is_differential: bool,
     ) {
-        let val = self.decode_dc_coeff(comp_idx, dc_tbl, dc_l, dc_u, dc_context, last_dc_val, dc_stats);
+        let val = self.decode_dc_coeff(comp_idx, dc_tbl, dc_l, dc_u, dc_context, last_dc_val, dc_stats, is_differential);
         block[0] = val << (successive_low as i32);
     }
 
@@ -448,10 +456,11 @@ impl<'a> ArithmeticDecoder<'a> {
         last_dc_val: &mut Vec<i32>,
         dc_stats: &mut Vec<Vec<u8>>,
         ac_stats: &mut Vec<Vec<u8>>,
+        is_differential: bool,
     ) {
         if self.error { return; }
 
-        let val = self.decode_dc_coeff(comp_idx, dc_tbl, dc_l, dc_u, dc_context, last_dc_val, dc_stats);
+        let val = self.decode_dc_coeff(comp_idx, dc_tbl, dc_l, dc_u, dc_context, last_dc_val, dc_stats, is_differential);
         block[0] = val;
 
         if self.error { return; }
@@ -594,6 +603,17 @@ impl<'a> ArithmeticDecoder<'a> {
     }
 }
 
+struct HierarchicalFrame {
+    width: u32,
+    height: u32,
+    mode: JpegMode,
+    coding_method: JpegCodingMethod,
+    precision: u8,
+    components: Vec<ColorComponentInfo>,
+    quantization_tables: Vec<QuantizationTable>,
+    scans: Vec<ScanData>,
+}
+
 pub struct JpegDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
@@ -618,6 +638,13 @@ pub struct JpegDecoder<R: Read + Seek> {
     scans: Vec<ScanData>,
     segments: Vec<JpegSegmentInfo>,
     reader: BitReader<R>,
+    adobe_color_transform: Option<u8>,
+    is_hierarchical: bool,
+    dhp_width: u32,
+    dhp_height: u32,
+    pending_expand_h: bool,
+    pending_expand_v: bool,
+    hierarchical_frames: Vec<HierarchicalFrame>,
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
@@ -647,6 +674,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
             scans: Vec::new(),
             segments: Vec::new(),
             reader: BitReader::new(reader),
+            adobe_color_transform: None,
+            is_hierarchical: false,
+            dhp_width: 0,
+            dhp_height: 0,
+            pending_expand_h: false,
+            pending_expand_v: false,
+            hierarchical_frames: Vec::new(),
         }
     }
 
@@ -803,6 +837,73 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.record_segment(segment_start, "APP1", JpegSegmentData::APP1 { length, exif });
 
         Ok(())
+    }
+
+    fn read_app14_adobe(&mut self, segment_start: u64) -> VexelResult<()> {
+        let length = self.reader.read_u16()?;
+
+        if length < 12 {
+            for _ in 0..(length.saturating_sub(2)) {
+                self.reader.read_u8()?;
+            }
+            self.record_segment(segment_start, "APP14", JpegSegmentData::APP {
+                marker: "APP14".to_string(),
+                length,
+            });
+            return Ok(());
+        }
+
+        let mut id = [0u8; 5];
+        for b in &mut id {
+            *b = self.reader.read_u8()?;
+        }
+
+        if &id != b"Adobe" {
+            let remaining = (length as usize).saturating_sub(7);
+            for _ in 0..remaining {
+                self.reader.read_u8()?;
+            }
+            self.record_segment(segment_start, "APP14", JpegSegmentData::APP {
+                marker: "APP14".to_string(),
+                length,
+            });
+            return Ok(());
+        }
+
+        let _version = self.reader.read_u16()?;
+        let _flags0 = self.reader.read_u16()?;
+        let _flags1 = self.reader.read_u16()?;
+        let color_transform = self.reader.read_u8()?;
+
+        self.adobe_color_transform = Some(color_transform);
+        log_debug!("Adobe APP14: color_transform={}", color_transform);
+
+        self.record_segment(segment_start, "APP14", JpegSegmentData::APP {
+            marker: "APP14".to_string(),
+            length,
+        });
+
+        Ok(())
+    }
+
+    fn should_convert_ycbcr(&self) -> bool {
+        let nc = self.components.len();
+        if nc == 1 {
+            return false;
+        }
+
+        if let Some(ct) = self.adobe_color_transform {
+            return ct != 0;
+        }
+
+        if nc == 3 {
+            let ids: Vec<u8> = self.components.iter().map(|c| c.id).collect();
+            if ids == [82, 71, 66] {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn read_start_of_frame(&mut self, sof_marker: &str, segment_start: u64) -> VexelResult<()> {
@@ -1322,12 +1423,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
         dc_table: &HuffmanTable,
         ac_table: &HuffmanTable,
         previous_dc: &mut i32,
+        is_differential: bool,
     ) -> VexelResult<()> {
         let length = Self::get_next_symbol(reader, dc_table);
 
-        let max_length = if self.precision > 8 { 12 } else { 11 };
-        if length > max_length {
-            log_warn!("Invalid DC coefficient length (>{}): {}", max_length, length);
+        if length > 15 {
+            log_warn!("Invalid DC coefficient length (>15): {}", length);
             return Ok(());
         }
 
@@ -1337,8 +1438,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
             dc_coeff -= (1 << length) - 1;
         }
 
-        let dc_value = dc_coeff + *previous_dc;
-        *previous_dc = dc_value;
+        let dc_value = if is_differential {
+            *previous_dc = dc_coeff;
+            dc_coeff
+        } else {
+            let v = dc_coeff + *previous_dc;
+            *previous_dc = v;
+            v
+        };
         unsafe { *mcu_component.get_unchecked_mut(0) = dc_value; }
 
         let mut i = 1usize;
@@ -1542,8 +1649,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                                             let length = Self::get_next_symbol(&mut reader, dc_table);
 
-                                            if length > 11 {
-                                                log_warn!("Invalid DC coefficient length (>11): {}", length);
+                                            if length > 15 {
+                                                log_warn!("Invalid DC coefficient length (>15): {}", length);
                                                 continue;
                                             }
 
@@ -1555,8 +1662,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                 value -= (1 << length) - 1;
                                             }
 
-                                            value += previous_dc[plane_index];
-                                            previous_dc[plane_index] = value;
+                                            let is_differential = matches!(self.mode, JpegMode::DifferentialProgressive | JpegMode::DifferentialSequential);
+                                            if is_differential {
+                                                previous_dc[plane_index] = value;
+                                            } else {
+                                                value += previous_dc[plane_index];
+                                                previous_dc[plane_index] = value;
+                                            }
                                             component_data[0] = value << scan.successive_low;
                                         } else {
                                             // Refining DC scan
@@ -1603,8 +1715,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                         k += 1;
                                                     }
 
-                                                    if length > 10 {
-                                                        log_warn!("Invalid AC coefficient length (>10): {}", length);
+                                                    let max_ac_len = if self.precision > 8 { 15 } else { 10 };
+                                                    if length > max_ac_len {
+                                                        log_warn!("Invalid AC coefficient length (>{}): {}", max_ac_len, length);
                                                         break;
                                                     }
 
@@ -2194,6 +2307,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                     &mut last_dc_val,
                                     &mut dc_stats,
                                     &mut ac_stats,
+                                    matches!(self.mode, JpegMode::DifferentialSequential | JpegMode::DifferentialProgressive),
                                 );
                             }
                         }
@@ -2338,6 +2452,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                 &mut per_scan_dc_context,
                                                 &mut per_scan_last_dc_val,
                                                 &mut per_scan_dc_stats,
+                                                matches!(self.mode, JpegMode::DifferentialProgressive | JpegMode::DifferentialSequential),
                                             );
                                         } else {
                                             arith.decode_dc_refine(
@@ -2481,12 +2596,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
                             }
 
                             if let Some(block) = planes[comp_idx].get_block_mut(block_x, block_y) {
+                                let is_differential = matches!(self.mode, JpegMode::DifferentialSequential | JpegMode::DifferentialProgressive);
                                 match self.decode_mcu(
                                     &mut reader,
                                     block,
                                     &info.dc_table,
                                     &info.ac_table,
                                     &mut previous_dc[comp_idx],
+                                    is_differential,
                                 ) {
                                     Ok(_) => {}
                                     Err(e) => {
@@ -2716,6 +2833,52 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }};
         }
 
+        let convert_ycbcr = self.should_convert_ycbcr();
+
+        macro_rules! fill_row_8 {
+            ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr) => {{
+                upsample_chroma_row!(cb_plane, $dy, $cb_row);
+                upsample_chroma_row!(cr_plane, $dy, $cr_row);
+                for col in 0..tw {
+                    let c0 = $y_row.get(col).copied().unwrap_or(0);
+                    let c1 = $cb_row.get(col).copied().unwrap_or(0);
+                    let c2 = $cr_row.get(col).copied().unwrap_or(0);
+                    if convert_ycbcr {
+                        let y128 = (c0 + 128) << 16;
+                        $dst[col * 3]     = ((y128 + 91881 * c2 + 32768) >> 16).clamp(0, 255) as u8;
+                        $dst[col * 3 + 1] = ((y128 - 22554 * c1 - 46802 * c2 + 32768) >> 16).clamp(0, 255) as u8;
+                        $dst[col * 3 + 2] = ((y128 + 116130 * c1 + 32768) >> 16).clamp(0, 255) as u8;
+                    } else {
+                        $dst[col * 3]     = (c0 + 128).clamp(0, 255) as u8;
+                        $dst[col * 3 + 1] = (c1 + 128).clamp(0, 255) as u8;
+                        $dst[col * 3 + 2] = (c2 + 128).clamp(0, 255) as u8;
+                    }
+                }
+            }};
+        }
+
+        macro_rules! fill_row_16 {
+            ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr) => {{
+                upsample_chroma_row!(cb_plane, $dy, $cb_row);
+                upsample_chroma_row!(cr_plane, $dy, $cr_row);
+                for col in 0..tw {
+                    let c0 = $y_row.get(col).copied().unwrap_or(0);
+                    let c1 = $cb_row.get(col).copied().unwrap_or(0);
+                    let c2 = $cr_row.get(col).copied().unwrap_or(0);
+                    if convert_ycbcr {
+                        let y2048 = (c0 + 2048) << 16;
+                        $dst[col * 3]     = (((y2048 + 91881 * c2 + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                        $dst[col * 3 + 1] = (((y2048 - 22554 * c1 - 46802 * c2 + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                        $dst[col * 3 + 2] = (((y2048 + 116130 * c1 + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                    } else {
+                        $dst[col * 3]     = ((c0 + 2048).clamp(0, 65535) as u16) << 4;
+                        $dst[col * 3 + 1] = ((c1 + 2048).clamp(0, 65535) as u16) << 4;
+                        $dst[col * 3 + 2] = ((c2 + 2048).clamp(0, 65535) as u16) << 4;
+                    }
+                }
+            }};
+        }
+
         if self.precision <= 8 {
             let mut pixels = vec![0u8; npixels * 3];
 
@@ -2749,18 +2912,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut y_row, y_sw, tw);
                     }
 
-                    upsample_chroma_row!(cb_plane, dy, cb_row);
-                    upsample_chroma_row!(cr_plane, dy, cr_row);
-
-                    for col in 0..tw {
-                        let y = y_row.get(col).copied().unwrap_or(0);
-                        let cb = cb_row.get(col).copied().unwrap_or(0);
-                        let cr = cr_row.get(col).copied().unwrap_or(0);
-                        let y128 = (y + 128) << 16;
-                        dst[col * 3] = ((y128 + 91881 * cr + 32768) >> 16).clamp(0, 255) as u8;
-                        dst[col * 3 + 1] = ((y128 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 255) as u8;
-                        dst[col * 3 + 2] = ((y128 + 116130 * cb + 32768) >> 16).clamp(0, 255) as u8;
-                    }
+                    fill_row_8!(dy, y_row, cb_row, cr_row, dst);
                 });
             }
 
@@ -2771,18 +2923,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let mut cr_row = vec![0i32; tw];
                 for dy in 0..th {
                     _upsample_y_row(dy, &mut y_row);
-                    upsample_chroma_row!(cb_plane, dy, cb_row);
-                    upsample_chroma_row!(cr_plane, dy, cr_row);
                     let base = dy * tw * 3;
-                    for col in 0..tw {
-                        let y = y_row.get(col).copied().unwrap_or(0);
-                        let cb = cb_row.get(col).copied().unwrap_or(0);
-                        let cr = cr_row.get(col).copied().unwrap_or(0);
-                        let y128 = (y + 128) << 16;
-                        pixels[base + col * 3] = ((y128 + 91881 * cr + 32768) >> 16).clamp(0, 255) as u8;
-                        pixels[base + col * 3 + 1] = ((y128 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 255) as u8;
-                        pixels[base + col * 3 + 2] = ((y128 + 116130 * cb + 32768) >> 16).clamp(0, 255) as u8;
-                    }
+                    fill_row_8!(dy, y_row, cb_row, cr_row, pixels[base..base + tw * 3]);
                 }
             }
 
@@ -2820,18 +2962,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut y_row, y_sw, tw);
                     }
 
-                    upsample_chroma_row!(cb_plane, dy, cb_row);
-                    upsample_chroma_row!(cr_plane, dy, cr_row);
-
-                    for col in 0..tw {
-                        let y = y_row.get(col).copied().unwrap_or(0);
-                        let cb = cb_row.get(col).copied().unwrap_or(0);
-                        let cr = cr_row.get(col).copied().unwrap_or(0);
-                        let y2048 = (y + 2048) << 16;
-                        dst[col * 3] = (((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
-                        dst[col * 3 + 1] = (((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
-                        dst[col * 3 + 2] = (((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16) << 4;
-                    }
+                    fill_row_16!(dy, y_row, cb_row, cr_row, dst);
                 });
             }
 
@@ -2842,18 +2973,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let mut cr_row = vec![0i32; tw];
                 for dy in 0..th {
                     _upsample_y_row(dy, &mut y_row);
-                    upsample_chroma_row!(cb_plane, dy, cb_row);
-                    upsample_chroma_row!(cr_plane, dy, cr_row);
                     let base = dy * tw * 3;
-                    for col in 0..tw {
-                        let y = y_row.get(col).copied().unwrap_or(0);
-                        let cb = cb_row.get(col).copied().unwrap_or(0);
-                        let cr = cr_row.get(col).copied().unwrap_or(0);
-                        let y2048 = (y + 2048) << 16;
-                        pixels16[base + col * 3] = (((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
-                        pixels16[base + col * 3 + 1] = (((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
-                        pixels16[base + col * 3 + 2] = (((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16) << 4;
-                    }
+                    fill_row_16!(dy, y_row, cb_row, cr_row, pixels16[base..base + tw * 3]);
                 }
             }
 
@@ -2902,6 +3023,420 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
     }
 
+    fn decode_frame_to_pixels(
+        &mut self,
+        frame: &HierarchicalFrame,
+    ) -> VexelResult<Vec<Vec<i32>>> {
+        let saved_width = self.width;
+        let saved_height = self.height;
+        let saved_mode = self.mode.clone();
+        let saved_coding = self.coding_method.clone();
+        let saved_precision = self.precision;
+        let saved_components = self.components.clone();
+        let saved_quantization = self.quantization_tables.clone();
+        let saved_scans = std::mem::take(&mut self.scans);
+        let saved_restart = self.restart_interval;
+
+        self.width = frame.width;
+        self.height = frame.height;
+        self.mode = frame.mode.clone();
+        self.coding_method = frame.coding_method.clone();
+        self.precision = frame.precision;
+        self.components = frame.components.clone();
+        self.quantization_tables = frame.quantization_tables.clone();
+        self.scans = frame.scans.clone();
+
+        let result = self.decode_frame_pixels_internal();
+
+        self.width = saved_width;
+        self.height = saved_height;
+        self.mode = saved_mode;
+        self.coding_method = saved_coding;
+        self.precision = saved_precision;
+        self.components = saved_components;
+        self.quantization_tables = saved_quantization;
+        self.scans = saved_scans;
+        self.restart_interval = saved_restart;
+
+        result
+    }
+
+    fn decode_frame_pixels_internal(&mut self) -> VexelResult<Vec<Vec<i32>>> {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let nc = self.components.len();
+
+        match self.mode.clone() {
+            JpegMode::DifferentialLossless => {
+                let scan = match self.scans.first() {
+                    Some(s) => s.clone(),
+                    None => return Ok(vec![vec![0i32; w * h]; nc]),
+                };
+
+                let differences = if self.coding_method == JpegCodingMethod::Arithmetic {
+                    self.decode_differences_arithmetic(&scan)?
+                } else {
+                    self.decode_differences(&scan)?
+                };
+
+                Ok(differences)
+            }
+
+            JpegMode::Lossless => {
+                let scan = match self.scans.first() {
+                    Some(s) => s.clone(),
+                    None => return Ok(vec![vec![0i32; w * h]; nc]),
+                };
+
+                let differences = if self.coding_method == JpegCodingMethod::Arithmetic {
+                    self.decode_differences_arithmetic(&scan)?
+                } else {
+                    self.decode_differences(&scan)?
+                };
+
+                let point_transform = self.successive_approximation_low;
+                let predictor = match scan.start_spectral {
+                    0 => Predictor::NoPrediction,
+                    1 => Predictor::Ra,
+                    2 => Predictor::Rb,
+                    3 => Predictor::Rc,
+                    4 => Predictor::RaRbRc1,
+                    5 => Predictor::RaRbRc2,
+                    6 => Predictor::RaRbRc3,
+                    7 => Predictor::RaRb,
+                    _ => Predictor::NoPrediction,
+                };
+
+                let samples = self.reconstruct_samples(differences, predictor, point_transform)?;
+                let pixels: Vec<Vec<i32>> = samples.into_iter().map(|c| c.into_iter().map(|v| v as i32).collect()).collect();
+
+                Ok(pixels)
+            }
+
+            JpegMode::Progressive | JpegMode::DifferentialProgressive => {
+                let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
+                let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
+                let mcu_w = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
+                let mcu_h = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+
+                let mut planes: Vec<ComponentPlane> = self.components.iter().map(|comp| {
+                    ComponentPlane::new(
+                        mcu_w * 8 * comp.horizontal_sampling_factor as u32,
+                        mcu_h * 8 * comp.vertical_sampling_factor as u32,
+                    )
+                }).collect();
+
+                match self.coding_method {
+                    JpegCodingMethod::Huffman => self.decode_progressive_scans(&mut planes)?,
+                    JpegCodingMethod::Arithmetic => self.decode_progressive_scans_arithmetic(&mut planes)?,
+                }
+
+                self.dequantize_and_idct_planes(&mut planes)?;
+                
+                Ok(self.planes_to_component_pixels(&planes))
+            }
+
+            _ => {
+                let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
+                let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
+                let mcu_w = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
+                let mcu_h = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+
+                let mut planes: Vec<ComponentPlane> = self.components.iter().map(|comp| {
+                    ComponentPlane::new(
+                        mcu_w * 8 * comp.horizontal_sampling_factor as u32,
+                        mcu_h * 8 * comp.vertical_sampling_factor as u32,
+                    )
+                }).collect();
+
+                match self.coding_method {
+                    JpegCodingMethod::Huffman => self.decode_huffman_to_planes(&mut planes)?,
+                    JpegCodingMethod::Arithmetic => self.decode_arithmetic_to_planes(&mut planes)?,
+                }
+
+                self.dequantize_and_idct_planes(&mut planes)?;
+                let result = self.planes_to_component_pixels(&planes);
+
+                Ok(result)
+            }
+        }
+    }
+
+    fn planes_to_component_pixels(&self, planes: &[ComponentPlane]) -> Vec<Vec<i32>> {
+        let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
+        let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
+        let tw = self.width as usize;
+        let th = self.height as usize;
+
+        planes.iter().zip(self.components.iter()).map(|(plane, comp)| {
+            let sw = ((self.width * comp.horizontal_sampling_factor as u32 + max_h_samp as u32 - 1) / max_h_samp as u32) as usize;
+            let sh = ((self.height * comp.vertical_sampling_factor as u32 + max_v_samp as u32 - 1) / max_v_samp as u32) as usize;
+            let raw = plane.deinterleave(sw as u32, sh as u32);
+
+            if sw == tw && sh == th {
+                raw
+            } else {
+                let mut out = vec![0i32; tw * th];
+                for dy in 0..th {
+                    for dx in 0..tw {
+                        let sx = (dx * sw / tw).min(sw.saturating_sub(1));
+                        let sy = (dy * sh / th).min(sh.saturating_sub(1));
+                        out[dy * tw + dx] = raw[sy * sw + sx];
+                    }
+                }
+                out
+            }
+        }).collect()
+    }
+
+    fn expand_2x(src: &[i32], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<i32> {
+        if src_w == dst_w && src_h == dst_h {
+            return src.to_vec();
+        }
+        let expand_h = dst_w > src_w;
+        let expand_v = dst_h > src_h;
+        let h_w = if expand_h { dst_w } else { src_w };
+
+        let mut h_buf = vec![0i32; h_w * src_h];
+        if expand_h {
+            for y in 0..src_h {
+                let row = &src[y * src_w..(y + 1) * src_w];
+                let out = &mut h_buf[y * h_w..(y + 1) * h_w];
+                for x in 0..src_w {
+                    let xi2 = x * 2;
+                    let next = if x + 1 < src_w { row[x + 1] } else { row[x] };
+                    if xi2 < h_w { out[xi2] = row[x]; }
+                    if xi2 + 1 < h_w { out[xi2 + 1] = (row[x] + next) >> 1; }
+                }
+            }
+        } else {
+            h_buf.copy_from_slice(src);
+        }
+
+        let mut out = vec![0i32; dst_w * dst_h];
+        if expand_v {
+            for y in 0..dst_h {
+                let sy = (y / 2).min(src_h - 1);
+                let ny = (sy + 1).min(src_h - 1);
+                if y % 2 == 0 {
+                    out[y * dst_w..(y + 1) * dst_w].copy_from_slice(&h_buf[sy * h_w..(sy + 1) * h_w]);
+                } else {
+                    let ra = &h_buf[sy * h_w..(sy + 1) * h_w];
+                    let rb = &h_buf[ny * h_w..(ny + 1) * h_w];
+                    for x in 0..dst_w {
+                        out[y * dst_w + x] = (ra[x] + rb[x]) >> 1;
+                    }
+                }
+            }
+        } else {
+            out.copy_from_slice(&h_buf);
+        }
+        out
+    }
+
+    fn decode_hierarchical(&mut self) -> VexelResult<Image> {
+        if self.hierarchical_frames.is_empty() {
+            return Err(VexelError::from(Error::new(ErrorKind::InvalidData, "No hierarchical frames found")));
+        }
+
+        let final_width = self.dhp_width;
+        let final_height = self.dhp_height;
+        let nc = self.hierarchical_frames[0].components.len();
+        let precision = self.hierarchical_frames[0].precision;
+        let level_shift = if precision <= 8 { 128i32 } else { 2048i32 };
+
+        let frames = std::mem::take(&mut self.hierarchical_frames);
+        let base = &frames[0];
+        let raw_pixels = self.decode_frame_to_pixels(base)?;
+        let is_base_lossless = matches!(base.mode, JpegMode::Lossless);
+
+        let mut current_pixels: Vec<Vec<i32>> = if is_base_lossless {
+            raw_pixels
+        } else {
+            raw_pixels.into_iter().map(|c| c.into_iter().map(|v| v + level_shift).collect()).collect()
+        };
+
+        let mut current_w = base.width as usize;
+        let mut current_h = base.height as usize;
+
+        for frame in frames.iter().skip(1) {
+            let dst_w = frame.width as usize;
+            let dst_h = frame.height as usize;
+
+            let mut upsampled: Vec<Vec<i32>> = current_pixels.iter().map(|comp| {
+                Self::expand_2x(comp, current_w, current_h, dst_w, dst_h)
+            }).collect();
+
+            let diff_raw = self.decode_frame_to_pixels(frame)?;
+
+            let max_val = (1i32 << precision) - 1;
+            for (comp_idx, diff) in diff_raw.iter().enumerate() {
+                if comp_idx >= upsampled.len() {
+                    break;
+                }
+                let up = &mut upsampled[comp_idx];
+                for (u, d) in up.iter_mut().zip(diff.iter()) {
+                    *u = (*u + *d).clamp(0, max_val);
+                }
+            }
+
+            current_pixels = upsampled;
+            current_w = dst_w;
+            current_h = dst_h;
+        }
+
+        self.hierarchical_frames = frames;
+
+        let out_w = final_width as usize;
+        let out_h = final_height as usize;
+
+        if current_w != out_w || current_h != out_h {
+            current_pixels = current_pixels.into_iter().map(|comp| {
+                Self::expand_2x(&comp, current_w, current_h, out_w, out_h)
+            }).collect();
+        }
+
+        let max_val = if precision <= 8 { 255i32 } else { 65535i32 };
+        let npixels = out_w * out_h;
+        let convert_ycbcr = self.should_convert_ycbcr();
+
+        if nc == 1 {
+            if precision <= 8 {
+                let mut pixels = vec![0u8; npixels];
+                for i in 0..npixels {
+                    pixels[i] = current_pixels[0].get(i).copied().unwrap_or(0).clamp(0, max_val) as u8;
+                }
+                Ok(Image::from_pixels(final_width, final_height, PixelData::L8(pixels)))
+            } else {
+                let mut pixels = vec![0u16; npixels];
+                for i in 0..npixels {
+                    pixels[i] = current_pixels[0].get(i).copied().unwrap_or(0).clamp(0, max_val) as u16;
+                }
+                Ok(Image::from_pixels(final_width, final_height, PixelData::L16(pixels)))
+            }
+        } else if nc == 3 {
+            if precision <= 8 {
+                let mut pixels = vec![0u8; npixels * 3];
+                for i in 0..npixels {
+                    let c0 = current_pixels[0].get(i).copied().unwrap_or(128);
+                    let c1 = current_pixels[1].get(i).copied().unwrap_or(128);
+                    let c2 = current_pixels[2].get(i).copied().unwrap_or(128);
+                    if convert_ycbcr {
+                        let cb = c1 - 128;
+                        let cr = c2 - 128;
+                        let y128 = c0 << 16;
+                        pixels[i * 3]     = ((y128 + 91881 * cr + 32768) >> 16).clamp(0, 255) as u8;
+                        pixels[i * 3 + 1] = ((y128 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 255) as u8;
+                        pixels[i * 3 + 2] = ((y128 + 116130 * cb + 32768) >> 16).clamp(0, 255) as u8;
+                    } else {
+                        pixels[i * 3]     = c0.clamp(0, 255) as u8;
+                        pixels[i * 3 + 1] = c1.clamp(0, 255) as u8;
+                        pixels[i * 3 + 2] = c2.clamp(0, 255) as u8;
+                    }
+                }
+                Ok(Image::from_pixels(final_width, final_height, PixelData::RGB8(pixels)))
+            } else {
+                let mut pixels = vec![0u16; npixels * 3];
+                for i in 0..npixels {
+                    let c0 = current_pixels[0].get(i).copied().unwrap_or(2048);
+                    let c1 = current_pixels[1].get(i).copied().unwrap_or(2048);
+                    let c2 = current_pixels[2].get(i).copied().unwrap_or(2048);
+                    if convert_ycbcr {
+                        let cb = c1 - 2048;
+                        let cr = c2 - 2048;
+                        let y2048 = c0 << 16;
+                        pixels[i * 3]     = (((y2048 + 91881 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                        pixels[i * 3 + 1] = (((y2048 - 22554 * cb - 46802 * cr + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                        pixels[i * 3 + 2] = (((y2048 + 116130 * cb + 32768) >> 16).clamp(0, 4095) as u16) << 4;
+                    } else {
+                        pixels[i * 3]     = (c0.clamp(0, 65535) as u16) << 4;
+                        pixels[i * 3 + 1] = (c1.clamp(0, 65535) as u16) << 4;
+                        pixels[i * 3 + 2] = (c2.clamp(0, 65535) as u16) << 4;
+                    }
+                }
+                Ok(Image::from_pixels(final_width, final_height, PixelData::RGB16(pixels)))
+            }
+        } else {
+            if precision <= 8 {
+                let mut pixels = vec![0u8; npixels * nc];
+                for i in 0..npixels {
+                    for c in 0..nc {
+                        pixels[i * nc + c] = current_pixels[c].get(i).copied().unwrap_or(0).clamp(0, max_val) as u8;
+                    }
+                }
+                Ok(Image::from_pixels(final_width, final_height, PixelData::RGB8(pixels)))
+            } else {
+                let mut pixels = vec![0u16; npixels * nc];
+                for i in 0..npixels {
+                    for c in 0..nc {
+                        pixels[i * nc + c] = current_pixels[c].get(i).copied().unwrap_or(0).clamp(0, max_val) as u16;
+                    }
+                }
+                Ok(Image::from_pixels(final_width, final_height, PixelData::RGB16(pixels)))
+            }
+        }
+    }
+
+    fn read_dhp(&mut self, segment_start: u64) -> VexelResult<()> {
+        let length = self.reader.read_u16()?;
+
+        let precision = self.reader.read_u8()?;
+        let height = self.reader.read_u16()? as u32;
+        let width = self.reader.read_u16()? as u32;
+        let component_count = self.reader.read_u8()?;
+
+        for _ in 0..component_count {
+            self.reader.read_u8()?;
+            self.reader.read_u8()?;
+            self.reader.read_u8()?;
+        }
+
+        self.is_hierarchical = true;
+        self.dhp_width = width;
+        self.dhp_height = height;
+
+        self.record_segment(segment_start, "DHP", JpegSegmentData::SOF(crate::decoders::jpeg::types::SOFData {
+            length,
+            marker: "DHP".to_string(),
+            precision,
+            width,
+            height,
+            component_count,
+            components: Vec::new(),
+        }));
+
+        Ok(())
+    }
+
+    fn read_exp(&mut self, _segment_start: u64) -> VexelResult<()> {
+        let _length = self.reader.read_u16()?;
+        let expand = self.reader.read_u8()?;
+        self.pending_expand_h = (expand >> 4) & 1 != 0;
+        self.pending_expand_v = expand & 1 != 0;
+        Ok(())
+    }
+
+    fn finalize_current_frame(&mut self) {
+        if self.scans.is_empty() {
+            return;
+        }
+
+        let frame = HierarchicalFrame {
+            width: self.width,
+            height: self.height,
+            mode: self.mode.clone(),
+            coding_method: self.coding_method.clone(),
+            precision: self.precision,
+            components: self.components.clone(),
+            quantization_tables: self.quantization_tables.clone(),
+            scans: std::mem::take(&mut self.scans),
+        };
+
+        self.hierarchical_frames.push(frame);
+        self.pending_expand_h = false;
+        self.pending_expand_v = false;
+    }
+
     fn record_segment(&mut self, start_offset: u64, marker: &str, data: JpegSegmentData) {
         self.segments.push(JpegSegmentInfo {
             start_offset,
@@ -2930,34 +3465,79 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         JpegMarker::COM => self.read_com(segment_start),
                         JpegMarker::APP0 => self.read_app0_jfif(segment_start),
                         JpegMarker::APP1 => self.read_app1_exif(segment_start),
-                        JpegMarker::SOF0 => self.read_start_of_frame("SOF0", segment_start),
+                        JpegMarker::APP14 => self.read_app14_adobe(segment_start),
+                        JpegMarker::SOF0 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
+                            self.read_start_of_frame("SOF0", segment_start)
+                        }
                         JpegMarker::SOF1 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
                             self.mode = JpegMode::ExtendedSequential;
                             self.read_start_of_frame("SOF1", segment_start)
                         }
                         JpegMarker::SOF2 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
                             self.mode = JpegMode::Progressive;
                             self.read_start_of_frame("SOF2", segment_start)
                         }
                         JpegMarker::SOF3 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
                             self.mode = JpegMode::Lossless;
                             self.read_start_of_frame("SOF3", segment_start)
                         }
+                        JpegMarker::SOF5 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
+                            self.mode = JpegMode::DifferentialSequential;
+                            self.read_start_of_frame("SOF5", segment_start)
+                        }
+                        JpegMarker::SOF6 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
+                            self.mode = JpegMode::DifferentialProgressive;
+                            self.read_start_of_frame("SOF6", segment_start)
+                        }
+                        JpegMarker::SOF7 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
+                            self.mode = JpegMode::DifferentialLossless;
+                            self.read_start_of_frame("SOF7", segment_start)
+                        }
                         JpegMarker::SOF9 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
                             self.mode = JpegMode::ExtendedSequential;
                             self.coding_method = JpegCodingMethod::Arithmetic;
                             self.read_start_of_frame("SOF9", segment_start)
                         }
                         JpegMarker::SOF10 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
                             self.mode = JpegMode::Progressive;
                             self.coding_method = JpegCodingMethod::Arithmetic;
                             self.read_start_of_frame("SOF10", segment_start)
                         }
                         JpegMarker::SOF11 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
                             self.mode = JpegMode::Lossless;
                             self.coding_method = JpegCodingMethod::Arithmetic;
                             self.read_start_of_frame("SOF11", segment_start)
                         }
+                        JpegMarker::SOF13 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
+                            self.mode = JpegMode::DifferentialSequential;
+                            self.coding_method = JpegCodingMethod::Arithmetic;
+                            self.read_start_of_frame("SOF13", segment_start)
+                        }
+                        JpegMarker::SOF14 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
+                            self.mode = JpegMode::DifferentialProgressive;
+                            self.coding_method = JpegCodingMethod::Arithmetic;
+                            self.read_start_of_frame("SOF14", segment_start)
+                        }
+                        JpegMarker::SOF15 => {
+                            if self.is_hierarchical { self.finalize_current_frame(); }
+                            self.mode = JpegMode::DifferentialLossless;
+                            self.coding_method = JpegCodingMethod::Arithmetic;
+                            self.read_start_of_frame("SOF15", segment_start)
+                        }
+                        JpegMarker::DHP => self.read_dhp(segment_start),
+                        JpegMarker::EXP => self.read_exp(segment_start),
                         JpegMarker::DRI => self.read_restart_interval(segment_start),
                         JpegMarker::DQT => self.read_quantization_table(segment_start),
                         JpegMarker::DHT => self.read_huffman_table(segment_start),
@@ -3004,6 +3584,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 .join(", ")
         );
 
+        if self.is_hierarchical {
+            self.finalize_current_frame();
+        }
+
         if self.width == 0 || self.height == 0 || self.components.is_empty() {
             return Err(VexelError::from(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -3014,6 +3598,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     self.components.len()
                 ),
             )));
+        }
+
+        if self.is_hierarchical {
+            return self.decode_hierarchical();
         }
 
         match &self.mode {
@@ -3033,6 +3621,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
             JpegMode::Lossless => {
                 let image = self.decode_lossless()?;
+                Ok(image)
+            }
+            JpegMode::DifferentialSequential | JpegMode::DifferentialProgressive | JpegMode::DifferentialLossless => {
+                log_warn!("Differential JPEG mode outside hierarchical context, treating as baseline");
+                let image = self.decode_baseline()?;
                 Ok(image)
             }
         }

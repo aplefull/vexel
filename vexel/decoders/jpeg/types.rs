@@ -115,6 +115,9 @@ pub enum JpegMode {
     ExtendedSequential,
     Progressive,
     Lossless,
+    DifferentialSequential,
+    DifferentialProgressive,
+    DifferentialLossless,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
