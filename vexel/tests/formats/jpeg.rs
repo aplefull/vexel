@@ -21,6 +21,38 @@ pub fn test_cases() -> Vec<TestCase> {
             },
         },
         TestCase {
+            name: "JPEG Lossless 16-bit",
+            path: "jpeg/jpeg_lossless16bit.jpg",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/jpeg_lossless16bit.jxl",
+            },
+        },
+        TestCase {
+            name: "JPEG Lossless 8-bit RGB",
+            path: "jpeg/jpeg_lossless_sel1-rgb.jpg",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/jpeg_lossless_sel1-rgb.jxl",
+            },
+        },
+        TestCase {
+            name: "JPEG Lossless 10-bit",
+            path: "jpeg/jpeg-lossless-XA1.jpg",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/jpeg-lossless-XA1.jxl",
+            },
+        },
+        TestCase {
+            name: "JPEG Lossless 12-bit",
+            path: "jpeg/jpeg-lossless-MR4.jpg",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/jpeg-lossless-MR4.jxl",
+            },
+        },
+        TestCase {
             name: "JPEG arithmetic (cat)",
             path: "jpeg/cat_arithmetic.jpg",
             validation: None,
