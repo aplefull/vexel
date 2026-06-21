@@ -53,6 +53,14 @@ pub fn test_cases() -> Vec<TestCase> {
             },
         },
         TestCase {
+            name: "JPEG lossless 4 components",
+            path: "jpeg/rgb_alpha_u1_lossless.jpg",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/rgb_alpha_u1_lossless.jxl",
+            },
+        },
+        TestCase {
             name: "JPEG arithmetic (cat)",
             path: "jpeg/cat_arithmetic.jpg",
             validation: None,

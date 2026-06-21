@@ -2009,6 +2009,34 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 },
                 frames,
             ))
+        } else if components_count == 4 {
+            let frames = if self.precision <= 8 {
+                let precision_correction = 8 - self.precision;
+                let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
+
+                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::RGBA8(pixels), 0)])
+            } else {
+                let precision_correction = 16 - self.precision;
+                let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
+
+                Vec::from([ImageFrame::new(
+                    width as u32,
+                    height as u32,
+                    PixelData::RGBA16(pixels),
+                    0,
+                )])
+            };
+
+            Ok(Image::new(
+                width as u32,
+                height as u32,
+                if self.precision <= 8 {
+                    PixelFormat::RGBA8
+                } else {
+                    PixelFormat::RGBA16
+                },
+                frames,
+            ))
         } else {
             let frames = if self.precision <= 8 {
                 let precision_correction = 8 - self.precision;
