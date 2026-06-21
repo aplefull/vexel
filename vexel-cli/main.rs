@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use vexel::{Image, LogLevel, Vexel};
+use vexel::{Image, LogLevel, PixelData, Vexel};
 use writer::Writer;
 
 const AFTER_HELP: &str = "\
@@ -204,6 +204,92 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+fn normalize_pixels(pixels: PixelData) -> PixelData {
+    fn color_channels(step: usize) -> usize {
+        if step == 4 || step == 2 { step - 1 } else { step }
+    }
+
+    fn norm_u8(mut p: Vec<u8>, step: usize) -> Vec<u8> {
+        let n = color_channels(step);
+        let (mut lo, mut hi) = (u8::MAX, u8::MIN);
+        for c in p.chunks_exact(step) {
+            for &v in &c[..n] { lo = lo.min(v); hi = hi.max(v); }
+        }
+        if hi > lo {
+            let r = (hi - lo) as f32;
+            for c in p.chunks_exact_mut(step) {
+                for v in &mut c[..n] { *v = ((*v - lo) as f32 / r * 255.0).round() as u8; }
+            }
+        }
+        p
+    }
+
+    fn norm_u16(mut p: Vec<u16>, step: usize) -> Vec<u16> {
+        let n = color_channels(step);
+        let (mut lo, mut hi) = (u16::MAX, u16::MIN);
+        for c in p.chunks_exact(step) {
+            for &v in &c[..n] { lo = lo.min(v); hi = hi.max(v); }
+        }
+        if hi > lo {
+            let r = (hi - lo) as f32;
+            for c in p.chunks_exact_mut(step) {
+                for v in &mut c[..n] { *v = ((*v - lo) as f32 / r * 65535.0).round() as u16; }
+            }
+        }
+        p
+    }
+
+    fn norm_f32(mut p: Vec<f32>, step: usize) -> Vec<f32> {
+        let n = color_channels(step);
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for c in p.chunks_exact(step) {
+            for &v in &c[..n] { if v < lo { lo = v; } if v > hi { hi = v; } }
+        }
+        if hi > lo {
+            let r = hi - lo;
+            for c in p.chunks_exact_mut(step) {
+                for v in &mut c[..n] { *v = (*v - lo) / r; }
+            }
+        }
+        p
+    }
+
+    fn norm_f64(mut p: Vec<f64>, step: usize) -> Vec<f64> {
+        let n = color_channels(step);
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for c in p.chunks_exact(step) {
+            for &v in &c[..n] { if v < lo { lo = v; } if v > hi { hi = v; } }
+        }
+        if hi > lo {
+            let r = hi - lo;
+            for c in p.chunks_exact_mut(step) {
+                for v in &mut c[..n] { *v = (*v - lo) / r; }
+            }
+        }
+        p
+    }
+    
+    match pixels {
+        PixelData::RGB8(p)    => PixelData::RGB8(norm_u8(p, 3)),
+        PixelData::RGBA8(p)   => PixelData::RGBA8(norm_u8(p, 4)),
+        PixelData::RGB16(p)   => PixelData::RGB16(norm_u16(p, 3)),
+        PixelData::RGBA16(p)  => PixelData::RGBA16(norm_u16(p, 4)),
+        PixelData::RGB32F(p)  => PixelData::RGB32F(norm_f32(p, 3)),
+        PixelData::RGBA32F(p) => PixelData::RGBA32F(norm_f32(p, 4)),
+        PixelData::RGB64F(p)  => PixelData::RGB64F(norm_f64(p, 3)),
+        PixelData::RGBA64F(p) => PixelData::RGBA64F(norm_f64(p, 4)),
+        PixelData::L8(p)      => PixelData::L8(norm_u8(p, 1)),
+        PixelData::LA8(p)     => PixelData::LA8(norm_u8(p, 2)),
+        PixelData::L16(p)     => PixelData::L16(norm_u16(p, 1)),
+        PixelData::LA16(p)    => PixelData::LA16(norm_u16(p, 2)),
+        PixelData::L32F(p)    => PixelData::L32F(norm_f32(p, 1)),
+        PixelData::LA32F(p)   => PixelData::LA32F(norm_f32(p, 2)),
+        PixelData::L64F(p)    => PixelData::L64F(norm_f64(p, 1)),
+        PixelData::LA64F(p)   => PixelData::LA64F(norm_f64(p, 2)),
+        other => other,
+    }
+}
+
 fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn std::error::Error>> {
     struct App {
         texture: Option<egui::TextureHandle>,
@@ -218,10 +304,11 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
         panel_open: bool,
         pixelated: bool,
         checkered_bg: bool,
+        normalize: bool,
     }
 
     impl App {
-        fn image_to_frames(image: &Image) -> (Vec<egui::ColorImage>, Vec<u32>, [usize; 2]) {
+        fn image_to_frames(image: &Image, normalize: bool) -> (Vec<egui::ColorImage>, Vec<u32>, [usize; 2]) {
             const MAX_TEXTURE_SIZE: usize = 16384;
 
             let original_size = [image.width() as usize, image.height() as usize];
@@ -233,10 +320,16 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                 let src_width = frame.width() as usize;
                 let src_height = frame.height() as usize;
 
-                let buffer = if frame.has_alpha() {
-                    frame.as_rgba8()
+                let pixels = if normalize {
+                    normalize_pixels(frame.pixels().clone())
                 } else {
-                    let rgb = frame.as_rgb8();
+                    frame.pixels().clone()
+                };
+
+                let buffer = if frame.has_alpha() {
+                    pixels.into_rgba8().as_bytes().to_vec()
+                } else {
+                    let rgb = pixels.into_rgb8().as_bytes().to_vec();
                     let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
                     for i in (0..rgb.len()).step_by(3) {
                         rgba.extend_from_slice(&[rgb[i], rgb[i + 1], rgb[i + 2], 255]);
@@ -300,6 +393,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                 panel_open: true,
                 pixelated: false,
                 checkered_bg: true,
+                normalize: false,
             };
 
             let _ = app.load_current_file();
@@ -307,12 +401,12 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
             app
         }
 
-        fn load_image_from_path(path: &Path) -> Result<(Vec<egui::ColorImage>, Vec<u32>, [usize; 2]), String> {
+        fn load_image_from_path(path: &Path, normalize: bool) -> Result<(Vec<egui::ColorImage>, Vec<u32>, [usize; 2]), String> {
             let mut decoder = Vexel::open(path).map_err(|e| e.to_string())?;
             let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.decode()))
                 .map_err(|_| "decoder panicked".to_string())?
                 .map_err(|e| e.to_string())?;
-            Ok(Self::image_to_frames(&image))
+            Ok(Self::image_to_frames(&image, normalize))
         }
 
         fn load_current_file(&mut self) -> bool {
@@ -320,7 +414,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                 return false;
             }
 
-            match Self::load_image_from_path(&self.files[self.current_file_index]) {
+            match Self::load_image_from_path(&self.files[self.current_file_index], self.normalize) {
                 Ok((frames, frame_delays, original_size)) => {
                     self.frames = frames;
                     self.frame_delays = frame_delays;
@@ -539,6 +633,18 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                             &mut self.checkered_bg,
                             egui::RichText::new("Checkered background").color(value_color).size(13.0),
                         );
+
+                        ui.add_space(4.0);
+                        let normalize_changed = ui
+                            .checkbox(
+                                &mut self.normalize,
+                                egui::RichText::new("Normalize").color(value_color).size(13.0),
+                            )
+                            .changed();
+
+                        if normalize_changed {
+                            self.load_current_file();
+                        }
 
                         let panel_rect = ui.min_rect();
                         let handle_width = 4.0;
