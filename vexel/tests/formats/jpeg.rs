@@ -61,6 +61,54 @@ pub fn test_cases() -> Vec<TestCase> {
             },
         },
         TestCase {
+            name: "JPEG lossless 4 components 12-bit",
+            path: "jpeg/rgb_alpha_u2_lossless.jpg",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "jpeg/rgb_alpha_u2_lossless.jxl",
+            },
+        },
+        TestCase {
+            name: "JPEG 4 components",
+            path: "jpeg/rgb_alpha_u1.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/rgb_alpha_u1.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG 4 components 12-bit",
+            path: "jpeg/rgb_alpha_u2.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/rgb_alpha_u2.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG no Adobe marker",
+            path: "jpeg/img_noadobemarker.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/img_noadobemarker.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG Adobe marker",
+            path: "jpeg/img_original.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/img_original.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
             name: "JPEG arithmetic (cat)",
             path: "jpeg/cat_arithmetic.jpg",
             validation: None,

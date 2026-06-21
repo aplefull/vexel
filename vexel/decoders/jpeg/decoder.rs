@@ -610,6 +610,7 @@ enum JpegColorspace {
     YCbCr,
     CMYK,
     YCCK,
+    RGBA,
     Unknown,
 }
 
@@ -926,6 +927,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         2 => JpegColorspace::YCCK,
                         _ => JpegColorspace::CMYK,
                     };
+                }
+                if ids == [0x00, 0x01, 0x02, 0x03] {
+                    return JpegColorspace::RGBA;
                 }
                 JpegColorspace::CMYK
             }
@@ -2804,6 +2808,57 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
+    fn convert_4component_to_rgba(
+        &self,
+        deinterleaved: &[Vec<i32>],
+        source_dims: &[(usize, usize)],
+        tw: usize,
+        th: usize,
+        npixels: usize,
+    ) -> VexelResult<PixelData> {
+        let empty: Vec<i32> = vec![];
+        let ch = [0, 1, 2, 3].map(|i| deinterleaved.get(i).map(|v| v.as_slice()).unwrap_or(&empty));
+
+        let upsample = |plane: &[i32], dims: (usize, usize), dx: usize, dy: usize| -> i32 {
+            let (sw, sh) = dims;
+            if sw == tw && sh == th {
+                return plane.get(dy * tw + dx).copied().unwrap_or(0);
+            }
+            let sx = (dx * sw / tw).min(sw.saturating_sub(1));
+            let sy = (dy * sh / th).min(sh.saturating_sub(1));
+            plane.get(sy * sw + sx).copied().unwrap_or(0)
+        };
+
+        if self.precision <= 8 {
+            let mut pixels = vec![0u8; npixels * 4];
+            for dy in 0..th {
+                for dx in 0..tw {
+                    let idx = (dy * tw + dx) * 4;
+                    for (c, plane) in ch.iter().enumerate() {
+                        let dims = source_dims.get(c).copied().unwrap_or((tw, th));
+                        pixels[idx + c] = (upsample(plane, dims, dx, dy) + 128).clamp(0, 255) as u8;
+                    }
+                }
+            }
+            Ok(PixelData::RGBA8(pixels))
+        } else {
+            let mut pixels = vec![0u16; npixels * 4];
+            let mid = 1 << (self.precision - 1);
+            let max_val = (1 << self.precision) - 1;
+            let shift = 16 - self.precision;
+            for dy in 0..th {
+                for dx in 0..tw {
+                    let idx = (dy * tw + dx) * 4;
+                    for (c, plane) in ch.iter().enumerate() {
+                        let dims = source_dims.get(c).copied().unwrap_or((tw, th));
+                        pixels[idx + c] = ((upsample(plane, dims, dx, dy) + mid as i32).clamp(0, max_val as i32) as u16) << shift;
+                    }
+                }
+            }
+            Ok(PixelData::RGBA16(pixels))
+        }
+    }
+
     fn convert_4component_to_rgb(
         &self,
         deinterleaved: &[Vec<i32>],
@@ -2965,6 +3020,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         if colorspace == JpegColorspace::CMYK || colorspace == JpegColorspace::YCCK {
             return self.convert_4component_to_rgb(&deinterleaved, &source_dims, tw, th, npixels, colorspace);
+        }
+
+        if colorspace == JpegColorspace::RGBA {
+            return self.convert_4component_to_rgba(&deinterleaved, &source_dims, tw, th, npixels);
         }
 
         if deinterleaved.len() < 3 {
