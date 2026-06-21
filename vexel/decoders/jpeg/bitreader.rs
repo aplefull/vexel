@@ -53,9 +53,17 @@ impl<'a> JpegBitReader<'a> {
 
     #[inline(always)]
     pub fn clear_buffer(&mut self) {
-        let whole_bytes = self.bits / 8;
-        self.pos -= whole_bytes as usize;
+        let whole_bytes = (self.bits / 8) as usize;
+        self.pos = self.pos.saturating_sub(whole_bytes);
         self.bits = 0;
         self.buf = 0;
+
+        while self.pos + 1 < self.data.len() {
+            if self.data[self.pos] == 0xFF && self.data[self.pos + 1] >= 0xD0 && self.data[self.pos + 1] <= 0xD7 {
+                self.pos += 2;
+                return;
+            }
+            self.pos += 1;
+        }
     }
 }
