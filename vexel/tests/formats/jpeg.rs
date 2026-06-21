@@ -179,5 +179,25 @@ pub fn test_cases() -> Vec<TestCase> {
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
         },
+        TestCase {
+            name: "JPEG asymmetric subsampling",
+            path: "jpeg/flower.png.im_q85_asymmetric.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/flower.png.im_q85_asymmetric.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
+        TestCase {
+            name: "JPEG blue channel subsampling",
+            path: "jpeg/flower.png.im_q85_rgb_subsample_blue.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/flower.png.im_q85_rgb_subsample_blue.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+        },
     ]
 }

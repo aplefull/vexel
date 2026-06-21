@@ -2857,14 +2857,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         let (y_sw, y_sh) = source_dims[0];
-        let (c_sw, c_sh) = if deinterleaved.len() >= 2 { source_dims[1] } else { (tw, th) };
-
-        let h_2x = tw == c_sw * 2 || tw == c_sw * 2 - 1;
-        let v_2x = th == c_sh * 2 || th == c_sh * 2 - 1;
-        let is_h2v1 = h_2x && th == c_sh;
-        let is_h1v2 = !h_2x && v_2x && tw == c_sw;
-        let is_h2v2 = h_2x && v_2x;
-        let is_identity = c_sw == tw && c_sh == th;
+        let (cb_sw, cb_sh) = if deinterleaved.len() >= 2 { source_dims[1] } else { (tw, th) };
+        let (cr_sw, cr_sh) = if deinterleaved.len() >= 3 { source_dims[2] } else { (cb_sw, cb_sh) };
 
         let y_plane = &deinterleaved[0];
         let cb_plane = if deinterleaved.len() > 1 { deinterleaved[1].as_slice() } else { &[] };
@@ -2899,55 +2893,63 @@ impl<R: Read + Seek> JpegDecoder<R> {
         };
 
         macro_rules! upsample_chroma_row {
-            ($plane:expr, $dy:expr, $tmp:expr) => {{
+            ($plane:expr, $p_sw:expr, $p_sh:expr, $dy:expr, $tmp:expr) => {{
+                let p_sw = $p_sw;
+                let p_sh = $p_sh;
+                let p_h_2x = tw == p_sw * 2 || tw == p_sw * 2 - 1;
+                let p_v_2x = th == p_sh * 2 || th == p_sh * 2 - 1;
+                let p_is_h2v1 = p_h_2x && th == p_sh;
+                let p_is_h1v2 = !p_h_2x && p_v_2x && tw == p_sw;
+                let p_is_h2v2 = p_h_2x && p_v_2x;
+                let p_is_identity = p_sw == tw && p_sh == th;
                 $tmp.resize(tw, 0);
-                if is_identity {
+                if p_is_identity {
                     let base = $dy * tw;
                     let avail = $plane.len().saturating_sub(base);
                     let copy_len = tw.min(avail);
                     $tmp[..copy_len].copy_from_slice(&$plane[base..base + copy_len]);
                     $tmp[copy_len..].fill(0);
-                } else if is_h2v2 {
-                    let sy = ($dy / 2).min(c_sh.saturating_sub(1));
+                } else if p_is_h2v2 {
+                    let sy = ($dy / 2).min(p_sh.saturating_sub(1));
                     let v = $dy % 2;
                     let sy_above = sy.saturating_sub(1);
-                    let sy_below = (sy + 1).min(c_sh.saturating_sub(1));
+                    let sy_below = (sy + 1).min(p_sh.saturating_sub(1));
                     let sy_near = if v == 0 { sy_above } else { sy_below };
                     let prev_near = if v == 0 { sy_above } else { sy };
-                    let src_row = &$plane[sy * c_sw..(sy * c_sw + c_sw).min($plane.len())];
-                    let near_row = &$plane[sy_near * c_sw..(sy_near * c_sw + c_sw).min($plane.len())];
-                    let prev_near_row = &$plane[prev_near * c_sw..(prev_near * c_sw + c_sw).min($plane.len())];
-                    let sw_eff = c_sw.min(src_row.len()).min(near_row.len());
-                    let mut col_sums = vec![0i32; c_sw];
-                    let mut prev_col_sums = vec![0i32; c_sw];
+                    let src_row = &$plane[sy * p_sw..(sy * p_sw + p_sw).min($plane.len())];
+                    let near_row = &$plane[sy_near * p_sw..(sy_near * p_sw + p_sw).min($plane.len())];
+                    let prev_near_row = &$plane[prev_near * p_sw..(prev_near * p_sw + p_sw).min($plane.len())];
+                    let sw_eff = p_sw.min(src_row.len()).min(near_row.len());
+                    let mut col_sums = vec![0i32; p_sw];
+                    let mut prev_col_sums = vec![0i32; p_sw];
                     up::compute_col_sums(src_row, near_row, &mut col_sums, sw_eff);
                     up::compute_col_sums(src_row, prev_near_row, &mut prev_col_sums, sw_eff.min(prev_near_row.len()));
-                    up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut $tmp, c_sw, tw);
-                } else if is_h2v1 {
-                    let sy = $dy.min(c_sh.saturating_sub(1));
-                    let src_row = &$plane[sy * c_sw..(sy * c_sw + c_sw).min($plane.len())];
-                    up::upsample_h2v1_row(src_row, &mut $tmp, c_sw.min(src_row.len()), tw);
-                } else if is_h1v2 {
-                    let sy = ($dy / 2).min(c_sh.saturating_sub(1));
+                    up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut $tmp, p_sw, tw);
+                } else if p_is_h2v1 {
+                    let sy = $dy.min(p_sh.saturating_sub(1));
+                    let src_row = &$plane[sy * p_sw..(sy * p_sw + p_sw).min($plane.len())];
+                    up::upsample_h2v1_row(src_row, &mut $tmp, p_sw.min(src_row.len()), tw);
+                } else if p_is_h1v2 {
+                    let sy = ($dy / 2).min(p_sh.saturating_sub(1));
                     let v = $dy % 2;
-                    let sy_near = if v == 0 { sy.saturating_sub(1) } else { (sy + 1).min(c_sh.saturating_sub(1)) };
+                    let sy_near = if v == 0 { sy.saturating_sub(1) } else { (sy + 1).min(p_sh.saturating_sub(1)) };
                     let bias = if v == 0 { 1i32 } else { 2i32 };
-                    let src_row = &$plane[sy * c_sw..(sy * c_sw + c_sw).min($plane.len())];
-                    let neighbor_row = &$plane[sy_near * c_sw..(sy_near * c_sw + c_sw).min($plane.len())];
-                    let sw_eff = c_sw.min(src_row.len()).min(neighbor_row.len()).min($tmp.len());
+                    let src_row = &$plane[sy * p_sw..(sy * p_sw + p_sw).min($plane.len())];
+                    let neighbor_row = &$plane[sy_near * p_sw..(sy_near * p_sw + p_sw).min($plane.len())];
+                    let sw_eff = p_sw.min(src_row.len()).min(neighbor_row.len()).min($tmp.len());
                     up::upsample_h1v2_row(src_row, neighbor_row, bias, &mut $tmp[..sw_eff.min(tw)], sw_eff);
                 } else {
                     for x in 0..tw {
-                        let fx = (x as f32 + 0.5) * c_sw as f32 / tw as f32 - 0.5;
-                        let fy = ($dy as f32 + 0.5) * c_sh as f32 / th as f32 - 0.5;
-                        let x0 = (fx.floor() as i64).clamp(0, c_sw as i64 - 1) as usize;
-                        let y0 = (fy.floor() as i64).clamp(0, c_sh as i64 - 1) as usize;
-                        let x1 = (x0 + 1).min(c_sw.saturating_sub(1));
-                        let y1 = (y0 + 1).min(c_sh.saturating_sub(1));
+                        let fx = (x as f32 + 0.5) * p_sw as f32 / tw as f32 - 0.5;
+                        let fy = ($dy as f32 + 0.5) * p_sh as f32 / th as f32 - 0.5;
+                        let x0 = (fx.floor() as i64).clamp(0, p_sw as i64 - 1) as usize;
+                        let y0 = (fy.floor() as i64).clamp(0, p_sh as i64 - 1) as usize;
+                        let x1 = (x0 + 1).min(p_sw.saturating_sub(1));
+                        let y1 = (y0 + 1).min(p_sh.saturating_sub(1));
                         let wx = fx - fx.floor();
                         let wy = fy - fy.floor();
                         let get = |px: usize, py: usize| -> i32 {
-                            let idx = py * c_sw + px;
+                            let idx = py * p_sw + px;
                             if idx < $plane.len() { $plane[idx] } else { 0 }
                         };
                         let v = (1.0 - wy) * ((1.0 - wx) * get(x0, y0) as f32 + wx * get(x1, y0) as f32)
@@ -2962,8 +2964,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         macro_rules! fill_row_8 {
             ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr) => {{
-                upsample_chroma_row!(cb_plane, $dy, $cb_row);
-                upsample_chroma_row!(cr_plane, $dy, $cr_row);
+                upsample_chroma_row!(cb_plane, cb_sw, cb_sh, $dy, $cb_row);
+                upsample_chroma_row!(cr_plane, cr_sw, cr_sh, $dy, $cr_row);
                 for col in 0..tw {
                     let c0 = $y_row.get(col).copied().unwrap_or(0);
                     let c1 = $cb_row.get(col).copied().unwrap_or(0);
@@ -2984,8 +2986,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         macro_rules! fill_row_16 {
             ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr) => {{
-                upsample_chroma_row!(cb_plane, $dy, $cb_row);
-                upsample_chroma_row!(cr_plane, $dy, $cr_row);
+                upsample_chroma_row!(cb_plane, cb_sw, cb_sh, $dy, $cb_row);
+                upsample_chroma_row!(cr_plane, cr_sw, cr_sh, $dy, $cr_row);
                 for col in 0..tw {
                     let c0 = $y_row.get(col).copied().unwrap_or(0);
                     let c1 = $cb_row.get(col).copied().unwrap_or(0);
