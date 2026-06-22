@@ -1,6 +1,7 @@
 mod writer;
 
 use clap::Parser;
+use libc::{rlimit, setrlimit, RLIMIT_AS};
 use eframe;
 use egui;
 use egui::ViewportBuilder;
@@ -57,6 +58,9 @@ struct Cli {
 
     #[arg(long, value_parser = ["error", "warn", "info", "debug"], default_value = "error", help = "Minimum log level to display")]
     log_level: String,
+
+    #[arg(long, default_value = "2048", help = "Maximum memory usage in MiB (0 = unlimited). Decoder will abort if this limit is exceeded.")]
+    memory_limit: u64,
 }
 
 fn get_files(path: &str) -> Vec<PathBuf> {
@@ -402,10 +406,8 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
         }
 
         fn load_image_from_path(path: &Path, normalize: bool) -> Result<(Vec<egui::ColorImage>, Vec<u32>, [usize; 2]), String> {
-            let mut decoder = Vexel::open(path).map_err(|e| e.to_string())?;
-            let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.decode()))
-                .map_err(|_| "decoder panicked".to_string())?
-                .map_err(|e| e.to_string())?;
+            let mut decoder = Vexel::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+            let image = decoder.decode().map_err(|e| format!("{}: {}", path.display(), e))?;
             Ok(Self::image_to_frames(&image, normalize))
         }
 
@@ -780,8 +782,29 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
 
     Ok(())
 }
+
+fn apply_memory_limit(limit_mib: u64) {
+    if limit_mib == 0 {
+        return;
+    }
+
+    let limit_bytes = limit_mib.saturating_mul(1024 * 1024);
+    let rl = rlimit {
+        rlim_cur: limit_bytes,
+        rlim_max: limit_bytes,
+    };
+
+    unsafe {
+        if setrlimit(RLIMIT_AS, &rl) != 0 {
+            eprintln!("Warning: failed to set memory limit");
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    apply_memory_limit(cli.memory_limit);
 
     let log_level = match cli.log_level.as_str() {
         "debug" => LogLevel::Debug,

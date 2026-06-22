@@ -947,6 +947,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 log_warn!("Invalid precision for lossless jpeg mode: {}, clamping", self.precision);
                 self.precision = self.precision.clamp(2, 16);
             }
+        } else if self.precision < 8 || self.precision > 16 {
+            log_warn!("Invalid precision: {}, clamping to 8", self.precision);
+            self.precision = 8;
         }
 
         self.height = self.reader.read_u16()? as u32;
@@ -3070,8 +3073,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             ($plane:expr, $p_sw:expr, $p_sh:expr, $dy:expr, $tmp:expr) => {{
                 let p_sw = $p_sw;
                 let p_sh = $p_sh;
-                let p_h_2x = tw == p_sw * 2 || tw == p_sw * 2 - 1;
-                let p_v_2x = th == p_sh * 2 || th == p_sh * 2 - 1;
+                let p_h_2x = tw == p_sw * 2 || tw == (p_sw * 2).saturating_sub(1);
+                let p_v_2x = th == p_sh * 2 || th == (p_sh * 2).saturating_sub(1);
                 let p_is_h2v1 = p_h_2x && th == p_sh;
                 let p_is_h1v2 = !p_h_2x && p_v_2x && tw == p_sw;
                 let p_is_h2v2 = p_h_2x && p_v_2x;
@@ -3114,6 +3117,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     up::upsample_h1v2_row(src_row, neighbor_row, bias, &mut $tmp[..sw_eff.min(tw)], sw_eff);
                 } else {
                     for x in 0..tw {
+                        if p_sw == 0 || p_sh == 0 {
+                            $tmp[x] = 0;
+                            continue;
+                        }
                         let fx = (x as f32 + 0.5) * p_sw as f32 / tw as f32 - 0.5;
                         let fy = ($dy as f32 + 0.5) * p_sh as f32 / th as f32 - 0.5;
                         let x0 = (fx.floor() as i64).clamp(0, p_sw as i64 - 1) as usize;

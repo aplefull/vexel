@@ -9,6 +9,7 @@ pub enum VexelError {
     UnsupportedFormat(String),
     InvalidDimensions { width: u32, height: u32 },
     Custom(String),
+    Panic(String),
 }
 
 impl Error for VexelError {
@@ -29,6 +30,7 @@ impl Display for VexelError {
                 write!(f, "Invalid image dimensions: {}x{}", width, height)
             }
             VexelError::Custom(msg) => write!(f, "{}", msg),
+            VexelError::Panic(msg) => write!(f, "Decoder panicked: {}", msg),
         }
     }
 }

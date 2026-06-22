@@ -3689,6 +3689,7 @@ dependencies = [
  "egui",
  "glob",
  "jpegxl-sys",
+ "libc",
  "vexel",
  "webp",
 ]

@@ -26,6 +26,7 @@ pub use utils::logger::{LogLevel, set_log_level};
 use serde::Serialize;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -94,7 +95,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        match &mut self.decoder {
+        let result = panic::catch_unwind(AssertUnwindSafe(|| match &mut self.decoder {
             Decoders::Jpeg(decoder) => impl_decode!(decoder),
             Decoders::JpegLs(decoder) => impl_decode!(decoder),
             Decoders::Png(decoder) => impl_decode!(decoder),
@@ -107,7 +108,17 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Jbig1(decoder) => impl_decode!(decoder),
             Decoders::Ico(decoder) => impl_decode!(decoder),
             Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
-        }
+        }));
+
+        result.unwrap_or_else(|payload| {
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            
+            Err(VexelError::Panic(msg.to_string()))
+        })
     }
 
     pub fn get_format(&self) -> ImageFormat {

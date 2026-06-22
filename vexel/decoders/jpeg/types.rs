@@ -169,10 +169,12 @@ impl HuffmanTable {
                 let sym = self.symbols[sym_idx];
                 let fill_count = 1 << (PEEK_BITS - code_len);
                 let base = (code as usize) << (PEEK_BITS - code_len);
-                let entry = (1u32 << 16) | ((sym as u32) << 8) | (code_len as u32);
-                for k in 0..fill_count {
-                    table[base + k] = entry;
+                if base >= TABLE_SIZE {
+                    continue;
                 }
+                let clamped_count = fill_count.min(TABLE_SIZE - base);
+                let entry = (1u32 << 16) | ((sym as u32) << 8) | (code_len as u32);
+                table[base..base + clamped_count].fill(entry);
             }
         }
 
