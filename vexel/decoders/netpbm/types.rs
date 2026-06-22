@@ -23,4 +23,6 @@ pub enum TupleType {
     BlackAndWhiteAlpha,
     GrayscaleAlpha,
     RGBAlpha,
+    CMYK,
+    CMYKAlpha,
 }

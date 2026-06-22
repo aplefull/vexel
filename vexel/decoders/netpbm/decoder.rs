@@ -273,6 +273,8 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             "BLACKANDWHITE_ALPHA" => Some(TupleType::BlackAndWhiteAlpha),
             "GRAYSCALE_ALPHA" => Some(TupleType::GrayscaleAlpha),
             "RGB_ALPHA" => Some(TupleType::RGBAlpha),
+            "CMYK" => Some(TupleType::CMYK),
+            "CMYK_ALPHA" => Some(TupleType::CMYKAlpha),
             _ => {
                 log_warn!("Unrecognized TUPLTYPE value: {}", s);
                 None
@@ -464,6 +466,70 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                 } else {
                     let mut image_data = vec![0u16; sample_count];
                     simd::scale_u16_be(data, &mut image_data, max_value as u16);
+                    Ok(PixelData::RGBA16(image_data))
+                }
+            }
+
+            (Some(TupleType::CMYK), 4) => {
+                let mv = max_value as f32;
+                if !is_16bit {
+                    let mut image_data = vec![0u8; pixel_count * 3];
+                    for (i, chunk) in data.chunks_exact(4).enumerate() {
+                        let c = chunk[0] as f32 / mv;
+                        let m = chunk[1] as f32 / mv;
+                        let y = chunk[2] as f32 / mv;
+                        let k = chunk[3] as f32 / mv;
+                        image_data[i * 3] = ((1.0 - c) * (1.0 - k) * 255.0).round() as u8;
+                        image_data[i * 3 + 1] = ((1.0 - m) * (1.0 - k) * 255.0).round() as u8;
+                        image_data[i * 3 + 2] = ((1.0 - y) * (1.0 - k) * 255.0).round() as u8;
+                    }
+                    Ok(PixelData::RGB8(image_data))
+                } else {
+                    let mut image_data = vec![0u16; pixel_count * 3];
+                    let mut reader = BitReader::new(Cursor::new(data));
+                    for i in 0..pixel_count {
+                        let c = reader.read_u16().unwrap_or(0) as f32 / mv;
+                        let m = reader.read_u16().unwrap_or(0) as f32 / mv;
+                        let y = reader.read_u16().unwrap_or(0) as f32 / mv;
+                        let k = reader.read_u16().unwrap_or(0) as f32 / mv;
+                        image_data[i * 3] = ((1.0 - c) * (1.0 - k) * 65535.0).round() as u16;
+                        image_data[i * 3 + 1] = ((1.0 - m) * (1.0 - k) * 65535.0).round() as u16;
+                        image_data[i * 3 + 2] = ((1.0 - y) * (1.0 - k) * 65535.0).round() as u16;
+                    }
+                    Ok(PixelData::RGB16(image_data))
+                }
+            }
+
+            (Some(TupleType::CMYKAlpha), 5) => {
+                let mv = max_value as f32;
+                if !is_16bit {
+                    let mut image_data = vec![0u8; pixel_count * 4];
+                    for (i, chunk) in data.chunks_exact(5).enumerate() {
+                        let c = chunk[0] as f32 / mv;
+                        let m = chunk[1] as f32 / mv;
+                        let y = chunk[2] as f32 / mv;
+                        let k = chunk[3] as f32 / mv;
+                        let a = chunk[4];
+                        image_data[i * 4] = ((1.0 - c) * (1.0 - k) * 255.0).round() as u8;
+                        image_data[i * 4 + 1] = ((1.0 - m) * (1.0 - k) * 255.0).round() as u8;
+                        image_data[i * 4 + 2] = ((1.0 - y) * (1.0 - k) * 255.0).round() as u8;
+                        image_data[i * 4 + 3] = Self::scale_to_8bit(a as u32, max_value);
+                    }
+                    Ok(PixelData::RGBA8(image_data))
+                } else {
+                    let mut image_data = vec![0u16; pixel_count * 4];
+                    let mut reader = BitReader::new(Cursor::new(data));
+                    for i in 0..pixel_count {
+                        let c = reader.read_u16().unwrap_or(0) as f32 / mv;
+                        let m = reader.read_u16().unwrap_or(0) as f32 / mv;
+                        let y = reader.read_u16().unwrap_or(0) as f32 / mv;
+                        let k = reader.read_u16().unwrap_or(0) as f32 / mv;
+                        let a = reader.read_u16().unwrap_or(0);
+                        image_data[i * 4] = ((1.0 - c) * (1.0 - k) * 65535.0).round() as u16;
+                        image_data[i * 4 + 1] = ((1.0 - m) * (1.0 - k) * 65535.0).round() as u16;
+                        image_data[i * 4 + 2] = ((1.0 - y) * (1.0 - k) * 65535.0).round() as u16;
+                        image_data[i * 4 + 3] = Self::scale_to_16bit(a as u32, max_value);
+                    }
                     Ok(PixelData::RGBA16(image_data))
                 }
             }

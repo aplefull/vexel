@@ -270,5 +270,21 @@ pub fn test_cases() -> Vec<TestCase> {
             })),
             comparison: Comparison::None,
         },
+        TestCase {
+            name: "NetPBM P7 CMYK",
+            path: "netpbm/cmyk.pam",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "netpbm/cmyk.jxl",
+            },
+        },
+        TestCase {
+            name: "NetPBM P7 CMYKA",
+            path: "netpbm/cmyk_alpha.pam",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "netpbm/cmyk_alpha.jxl",
+            },
+        },
     ]
 }
