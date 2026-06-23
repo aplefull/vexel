@@ -13,7 +13,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<(u32, u32, u8, ColorType, CompressionMethod, bool, bool)> {
-        let (start_offset, length, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let width = reader.read_u32()?;
         let height = reader.read_u32()?;
@@ -74,7 +74,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length,
-            raw_bytes,
+
             data: PngChunkData::IHDR(IhdrChunkData {
                 width,
                 height,
@@ -94,7 +94,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<Vec<[u8; 3]>> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let length = length_u32;
 
@@ -116,7 +116,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::PLTE(PlteChunkData {
                 entries: palette.clone(),
                 crc,
@@ -132,23 +132,23 @@ impl ChunkReader {
         idat_data: &mut Vec<u8>,
         frames: &mut Vec<PngFrame>,
     ) -> VexelResult<()> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = length_u32 as usize;
-        let chunk_data = &raw_bytes[8..8 + length];
+        let mut chunk_data = vec![0u8; length_u32 as usize];
+        reader.read_exact(&mut chunk_data)?;
+        reader.read_u32()?;
 
         if !frames.is_empty() {
             let fctl_info = frames.last_mut().unwrap();
-            fctl_info.fdat.extend_from_slice(chunk_data);
+            fctl_info.fdat.extend_from_slice(&chunk_data);
         }
 
-        idat_data.extend_from_slice(chunk_data);
+        idat_data.extend_from_slice(&chunk_data);
 
         chunks.push(PngChunkInfo {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
             data: PngChunkData::IDAT(IdatChunkData {
                 data_length: length_u32,
                 crc,
@@ -162,7 +162,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<(String, ICCProfile)> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let length = length_u32;
         let mut num_read = 0;
@@ -211,7 +211,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::ICCP(IccpChunkData {
                 profile_name: profile_name.clone(),
                 profile: icc.clone(),
@@ -226,13 +226,13 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<()> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         chunks.push(PngChunkInfo {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::IEND { crc },
         });
 
@@ -243,7 +243,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<SuggestedPalette> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let length = length_u32;
 
@@ -322,7 +322,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::SPLT(SpltChunkData {
                 palette: palette.clone(),
                 crc,
@@ -336,7 +336,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<RenderingIntent> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let intent = match reader.read_u8()? {
             0 => RenderingIntent::Perceptual,
@@ -353,7 +353,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::SRGB(SrgbChunkData {
                 rendering_intent: intent,
                 crc,
@@ -367,7 +367,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<f32> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let gamma_int = reader.read_u32()?;
         let gamma = gamma_int as f32 / 100000.0;
@@ -376,7 +376,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::GAMA(GamaChunkData {
                 gamma,
                 gamma_raw: gamma_int,
@@ -391,7 +391,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<Chromaticities> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let mut buf = vec![0u8; length_u32 as usize];
         reader.read_exact(&mut buf)?;
@@ -419,7 +419,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::CHRM(ChrmChunkData {
                 chromaticities,
                 crc,
@@ -435,7 +435,7 @@ impl ChunkReader {
         color_type: ColorType,
         palette: Option<&Vec<[u8; 3]>>,
     ) -> VexelResult<TransparencyData> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let length = length_u32;
 
@@ -479,7 +479,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::TRNS(TrnsChunkData {
                 transparency: trns_data.clone(),
                 crc,
@@ -495,7 +495,7 @@ impl ChunkReader {
         color_type: ColorType,
         palette: Option<&Vec<[u8; 3]>>,
     ) -> VexelResult<BackgroundData> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let length = length_u32;
 
@@ -537,7 +537,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::BKGD(BkgdChunkData {
                 background: background.clone(),
                 crc,
@@ -551,7 +551,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<PhysicalDimensions> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let pixels_per_unit_x = reader.read_u32()?;
         let pixels_per_unit_y = reader.read_u32()?;
@@ -573,7 +573,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::PHYS(PhysChunkData {
                 physical_dimensions: dimensions.clone(),
                 crc,
@@ -588,7 +588,7 @@ impl ChunkReader {
         chunks: &mut Vec<PngChunkInfo>,
         color_type: ColorType,
     ) -> VexelResult<SignificantBits> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let length = length_u32;
 
@@ -655,7 +655,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::SBIT(SbitChunkData {
                 significant_bits: sbit_data.clone(),
                 crc,
@@ -670,7 +670,7 @@ impl ChunkReader {
         chunks: &mut Vec<PngChunkInfo>,
         palette: Option<&Vec<[u8; 3]>>,
     ) -> VexelResult<Vec<u16>> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         if palette.is_none() {
             log_warn!("Encountered hIST chunk before PLTE chunk");
@@ -695,7 +695,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::HIST(HistChunkData {
                 frequencies: frequencies.clone(),
                 crc,
@@ -709,7 +709,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<ImageTime> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let year = reader.read_u16()?;
         let month = reader.read_u8()?;
@@ -751,7 +751,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::TIME(TimeChunkData {
                 time: time.clone(),
                 crc,
@@ -765,7 +765,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<PngText> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let length = length_u32;
         let mut chunk_data = vec![0u8; length as usize];
@@ -785,7 +785,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::TEXT(TextChunkData {
                 text: png_text.clone(),
                 crc,
@@ -799,7 +799,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<PngText> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let mut chunk_data = vec![0u8; length_u32 as usize];
         reader.read_exact(&mut chunk_data)?;
@@ -817,7 +817,7 @@ impl ChunkReader {
                 start_offset,
                 chunk_type: chunk_type_str,
                 length: length_u32,
-                raw_bytes,
+    
                 data: PngChunkData::ZTXT(TextChunkData {
                     text: png_text.clone(),
                     crc,
@@ -845,7 +845,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::ZTXT(TextChunkData {
                 text: png_text.clone(),
                 crc,
@@ -859,7 +859,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<PngText> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let mut chunk_data = vec![0u8; length_u32 as usize];
         reader.read_exact(&mut chunk_data)?;
@@ -907,7 +907,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::ITXT(TextChunkData {
                 text: png_text.clone(),
                 crc,
@@ -921,7 +921,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
     ) -> VexelResult<ActlChunk> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let num_frames = reader.read_u32()?;
         let num_plays = reader.read_u32()?;
@@ -936,7 +936,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::ACTL(ActlChunkData {
                 actl: actl.clone(),
                 crc,
@@ -952,7 +952,7 @@ impl ChunkReader {
         width: u32,
         height: u32,
     ) -> VexelResult<FctlChunk> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let sequence_number = reader.read_u32()?;
         let mut width_frame = reader.read_u32()?;
@@ -1010,7 +1010,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::FCTL(FctlChunkData {
                 fctl: fctl.clone(),
                 crc,
@@ -1025,7 +1025,7 @@ impl ChunkReader {
         chunks: &mut Vec<PngChunkInfo>,
         frames: &mut Vec<PngFrame>,
     ) -> VexelResult<()> {
-        let (start_offset, length_u32, raw_bytes, chunk_type_str, crc) = capture_chunk_info(reader)?;
+        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let length = length_u32 - 4;
 
@@ -1047,7 +1047,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            raw_bytes,
+
             data: PngChunkData::FDAT(FdatChunkData {
                 sequence_number,
                 data_length: length,
@@ -1061,18 +1061,18 @@ impl ChunkReader {
 
 pub fn capture_chunk_info<R: Read + Seek>(
     reader: &mut BitReader<R>,
-) -> VexelResult<(u64, u32, Vec<u8>, String, u32)> {
+) -> VexelResult<(u64, u32, String, u32)> {
     let pos_before = reader.stream_position()?;
-    
+
     // Reader is positioned right after chunk type (which was read into the window)
     // Chunk structure: [length:4][type:4][data:length][crc:4]
     // We're at position after type, so: start_offset = current - 4 (type) - 4 (length) = current - 8
     let start_offset = pos_before - 8;
-    
+
     reader.seek(SeekFrom::Start(start_offset))?;
 
     let length_u32 = reader.read_u32()?;
-    
+
     let mut chunk_type = vec![0; 4];
     reader.read_exact(&mut chunk_type)?;
     let chunk_type_str = String::from_utf8_lossy(&chunk_type).to_string();
@@ -1084,7 +1084,7 @@ pub fn capture_chunk_info<R: Read + Seek>(
 
     let calculator = CrcCalculator::new();
     let calculated_crc = calculator.calculate_crc_two_parts(&chunk_type, &chunk_data);
-    
+
     if calculated_crc != crc {
         log_warn!(
             "CRC mismatch for chunk {}: expected 0x{:08x}, calculated 0x{:08x}",
@@ -1094,14 +1094,7 @@ pub fn capture_chunk_info<R: Read + Seek>(
         );
     }
 
-    let total_size = 4 + 4 + length_u32 as usize + 4;
-    let mut raw_bytes = Vec::with_capacity(total_size);
-    raw_bytes.extend_from_slice(&length_u32.to_be_bytes());
-    raw_bytes.extend_from_slice(&chunk_type);
-    raw_bytes.extend_from_slice(&chunk_data);
-    raw_bytes.extend_from_slice(&crc.to_be_bytes());
-
     reader.seek(SeekFrom::Start(start_offset + 8))?;
 
-    Ok((start_offset, length_u32, raw_bytes, chunk_type_str, crc))
+    Ok((start_offset, length_u32, chunk_type_str, crc))
 }

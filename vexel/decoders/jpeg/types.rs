@@ -15,12 +15,15 @@ pub enum JpegSegmentData {
     EOI,
     APP0(JFIFData),
     APP1 { length: u16, exif: Option<ExifData> },
-    APP { marker: String, length: u16 },
+    APP2(APP2Data),
+    APP14(APP14AdobeData),
+    APP { marker: String, length: u16, identifier: Option<String> },
     SOF(SOFData),
     DHT(DHTData),
     DAC(DACData),
     DQT(DQTData),
     DRI { restart_interval: u16 },
+    EXP { expand_horizontal: bool, expand_vertical: bool },
     SOS(SOSData),
     COM { text: String },
     Unknown { marker: String, length: u16 },
@@ -37,7 +40,29 @@ pub struct JFIFData {
     pub y_density: u16,
     pub thumbnail_width: u8,
     pub thumbnail_height: u8,
-    pub thumbnail_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct APP2Data {
+    pub length: u16,
+    pub identifier: String,
+    pub icc_profile_sequence: Option<IccProfileSequenceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct IccProfileSequenceInfo {
+    pub chunk_sequence: u8,
+    pub total_chunks: u8,
+    pub profile_data_length: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct APP14AdobeData {
+    pub length: u16,
+    pub version: u16,
+    pub flags0: u16,
+    pub flags1: u16,
+    pub color_transform: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -79,8 +104,6 @@ pub struct SOSData {
     pub end_spectral: u8,
     pub successive_high: u8,
     pub successive_low: u8,
-    pub dc_tables: Vec<HuffmanTable>,
-    pub ac_tables: Vec<HuffmanTable>,
     pub data_length: u64,
 }
 
@@ -130,18 +153,24 @@ pub enum JpegCodingMethod {
 pub struct QuantizationTable {
     pub id: u8,
     pub precision: u8,
-    pub length: u16,
     pub table: Vec<u16>,
+    #[serde(skip)]
+    pub table_natural: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 pub struct HuffmanTable {
     pub id: u8,
     pub class: u8,
-    pub offsets: Vec<u32>,
+    pub counts: Vec<u8>,
     pub symbols: Vec<u8>,
+    #[serde(skip)]
+    pub offsets: Vec<u32>,
+    #[serde(skip)]
     pub codes: Vec<u32>,
+    #[serde(skip)]
     pub first_code: Vec<u32>,
+    #[serde(skip)]
     pub fast_lookup: Vec<u32>,
 }
 

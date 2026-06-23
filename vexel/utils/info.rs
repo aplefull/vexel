@@ -28,13 +28,13 @@ pub enum ImageInfo {
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct JpegInfo {
-    pub segments: Vec<JpegSegmentInfo>,
+    pub sections: Vec<JpegSegmentInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct PngInfo {
-    pub chunks: Vec<PngChunkInfo>,
+    pub sections: Vec<PngChunkInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -135,12 +135,12 @@ impl fmt::Display for ImageInfo {
 
 impl fmt::Display for PngInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "PNG Info")?;
+        writeln!(f, "PNG Information")?;
         writeln!(f, "=====================")?;
-        writeln!(f, "Total chunks: {}", self.chunks.len())?;
+        writeln!(f, "Total chunks: {}", self.sections.len())?;
         writeln!(f)?;
 
-        for (idx, chunk) in self.chunks.iter().enumerate() {
+        for (idx, chunk) in self.sections.iter().enumerate() {
             writeln!(f, "Chunk #{}: {} (offset: 0x{:08X}, length: {} bytes)",
                 idx + 1, chunk.chunk_type, chunk.start_offset, chunk.length)?;
 
@@ -273,6 +273,7 @@ impl fmt::Display for PngInfo {
                 crate::decoders::png::PngChunkData::IEND { .. } => {
                     writeln!(f, "  End of image")?;
                 }
+                crate::decoders::png::PngChunkData::Signature => {}
                 crate::decoders::png::PngChunkData::Unknown { chunk_type, length, .. } => {
                     writeln!(f, "  Unknown chunk type: {}", chunk_type)?;
                     writeln!(f, "  Length: {} bytes", length)?;
@@ -321,12 +322,12 @@ impl fmt::Display for JpegInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use crate::decoders::jpeg::types::JpegSegmentData;
 
-        writeln!(f, "JPEG Info")?;
-        writeln!(f, "======================")?;
-        writeln!(f, "Segments: {}", self.segments.len())?;
+        writeln!(f, "JPEG Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Segments: {}", self.sections.len())?;
         writeln!(f)?;
 
-        for segment in &self.segments {
+        for segment in &self.sections {
             writeln!(f, "Offset 0x{:08X}  {}", segment.start_offset, segment.marker)?;
 
             match &segment.data {
@@ -362,9 +363,31 @@ impl fmt::Display for JpegInfo {
                         }
                     }
                 }
-                JpegSegmentData::APP { marker, length } => {
+                JpegSegmentData::APP2(app2) => {
+                    writeln!(f, "  Length: {} bytes", app2.length)?;
+                    writeln!(f, "  Identifier: {}", app2.identifier)?;
+                    if let Some(icc) = &app2.icc_profile_sequence {
+                        writeln!(f, "  ICC chunk: {}/{}", icc.chunk_sequence, icc.total_chunks)?;
+                        writeln!(f, "  ICC profile data: {} bytes", icc.profile_data_length)?;
+                    }
+                }
+                JpegSegmentData::APP14(adobe) => {
+                    writeln!(f, "  Length: {} bytes", adobe.length)?;
+                    writeln!(f, "  Version: {}", adobe.version)?;
+                    writeln!(f, "  Flags0: 0x{:04X}", adobe.flags0)?;
+                    writeln!(f, "  Flags1: 0x{:04X}", adobe.flags1)?;
+                    writeln!(f, "  Color transform: {}", adobe.color_transform)?;
+                }
+                JpegSegmentData::APP { marker, length, identifier } => {
                     writeln!(f, "  Marker: {}", marker)?;
                     writeln!(f, "  Length: {} bytes", length)?;
+                    if let Some(id) = identifier {
+                        writeln!(f, "  Identifier: {}", id)?;
+                    }
+                }
+                JpegSegmentData::EXP { expand_horizontal, expand_vertical } => {
+                    writeln!(f, "  Expand horizontal: {}", expand_horizontal)?;
+                    writeln!(f, "  Expand vertical: {}", expand_vertical)?;
                 }
                 JpegSegmentData::SOF(sof) => {
                     writeln!(f, "  Length: {} bytes", sof.length)?;
@@ -382,19 +405,30 @@ impl fmt::Display for JpegInfo {
                     writeln!(f, "  Tables: {}", dht.tables.len())?;
                     for table in &dht.tables {
                         let class = if table.class == 0 { "DC" } else { "AC" };
-                        writeln!(f, "    {} table id={}, symbols={}", class, table.id, table.symbols.len())?;
+                        writeln!(f, "    {} table id={}", class, table.id)?;
+                        writeln!(f, "      Counts (per length 1-16): {:?}", table.counts)?;
+                        writeln!(f, "      Symbols ({}): {:?}", table.symbols.len(), table.symbols)?;
                     }
                 }
                 JpegSegmentData::DAC(dac) => {
                     writeln!(f, "  Length: {} bytes", dac.length)?;
-                    writeln!(f, "  DC tables: {}", dac.dc_tables.len())?;
-                    writeln!(f, "  AC tables: {}", dac.ac_tables.len())?;
+                    for table in &dac.dc_tables {
+                        writeln!(f, "    DC table id={}, Kx={}, U/L={}", table.identifier, table.values[0].value, table.values[0].length)?;
+                    }
+                    for table in &dac.ac_tables {
+                        writeln!(f, "    AC table id={}, Kx={}", table.identifier, table.values[0].value)?;
+                    }
                 }
                 JpegSegmentData::DQT(dqt) => {
                     writeln!(f, "  Length: {} bytes", dqt.length)?;
                     writeln!(f, "  Tables: {}", dqt.tables.len())?;
                     for table in &dqt.tables {
-                        writeln!(f, "    Table id={}, precision={}", table.id, table.precision)?;
+                        let bits = if table.precision == 0 { 8u8 } else { 16u8 };
+                        writeln!(f, "    Table id={}, precision={} bits", table.id, bits)?;
+                        for row in 0..8 {
+                            let row_vals: Vec<u16> = (0..8).map(|col| table.table.get(row * 8 + col).copied().unwrap_or(0)).collect();
+                            writeln!(f, "      {:?}", row_vals)?;
+                        }
                     }
                 }
                 JpegSegmentData::DRI { restart_interval } => {
@@ -467,7 +501,7 @@ impl fmt::Display for GifInfo {
 impl fmt::Display for NetpbmInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Netpbm Image Information")?;
-        writeln!(f, "========================")?;
+        writeln!(f, "=====================")?;
         writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
         writeln!(f, "Max value: {}", self.max_value)?;
         writeln!(f, "Depth: {}", self.depth)?;
@@ -506,7 +540,7 @@ impl fmt::Display for HdrInfo {
 impl fmt::Display for Jbig1Info {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "JBIG1 Image Information")?;
-        writeln!(f, "=======================")?;
+        writeln!(f, "=====================")?;
         writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
         writeln!(f, "Planes: {}", self.planes)?;
         writeln!(f, "Resolution layers: {} to {}", self.dl, self.d)?;
@@ -522,7 +556,7 @@ impl fmt::Display for Jbig1Info {
 impl fmt::Display for IcoInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "ICO/CUR Image Information")?;
-        writeln!(f, "=========================")?;
+        writeln!(f, "=====================")?;
         writeln!(f, "Type: {:?}", self.ico_type)?;
         writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
         writeln!(f, "Images: {}", self.entries.len())?;

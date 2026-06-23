@@ -359,6 +359,7 @@ pub enum PngChunkData {
     FCTL(FctlChunkData),
     FDAT(FdatChunkData),
     IEND { crc: u32 },
+    Signature,
     Unknown { chunk_type: String, length: u32, crc: u32 },
 }
 
@@ -367,6 +368,5 @@ pub struct PngChunkInfo {
     pub start_offset: u64,
     pub chunk_type: String,
     pub length: u32,
-    pub raw_bytes: Vec<u8>,
     pub data: PngChunkData,
 }

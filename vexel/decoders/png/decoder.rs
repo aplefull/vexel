@@ -80,7 +80,7 @@ impl<R: Read + Seek> PngDecoder<R> {
 
     pub fn get_info(&self) -> PngInfo {
         PngInfo {
-            chunks: self.chunks.clone(),
+            sections: self.chunks.clone(),
         }
     }
 
@@ -160,14 +160,9 @@ impl<R: Read + Seek> PngDecoder<R> {
 
         self.chunks.push(PngChunkInfo {
             start_offset: 0,
-            chunk_type: "PNG Signature".to_string(),
+            chunk_type: "Signature".to_string(),
             length: 8,
-            raw_bytes: signature.clone(),
-            data: PngChunkData::Unknown {
-                chunk_type: "PNG Signature".to_string(),
-                length: 8,
-                crc: 0,
-            },
+            data: PngChunkData::Signature,
         });
 
         let mut window = [0u8; 4];
@@ -357,16 +352,15 @@ impl<R: Read + Seek> PngDecoder<R> {
                     }
                 }
                 None => {
-                    if let Ok((start_offset, length_u32, raw_bytes, chunk_type_str, crc)) =
+                    if let Ok((start_offset, length_u32, chunk_type_str, crc)) =
                         chunks::capture_chunk_info(&mut self.reader)
                     {
                         log_debug!("Unknown chunk: {}", chunk_type_str);
-                        
+
                         self.chunks.push(PngChunkInfo {
                             start_offset,
                             chunk_type: chunk_type_str.clone(),
                             length: length_u32,
-                            raw_bytes,
                             data: PngChunkData::Unknown {
                                 chunk_type: chunk_type_str,
                                 length: length_u32,
