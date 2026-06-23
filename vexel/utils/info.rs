@@ -269,7 +269,7 @@ impl fmt::Display for PngInfo {
 
 fn fmt_exif_value(value: &ExifValue) -> String {
     match value {
-        ExifValue::Ascii(s) => s.clone(),
+        ExifValue::Ascii(strings) => strings.join(" / "),
         ExifValue::Short(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
         ExifValue::Long(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
         ExifValue::Rational(v) => v
@@ -277,12 +277,16 @@ fn fmt_exif_value(value: &ExifValue) -> String {
             .map(|(n, d)| if *d == 0 { format!("{}/0", n) } else { format!("{}/{}", n, d) })
             .collect::<Vec<_>>()
             .join(", "),
+        ExifValue::SByte(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+        ExifValue::SShort(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
         ExifValue::SLong(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
         ExifValue::SRational(v) => v
             .iter()
             .map(|(n, d)| if *d == 0 { format!("{}/0", n) } else { format!("{}/{}", n, d) })
             .collect::<Vec<_>>()
             .join(", "),
+        ExifValue::Float(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
+        ExifValue::Double(v) => v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "),
         ExifValue::Byte(v) => format!("{} bytes", v.len()),
         ExifValue::Undefined(v) => format!("{} bytes (undefined)", v.len()),
     }
@@ -338,6 +342,9 @@ impl fmt::Display for JpegInfo {
                         }
                         if let Some(ifd) = &exif.gps_ifd {
                             fmt_exif_ifd(f, "GPSIFD", ifd)?;
+                        }
+                        if let Some(ifd) = &exif.interop_ifd {
+                            fmt_exif_ifd(f, "InteroperabilityIFD", ifd)?;
                         }
                         if let Some(ifd) = &exif.ifd1 {
                             fmt_exif_ifd(f, "IFD1 (thumbnail)", ifd)?;
@@ -994,6 +1001,9 @@ impl fmt::Display for JpegLsInfo {
                         }
                         if let Some(ifd) = &exif.gps_ifd {
                             fmt_exif_ifd(f, "GPSIFD", ifd)?;
+                        }
+                        if let Some(ifd) = &exif.interop_ifd {
+                            fmt_exif_ifd(f, "InteroperabilityIFD", ifd)?;
                         }
                         if let Some(ifd) = &exif.ifd1 {
                             fmt_exif_ifd(f, "IFD1 (thumbnail)", ifd)?;
