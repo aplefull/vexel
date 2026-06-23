@@ -7,6 +7,7 @@ use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::jpeg_ls::types::JpegLsSectionInfo;
 use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::png::PngChunkInfo;
+use crate::decoders::tga::types::TgaSectionInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
 use serde::Serialize;
 use std::fmt;
@@ -25,6 +26,7 @@ pub enum ImageInfo {
     Hdr(HdrInfo),
     Jbig1(Jbig1Info),
     Ico(IcoInfo),
+    Tga(TgaInfo),
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -81,6 +83,12 @@ pub struct IcoInfo {
     pub sections: Vec<IcoSectionInfo>,
 }
 
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct TgaInfo {
+    pub sections: Vec<TgaSectionInfo>,
+}
+
 impl fmt::Display for ImageInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -93,6 +101,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Hdr(info) => write!(f, "{}", info),
             ImageInfo::Jbig1(info) => write!(f, "{}", info),
             ImageInfo::Ico(info) => write!(f, "{}", info),
+            ImageInfo::Tga(info) => write!(f, "{}", info),
         }
     }
 }
@@ -1045,6 +1054,99 @@ impl fmt::Display for IcoInfo {
                 IcoSectionData::ImageData(d) => {
                     writeln!(f, "Offset 0x{:08X}  Image Data ({:?})", section.start_offset, d.image_format)?;
                     writeln!(f, "  Length: {} bytes", d.length)?;
+                }
+            }
+            writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for TgaInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::tga::types::TgaSectionData;
+
+        writeln!(f, "TGA Image Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                TgaSectionData::Header(h) => {
+                    writeln!(f, "Offset 0x{:08X}  Header", section.start_offset)?;
+                    writeln!(f, "  ID length: {}", h.id_length)?;
+                    writeln!(f, "  Palette type: {}", h.palette_type)?;
+                    writeln!(f, "  Image type: {}", h.image_type_raw)?;
+                    writeln!(f, "  Palette first entry: {}", h.palette_first)?;
+                    writeln!(f, "  Palette length: {}", h.palette_length)?;
+                    writeln!(f, "  Palette BPP: {}", h.palette_bpp)?;
+                    writeln!(f, "  X origin: {}", h.x_origin)?;
+                    writeln!(f, "  Y origin: {}", h.y_origin)?;
+                    writeln!(f, "  Width: {}", h.width)?;
+                    writeln!(f, "  Height: {}", h.height)?;
+                    writeln!(f, "  Bits per pixel: {}", h.bpp)?;
+                    writeln!(f, "  Flags: 0x{:02X}", h.flags)?;
+                }
+                TgaSectionData::ImageId(id) => {
+                    writeln!(f, "Offset 0x{:08X}  Image ID ({} bytes)", section.start_offset, id.length)?;
+                    if !id.text.is_empty() {
+                        writeln!(f, "  Text: {}", id.text)?;
+                    }
+                }
+                TgaSectionData::ColorMap(cm) => {
+                    writeln!(f, "Offset 0x{:08X}  Color Map", section.start_offset)?;
+                    writeln!(f, "  First entry index: {}", cm.first_entry_index)?;
+                    writeln!(f, "  Entry count: {}", cm.entry_count)?;
+                    writeln!(f, "  Entry size: {} bits", cm.entry_size)?;
+                    writeln!(f, "  Data length: {} bytes", cm.data_length)?;
+                }
+                TgaSectionData::PixelData(pd) => {
+                    writeln!(f, "Offset 0x{:08X}  Pixel Data", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", pd.length)?;
+                }
+                TgaSectionData::Footer(ft) => {
+                    writeln!(f, "Offset 0x{:08X}  Footer (TGA 2.0)", section.start_offset)?;
+                    writeln!(f, "  Extension area offset: 0x{:08X}", ft.extension_area_offset)?;
+                    writeln!(f, "  Developer dir offset: 0x{:08X}", ft.developer_dir_offset)?;
+                }
+                TgaSectionData::ExtensionArea(ext) => {
+                    writeln!(f, "Offset 0x{:08X}  Extension Area (TGA 2.0)", section.start_offset)?;
+                    writeln!(f, "  Extension size: {} bytes", ext.extension_size)?;
+                    if !ext.author_name.is_empty() {
+                        writeln!(f, "  Author name: {}", ext.author_name)?;
+                    }
+                    if !ext.author_comments.is_empty() {
+                        let comments = ext.author_comments.trim();
+                        if !comments.is_empty() {
+                            if comments.len() > 60 {
+                                writeln!(f, "  Author comments: {}... ({} chars)", &comments[..60], comments.len())?;
+                            } else {
+                                writeln!(f, "  Author comments: {}", comments)?;
+                            }
+                        }
+                    }
+                    if ext.date_year != 0 {
+                        writeln!(f, "  Date: {:04}-{:02}-{:02}", ext.date_year, ext.date_month, ext.date_day)?;
+                        writeln!(f, "  Time: {:02}:{:02}:{:02}", ext.time_hour, ext.time_minute, ext.time_second)?;
+                    }
+                    if !ext.job_name.is_empty() {
+                        writeln!(f, "  Job name: {}", ext.job_name)?;
+                        writeln!(f, "  Job time: {:02}:{:02}:{:02}", ext.job_hours, ext.job_minutes, ext.job_seconds)?;
+                    }
+                    if !ext.software_id.is_empty() {
+                        writeln!(f, "  Software ID: {}", ext.software_id)?;
+                        writeln!(f, "  Software version: {}.{} '{}'", ext.software_version_number / 100, ext.software_version_number % 100, ext.software_version_letter as char)?;
+                    }
+                    writeln!(f, "  Key color: A={} R={} G={} B={}", ext.key_color_a, ext.key_color_r, ext.key_color_g, ext.key_color_b)?;
+                    if ext.pixel_aspect_ratio_denominator != 0 {
+                        writeln!(f, "  Pixel aspect ratio: {}/{}", ext.pixel_aspect_ratio_numerator, ext.pixel_aspect_ratio_denominator)?;
+                    }
+                    if ext.gamma_value_denominator != 0 {
+                        writeln!(f, "  Gamma: {}/{}", ext.gamma_value_numerator, ext.gamma_value_denominator)?;
+                    }
+                    writeln!(f, "  Attributes type: {}", ext.attributes_type)?;
                 }
             }
             writeln!(f)?;

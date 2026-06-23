@@ -169,6 +169,10 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = ico_decoder.get_info();
                 ImageInfo::Ico(image_data)
             }
+            Decoders::Tga(tga_decoder) => {
+                let image_data = tga_decoder.get_info();
+                ImageInfo::Tga(image_data)
+            }
             _ => unimplemented!(),
         }
     }
