@@ -2,7 +2,7 @@ use crate::bitreader::BitReader;
 use crate::decoders::bmp::compression::RleDecoder;
 use crate::decoders::bmp::headers::HeaderReader;
 use crate::decoders::bmp::pixels::PixelDecoder;
-use crate::decoders::bmp::types::{BitmapCompression, BitmapFileHeader, BitmapInfoHeader, ColorEntry, DibHeader};
+use crate::decoders::bmp::types::{BitmapCompression, BitmapFileHeader, BitmapInfoHeader, BmpExtraMasks, BmpPixelDataInfo, BmpSectionData, BmpSectionInfo, ColorEntry, DibHeader};
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
@@ -21,6 +21,7 @@ pub struct BmpDecoder<R: Read + Seek> {
     icc_profile: Option<ICCProfile>,
     data: Vec<u8>,
     rle_decoded: bool,
+    sections: Vec<BmpSectionInfo>,
     reader: BitReader<R>,
 }
 
@@ -52,6 +53,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             icc_profile: None,
             data: Vec::new(),
             rle_decoded: false,
+            sections: Vec::new(),
             reader: BitReader::with_le(reader),
         }
     }
@@ -66,25 +68,37 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
     pub fn get_info(&self) -> BmpInfo {
         BmpInfo {
-            width: self.width,
-            height: self.height,
-            file_header: self.file_header.clone(),
-            dib_header: self.dib_header.clone(),
-            color_table: self.color_table.clone(),
-            icc_profile: self.icc_profile.clone(),
+            sections: self.sections.clone(),
         }
     }
 
     fn read_file_header(&mut self) -> VexelResult<()> {
-        self.file_header = HeaderReader::read_file_header(&mut self.reader)?;
+        let start_offset = self.reader.stream_position().unwrap_or(0);
+        let (file_header, ba_header) = HeaderReader::read_file_header(&mut self.reader)?;
+        self.file_header = file_header;
+        if let Some(ba) = ba_header {
+            self.sections.push(BmpSectionInfo {
+                start_offset,
+                data: BmpSectionData::BitmapArrayHeader(ba),
+            });
+        }
+        self.sections.push(BmpSectionInfo {
+            start_offset,
+            data: BmpSectionData::FileHeader(self.file_header.clone()),
+        });
         Ok(())
     }
 
     fn read_info_header(&mut self) -> VexelResult<()> {
+        let start_offset = self.reader.stream_position().unwrap_or(0);
         let (dib_header, width, height) = HeaderReader::read_info_header(&mut self.reader)?;
         self.dib_header = dib_header;
         self.width = width;
         self.height = height;
+        self.sections.push(BmpSectionInfo {
+            start_offset,
+            data: BmpSectionData::DibHeader(self.dib_header.clone()),
+        });
         Ok(())
     }
 
@@ -92,6 +106,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         if matches!(self.dib_header, DibHeader::Info(_)) {
             let compression = self.dib_header.compression();
             if matches!(compression, BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields) {
+                let start_offset = self.reader.stream_position().unwrap_or(0);
                 let r = self.reader.read_u32()?;
                 let g = self.reader.read_u32()?;
                 let b = self.reader.read_u32()?;
@@ -101,6 +116,15 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     0
                 };
                 self.extra_masks = Some((r, g, b, a));
+                self.sections.push(BmpSectionInfo {
+                    start_offset,
+                    data: BmpSectionData::ExtraMasks(BmpExtraMasks {
+                        red_mask: r,
+                        green_mask: g,
+                        blue_mask: b,
+                        alpha_mask: a,
+                    }),
+                });
             }
         }
         Ok(())
@@ -115,6 +139,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             };
 
             let is_core = matches!(self.dib_header, DibHeader::Core(_));
+            let start_offset = self.reader.stream_position().unwrap_or(0);
 
             for _ in 0..num_colors {
                 let blue = self.reader.read_u8()?;
@@ -129,6 +154,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     reserved,
                 });
             }
+
+            self.sections.push(BmpSectionInfo {
+                start_offset,
+                data: BmpSectionData::ColorTable(self.color_table.clone()),
+            });
         }
 
         Ok(())
@@ -145,6 +175,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let data = self.reader.read_bytes(profile_size as usize)?;
 
         if let Ok(profile) = ICCProfile::new(&data) {
+            self.sections.push(BmpSectionInfo {
+                start_offset: file_offset,
+                data: BmpSectionData::IccProfile(profile.clone()),
+            });
             self.icc_profile = Some(profile);
         }
 
@@ -152,8 +186,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
     }
 
     fn read_pixel_data(&mut self) -> VexelResult<()> {
-        self.reader
-            .seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
+        let pixel_offset = self.file_header.pixel_offset as u64;
+        self.reader.seek(SeekFrom::Start(pixel_offset))?;
 
         let is_rle = matches!(
             self.dib_header.compression(),
@@ -168,6 +202,14 @@ impl<R: Read + Seek> BmpDecoder<R> {
             let data_size = row_size * self.height;
             std::cmp::min(data_size as u64, bytes_until_eof)
         };
+
+        self.sections.push(BmpSectionInfo {
+            start_offset: pixel_offset,
+            data: BmpSectionData::PixelData(BmpPixelDataInfo {
+                offset: pixel_offset,
+                length: bytes_to_read,
+            }),
+        });
 
         self.data = self.reader.read_bytes(bytes_to_read as usize)?;
 

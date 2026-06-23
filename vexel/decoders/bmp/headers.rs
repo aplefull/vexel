@@ -1,6 +1,7 @@
 use crate::decoders::bmp::types::{
-    BitmapCoreHeader, BitmapFileHeader, BitmapInfoHeader, BitmapV2InfoHeader, BitmapV3InfoHeader,
-    BitmapV4Header, BitmapV5Header, BitmapCompression, CIEXYZ, ColorSpace, DibHeader, OS22XBitmapHeader,
+    BitmapArrayHeader, BitmapCoreHeader, BitmapFileHeader, BitmapInfoHeader, BitmapV2InfoHeader,
+    BitmapV3InfoHeader, BitmapV4Header, BitmapV5Header, BitmapCompression, CIEXYZ, ColorSpace,
+    DibHeader, OS22XBitmapHeader,
 };
 use crate::utils::error::{VexelError, VexelResult};
 use crate::{log_warn};
@@ -10,15 +11,18 @@ use std::io::{Read, Seek};
 pub struct HeaderReader;
 
 impl HeaderReader {
-    pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapFileHeader> {
+    pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(BitmapFileHeader, Option<BitmapArrayHeader>)> {
         let signature = reader.read_u16()?;
 
         if signature == 0x4142 {
-            let _file_size = reader.read_u32()?;
-            let _next_offset = reader.read_u32()?;
-            let _screen_width = reader.read_u16()?;
-            let _screen_height = reader.read_u16()?;
-            return Self::read_file_header(reader);
+            let ba = BitmapArrayHeader {
+                file_size: reader.read_u32()?,
+                next_offset: reader.read_u32()?,
+                screen_width: reader.read_u16()?,
+                screen_height: reader.read_u16()?,
+            };
+            let (file_header, _) = Self::read_file_header(reader)?;
+            return Ok((file_header, Some(ba)));
         }
 
         match signature {
@@ -32,12 +36,12 @@ impl HeaderReader {
             }
         }
 
-        Ok(BitmapFileHeader {
+        Ok((BitmapFileHeader {
             file_size: reader.read_u32()?,
             reserved1: reader.read_u16()?,
             reserved2: reader.read_u16()?,
             pixel_offset: reader.read_u32()?,
-        })
+        }, None))
     }
 
     pub fn read_info_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(DibHeader, u32, u32)> {

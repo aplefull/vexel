@@ -6,7 +6,12 @@ use std::io::{Read, Seek};
 
 use super::compose_simd::compose_frame;
 use super::lzw::decompress_lzw;
-use super::types::{ApplicationExtension, DisposalMethod, GifDecoder, GifFrameInfo, GraphicsControlExtension, PlainTextExtension};
+use super::types::{
+    ApplicationExtension, DisposalMethod, GifApplicationExtensionData, GifColorTableInfo,
+    GifCommentData, GifDecoder, GifFrameInfo, GifGraphicsControlData, GifHeaderData,
+    GifImageDataInfo, GifImageDescriptorData, GifPlainTextData, GifSectionData, GifSectionInfo,
+    GraphicsControlExtension, PlainTextExtension,
+};
 
 impl<R: Read + Seek + Sync> GifDecoder<R> {
     pub fn new(reader: R) -> Self {
@@ -27,6 +32,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             comments: Vec::new(),
             app_extensions: Vec::new(),
             plain_text_extensions: Vec::new(),
+            sections: Vec::new(),
             reader: BitReader::new(reader),
         }
     }
@@ -41,26 +47,13 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
     pub fn get_info(&self) -> GifInfo {
         GifInfo {
-            width: self.width,
-            height: self.height,
-            canvas_width: self.canvas_width,
-            canvas_height: self.canvas_height,
-            version: self.version.clone(),
-            global_color_table_flag: self.global_color_table_flag,
-            color_resolution: self.color_resolution,
-            sort_flag: self.sort_flag,
-            size_of_global_color_table: self.size_of_global_color_table,
-            background_color_index: self.background_color_index,
-            pixel_aspect_ratio: self.pixel_aspect_ratio,
-            global_color_table: self.global_color_table.clone(),
-            frames: self.frames.clone(),
-            comments: self.comments.clone(),
-            app_extensions: self.app_extensions.clone(),
-            plain_text_extensions: self.plain_text_extensions.clone(),
+            sections: self.sections.clone(),
         }
     }
 
     fn read_header(&mut self) -> VexelResult<()> {
+        let start_offset = self.reader.stream_position().unwrap_or(0);
+
         let mut buf = [0u8; 10];
         let mut n = 0;
         while n < buf.len() {
@@ -95,8 +88,22 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.size_of_global_color_table = packed_fields & 0b00000111;
 
         self.background_color_index = self.reader.read_u8()?;
-
         self.pixel_aspect_ratio = self.reader.read_u8()?;
+
+        self.sections.push(GifSectionInfo {
+            start_offset,
+            data: GifSectionData::Header(GifHeaderData {
+                version: self.version.clone(),
+                canvas_width: self.canvas_width,
+                canvas_height: self.canvas_height,
+                global_color_table_flag: self.global_color_table_flag,
+                color_resolution: self.color_resolution,
+                sort_flag: self.sort_flag,
+                size_of_global_color_table: self.size_of_global_color_table,
+                background_color_index: self.background_color_index,
+                pixel_aspect_ratio: self.pixel_aspect_ratio,
+            }),
+        });
 
         Ok(())
     }
@@ -106,7 +113,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             return;
         }
 
-        let num_entries = 1 << (self.size_of_global_color_table + 1);
+        let start_offset = self.reader.stream_position().unwrap_or(0);
+        let num_entries = 1u32 << (self.size_of_global_color_table + 1);
         let table_size = num_entries * 3;
 
         for _ in 0..table_size {
@@ -120,9 +128,22 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
             self.global_color_table.push(bit);
         }
+
+        let entries = self.global_color_table.chunks_exact(3)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect();
+
+        self.sections.push(GifSectionInfo {
+            start_offset,
+            data: GifSectionData::GlobalColorTable(GifColorTableInfo {
+                entry_count: num_entries,
+                length: table_size,
+                entries,
+            }),
+        });
     }
 
-    fn read_application_extension(&mut self) -> VexelResult<()> {
+    fn read_application_extension(&mut self, start_offset: u64) -> VexelResult<()> {
         let block_size = self.reader.read_u8()?;
         if block_size != 11 {
             log_warn!("Invalid application extension block size: {}", block_size);
@@ -138,6 +159,9 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             auth_code.push(self.reader.read_u8()?);
         }
 
+        let identifier_str = String::from_utf8_lossy(identifier.as_slice()).to_string();
+        let auth_code_str = String::from_utf8_lossy(auth_code.as_slice()).to_string();
+
         if identifier == b"NETSCAPE" && auth_code == b"2.0" {
             loop {
                 let sub_block_size = self.reader.read_u8()?;
@@ -148,8 +172,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 let mut app_extension = ApplicationExtension {
                     loop_count: None,
                     buffer_size: None,
-                    identifier: String::from_utf8_lossy(identifier.as_slice()).to_string(),
-                    auth_code: String::from_utf8_lossy(auth_code.as_slice()).to_string(),
+                    identifier: identifier_str.clone(),
+                    auth_code: auth_code_str.clone(),
                     data: Vec::new(),
                 };
 
@@ -178,6 +202,16 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                     }
                 }
 
+                self.sections.push(GifSectionInfo {
+                    start_offset,
+                    data: GifSectionData::ApplicationExtension(GifApplicationExtensionData {
+                        identifier: app_extension.identifier.clone(),
+                        auth_code: app_extension.auth_code.clone(),
+                        loop_count: app_extension.loop_count,
+                        buffer_size: app_extension.buffer_size,
+                        data_length: sub_block_size as u64,
+                    }),
+                });
                 self.app_extensions.push(app_extension);
             }
         } else {
@@ -194,11 +228,22 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 }
             }
 
+            let data_length = data.len() as u64;
+            self.sections.push(GifSectionInfo {
+                start_offset,
+                data: GifSectionData::ApplicationExtension(GifApplicationExtensionData {
+                    identifier: identifier_str.clone(),
+                    auth_code: auth_code_str.clone(),
+                    loop_count: None,
+                    buffer_size: None,
+                    data_length,
+                }),
+            });
             self.app_extensions.push(ApplicationExtension {
                 loop_count: None,
                 buffer_size: None,
-                identifier: String::from_utf8_lossy(identifier.as_slice()).to_string(),
-                auth_code: String::from_utf8_lossy(auth_code.as_slice()).to_string(),
+                identifier: identifier_str,
+                auth_code: auth_code_str,
                 data,
             });
         }
@@ -207,7 +252,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     }
 
     #[allow(dead_code)]
-    fn read_plain_text_extension(&mut self) -> VexelResult<()> {
+    fn read_plain_text_extension(&mut self, start_offset: u64) -> VexelResult<()> {
         let block_size = self.reader.read_u8()?;
         if block_size != 12 {
             log_warn!("Invalid plain text extension block size: {}", block_size);
@@ -237,6 +282,20 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             text.push_str(&String::from_utf8_lossy(&block));
         }
 
+        self.sections.push(GifSectionInfo {
+            start_offset,
+            data: GifSectionData::PlainTextExtension(GifPlainTextData {
+                left,
+                top,
+                width,
+                height,
+                cell_width,
+                cell_height,
+                foreground_color,
+                background_color,
+                text: text.clone(),
+            }),
+        });
         self.plain_text_extensions.push(PlainTextExtension {
             left,
             top,
@@ -252,7 +311,9 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_comment_extension(&mut self) -> VexelResult<()> {
+    fn read_comment_extension(&mut self, start_offset: u64) -> VexelResult<()> {
+        let mut full_text = String::new();
+
         loop {
             let block_size = self.reader.read_u8()?;
             if block_size == 0 {
@@ -265,38 +326,47 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 block.push(byte);
             }
 
-            self.comments.push(String::from_utf8(block).unwrap());
+            let text = String::from_utf8(block).unwrap();
+            full_text.push_str(&text);
+            self.comments.push(text);
         }
+
+        self.sections.push(GifSectionInfo {
+            start_offset,
+            data: GifSectionData::CommentExtension(GifCommentData { text: full_text }),
+        });
 
         Ok(())
     }
 
     fn read_frames(&mut self) -> VexelResult<()> {
-        let mut current_gce: Option<GraphicsControlExtension> = None;
+        let mut current_gce: Option<(u64, GraphicsControlExtension)> = None;
 
         loop {
+            let block_start = self.reader.stream_position().unwrap_or(0);
             let block_type = self.reader.read_u8()?;
 
             match block_type {
                 // Image Separator (0x2C)
                 0x2C => {
-                    self.read_frame(current_gce.take())?;
+                    self.read_frame(block_start, current_gce.take().map(|(_, gce)| gce))?;
                 }
                 // Extension Introducer (0x21)
                 0x21 => {
                     let label = self.reader.read_u8()?;
                     match label {
                         0xF9 => {
-                            current_gce = Some(self.read_graphics_control_extension()?);
+                            let gce = self.read_graphics_control_extension(block_start)?;
+                            current_gce = Some((block_start, gce));
                         }
                         0xFE => {
-                            self.read_comment_extension()?;
+                            self.read_comment_extension(block_start)?;
                         }
                         0xFF => {
-                            self.read_application_extension()?;
+                            self.read_application_extension(block_start)?;
                         }
                         /*0x01 => {
-                            self.read_plain_text_extension()?;
+                            self.read_plain_text_extension(block_start)?;
                         }*/
                         _ => {
                             log_warn!("Skipping unknown extension: {:#04x}", label);
@@ -315,6 +385,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 }
                 // End of image (0x3B)
                 0x3B => {
+                    self.sections.push(GifSectionInfo {
+                        start_offset: block_start,
+                        data: GifSectionData::Trailer,
+                    });
                     break;
                 }
                 _ => {}
@@ -324,46 +398,58 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_frame(&mut self, gce: Option<GraphicsControlExtension>) -> VexelResult<()> {
-        let mut frame = GifFrameInfo {
-            left: self.reader.read_u16()?.swap_bytes() as u32,
-            top: self.reader.read_u16()?.swap_bytes() as u32,
-            width: self.reader.read_u16()?.swap_bytes() as u32,
-            height: self.reader.read_u16()?.swap_bytes() as u32,
-            local_color_table_flag: false,
-            interlace_flag: false,
-            sort_flag: false,
-            size_of_local_color_table: 0,
-            local_color_table: Vec::new(),
-            lzw_minimum_code_size: 0,
-            user_input: gce.as_ref().map(|gce| gce.user_input).unwrap_or(false),
-            transparent_index: gce
-                .as_ref()
-                .filter(|gce| gce.transparency)
-                .map(|gce| gce.transparent_color_index),
-            disposal_method: gce
-                .as_ref()
-                .map(|gce| gce.disposal_method)
-                .unwrap_or(DisposalMethod::None),
-            delay: gce.map(|gce| gce.delay).unwrap_or(100),
-            data: Vec::new(),
-        };
+    fn read_frame(&mut self, descriptor_offset: u64, gce: Option<GraphicsControlExtension>) -> VexelResult<()> {
+        let left = self.reader.read_u16()?.swap_bytes() as u32;
+        let top = self.reader.read_u16()?.swap_bytes() as u32;
+        let width = self.reader.read_u16()?.swap_bytes() as u32;
+        let height = self.reader.read_u16()?.swap_bytes() as u32;
 
         let packed_fields = self.reader.read_u8()?;
-        frame.local_color_table_flag = (packed_fields & 0b10000000) != 0;
-        frame.interlace_flag = (packed_fields & 0b01000000) != 0;
-        frame.sort_flag = (packed_fields & 0b00100000) != 0;
-        frame.size_of_local_color_table = packed_fields & 0b00000111;
+        let local_color_table_flag = (packed_fields & 0b10000000) != 0;
+        let interlace_flag = (packed_fields & 0b01000000) != 0;
+        let sort_flag = (packed_fields & 0b00100000) != 0;
+        let size_of_local_color_table = packed_fields & 0b00000111;
 
-        if frame.local_color_table_flag {
-            let table_size = 3 * (1 << (frame.size_of_local_color_table + 1));
+        self.sections.push(GifSectionInfo {
+            start_offset: descriptor_offset,
+            data: GifSectionData::ImageDescriptor(GifImageDescriptorData {
+                left,
+                top,
+                width,
+                height,
+                local_color_table_flag,
+                interlace_flag,
+                sort_flag,
+                size_of_local_color_table,
+            }),
+        });
+
+        let mut local_color_table = Vec::new();
+        if local_color_table_flag {
+            let lct_offset = self.reader.stream_position().unwrap_or(0);
+            let num_entries = 1u32 << (size_of_local_color_table + 1);
+            let table_size = num_entries * 3;
             for _ in 0..table_size {
-                frame.local_color_table.push(self.reader.read_u8()?);
+                local_color_table.push(self.reader.read_u8()?);
             }
+            let entries = local_color_table.chunks_exact(3)
+                .map(|c| [c[0], c[1], c[2]])
+                .collect();
+            self.sections.push(GifSectionInfo {
+                start_offset: lct_offset,
+                data: GifSectionData::LocalColorTable(GifColorTableInfo {
+                    entry_count: num_entries,
+                    length: table_size,
+                    entries,
+                }),
+            });
         }
 
-        frame.lzw_minimum_code_size = self.reader.read_u8()?;
+        let image_data_offset = self.reader.stream_position().unwrap_or(0);
+        let lzw_minimum_code_size = self.reader.read_u8()?;
 
+        let mut data = Vec::new();
+        let mut data_length: u64 = 1;
         loop {
             let block_size = match self.reader.read_u8() {
                 Ok(0) => break,
@@ -374,18 +460,51 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 }
             };
 
+            data_length += 1 + block_size as u64;
             let mut buffer = vec![0u8; block_size];
             match self.reader.read_exact(&mut buffer) {
                 Ok(_) => {}
                 Err(e) => {
                     log_warn!("Error reading image sub-block data: {:?}", e);
-                    frame.data.extend_from_slice(&buffer);
+                    data.extend_from_slice(&buffer);
                     break;
                 }
             }
 
-            frame.data.extend(buffer);
+            data.extend(buffer);
         }
+
+        self.sections.push(GifSectionInfo {
+            start_offset: image_data_offset,
+            data: GifSectionData::ImageData(GifImageDataInfo {
+                lzw_minimum_code_size,
+                data_length,
+            }),
+        });
+
+        let frame = GifFrameInfo {
+            left,
+            top,
+            width,
+            height,
+            local_color_table_flag,
+            interlace_flag,
+            sort_flag,
+            size_of_local_color_table,
+            local_color_table,
+            lzw_minimum_code_size,
+            user_input: gce.as_ref().map(|gce| gce.user_input).unwrap_or(false),
+            transparent_index: gce
+                .as_ref()
+                .filter(|gce| gce.transparency)
+                .map(|gce| gce.transparent_color_index),
+            disposal_method: gce
+                .as_ref()
+                .map(|gce| gce.disposal_method)
+                .unwrap_or(DisposalMethod::None),
+            delay: gce.map(|gce| gce.delay).unwrap_or(100),
+            data,
+        };
 
         if self.frames.is_empty() {
             self.width = self.canvas_width;
@@ -397,7 +516,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(())
     }
 
-    fn read_graphics_control_extension(&mut self) -> VexelResult<GraphicsControlExtension> {
+    fn read_graphics_control_extension(&mut self, start_offset: u64) -> VexelResult<GraphicsControlExtension> {
         let block_size = self.reader.read_u8()?;
         if block_size != 4 {
             log_warn!("Invalid graphics control extension block size: {}", block_size);
@@ -422,6 +541,16 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         if terminator != 0 {
             log_warn!("Invalid graphics control extension block terminator: {}", terminator);
         }
+
+        self.sections.push(GifSectionInfo {
+            start_offset,
+            data: GifSectionData::GraphicsControlExtension(GifGraphicsControlData {
+                disposal_method,
+                user_input,
+                transparent_color_index: transparency.then_some(transparent_color_index),
+                delay,
+            }),
+        });
 
         Ok(GraphicsControlExtension {
             disposal_method,

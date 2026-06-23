@@ -1,12 +1,11 @@
-use crate::decoders::bmp::{BitmapFileHeader, ColorEntry, DibHeader};
-use crate::decoders::gif::{ApplicationExtension, GifFrameInfo, PlainTextExtension};
+use crate::decoders::bmp::BmpSectionInfo;
+use crate::decoders::gif::GifSectionInfo;
 use crate::decoders::hdr::HdrFormat;
 use crate::decoders::ico::{IconDirEntry, IcoType};
 use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::netpbm::{NetpbmFormat, TupleType};
 use crate::decoders::png::PngChunkInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
-use crate::utils::icc::ICCProfile;
 use serde::Serialize;
 use std::fmt;
 use tsify::Tsify;
@@ -40,33 +39,13 @@ pub struct PngInfo {
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct BmpInfo {
-    pub width: u32,
-    pub height: u32,
-    pub file_header: BitmapFileHeader,
-    pub dib_header: DibHeader,
-    pub color_table: Vec<ColorEntry>,
-    pub icc_profile: Option<ICCProfile>,
+    pub sections: Vec<BmpSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct GifInfo {
-    pub width: u32,
-    pub height: u32,
-    pub canvas_width: u32,
-    pub canvas_height: u32,
-    pub version: String,
-    pub global_color_table_flag: bool,
-    pub color_resolution: u8,
-    pub sort_flag: bool,
-    pub size_of_global_color_table: u8,
-    pub background_color_index: u8,
-    pub pixel_aspect_ratio: u8,
-    pub global_color_table: Vec<u8>,
-    pub frames: Vec<GifFrameInfo>,
-    pub comments: Vec<String>,
-    pub app_extensions: Vec<ApplicationExtension>,
-    pub plain_text_extensions: Vec<PlainTextExtension>,
+    pub sections: Vec<GifSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -156,6 +135,8 @@ impl fmt::Display for PngInfo {
                 }
                 crate::decoders::png::PngChunkData::PLTE(data) => {
                     writeln!(f, "  Palette entries: {}", data.entries.len())?;
+                    let hex: Vec<String> = data.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
+                    writeln!(f, "  Colors: {}", hex.join(", "))?;
                 }
                 crate::decoders::png::PngChunkData::IDAT(data) => {
                     writeln!(f, "  Data length: {} bytes", data.data_length)?;
@@ -251,9 +232,15 @@ impl fmt::Display for PngInfo {
                     writeln!(f, "  Palette name: {}", data.palette.name)?;
                     writeln!(f, "  Sample depth: {} bits", data.palette.sample_depth)?;
                     writeln!(f, "  Samples: {}", data.palette.samples.len())?;
+                    let entries: Vec<String> = data.palette.samples.iter()
+                        .map(|s| format!("#{:04X}{:04X}{:04X}{:04X}(f={})", s.red, s.green, s.blue, s.alpha, s.frequency))
+                        .collect();
+                    writeln!(f, "  Colors: {}", entries.join(", "))?;
                 }
                 crate::decoders::png::PngChunkData::HIST(data) => {
                     writeln!(f, "  Histogram entries: {}", data.frequencies.len())?;
+                    let freqs: Vec<String> = data.frequencies.iter().map(|n| n.to_string()).collect();
+                    writeln!(f, "  Frequencies: {}", freqs.join(", "))?;
                 }
                 crate::decoders::png::PngChunkData::ACTL(data) => {
                     writeln!(f, "  Number of frames: {}", data.actl.num_frames)?;
@@ -462,38 +449,274 @@ impl fmt::Display for JpegInfo {
 
 impl fmt::Display for BmpInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "BMP Image Information")?;
+        use crate::decoders::bmp::{BmpSectionData, DibHeader};
+
+        writeln!(f, "BMP Information")?;
         writeln!(f, "=====================")?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "File size: {} bytes", self.file_header.file_size)?;
-        writeln!(f, "Color table entries: {}", self.color_table.len())?;
-        if let Some(profile) = &self.icc_profile {
-            writeln!(f, "ICC Profile:")?;
-            writeln!(f, "  Size: {} bytes", profile.header.size)?;
-            writeln!(f, "  Class: {}", profile.header.profile_class)?;
-            writeln!(f, "  Color space: {}", profile.header.color_space)?;
-            writeln!(f, "  PCS: {}", profile.header.pcs)?;
-            writeln!(f, "  Tags: {}", profile.tag_table.tag_count)?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                BmpSectionData::BitmapArrayHeader(ba) => {
+                    writeln!(f, "Offset 0x{:08X}  Bitmap Array Header", section.start_offset)?;
+                    writeln!(f, "  File size: {} bytes", ba.file_size)?;
+                    writeln!(f, "  Next offset: {}", ba.next_offset)?;
+                    writeln!(f, "  Screen size: {}x{}", ba.screen_width, ba.screen_height)?;
+                }
+                BmpSectionData::FileHeader(h) => {
+                    writeln!(f, "Offset 0x{:08X}  File Header", section.start_offset)?;
+                    writeln!(f, "  File size: {} bytes", h.file_size)?;
+                    writeln!(f, "  Reserved1: {}", h.reserved1)?;
+                    writeln!(f, "  Reserved2: {}", h.reserved2)?;
+                    writeln!(f, "  Pixel data offset: {} bytes", h.pixel_offset)?;
+                }
+                BmpSectionData::DibHeader(dib) => {
+                    writeln!(f, "Offset 0x{:08X}  DIB Header", section.start_offset)?;
+                    match dib {
+                        DibHeader::Core(h) => {
+                            writeln!(f, "  Type: BITMAPCOREHEADER (12 bytes)")?;
+                            writeln!(f, "  Width: {}", h.width)?;
+                            writeln!(f, "  Height: {}", h.height)?;
+                            writeln!(f, "  Planes: {}", h.planes)?;
+                            writeln!(f, "  Bits per pixel: {}", h.bits_per_pixel)?;
+                        }
+                        DibHeader::OS2V2(h) => {
+                            writeln!(f, "  Type: OS22XBITMAPHEADER")?;
+                            writeln!(f, "  Width: {}", h.width)?;
+                            writeln!(f, "  Height: {}", h.height)?;
+                            writeln!(f, "  Planes: {}", h.planes)?;
+                            writeln!(f, "  Bits per pixel: {}", h.bits_per_pixel)?;
+                            writeln!(f, "  Compression: {:?}", h.compression)?;
+                            writeln!(f, "  Image size: {} bytes", h.image_size)?;
+                            writeln!(f, "  X pixels per meter: {}", h.x_pixels_per_meter)?;
+                            writeln!(f, "  Y pixels per meter: {}", h.y_pixels_per_meter)?;
+                            writeln!(f, "  Colors used: {}", h.colors_used)?;
+                            writeln!(f, "  Important colors: {}", h.important_colors)?;
+                        }
+                        DibHeader::Info(h) => {
+                            writeln!(f, "  Type: BITMAPINFOHEADER (40 bytes)")?;
+                            writeln!(f, "  Width: {}", h.width)?;
+                            writeln!(f, "  Height: {}", h.height)?;
+                            writeln!(f, "  Planes: {}", h.planes)?;
+                            writeln!(f, "  Bits per pixel: {}", h.bits_per_pixel)?;
+                            writeln!(f, "  Compression: {:?}", h.compression)?;
+                            writeln!(f, "  Image size: {} bytes", h.image_size)?;
+                            writeln!(f, "  X pixels per meter: {}", h.x_pixels_per_meter)?;
+                            writeln!(f, "  Y pixels per meter: {}", h.y_pixels_per_meter)?;
+                            writeln!(f, "  Colors used: {}", h.colors_used)?;
+                            writeln!(f, "  Important colors: {}", h.important_colors)?;
+                        }
+                        DibHeader::V2(h) => {
+                            writeln!(f, "  Type: BITMAPV2INFOHEADER (52 bytes)")?;
+                            writeln!(f, "  Width: {}", h.info.width)?;
+                            writeln!(f, "  Height: {}", h.info.height)?;
+                            writeln!(f, "  Planes: {}", h.info.planes)?;
+                            writeln!(f, "  Bits per pixel: {}", h.info.bits_per_pixel)?;
+                            writeln!(f, "  Compression: {:?}", h.info.compression)?;
+                            writeln!(f, "  Image size: {} bytes", h.info.image_size)?;
+                            writeln!(f, "  X pixels per meter: {}", h.info.x_pixels_per_meter)?;
+                            writeln!(f, "  Y pixels per meter: {}", h.info.y_pixels_per_meter)?;
+                            writeln!(f, "  Colors used: {}", h.info.colors_used)?;
+                            writeln!(f, "  Important colors: {}", h.info.important_colors)?;
+                            writeln!(f, "  Red mask: 0x{:08X}", h.red_mask)?;
+                            writeln!(f, "  Green mask: 0x{:08X}", h.green_mask)?;
+                            writeln!(f, "  Blue mask: 0x{:08X}", h.blue_mask)?;
+                        }
+                        DibHeader::V3(h) => {
+                            writeln!(f, "  Type: BITMAPV3INFOHEADER (56 bytes)")?;
+                            writeln!(f, "  Width: {}", h.v2.info.width)?;
+                            writeln!(f, "  Height: {}", h.v2.info.height)?;
+                            writeln!(f, "  Planes: {}", h.v2.info.planes)?;
+                            writeln!(f, "  Bits per pixel: {}", h.v2.info.bits_per_pixel)?;
+                            writeln!(f, "  Compression: {:?}", h.v2.info.compression)?;
+                            writeln!(f, "  Image size: {} bytes", h.v2.info.image_size)?;
+                            writeln!(f, "  X pixels per meter: {}", h.v2.info.x_pixels_per_meter)?;
+                            writeln!(f, "  Y pixels per meter: {}", h.v2.info.y_pixels_per_meter)?;
+                            writeln!(f, "  Colors used: {}", h.v2.info.colors_used)?;
+                            writeln!(f, "  Important colors: {}", h.v2.info.important_colors)?;
+                            writeln!(f, "  Red mask: 0x{:08X}", h.v2.red_mask)?;
+                            writeln!(f, "  Green mask: 0x{:08X}", h.v2.green_mask)?;
+                            writeln!(f, "  Blue mask: 0x{:08X}", h.v2.blue_mask)?;
+                            writeln!(f, "  Alpha mask: 0x{:08X}", h.alpha_mask)?;
+                        }
+                        DibHeader::V4(h) => {
+                            writeln!(f, "  Type: BITMAPV4HEADER (108 bytes)")?;
+                            writeln!(f, "  Width: {}", h.v3.v2.info.width)?;
+                            writeln!(f, "  Height: {}", h.v3.v2.info.height)?;
+                            writeln!(f, "  Planes: {}", h.v3.v2.info.planes)?;
+                            writeln!(f, "  Bits per pixel: {}", h.v3.v2.info.bits_per_pixel)?;
+                            writeln!(f, "  Compression: {:?}", h.v3.v2.info.compression)?;
+                            writeln!(f, "  Image size: {} bytes", h.v3.v2.info.image_size)?;
+                            writeln!(f, "  X pixels per meter: {}", h.v3.v2.info.x_pixels_per_meter)?;
+                            writeln!(f, "  Y pixels per meter: {}", h.v3.v2.info.y_pixels_per_meter)?;
+                            writeln!(f, "  Colors used: {}", h.v3.v2.info.colors_used)?;
+                            writeln!(f, "  Important colors: {}", h.v3.v2.info.important_colors)?;
+                            writeln!(f, "  Red mask: 0x{:08X}", h.v3.v2.red_mask)?;
+                            writeln!(f, "  Green mask: 0x{:08X}", h.v3.v2.green_mask)?;
+                            writeln!(f, "  Blue mask: 0x{:08X}", h.v3.v2.blue_mask)?;
+                            writeln!(f, "  Alpha mask: 0x{:08X}", h.v3.alpha_mask)?;
+                            writeln!(f, "  CS type: 0x{:08X}", h.cs_type)?;
+                            writeln!(f, "  Gamma red: {}", h.gamma_red)?;
+                            writeln!(f, "  Gamma green: {}", h.gamma_green)?;
+                            writeln!(f, "  Gamma blue: {}", h.gamma_blue)?;
+                        }
+                        DibHeader::V5(h) => {
+                            writeln!(f, "  Type: BITMAPV5HEADER (124 bytes)")?;
+                            writeln!(f, "  Width: {}", h.v4.v3.v2.info.width)?;
+                            writeln!(f, "  Height: {}", h.v4.v3.v2.info.height)?;
+                            writeln!(f, "  Planes: {}", h.v4.v3.v2.info.planes)?;
+                            writeln!(f, "  Bits per pixel: {}", h.v4.v3.v2.info.bits_per_pixel)?;
+                            writeln!(f, "  Compression: {:?}", h.v4.v3.v2.info.compression)?;
+                            writeln!(f, "  Image size: {} bytes", h.v4.v3.v2.info.image_size)?;
+                            writeln!(f, "  X pixels per meter: {}", h.v4.v3.v2.info.x_pixels_per_meter)?;
+                            writeln!(f, "  Y pixels per meter: {}", h.v4.v3.v2.info.y_pixels_per_meter)?;
+                            writeln!(f, "  Colors used: {}", h.v4.v3.v2.info.colors_used)?;
+                            writeln!(f, "  Important colors: {}", h.v4.v3.v2.info.important_colors)?;
+                            writeln!(f, "  Red mask: 0x{:08X}", h.v4.v3.v2.red_mask)?;
+                            writeln!(f, "  Green mask: 0x{:08X}", h.v4.v3.v2.green_mask)?;
+                            writeln!(f, "  Blue mask: 0x{:08X}", h.v4.v3.v2.blue_mask)?;
+                            writeln!(f, "  Alpha mask: 0x{:08X}", h.v4.v3.alpha_mask)?;
+                            writeln!(f, "  CS type: 0x{:08X}", h.v4.cs_type)?;
+                            writeln!(f, "  Gamma red: {}", h.v4.gamma_red)?;
+                            writeln!(f, "  Gamma green: {}", h.v4.gamma_green)?;
+                            writeln!(f, "  Gamma blue: {}", h.v4.gamma_blue)?;
+                            writeln!(f, "  Intent: {}", h.intent)?;
+                            writeln!(f, "  Profile data offset: {}", h.profile_data)?;
+                            writeln!(f, "  Profile size: {} bytes", h.profile_size)?;
+                        }
+                    }
+                }
+                BmpSectionData::ExtraMasks(m) => {
+                    writeln!(f, "Offset 0x{:08X}  Extra Color Masks", section.start_offset)?;
+                    writeln!(f, "  Red mask: 0x{:08X}", m.red_mask)?;
+                    writeln!(f, "  Green mask: 0x{:08X}", m.green_mask)?;
+                    writeln!(f, "  Blue mask: 0x{:08X}", m.blue_mask)?;
+                    writeln!(f, "  Alpha mask: 0x{:08X}", m.alpha_mask)?;
+                }
+                BmpSectionData::ColorTable(entries) => {
+                    writeln!(f, "Offset 0x{:08X}  Color Table ({} entries)", section.start_offset, entries.len())?;
+                    let hex: Vec<String> = entries.iter().map(|e| format!("#{:02X}{:02X}{:02X}", e.red, e.green, e.blue)).collect();
+                    writeln!(f, "  Colors: {}", hex.join(", "))?;
+                }
+                BmpSectionData::PixelData(pd) => {
+                    writeln!(f, "Offset 0x{:08X}  Pixel Data", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", pd.length)?;
+                }
+                BmpSectionData::IccProfile(profile) => {
+                    writeln!(f, "Offset 0x{:08X}  ICC Profile", section.start_offset)?;
+                    writeln!(f, "  Size: {} bytes", profile.header.size)?;
+                    writeln!(f, "  Class: {}", profile.header.profile_class)?;
+                    writeln!(f, "  Color space: {}", profile.header.color_space)?;
+                    writeln!(f, "  PCS: {}", profile.header.pcs)?;
+                    writeln!(f, "  Tags: {}", profile.tag_table.tag_count)?;
+                }
+            }
+            writeln!(f)?;
         }
+
         Ok(())
     }
 }
 
 impl fmt::Display for GifInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "GIF Image Information")?;
+        use crate::decoders::gif::GifSectionData;
+
+        writeln!(f, "GIF Information")?;
         writeln!(f, "=====================")?;
-        writeln!(f, "Version: {}", self.version)?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "Canvas: {}x{}", self.canvas_width, self.canvas_height)?;
-        writeln!(f, "Frames: {}", self.frames.len())?;
-        writeln!(f, "Has global color table: {}", self.global_color_table_flag)?;
-        if !self.comments.is_empty() {
-            writeln!(f, "\nComments:")?;
-            for comment in &self.comments {
-                writeln!(f, "  {}", comment)?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                GifSectionData::Header(h) => {
+                    writeln!(f, "Offset 0x{:08X}  Header", section.start_offset)?;
+                    writeln!(f, "  Version: {}", h.version)?;
+                    writeln!(f, "  Canvas width: {}", h.canvas_width)?;
+                    writeln!(f, "  Canvas height: {}", h.canvas_height)?;
+                    writeln!(f, "  Global color table flag: {}", h.global_color_table_flag)?;
+                    writeln!(f, "  Color resolution: {}", h.color_resolution)?;
+                    writeln!(f, "  Sort flag: {}", h.sort_flag)?;
+                    writeln!(f, "  Size of global color table: {}", h.size_of_global_color_table)?;
+                    writeln!(f, "  Background color index: {}", h.background_color_index)?;
+                    writeln!(f, "  Pixel aspect ratio: {}", h.pixel_aspect_ratio)?;
+                }
+                GifSectionData::GlobalColorTable(ct) => {
+                    writeln!(f, "Offset 0x{:08X}  Global Color Table", section.start_offset)?;
+                    writeln!(f, "  Entries: {}", ct.entry_count)?;
+                    writeln!(f, "  Length: {} bytes", ct.length)?;
+                    let hex: Vec<String> = ct.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
+                    writeln!(f, "  Colors: {}", hex.join(", "))?;
+                }
+                GifSectionData::GraphicsControlExtension(gce) => {
+                    writeln!(f, "Offset 0x{:08X}  Graphics Control Extension", section.start_offset)?;
+                    writeln!(f, "  Disposal method: {:?}", gce.disposal_method)?;
+                    writeln!(f, "  User input: {}", gce.user_input)?;
+                    writeln!(f, "  Transparent color index: {:?}", gce.transparent_color_index)?;
+                    writeln!(f, "  Delay: {} ms", gce.delay)?;
+                }
+                GifSectionData::ImageDescriptor(id) => {
+                    writeln!(f, "Offset 0x{:08X}  Image Descriptor", section.start_offset)?;
+                    writeln!(f, "  Position: ({}, {})", id.left, id.top)?;
+                    writeln!(f, "  Dimensions: {}x{}", id.width, id.height)?;
+                    writeln!(f, "  Local color table flag: {}", id.local_color_table_flag)?;
+                    writeln!(f, "  Interlace flag: {}", id.interlace_flag)?;
+                    writeln!(f, "  Sort flag: {}", id.sort_flag)?;
+                    writeln!(f, "  Size of local color table: {}", id.size_of_local_color_table)?;
+                }
+                GifSectionData::LocalColorTable(ct) => {
+                    writeln!(f, "Offset 0x{:08X}  Local Color Table", section.start_offset)?;
+                    writeln!(f, "  Entries: {}", ct.entry_count)?;
+                    writeln!(f, "  Length: {} bytes", ct.length)?;
+                    let hex: Vec<String> = ct.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
+                    writeln!(f, "  Colors: {}", hex.join(", "))?;
+                }
+                GifSectionData::ImageData(id) => {
+                    writeln!(f, "Offset 0x{:08X}  Image Data", section.start_offset)?;
+                    writeln!(f, "  LZW minimum code size: {}", id.lzw_minimum_code_size)?;
+                    writeln!(f, "  Data length: {} bytes", id.data_length)?;
+                }
+                GifSectionData::CommentExtension(c) => {
+                    writeln!(f, "Offset 0x{:08X}  Comment Extension", section.start_offset)?;
+                    if c.text.len() > 60 {
+                        writeln!(f, "  Text: {}... ({} chars)", &c.text[..60], c.text.len())?;
+                    } else {
+                        writeln!(f, "  Text: {}", c.text)?;
+                    }
+                }
+                GifSectionData::ApplicationExtension(ae) => {
+                    writeln!(f, "Offset 0x{:08X}  Application Extension", section.start_offset)?;
+                    writeln!(f, "  Identifier: {}", ae.identifier)?;
+                    writeln!(f, "  Auth code: {}", ae.auth_code)?;
+                    if let Some(loop_count) = ae.loop_count {
+                        writeln!(f, "  Loop count: {}", loop_count)?;
+                    }
+                    if let Some(buffer_size) = ae.buffer_size {
+                        writeln!(f, "  Buffer size: {}", buffer_size)?;
+                    }
+                    writeln!(f, "  Data length: {} bytes", ae.data_length)?;
+                }
+                GifSectionData::PlainTextExtension(pt) => {
+                    writeln!(f, "Offset 0x{:08X}  Plain Text Extension", section.start_offset)?;
+                    writeln!(f, "  Position: ({}, {})", pt.left, pt.top)?;
+                    writeln!(f, "  Dimensions: {}x{}", pt.width, pt.height)?;
+                    writeln!(f, "  Cell: {}x{}", pt.cell_width, pt.cell_height)?;
+                    writeln!(f, "  Foreground color: {}", pt.foreground_color)?;
+                    writeln!(f, "  Background color: {}", pt.background_color)?;
+                    if pt.text.len() > 60 {
+                        writeln!(f, "  Text: {}... ({} chars)", &pt.text[..60], pt.text.len())?;
+                    } else {
+                        writeln!(f, "  Text: {}", pt.text)?;
+                    }
+                }
+                GifSectionData::Trailer => {
+                    writeln!(f, "Offset 0x{:08X}  Trailer", section.start_offset)?;
+                }
             }
+            writeln!(f)?;
         }
+
         Ok(())
     }
 }

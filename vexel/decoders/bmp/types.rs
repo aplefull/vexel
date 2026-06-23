@@ -1,4 +1,5 @@
 use crate::log_warn;
+use crate::utils::icc::ICCProfile;
 use serde::Serialize;
 use tsify::Tsify;
 
@@ -35,6 +36,14 @@ impl BitmapCompression {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct BitmapArrayHeader {
+    pub file_size: u32,
+    pub next_offset: u32,
+    pub screen_width: u16,
+    pub screen_height: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -225,4 +234,35 @@ pub struct ColorEntry {
     pub green: u8,
     pub red: u8,
     pub reserved: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct BmpExtraMasks {
+    pub red_mask: u32,
+    pub green_mask: u32,
+    pub blue_mask: u32,
+    pub alpha_mask: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct BmpPixelDataInfo {
+    pub offset: u64,
+    pub length: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub enum BmpSectionData {
+    BitmapArrayHeader(BitmapArrayHeader),
+    FileHeader(BitmapFileHeader),
+    DibHeader(DibHeader),
+    ExtraMasks(BmpExtraMasks),
+    ColorTable(Vec<ColorEntry>),
+    PixelData(BmpPixelDataInfo),
+    IccProfile(ICCProfile),
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct BmpSectionInfo {
+    pub start_offset: u64,
+    pub data: BmpSectionData,
 }
