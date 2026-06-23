@@ -1,9 +1,9 @@
 use crate::decoders::bmp::BmpSectionInfo;
 use crate::decoders::gif::GifSectionInfo;
-use crate::decoders::hdr::HdrFormat;
+use crate::decoders::hdr::HdrSectionInfo;
 use crate::decoders::ico::{IconDirEntry, IcoType};
 use crate::decoders::jpeg::types::JpegSegmentInfo;
-use crate::decoders::netpbm::{NetpbmFormat, TupleType};
+use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::png::PngChunkInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
 use serde::Serialize;
@@ -51,26 +51,13 @@ pub struct GifInfo {
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct NetpbmInfo {
-    pub width: u32,
-    pub height: u32,
-    pub max_value: u32,
-    pub depth: u8,
-    pub format: Option<NetpbmFormat>,
-    pub tuple_type: Option<TupleType>,
+    pub sections: Vec<NetpbmSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct HdrInfo {
-    pub width: u32,
-    pub height: u32,
-    pub gamma: Option<f32>,
-    pub exposure: Option<f32>,
-    pub pixel_aspect_ratio: Option<f32>,
-    pub color_correction: Option<[f32; 3]>,
-    pub primaries: Option<[f32; 8]>,
-    pub format: HdrFormat,
-    pub comments: Vec<String>,
+    pub sections: Vec<HdrSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -723,39 +710,92 @@ impl fmt::Display for GifInfo {
 
 impl fmt::Display for NetpbmInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::netpbm::{NetpbmSectionData};
+
         writeln!(f, "Netpbm Image Information")?;
         writeln!(f, "=====================")?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "Max value: {}", self.max_value)?;
-        writeln!(f, "Depth: {}", self.depth)?;
-        if let Some(format) = &self.format {
-            writeln!(f, "Format: {:?}", format)?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                NetpbmSectionData::Comment(text) => {
+                    writeln!(f, "Offset 0x{:08X}  Comment", section.start_offset)?;
+                    writeln!(f, "  Text: {}", text)?;
+                }
+                NetpbmSectionData::Header(h) => {
+                    writeln!(f, "Offset 0x{:08X}  Header", section.start_offset)?;
+                    writeln!(f, "  Format: {:?}", h.format)?;
+                    writeln!(f, "  Width: {}", h.width)?;
+                    writeln!(f, "  Height: {}", h.height)?;
+                    writeln!(f, "  Max value: {}", h.max_value)?;
+                    if let Some(depth) = h.depth {
+                        writeln!(f, "  Depth: {}", depth)?;
+                    }
+                    if let Some(tuple_type) = &h.tuple_type {
+                        writeln!(f, "  Tuple type: {:?}", tuple_type)?;
+                    } else if let Some(raw) = &h.tuple_type_raw {
+                        writeln!(f, "  Tuple type (raw): {}", raw)?;
+                    }
+                }
+                NetpbmSectionData::PixelData(pd) => {
+                    writeln!(f, "Offset 0x{:08X}  Pixel Data", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", pd.length)?;
+                }
+            }
+            writeln!(f)?;
         }
-        if let Some(tuple_type) = &self.tuple_type {
-            writeln!(f, "Tuple type: {:?}", tuple_type)?;
-        }
+
         Ok(())
     }
 }
 
 impl fmt::Display for HdrInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::hdr::HdrSectionData;
+
         writeln!(f, "HDR Image Information")?;
         writeln!(f, "=====================")?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "Format: {:?}", self.format)?;
-        if let Some(gamma) = self.gamma {
-            writeln!(f, "Gamma: {}", gamma)?;
-        }
-        if let Some(exposure) = self.exposure {
-            writeln!(f, "Exposure: {}", exposure)?;
-        }
-        if !self.comments.is_empty() {
-            writeln!(f, "\nComments:")?;
-            for comment in &self.comments {
-                writeln!(f, "  {}", comment)?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                HdrSectionData::Header(h) => {
+                    writeln!(f, "Offset 0x{:08X}  Header", section.start_offset)?;
+                    writeln!(f, "  Format: {:?}", h.format)?;
+                    writeln!(f, "  Width: {}", h.width)?;
+                    writeln!(f, "  Height: {}", h.height)?;
+                    if let Some(gamma) = h.gamma {
+                        writeln!(f, "  Gamma: {}", gamma)?;
+                    }
+                    if let Some(exposure) = h.exposure {
+                        writeln!(f, "  Exposure: {}", exposure)?;
+                    }
+                    if let Some(ratio) = h.pixel_aspect_ratio {
+                        writeln!(f, "  Pixel aspect ratio: {}", ratio)?;
+                    }
+                    if let Some(cc) = h.color_correction {
+                        writeln!(f, "  Color correction: R={} G={} B={}", cc[0], cc[1], cc[2])?;
+                    }
+                    if let Some(p) = h.primaries {
+                        writeln!(f, "  Primaries red: ({}, {})", p[0], p[1])?;
+                        writeln!(f, "  Primaries green: ({}, {})", p[2], p[3])?;
+                        writeln!(f, "  Primaries blue: ({}, {})", p[4], p[5])?;
+                        writeln!(f, "  Primaries white: ({}, {})", p[6], p[7])?;
+                    }
+                    for comment in &h.comments {
+                        writeln!(f, "  Comment: {}", comment)?;
+                    }
+                }
+                HdrSectionData::PixelData(pd) => {
+                    writeln!(f, "Offset 0x{:08X}  Pixel Data", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", pd.length)?;
+                }
             }
+            writeln!(f)?;
         }
+
         Ok(())
     }
 }

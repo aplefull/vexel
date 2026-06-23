@@ -6,7 +6,7 @@ use crate::{log_warn, Image, PixelData};
 use std::io::{Cursor, Read, Seek};
 
 use super::simd;
-use super::types::{NetpbmFormat, TupleType};
+use super::types::{NetpbmFormat, NetpbmHeaderData, NetpbmPixelDataInfo, NetpbmSectionData, NetpbmSectionInfo, TupleType};
 
 pub struct NetPbmDecoder<R: Read + Seek> {
     width: u32,
@@ -18,6 +18,7 @@ pub struct NetPbmDecoder<R: Read + Seek> {
     tuple_type_raw: Option<String>,
     reader: BitReader<R>,
     lookahead: Option<u8>,
+    sections: Vec<NetpbmSectionInfo>,
 }
 
 impl<R: Read + Seek> NetPbmDecoder<R> {
@@ -32,6 +33,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             tuple_type_raw: None,
             reader: BitReader::new(reader),
             lookahead: None,
+            sections: Vec::new(),
         }
     }
 
@@ -45,12 +47,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
     pub fn get_info(&self) -> NetpbmInfo {
         NetpbmInfo {
-            width: self.width,
-            height: self.height,
-            max_value: self.max_value,
-            depth: self.depth,
-            format: self.format.clone(),
-            tuple_type: self.tuple_type.clone(),
+            sections: self.sections.clone(),
         }
     }
 
@@ -76,12 +73,20 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                 None => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()),
             };
             match byte {
-                b'#' => loop {
-                    match self.next_byte() {
-                        Some(b'\n') | Some(b'\r') | None => break,
-                        _ => {}
+                b'#' => {
+                    let comment_offset = self.reader.stream_position().unwrap_or(0).saturating_sub(1);
+                    let mut comment = String::new();
+                    loop {
+                        match self.next_byte() {
+                            Some(b'\n') | Some(b'\r') | None => break,
+                            Some(b) => comment.push(b as char),
+                        }
                     }
-                },
+                    self.sections.push(NetpbmSectionInfo {
+                        start_offset: comment_offset,
+                        data: NetpbmSectionData::Comment(comment),
+                    });
+                }
                 b' ' | b'\t' | b'\n' | b'\r' => continue,
                 _ => return Ok(byte),
             }
@@ -156,6 +161,8 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn read_header(&mut self) -> VexelResult<()> {
+        let header_start = self.reader.stream_position().unwrap_or(0);
+
         let b0 = self.next_byte().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))? as u16;
         let b1 = self.next_byte().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))? as u16;
         let magick = (b0 << 8) | b1;
@@ -180,6 +187,20 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             NetpbmFormat::P7 => self.read_pam_header()?,
             _ => self.read_standard_header(format)?,
         }
+
+        let depth = if self.depth > 0 { Some(self.depth) } else { None };
+        self.sections.push(NetpbmSectionInfo {
+            start_offset: header_start,
+            data: NetpbmSectionData::Header(NetpbmHeaderData {
+                format: self.format.clone().unwrap(),
+                width: self.width,
+                height: self.height,
+                max_value: self.max_value,
+                depth,
+                tuple_type: self.tuple_type.clone(),
+                tuple_type_raw: self.tuple_type_raw.clone(),
+            }),
+        });
 
         Ok(())
     }
@@ -614,8 +635,9 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
     fn read_and_decode_frame(&mut self) -> VexelResult<PixelData> {
         let bytes_per_sample = if self.max_value > 255 { 2usize } else { 1usize };
+        let pixel_data_start = self.reader.stream_position().unwrap_or(0);
 
-        match &self.format {
+        let result = match &self.format {
             Some(NetpbmFormat::P1) => self.decode_ascii_bitmap(),
             Some(NetpbmFormat::P2) => self.decode_ascii_graymap(),
             Some(NetpbmFormat::P3) => self.decode_ascii_pixmap(),
@@ -660,7 +682,17 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                 let data = self.read_binary_frame_data(byte_count)?;
                 self.decode_binary_pixmap(&data)
             }
-        }
+        };
+
+        let pixel_data_end = self.reader.stream_position().unwrap_or(pixel_data_start);
+        self.sections.push(NetpbmSectionInfo {
+            start_offset: pixel_data_start,
+            data: NetpbmSectionData::PixelData(NetpbmPixelDataInfo {
+                length: pixel_data_end.saturating_sub(pixel_data_start),
+            }),
+        });
+
+        result
     }
 
     fn has_more_data(&mut self) -> bool {

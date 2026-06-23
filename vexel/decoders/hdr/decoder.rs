@@ -5,19 +5,14 @@ use crate::{log_warn, Image};
 use std::io::{Read, Seek};
 
 use super::pixels::PixelDecoder;
-use super::types::HdrFormat;
+use super::types::{HdrFormat, HdrHeaderData, HdrPixelDataInfo, HdrSectionData, HdrSectionInfo};
 
 pub struct HdrDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
-    gamma: Option<f32>,
-    exposure: Option<f32>,
-    pixel_aspect_ratio: Option<f32>,
-    color_correction: Option<[f32; 3]>,
-    primaries: Option<[f32; 8]>,
     format: HdrFormat,
-    comments: Vec<String>,
     reader: BitReader<R>,
+    sections: Vec<HdrSectionInfo>,
 }
 
 impl<R: Read + Seek> HdrDecoder<R> {
@@ -25,14 +20,9 @@ impl<R: Read + Seek> HdrDecoder<R> {
         HdrDecoder {
             width: 0,
             height: 0,
-            gamma: None,
-            exposure: None,
-            pixel_aspect_ratio: None,
-            color_correction: None,
-            primaries: None,
             format: HdrFormat::RGBE,
-            comments: Vec::new(),
             reader: BitReader::new(reader),
+            sections: Vec::new(),
         }
     }
 
@@ -61,16 +51,25 @@ impl<R: Read + Seek> HdrDecoder<R> {
     }
 
     fn read_header(&mut self) -> VexelResult<()> {
+        let header_start = self.reader.stream_position().unwrap_or(0);
         let mut line;
+
+        let mut gamma: Option<f32> = None;
+        let mut exposure: Option<f32> = None;
+        let mut pixel_aspect_ratio: Option<f32> = None;
+        let mut color_correction: Option<[f32; 3]> = None;
+        let mut primaries: Option<[f32; 8]> = None;
+        let mut comments: Vec<String> = Vec::new();
 
         loop {
             line = String::from_utf8_lossy(self.read_until_newline()?.as_slice()).to_string();
+
             if line.starts_with("#?RADIANCE") {
                 continue;
             }
 
-            if line.starts_with("#") {
-                self.comments.push(line);
+            if line.starts_with('#') {
+                comments.push(line.trim_start_matches('#').trim().to_string());
                 continue;
             }
 
@@ -90,20 +89,17 @@ impl<R: Read + Seek> HdrDecoder<R> {
             }
 
             if line.starts_with("GAMMA") {
-                self.gamma = Some(Self::parse_f32(Self::get_value(line).as_str()));
-
+                gamma = Some(Self::parse_f32(Self::get_value(line).as_str()));
                 continue;
             }
 
             if line.starts_with("EXPOSURE") {
-                self.exposure = Some(Self::parse_f32(Self::get_value(line).as_str()));
-
+                exposure = Some(Self::parse_f32(Self::get_value(line).as_str()));
                 continue;
             }
 
             if line.starts_with("PIXASPECT") {
-                self.pixel_aspect_ratio = Some(Self::parse_f32(Self::get_value(line).as_str()));
-
+                pixel_aspect_ratio = Some(Self::parse_f32(Self::get_value(line).as_str()));
                 continue;
             }
 
@@ -115,8 +111,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 let g = Self::parse_f32(parts.get(2).unwrap_or(&"0"));
                 let b = Self::parse_f32(parts.get(3).unwrap_or(&"0"));
 
-                self.color_correction = Some([r, g, b]);
-
+                color_correction = Some([r, g, b]);
                 continue;
             }
 
@@ -124,34 +119,23 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 let value = Self::get_value(line);
                 let parts: Vec<&str> = value.split_whitespace().collect();
 
-                let mut primaries = Vec::new();
-
+                let mut p = Vec::new();
                 for part in parts.iter() {
-                    primaries.push(Self::parse_f32(part));
+                    p.push(Self::parse_f32(part));
                 }
 
-                if primaries.len() != 8 {
-                    log_warn!("Invalid number of primaries: {}", primaries.len());
-
-                    if primaries.len() > 8 {
-                        primaries.truncate(8);
+                if p.len() != 8 {
+                    log_warn!("Invalid number of primaries: {}", p.len());
+                    if p.len() > 8 {
+                        p.truncate(8);
                     } else {
-                        while primaries.len() < 8 {
-                            primaries.push(0.0);
+                        while p.len() < 8 {
+                            p.push(0.0);
                         }
                     }
                 }
-                self.primaries = Some([
-                    primaries[0],
-                    primaries[1],
-                    primaries[2],
-                    primaries[3],
-                    primaries[4],
-                    primaries[5],
-                    primaries[6],
-                    primaries[7],
-                ]);
 
+                primaries = Some([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]]);
                 continue;
             }
 
@@ -206,6 +190,21 @@ impl<R: Read + Seek> HdrDecoder<R> {
 
             break;
         }
+
+        self.sections.push(HdrSectionInfo {
+            start_offset: header_start,
+            data: HdrSectionData::Header(HdrHeaderData {
+                width: self.width,
+                height: self.height,
+                format: self.format,
+                gamma,
+                exposure,
+                pixel_aspect_ratio,
+                color_correction,
+                primaries,
+                comments,
+            }),
+        });
 
         Ok(())
     }
@@ -356,22 +355,24 @@ impl<R: Read + Seek> HdrDecoder<R> {
 
     pub fn get_info(&self) -> HdrInfo {
         HdrInfo {
-            width: self.width,
-            height: self.height,
-            gamma: self.gamma,
-            exposure: self.exposure,
-            pixel_aspect_ratio: self.pixel_aspect_ratio,
-            color_correction: self.color_correction,
-            primaries: self.primaries,
-            format: self.format,
-            comments: self.comments.clone(),
+            sections: self.sections.clone(),
         }
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         self.read_header()?;
 
+        let pixel_data_start = self.reader.stream_position().unwrap_or(0);
         let rgbe_data = self.read_scanlines()?;
+        let pixel_data_length = rgbe_data.len() as u64;
+
+        self.sections.push(HdrSectionInfo {
+            start_offset: pixel_data_start,
+            data: HdrSectionData::PixelData(HdrPixelDataInfo {
+                length: pixel_data_length,
+            }),
+        });
+
         let pixel_decoder = PixelDecoder::new(self.width, self.height, self.format);
         let mut pixel_data = pixel_decoder.decode(&rgbe_data)?;
         pixel_data.correct_pixels(self.width, self.height);

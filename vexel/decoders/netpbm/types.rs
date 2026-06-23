@@ -26,3 +26,32 @@ pub enum TupleType {
     CMYK,
     CMYKAlpha,
 }
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct NetpbmHeaderData {
+    pub format: NetpbmFormat,
+    pub width: u32,
+    pub height: u32,
+    pub max_value: u32,
+    pub depth: Option<u8>,
+    pub tuple_type: Option<TupleType>,
+    pub tuple_type_raw: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct NetpbmPixelDataInfo {
+    pub length: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub enum NetpbmSectionData {
+    Comment(String),
+    Header(NetpbmHeaderData),
+    PixelData(NetpbmPixelDataInfo),
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct NetpbmSectionInfo {
+    pub start_offset: u64,
+    pub data: NetpbmSectionData,
+}
