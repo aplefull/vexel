@@ -23,6 +23,7 @@ pub enum JpegSegmentData {
     DAC(DACData),
     DQT(DQTData),
     DRI { restart_interval: u16 },
+    DNL { number_of_lines: u16 },
     EXP { expand_horizontal: bool, expand_vertical: bool },
     SOS(SOSData),
     COM { text: String },

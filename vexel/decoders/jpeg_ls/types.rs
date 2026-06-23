@@ -19,8 +19,16 @@ pub enum JpegLsSectionData {
     Sos(JpegLsSosData),
     Lse(JpegLsLseData),
     Dri(JpegLsDriData),
+    Dnl(JpegLsDnlData),
     App(JpegLsAppData),
     Com(JpegLsComData),
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsDnlData {
+    pub length: u16,
+    pub number_of_lines: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]

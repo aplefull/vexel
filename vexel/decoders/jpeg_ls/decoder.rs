@@ -142,6 +142,23 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         }
     }
 
+    fn read_dnl(&mut self) -> std::io::Result<JpegLsDnlData> {
+        let length = self.read_u16()?;
+        let number_of_lines = self.read_u16()?;
+
+        if let Some(ref mut frame) = self.frame {
+            if number_of_lines > 0 {
+                frame.height = number_of_lines as u32;
+            } else {
+                log_warn!("DNL specifies 0 lines, ignoring");
+            }
+        } else {
+            log_warn!("DNL marker encountered before SOF, ignoring");
+        }
+
+        Ok(JpegLsDnlData { length, number_of_lines })
+    }
+
     fn read_sos(&mut self) -> std::io::Result<JpegLsSosData> {
         let marker_len = self.read_u16()?;
         let comp_count = self.read_u8()?;
@@ -308,6 +325,19 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                             restart_interval: interval,
                         }),
                     });
+                }
+                JpegLsMarker::DNL => {
+                    match self.read_dnl() {
+                        Ok(dnl) => {
+                            self.sections.push(JpegLsSectionInfo {
+                                start_offset: marker_start,
+                                data: JpegLsSectionData::Dnl(dnl),
+                            });
+                        }
+                        Err(e) => {
+                            log_warn!("Failed to read DNL segment: {}", e);
+                        }
+                    }
                 }
                 JpegLsMarker::APP8 => {
                     let app = self.try_read_hp_color_transform()?;

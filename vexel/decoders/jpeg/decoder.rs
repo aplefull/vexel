@@ -1008,11 +1008,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.height = self.reader.read_u16()? as u32;
         self.width = self.reader.read_u16()? as u32;
 
-        if self.height == 0 || self.width == 0 {
+        if self.width == 0 {
             return Err(VexelError::from(Error::new(
                 ErrorKind::InvalidData,
                 "Invalid image dimensions",
             )));
+        }
+
+        if self.height == 0 {
+            log_warn!("SOF height is 0, expecting DNL marker to define number of lines");
         }
 
         // TODO rename them, they are not MCU dimensions, but dimensions of the image in MCUs
@@ -1080,6 +1084,28 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.restart_interval = self.reader.read_u16()?;
 
         self.record_segment(segment_start, "DRI", JpegSegmentData::DRI { restart_interval: self.restart_interval });
+
+        Ok(())
+    }
+
+    fn read_dnl(&mut self, segment_start: u64) -> VexelResult<()> {
+        let length = self.reader.read_u16()?;
+
+        if length != 4 {
+            log_warn!("Invalid DNL segment length: {}, expected 4", length);
+        }
+
+        let number_of_lines = self.reader.read_u16()?;
+
+        if number_of_lines == 0 {
+            log_warn!("DNL specifies 0 lines, ignoring");
+        } else {
+            self.height = number_of_lines as u32;
+            self.mcu_height = (self.height + 7) / 8;
+            log_debug!("DNL: updated height to {}", self.height);
+        }
+
+        self.record_segment(segment_start, "DNL", JpegSegmentData::DNL { number_of_lines });
 
         Ok(())
     }
@@ -3930,6 +3956,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         JpegMarker::DHP => self.read_dhp(segment_start),
                         JpegMarker::EXP => self.read_exp(segment_start),
                         JpegMarker::DRI => self.read_restart_interval(segment_start),
+                        JpegMarker::DNL => self.read_dnl(segment_start),
                         JpegMarker::DQT => self.read_quantization_table(segment_start),
                         JpegMarker::DHT => self.read_huffman_table(segment_start),
                         JpegMarker::DAC => self.read_dac(segment_start),

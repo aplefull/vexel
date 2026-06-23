@@ -415,6 +415,9 @@ impl fmt::Display for JpegInfo {
                 JpegSegmentData::DRI { restart_interval } => {
                     writeln!(f, "  Restart interval: {}", restart_interval)?;
                 }
+                JpegSegmentData::DNL { number_of_lines } => {
+                    writeln!(f, "  Number of lines: {}", number_of_lines)?;
+                }
                 JpegSegmentData::SOS(sos) => {
                     writeln!(f, "  Length: {} bytes", sos.length)?;
                     writeln!(f, "  Components: {}", sos.component_count)?;
@@ -944,6 +947,11 @@ impl fmt::Display for JpegLsInfo {
                     writeln!(f, "Offset 0x{:08X}  DRI (Restart Interval)", section.start_offset)?;
                     writeln!(f, "  Length: {} bytes", dri.length)?;
                     writeln!(f, "  Restart interval: {}", dri.restart_interval)?;
+                }
+                JpegLsSectionData::Dnl(dnl) => {
+                    writeln!(f, "Offset 0x{:08X}  DNL (Define Number of Lines)", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", dnl.length)?;
+                    writeln!(f, "  Number of lines: {}", dnl.number_of_lines)?;
                 }
                 JpegLsSectionData::App(app) => {
                     let marker_name = match app.marker {
