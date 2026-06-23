@@ -1,7 +1,8 @@
 use crate::decoders::bmp::BmpSectionInfo;
 use crate::decoders::gif::GifSectionInfo;
 use crate::decoders::hdr::HdrSectionInfo;
-use crate::decoders::ico::{IconDirEntry, IcoType};
+use crate::decoders::ico::IcoSectionInfo;
+use crate::decoders::jbig1::types::Jbig1SectionInfo;
 use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::png::PngChunkInfo;
@@ -63,25 +64,13 @@ pub struct HdrInfo {
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct Jbig1Info {
-    pub width: u32,
-    pub height: u32,
-    pub planes: u8,
-    pub dl: u8,
-    pub d: u8,
-    pub l0: u32,
-    pub mx: u8,
-    pub my: u8,
-    pub order: u8,
-    pub options: u8,
+    pub sections: Vec<Jbig1SectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct IcoInfo {
-    pub width: u32,
-    pub height: u32,
-    pub ico_type: IcoType,
-    pub entries: Vec<IconDirEntry>,
+    pub sections: Vec<IcoSectionInfo>,
 }
 
 impl fmt::Display for ImageInfo {
@@ -802,30 +791,107 @@ impl fmt::Display for HdrInfo {
 
 impl fmt::Display for Jbig1Info {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::jbig1::types::Jbig1SectionData;
+
         writeln!(f, "JBIG1 Image Information")?;
         writeln!(f, "=====================")?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "Planes: {}", self.planes)?;
-        writeln!(f, "Resolution layers: {} to {}", self.dl, self.d)?;
-        writeln!(f, "Lines per stripe (L0): {}", self.l0)?;
-        writeln!(f, "Max ATMOVE x: {}", self.mx)?;
-        writeln!(f, "Max ATMOVE y: {}", self.my)?;
-        writeln!(f, "Order flags: 0x{:02X}", self.order)?;
-        writeln!(f, "Options: 0x{:02X}", self.options)?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                Jbig1SectionData::Bih(bih) => {
+                    writeln!(f, "Offset 0x{:08X}  Binary Image Header", section.start_offset)?;
+                    writeln!(f, "  DL (lowest resolution layer): {}", bih.dl)?;
+                    writeln!(f, "  D (highest resolution layer): {}", bih.d)?;
+                    writeln!(f, "  Planes: {}", bih.planes)?;
+                    writeln!(f, "  Width (XD): {}", bih.xd)?;
+                    writeln!(f, "  Height (YD): {}", bih.yd)?;
+                    writeln!(f, "  Lines per stripe (L0): {}", bih.l0)?;
+                    writeln!(f, "  Max ATMOVE x (MX): {}", bih.mx)?;
+                    writeln!(f, "  Max ATMOVE y (MY): {}", bih.my)?;
+                    writeln!(f, "  Order: 0x{:02X}", bih.order)?;
+                    writeln!(f, "  Options: 0x{:02X}", bih.options)?;
+                }
+                Jbig1SectionData::Dptable(dp) => {
+                    writeln!(f, "Offset 0x{:08X}  DPTABLE (private prediction table)", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", dp.length)?;
+                }
+                Jbig1SectionData::Stripe(s) => {
+                    let kind = if s.is_reset { "SDRST" } else { "SDNORM" };
+                    writeln!(f, "Offset 0x{:08X}  Stripe data ({})", section.start_offset, kind)?;
+                    writeln!(f, "  Plane: {}, Layer: {}, Stripe index: {}", s.plane, s.layer, s.stripe_index)?;
+                    writeln!(f, "  Data length: {} bytes", s.data_length)?;
+                    writeln!(f, "  Reset: {}", s.is_reset)?;
+                }
+                Jbig1SectionData::AtMove(atm) => {
+                    writeln!(f, "Offset 0x{:08X}  ATMOVE marker", section.start_offset)?;
+                    writeln!(f, "  Line: {}", atm.line)?;
+                    writeln!(f, "  TX: {}, TY: {}", atm.tx, atm.ty)?;
+                }
+                Jbig1SectionData::Newlen(nl) => {
+                    writeln!(f, "Offset 0x{:08X}  NEWLEN marker", section.start_offset)?;
+                    writeln!(f, "  New height (YD): {}", nl.new_height)?;
+                }
+                Jbig1SectionData::Comment(c) => {
+                    writeln!(f, "Offset 0x{:08X}  Comment", section.start_offset)?;
+                    if c.text.len() > 60 {
+                        writeln!(f, "  Text: {}... ({} chars)", &c.text[..60], c.text.len())?;
+                    } else {
+                        writeln!(f, "  Text: {}", c.text)?;
+                    }
+                }
+                Jbig1SectionData::Abort => {
+                    writeln!(f, "Offset 0x{:08X}  ABORT marker", section.start_offset)?;
+                }
+                Jbig1SectionData::Unknown(u) => {
+                    writeln!(f, "Offset 0x{:08X}  Unknown marker (0xFF {:02X})", section.start_offset, u.marker)?;
+                }
+            }
+            writeln!(f)?;
+        }
+
         Ok(())
     }
 }
 
 impl fmt::Display for IcoInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::ico::IcoSectionData;
+
         writeln!(f, "ICO/CUR Image Information")?;
         writeln!(f, "=====================")?;
-        writeln!(f, "Type: {:?}", self.ico_type)?;
-        writeln!(f, "Dimensions: {}x{}", self.width, self.height)?;
-        writeln!(f, "Images: {}", self.entries.len())?;
-        for (i, entry) in self.entries.iter().enumerate() {
-            writeln!(f, "  Image #{}: {}x{} {:?} {} bpp", i + 1, entry.width, entry.height, entry.image_format, entry.bit_count)?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                IcoSectionData::IconDir(h) => {
+                    writeln!(f, "Offset 0x{:08X}  Icon Directory", section.start_offset)?;
+                    writeln!(f, "  Type: {:?}", h.ico_type)?;
+                    writeln!(f, "  Image count: {}", h.image_count)?;
+                }
+                IcoSectionData::IconDirEntry(e) => {
+                    writeln!(f, "Offset 0x{:08X}  Icon Directory Entry", section.start_offset)?;
+                    writeln!(f, "  Dimensions: {}x{}", e.width, e.height)?;
+                    writeln!(f, "  Color count: {}", e.color_count)?;
+                    writeln!(f, "  Planes: {}", e.planes)?;
+                    writeln!(f, "  Bit count: {}", e.bit_count)?;
+                    writeln!(f, "  Bytes in resource: {}", e.bytes_in_res)?;
+                    writeln!(f, "  Image offset: 0x{:08X}", e.image_offset)?;
+                    writeln!(f, "  Format: {:?}", e.image_format)?;
+                    if e.hotspot_x > 0 || e.hotspot_y > 0 {
+                        writeln!(f, "  Hotspot: ({}, {})", e.hotspot_x, e.hotspot_y)?;
+                    }
+                }
+                IcoSectionData::ImageData(d) => {
+                    writeln!(f, "Offset 0x{:08X}  Image Data ({:?})", section.start_offset, d.image_format)?;
+                    writeln!(f, "  Length: {} bytes", d.length)?;
+                }
+            }
+            writeln!(f)?;
         }
+
         Ok(())
     }
 }

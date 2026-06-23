@@ -265,3 +265,75 @@ pub struct AtMove {
     pub tx: i8,
     pub ty: i8,
 }
+
+use serde::Serialize;
+use tsify::Tsify;
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Jbig1BihData {
+    pub dl: u8,
+    pub d: u8,
+    pub planes: u8,
+    pub xd: u32,
+    pub yd: u32,
+    pub l0: u32,
+    pub mx: u8,
+    pub my: u8,
+    pub order: u8,
+    pub options: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Jbig1DptableData {
+    pub length: u32,
+    pub table: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Jbig1StripeData {
+    pub plane: u8,
+    pub layer: u8,
+    pub stripe_index: u32,
+    pub data_length: usize,
+    pub is_reset: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Jbig1AtMoveData {
+    pub line: u32,
+    pub tx: i8,
+    pub ty: i8,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Jbig1NewlenData {
+    pub new_height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Jbig1CommentData {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Jbig1UnknownMarkerData {
+    pub marker: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub enum Jbig1SectionData {
+    Bih(Jbig1BihData),
+    Dptable(Jbig1DptableData),
+    Stripe(Jbig1StripeData),
+    AtMove(Jbig1AtMoveData),
+    Newlen(Jbig1NewlenData),
+    Comment(Jbig1CommentData),
+    Abort,
+    Unknown(Jbig1UnknownMarkerData),
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Jbig1SectionInfo {
+    pub start_offset: u64,
+    pub data: Jbig1SectionData,
+}

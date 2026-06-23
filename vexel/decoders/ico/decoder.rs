@@ -1,6 +1,9 @@
 use crate::bitreader::BitReader;
 use crate::decoders::bmp::decoder::BmpDecoder;
-use crate::decoders::ico::types::{IconDirEntry, IcoImageFormat, IcoType};
+use crate::decoders::ico::types::{
+    IconDirEntry, IcoIconDirData, IcoIconDirEntryData, IcoImageDataInfo, IcoImageFormat,
+    IcoSectionData, IcoSectionInfo, IcoType,
+};
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, ImageFrame, PixelData};
@@ -13,6 +16,8 @@ pub struct IcoDecoder<R: Read + Seek> {
     height: u32,
     ico_type: IcoType,
     entries: Vec<IconDirEntry>,
+    entry_offsets: Vec<u64>,
+    sections: Vec<IcoSectionInfo>,
     reader: BitReader<R>,
 }
 
@@ -23,6 +28,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
             height: 0,
             ico_type: IcoType::Ico,
             entries: Vec::new(),
+            entry_offsets: Vec::new(),
+            sections: Vec::new(),
             reader: BitReader::with_le(reader),
         }
     }
@@ -37,14 +44,13 @@ impl<R: Read + Seek> IcoDecoder<R> {
 
     pub fn get_info(&self) -> IcoInfo {
         IcoInfo {
-            width: self.width,
-            height: self.height,
-            ico_type: self.ico_type,
-            entries: self.entries.clone(),
+            sections: self.sections.clone(),
         }
     }
 
     fn read_header(&mut self) -> VexelResult<u16> {
+        let header_offset = self.reader.stream_position().unwrap_or(0);
+
         let reserved = self.reader.read_u16()?;
         if reserved != 0 {
             log_warn!("ICO reserved field is non-zero: {}", reserved);
@@ -61,14 +67,26 @@ impl<R: Read + Seek> IcoDecoder<R> {
         };
 
         let count = self.reader.read_u16()?;
+
+        self.sections.push(IcoSectionInfo {
+            start_offset: header_offset,
+            data: IcoSectionData::IconDir(IcoIconDirData {
+                ico_type: self.ico_type,
+                image_count: count,
+            }),
+        });
+
         Ok(count)
     }
 
     fn read_entries(&mut self, count: u16) -> VexelResult<()> {
         for _ in 0..count {
+            let entry_offset = self.reader.stream_position().unwrap_or(0);
+
             let width_byte = self.reader.read_u8()?;
             let height_byte = self.reader.read_u8()?;
             let color_count = self.reader.read_u8()?;
+            // TODO: add a method to skip bytes, so we don't have to read into vars we don't use
             let _reserved = self.reader.read_u8()?;
             let planes_or_hotspot_x = self.reader.read_u16()?;
             let bit_count_or_hotspot_y = self.reader.read_u16()?;
@@ -95,6 +113,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
                 hotspot_y,
                 image_format: IcoImageFormat::Bmp,
             });
+
+            self.entry_offsets.push(entry_offset);
         }
 
         Ok(())
@@ -123,6 +143,36 @@ impl<R: Read + Seek> IcoDecoder<R> {
         }
 
         Ok(())
+    }
+
+    fn push_entry_and_image_data_sections(&mut self) {
+        for (entry, &offset) in self.entries.iter().zip(self.entry_offsets.iter()) {
+            self.sections.push(IcoSectionInfo {
+                start_offset: offset,
+                data: IcoSectionData::IconDirEntry(IcoIconDirEntryData {
+                    width: entry.width,
+                    height: entry.height,
+                    color_count: entry.color_count,
+                    planes: entry.planes,
+                    bit_count: entry.bit_count,
+                    bytes_in_res: entry.bytes_in_res,
+                    image_offset: entry.image_offset,
+                    hotspot_x: entry.hotspot_x,
+                    hotspot_y: entry.hotspot_y,
+                    image_format: entry.image_format,
+                }),
+            });
+        }
+        for entry in &self.entries {
+            self.sections.push(IcoSectionInfo {
+                start_offset: entry.image_offset as u64,
+                data: IcoSectionData::ImageData(IcoImageDataInfo {
+                    length: entry.bytes_in_res,
+                    image_format: entry.image_format,
+                }),
+            });
+        }
+        self.sections.sort_by_key(|s| s.start_offset);
     }
 
     fn decode_png_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {
@@ -182,6 +232,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
                 log_warn!("Error detecting ICO image formats: {}", e);
             }
         }
+
+        self.push_entry_and_image_data_sections();
 
         if self.entries.is_empty() {
             return Err(VexelError::Custom("ICO file contains no valid entries".to_string()));
