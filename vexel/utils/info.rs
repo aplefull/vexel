@@ -4,6 +4,7 @@ use crate::decoders::hdr::HdrSectionInfo;
 use crate::decoders::ico::IcoSectionInfo;
 use crate::decoders::jbig1::types::Jbig1SectionInfo;
 use crate::decoders::jpeg::types::JpegSegmentInfo;
+use crate::decoders::jpeg_ls::types::JpegLsSectionInfo;
 use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::png::PngChunkInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
@@ -16,6 +17,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 #[tsify(into_wasm_abi)]
 pub enum ImageInfo {
     Jpeg(JpegInfo),
+    JpegLs(JpegLsInfo),
     Png(PngInfo),
     Bmp(BmpInfo),
     Gif(GifInfo),
@@ -69,6 +71,12 @@ pub struct Jbig1Info {
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
+pub struct JpegLsInfo {
+    pub sections: Vec<JpegLsSectionInfo>,
+}
+
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct IcoInfo {
     pub sections: Vec<IcoSectionInfo>,
 }
@@ -77,6 +85,7 @@ impl fmt::Display for ImageInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ImageInfo::Jpeg(info) => write!(f, "{}", info),
+            ImageInfo::JpegLs(info) => write!(f, "{}", info),
             ImageInfo::Png(info) => write!(f, "{}", info),
             ImageInfo::Bmp(info) => write!(f, "{}", info),
             ImageInfo::Gif(info) => write!(f, "{}", info),
@@ -846,6 +855,155 @@ impl fmt::Display for Jbig1Info {
                 }
                 Jbig1SectionData::Unknown(u) => {
                     writeln!(f, "Offset 0x{:08X}  Unknown marker (0xFF {:02X})", section.start_offset, u.marker)?;
+                }
+            }
+            writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for JpegLsInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::jpeg_ls::types::JpegLsSectionData;
+
+        writeln!(f, "JPEG-LS Image Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                JpegLsSectionData::Soi => {
+                    writeln!(f, "Offset 0x{:08X}  SOI (Start of Image)", section.start_offset)?;
+                }
+                JpegLsSectionData::Eoi => {
+                    writeln!(f, "Offset 0x{:08X}  EOI (End of Image)", section.start_offset)?;
+                }
+                JpegLsSectionData::Sof(sof) => {
+                    writeln!(f, "Offset 0x{:08X}  SOF55 (Frame Header)", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", sof.length)?;
+                    writeln!(f, "  Precision: {} bits", sof.precision)?;
+                    writeln!(f, "  Width: {}", sof.width)?;
+                    writeln!(f, "  Height: {}", sof.height)?;
+                    writeln!(f, "  Components: {}", sof.component_count)?;
+                    for comp in &sof.components {
+                        writeln!(f, "    Component {}: sampling {}x{}", comp.id, comp.horizontal_sampling, comp.vertical_sampling)?;
+                    }
+                }
+                JpegLsSectionData::Sos(sos) => {
+                    writeln!(f, "Offset 0x{:08X}  SOS (Scan Header)", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", sos.length)?;
+                    writeln!(f, "  Components: {}", sos.component_count)?;
+                    for comp in &sos.components {
+                        writeln!(f, "    Component {}: mapping table selector {}", comp.id, comp.mapping_table_selector)?;
+                    }
+                    writeln!(f, "  NEAR (loss): {}", sos.near)?;
+                    writeln!(f, "  Interleave mode: {}", sos.interleave_mode)?;
+                    writeln!(f, "  Point transform: {}", sos.point_transform)?;
+                    writeln!(f, "  Scan data: {} bytes", sos.scan_data_length)?;
+                }
+                JpegLsSectionData::Lse(lse) => {
+                    writeln!(f, "Offset 0x{:08X}  LSE (JPEG-LS Preset Parameters)", section.start_offset)?;
+                    match lse {
+                        crate::decoders::jpeg_ls::types::JpegLsLseData::PresetParameters { length, maxval, t1, t2, t3, reset } => {
+                            writeln!(f, "  Length: {} bytes", length)?;
+                            writeln!(f, "  MaxVal: {}", maxval)?;
+                            writeln!(f, "  T1: {}", t1)?;
+                            writeln!(f, "  T2: {}", t2)?;
+                            writeln!(f, "  T3: {}", t3)?;
+                            writeln!(f, "  Reset: {}", reset)?;
+                        }
+                        crate::decoders::jpeg_ls::types::JpegLsLseData::MappingTable { length, table_id, entry_count, entries } => {
+                            writeln!(f, "  Length: {} bytes", length)?;
+                            writeln!(f, "  Table ID: {}", table_id)?;
+                            writeln!(f, "  Entries: {}", entry_count)?;
+                            writeln!(f, "  Values: {:?}", entries)?;
+                        }
+                        crate::decoders::jpeg_ls::types::JpegLsLseData::ExtendedTemplate { length, entries } => {
+                            writeln!(f, "  Length: {} bytes", length)?;
+                            writeln!(f, "  Template bytes: {} bytes", entries.len())?;
+                        }
+                        crate::decoders::jpeg_ls::types::JpegLsLseData::Other { length, id_type } => {
+                            writeln!(f, "  Length: {} bytes", length)?;
+                            writeln!(f, "  ID type: {}", id_type)?;
+                        }
+                    }
+                }
+                JpegLsSectionData::Dri(dri) => {
+                    writeln!(f, "Offset 0x{:08X}  DRI (Restart Interval)", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", dri.length)?;
+                    writeln!(f, "  Restart interval: {}", dri.restart_interval)?;
+                }
+                JpegLsSectionData::App(app) => {
+                    let marker_name = match app.marker {
+                        0xFFE0 => "APP0",
+                        0xFFE1 => "APP1",
+                        0xFFE2 => "APP2",
+                        0xFFE3 => "APP3",
+                        0xFFE4 => "APP4",
+                        0xFFE5 => "APP5",
+                        0xFFE6 => "APP6",
+                        0xFFE7 => "APP7",
+                        0xFFE8 => "APP8",
+                        0xFFE9 => "APP9",
+                        0xFFEA => "APP10",
+                        0xFFEB => "APP11",
+                        0xFFEC => "APP12",
+                        0xFFED => "APP13",
+                        0xFFEE => "APP14",
+                        0xFFEF => "APP15",
+                        _ => "APP",
+                    };
+                    writeln!(f, "Offset 0x{:08X}  {} (Application Data)", section.start_offset, marker_name)?;
+                    writeln!(f, "  Length: {} bytes", app.length)?;
+                    if let Some(id) = &app.identifier {
+                        writeln!(f, "  Identifier: {}", id)?;
+                    }
+                    if let Some(jfif) = &app.jfif {
+                        writeln!(f, "  Version: {}.{:02}", jfif.version_major, jfif.version_minor)?;
+                        writeln!(f, "  Density units: {}", jfif.density_units)?;
+                        writeln!(f, "  Density: {}x{}", jfif.x_density, jfif.y_density)?;
+                        if jfif.thumbnail_width > 0 || jfif.thumbnail_height > 0 {
+                            writeln!(f, "  Thumbnail: {}x{}", jfif.thumbnail_width, jfif.thumbnail_height)?;
+                        }
+                    }
+                    if let Some(exif) = &app.exif {
+                        writeln!(f, "  Byte order: {:?}", exif.byte_order)?;
+                        fmt_exif_ifd(f, "IFD0", &exif.ifd0)?;
+                        if let Some(ifd) = &exif.exif_ifd {
+                            fmt_exif_ifd(f, "ExifIFD", ifd)?;
+                        }
+                        if let Some(ifd) = &exif.gps_ifd {
+                            fmt_exif_ifd(f, "GPSIFD", ifd)?;
+                        }
+                        if let Some(ifd) = &exif.ifd1 {
+                            fmt_exif_ifd(f, "IFD1 (thumbnail)", ifd)?;
+                        }
+                    }
+                    if let Some(icc) = &app.icc_profile_sequence {
+                        writeln!(f, "  ICC chunk: {}/{}", icc.chunk_sequence, icc.total_chunks)?;
+                        writeln!(f, "  ICC profile data: {} bytes", icc.profile_data_length)?;
+                    }
+                    if let Some(adobe) = &app.adobe {
+                        writeln!(f, "  Version: {}", adobe.version)?;
+                        writeln!(f, "  Flags0: 0x{:04X}", adobe.flags0)?;
+                        writeln!(f, "  Flags1: 0x{:04X}", adobe.flags1)?;
+                        writeln!(f, "  Color transform: {}", adobe.color_transform)?;
+                    }
+                    if let Some(transform) = app.color_transform {
+                        writeln!(f, "  HP color transform: {}", transform)?;
+                    }
+                }
+                JpegLsSectionData::Com(com) => {
+                    writeln!(f, "Offset 0x{:08X}  COM (Comment)", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", com.length)?;
+                    if com.text.len() > 60 {
+                        writeln!(f, "  Text: {}... ({} chars)", &com.text[..60], com.text.len())?;
+                    } else {
+                        writeln!(f, "  Text: {}", com.text)?;
+                    }
                 }
             }
             writeln!(f)?;

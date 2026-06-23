@@ -157,6 +157,10 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
                 ImageInfo::Hdr(image_data)
             }
+            Decoders::JpegLs(jpeg_ls_decoder) => {
+                let image_data = jpeg_ls_decoder.get_info();
+                ImageInfo::JpegLs(image_data)
+            }
             Decoders::Jbig1(jbig1_decoder) => {
                 let image_data = jbig1_decoder.get_info();
                 ImageInfo::Jbig1(image_data)

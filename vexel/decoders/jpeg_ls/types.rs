@@ -1,3 +1,121 @@
+use crate::decoders::jpeg::types::{APP14AdobeData, JFIFData};
+use crate::utils::exif::ExifData;
+use serde::Serialize;
+use tsify::Tsify;
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsSectionInfo {
+    pub start_offset: u64,
+    pub data: JpegLsSectionData,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub enum JpegLsSectionData {
+    Soi,
+    Eoi,
+    Sof(JpegLsSofData),
+    Sos(JpegLsSosData),
+    Lse(JpegLsLseData),
+    Dri(JpegLsDriData),
+    App(JpegLsAppData),
+    Com(JpegLsComData),
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsSofData {
+    pub length: u16,
+    pub precision: u8,
+    pub height: u32,
+    pub width: u32,
+    pub component_count: u8,
+    pub components: Vec<JpegLsComponentInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsComponentInfo {
+    pub id: u8,
+    pub horizontal_sampling: u8,
+    pub vertical_sampling: u8,
+    pub reserved: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsSosData {
+    pub length: u16,
+    pub component_count: u8,
+    pub components: Vec<JpegLsSosComponentInfo>,
+    pub near: u8,
+    pub interleave_mode: u8,
+    pub point_transform: u8,
+    pub scan_data_length: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsSosComponentInfo {
+    pub id: u8,
+    pub mapping_table_selector: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub enum JpegLsLseData {
+    PresetParameters {
+        length: u16,
+        maxval: u16,
+        t1: u16,
+        t2: u16,
+        t3: u16,
+        reset: u16,
+    },
+    MappingTable {
+        length: u16,
+        table_id: u8,
+        entry_count: u16,
+        entries: Vec<u16>,
+    },
+    ExtendedTemplate {
+        length: u16,
+        entries: Vec<u8>,
+    },
+    Other {
+        length: u16,
+        id_type: u8,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsDriData {
+    pub length: u16,
+    pub restart_interval: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsAppData {
+    pub marker: u16,
+    pub length: u16,
+    pub identifier: Option<String>,
+    pub jfif: Option<JFIFData>,
+    pub exif: Option<ExifData>,
+    pub icc_profile_sequence: Option<crate::decoders::jpeg::types::IccProfileSequenceInfo>,
+    pub adobe: Option<APP14AdobeData>,
+    pub color_transform: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JpegLsComData {
+    pub length: u16,
+    pub text: String,
+}
+
 pub const MAX_COMPONENTS: usize = 6;
 pub const CREGIONS: usize = 9;
 pub const CONTEXTS1: usize = CREGIONS * CREGIONS * CREGIONS;

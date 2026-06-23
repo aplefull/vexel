@@ -1,10 +1,14 @@
 use std::io::{Read, Seek};
 
+use crate::decoders::jpeg::types::{APP14AdobeData, IccProfileSequenceInfo, JFIFData};
 use crate::utils::error::VexelResult;
+use crate::utils::exif::ExifReader;
+use crate::utils::info::JpegLsInfo;
 use crate::{Image, PixelData, log_warn};
 use crate::bitreader::BitReader;
 
 use super::bitreader::JlsBitReader;
+use crate::utils::marker::Marker;
 use super::markers::{JPEG_LS_MARKERS, JpegLsMarker};
 use super::types::*;
 
@@ -15,6 +19,7 @@ pub struct JpegLsDecoder<R: Read + Seek> {
     scans: Vec<(ScanHeader, Vec<u8>)>,
     color_transform: u8,
     restart_interval: usize,
+    sections: Vec<JpegLsSectionInfo>,
 }
 
 impl<R: Read + Seek> JpegLsDecoder<R> {
@@ -26,6 +31,13 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             scans: Vec::new(),
             color_transform: 0,
             restart_interval: 0,
+            sections: Vec::new(),
+        }
+    }
+
+    pub fn get_info(&self) -> JpegLsInfo {
+        JpegLsInfo {
+            sections: self.sections.clone(),
         }
     }
 
@@ -37,24 +49,31 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         Ok(self.reader.read_bits(16)? as u16)
     }
 
-    fn read_sof(&mut self) -> std::io::Result<()> {
-        let _marker_len = self.read_u16()?;
+    fn read_sof(&mut self) -> std::io::Result<JpegLsSofData> {
+        let marker_len = self.read_u16()?;
         let precision = self.read_u8()?;
         let height = self.read_u16()? as u32;
         let width = self.read_u16()? as u32;
-        let comp_count = self.read_u8()? as usize;
+        let comp_count = self.read_u8()?;
 
         let alpha = 1i32 << precision;
 
         let mut components = Vec::new();
-        for _ in 0..comp_count {
+        let mut info_components = Vec::new();
+        for _ in 0..comp_count as usize {
             let id = self.read_u8()?;
             let sampling = self.read_u8()?;
-            let _tq = self.read_u8()?;
+            let tq = self.read_u8()?;
             components.push(ComponentInfo {
                 id,
                 horizontal_sampling: (sampling >> 4) & 0xF,
                 vertical_sampling: sampling & 0xF,
+            });
+            info_components.push(JpegLsComponentInfo {
+                id,
+                horizontal_sampling: (sampling >> 4) & 0xF,
+                vertical_sampling: sampling & 0xF,
+                reserved: tq,
             });
         }
 
@@ -66,47 +85,77 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             alpha,
         });
 
-        Ok(())
+        Ok(JpegLsSofData {
+            length: marker_len,
+            precision,
+            height,
+            width,
+            component_count: comp_count,
+            components: info_components,
+        })
     }
 
-    fn read_lse(&mut self) -> std::io::Result<()> {
-        let marker_len = self.read_u16()? as usize;
+    fn read_lse(&mut self) -> std::io::Result<JpegLsLseData> {
+        let marker_len = self.read_u16()?;
         let id_type = self.read_u8()?;
 
-        if id_type == 1 {
-            let maxval = self.read_u16()? as i32;
-            let t1 = self.read_u16()? as i32;
-            let t2 = self.read_u16()? as i32;
-            let t3 = self.read_u16()? as i32;
-            let reset = self.read_u16()? as i32;
+        match id_type {
+            1 => {
+                let maxval = self.read_u16()?;
+                let t1 = self.read_u16()?;
+                let t2 = self.read_u16()?;
+                let t3 = self.read_u16()?;
+                let reset = self.read_u16()?;
 
-            let scan = self.pending_scan.get_or_insert_with(ScanHeader::default);
-            scan.alpha = maxval + 1;
-            scan.t1 = t1;
-            scan.t2 = t2;
-            scan.t3 = t3;
-            scan.reset = reset;
-        } else {
-            for _ in 3..marker_len {
-                self.read_u8()?;
+                let scan = self.pending_scan.get_or_insert_with(ScanHeader::default);
+                scan.alpha = maxval as i32 + 1;
+                scan.t1 = t1 as i32;
+                scan.t2 = t2 as i32;
+                scan.t3 = t3 as i32;
+                scan.reset = reset as i32;
+
+                Ok(JpegLsLseData::PresetParameters { length: marker_len, maxval, t1, t2, t3, reset })
+            }
+            2 => {
+                let table_id = self.read_u8()?;
+                let entry_count = self.read_u16()?;
+                let mut entries = Vec::with_capacity(entry_count as usize + 1);
+                for _ in 0..=entry_count {
+                    entries.push(self.read_u16()?);
+                }
+                Ok(JpegLsLseData::MappingTable { length: marker_len, table_id, entry_count, entries })
+            }
+            3 => {
+                let remaining = (marker_len as usize).saturating_sub(3);
+                let mut entries = Vec::with_capacity(remaining);
+                for _ in 0..remaining {
+                    entries.push(self.read_u8()?);
+                }
+                Ok(JpegLsLseData::ExtendedTemplate { length: marker_len, entries })
+            }
+            _ => {
+                for _ in 3..marker_len as usize {
+                    self.read_u8()?;
+                }
+                Ok(JpegLsLseData::Other { length: marker_len, id_type })
             }
         }
-
-        Ok(())
     }
 
-    fn read_sos(&mut self) -> std::io::Result<()> {
-        let _marker_len = self.read_u16()?;
-        let comp_count = self.read_u8()? as usize;
+    fn read_sos(&mut self) -> std::io::Result<JpegLsSosData> {
+        let marker_len = self.read_u16()?;
+        let comp_count = self.read_u8()?;
 
         let mut component_ids = Vec::new();
-        for _ in 0..comp_count {
+        let mut info_components = Vec::new();
+        for _ in 0..comp_count as usize {
             let cid = self.read_u8()?;
-            let _tm = self.read_u8()?;
+            let tm = self.read_u8()?;
             component_ids.push(cid);
+            info_components.push(JpegLsSosComponentInfo { id: cid, mapping_table_selector: tm });
         }
 
-        let near = self.read_u8()? as i32;
+        let near = self.read_u8()?;
         let ilv_byte = self.read_u8()?;
         let pt = self.read_u8()?;
 
@@ -127,7 +176,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
         let scan = self.pending_scan.get_or_insert_with(ScanHeader::default);
         scan.component_ids = component_ids;
-        scan.near = near;
+        scan.near = near as i32;
         scan.interleave_mode = interleave_mode;
         scan.point_transform = pt;
         if scan.alpha <= 1 {
@@ -138,33 +187,33 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             }
         }
 
-        Ok(())
+        Ok(JpegLsSosData {
+            length: marker_len,
+            component_count: comp_count,
+            components: info_components,
+            near,
+            interleave_mode: ilv_byte,
+            point_transform: pt,
+            scan_data_length: 0,
+        })
     }
 
-    fn try_read_hp_color_transform(&mut self) -> std::io::Result<()> {
-        let length = self.read_u16()? as usize;
-        if length < 6 {
-            for _ in 2..length {
-                self.read_u8()?;
+    fn try_read_hp_color_transform(&mut self) -> std::io::Result<JpegLsAppData> {
+        let length = self.read_u16()?;
+        let payload = self.reader.read_bytes(length.saturating_sub(2) as usize)?;
+
+        let (identifier, color_transform) = if payload.len() >= 5 {
+            let id = String::from_utf8(payload[..4].to_vec()).ok();
+            let is_mrfx = payload.starts_with(b"mrfx");
+            if is_mrfx {
+                self.color_transform = payload[4];
             }
-            return Ok(());
-        }
+            (id, if is_mrfx { Some(payload[4]) } else { None })
+        } else {
+            (None, None)
+        };
 
-        let b0 = self.read_u8()?;
-        let b1 = self.read_u8()?;
-        let b2 = self.read_u8()?;
-        let b3 = self.read_u8()?;
-        let transform = self.read_u8()?;
-
-        for _ in 7..length {
-            self.read_u8()?;
-        }
-
-        if b0 == b'm' && b1 == b'r' && b2 == b'f' && b3 == b'x' {
-            self.color_transform = transform;
-        }
-
-        Ok(())
+        Ok(JpegLsAppData { marker: 0xFFE8, length, identifier, jfif: None, exif: None, icc_profile_sequence: None, adobe: None, color_transform })
     }
 
     fn read_compressed_data(&mut self) -> std::io::Result<Vec<u8>> {
@@ -206,35 +255,147 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 Ok(None) => break,
                 Err(_) => break,
             };
+            let marker_start = self.reader.stream_position().unwrap_or(2).saturating_sub(2);
 
             match marker {
-                JpegLsMarker::SOI => {}
+                JpegLsMarker::SOI => {
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::Soi,
+                    });
+                }
                 JpegLsMarker::SOF55 => {
-                    self.read_sof()?;
+                    let sof = self.read_sof()?;
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::Sof(sof),
+                    });
                 }
                 JpegLsMarker::LSE => {
-                    self.read_lse()?;
+                    let lse = self.read_lse()?;
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::Lse(lse),
+                    });
                 }
                 JpegLsMarker::SOS => {
-                    self.read_sos()?;
+                    let mut sos = self.read_sos()?;
                     let data = self.read_compressed_data()?;
+                    sos.scan_data_length = data.len();
                     let mut scan = self.pending_scan.take().unwrap_or_default();
                     scan.restart_interval = self.restart_interval;
                     self.scans.push((scan, data));
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::Sos(sos),
+                    });
                 }
-                JpegLsMarker::EOI => break,
+                JpegLsMarker::EOI => {
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::Eoi,
+                    });
+                    break;
+                }
                 JpegLsMarker::DRI => {
-                    let _len = self.read_u16()?;
-                    let interval = self.read_u16()? as usize;
-                    self.restart_interval = interval;
+                    let len = self.read_u16()?;
+                    let interval = self.read_u16()?;
+                    self.restart_interval = interval as usize;
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::Dri(JpegLsDriData {
+                            length: len,
+                            restart_interval: interval,
+                        }),
+                    });
                 }
                 JpegLsMarker::APP8 => {
-                    self.try_read_hp_color_transform()?;
+                    let app = self.try_read_hp_color_transform()?;
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::App(app),
+                    });
                 }
-                JpegLsMarker::APP0
-                | JpegLsMarker::APP1
-                | JpegLsMarker::APP2
-                | JpegLsMarker::APP3
+                JpegLsMarker::APP0 => {
+                    let len = self.read_u16()?;
+                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let mut app = JpegLsAppData { marker: 0xFFE0, length: len, identifier: None, jfif: None, exif: None, icc_profile_sequence: None, adobe: None, color_transform: None };
+                    if payload.len() >= 5 {
+                        let id = String::from_utf8_lossy(&payload[..5]).to_string();
+                        app.identifier = Some(id.trim_end_matches('\0').to_string());
+                        if payload.starts_with(b"JFIF\0") && payload.len() >= 9 {
+                            let get = |i: usize| payload.get(i).copied().unwrap_or(0);
+                            let get_u16 = |i: usize| u16::from_be_bytes([get(i), get(i + 1)]);
+                            app.jfif = Some(JFIFData {
+                                length: len,
+                                identifier: "JFIF".to_string(),
+                                version_major: get(5),
+                                version_minor: get(6),
+                                density_units: get(7),
+                                x_density: get_u16(8),
+                                y_density: get_u16(10),
+                                thumbnail_width: get(12),
+                                thumbnail_height: get(13),
+                            });
+                        }
+                    }
+                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(app) });
+                }
+                JpegLsMarker::APP1 => {
+                    let len = self.read_u16()?;
+                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let exif = if payload.starts_with(b"Exif\0\0") {
+                        ExifReader::parse(&payload[6..])
+                    } else {
+                        None
+                    };
+                    let identifier = if payload.len() >= 4 {
+                        let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len().min(32));
+                        String::from_utf8_lossy(&payload[..null_pos]).into_owned().into()
+                    } else {
+                        None
+                    };
+                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(JpegLsAppData { marker: 0xFFE1, length: len, identifier, jfif: None, exif, icc_profile_sequence: None, adobe: None, color_transform: None }) });
+                }
+                JpegLsMarker::APP2 => {
+                    let len = self.read_u16()?;
+                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
+                    let identifier = String::from_utf8_lossy(&payload[..null_pos]).to_string();
+                    let icc = if identifier == "ICC_PROFILE" && payload.len() >= null_pos + 3 {
+                        Some(IccProfileSequenceInfo {
+                            chunk_sequence: payload[null_pos + 1],
+                            total_chunks: payload[null_pos + 2],
+                            profile_data_length: payload.len().saturating_sub(null_pos + 3) as u32,
+                        })
+                    } else {
+                        None
+                    };
+                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(JpegLsAppData { marker: 0xFFE2, length: len, identifier: Some(identifier), jfif: None, exif: None, icc_profile_sequence: icc, adobe: None, color_transform: None }) });
+                }
+                JpegLsMarker::APP14 => {
+                    let len = self.read_u16()?;
+                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let adobe = if payload.starts_with(b"Adobe") && payload.len() >= 12 {
+                        Some(APP14AdobeData {
+                            length: len,
+                            version: u16::from_be_bytes([payload[5], payload[6]]),
+                            flags0: u16::from_be_bytes([payload[7], payload[8]]),
+                            flags1: u16::from_be_bytes([payload[9], payload[10]]),
+                            color_transform: payload[11],
+                        })
+                    } else {
+                        None
+                    };
+                    let identifier = if payload.len() >= 5 {
+                        let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len().min(32));
+                        Some(String::from_utf8_lossy(&payload[..null_pos]).to_string())
+                    } else {
+                        None
+                    };
+                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(JpegLsAppData { marker: 0xFFEE, length: len, identifier, jfif: None, exif: None, icc_profile_sequence: None, adobe, color_transform: None }) });
+                }
+                JpegLsMarker::APP3
                 | JpegLsMarker::APP4
                 | JpegLsMarker::APP5
                 | JpegLsMarker::APP6
@@ -244,18 +405,36 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 | JpegLsMarker::APP11
                 | JpegLsMarker::APP12
                 | JpegLsMarker::APP13
-                | JpegLsMarker::APP14
-                | JpegLsMarker::APP15
-                | JpegLsMarker::COM => {
-                    let len = self.read_u16()? as usize;
-                    for _ in 0..len.saturating_sub(2) {
-                        self.read_u8()?;
+                | JpegLsMarker::APP15 => {
+                    let len = self.read_u16()?;
+                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let marker_u16 = marker.to_u16();
+                    let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len().min(32));
+                    let identifier = if null_pos > 0 && payload[..null_pos].iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+                        String::from_utf8(payload[..null_pos].to_vec()).ok()
+                    } else {
+                        None
+                    };
+                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(JpegLsAppData { marker: marker_u16, length: len, identifier, jfif: None, exif: None, icc_profile_sequence: None, adobe: None, color_transform: None }) });
+                }
+                JpegLsMarker::COM => {
+                    let len = self.read_u16()?;
+                    let payload_len = len.saturating_sub(2) as usize;
+                    let mut text_bytes = Vec::with_capacity(payload_len);
+                    for _ in 0..payload_len {
+                        text_bytes.push(self.read_u8()?);
                     }
+                    let text = String::from_utf8_lossy(&text_bytes).into_owned();
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::Com(JpegLsComData { length: len, text }),
+                    });
                 }
                 _ => {
                     log_warn!("Unhandled JPEG-LS marker: {:?}", marker);
                 }
             }
+
         }
 
         let frame = match self.frame.as_ref() {
