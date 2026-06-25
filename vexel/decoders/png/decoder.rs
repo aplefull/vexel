@@ -76,13 +76,6 @@ impl<R: Read + Seek> PngDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
 
     pub fn get_info(&self) -> PngInfo {
         PngInfo {

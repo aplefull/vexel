@@ -86,21 +86,12 @@ pub struct Image {
 }
 
 impl Image {
-    pub fn new(width: u32, height: u32, pixel_format: PixelFormat, frames: Vec<ImageFrame>) -> Image {
+    pub(crate) fn new(width: u32, height: u32, pixel_format: PixelFormat, frames: Vec<ImageFrame>) -> Image {
         Image {
             width,
             height,
             pixel_format,
             frames,
-        }
-    }
-
-    pub fn default() -> Image {
-        Image {
-            width: 0,
-            height: 0,
-            pixel_format: PixelFormat::RGB8,
-            frames: Vec::new(),
         }
     }
 
@@ -113,7 +104,7 @@ impl Image {
         }
     }
 
-    pub fn from_pixels(width: u32, height: u32, pixels: PixelData) -> Image {
+    pub(crate) fn from_pixels(width: u32, height: u32, pixels: PixelData) -> Image {
         let frame = ImageFrame::new(width, height, pixels, 0);
         Image::from_frame(frame)
     }
@@ -186,14 +177,14 @@ impl Image {
 
 #[derive(Debug, Clone)]
 pub struct ImageFrame {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: PixelData,
-    pub delay: u32,
+    width: u32,
+    height: u32,
+    pixels: PixelData,
+    delay: u32,
 }
 
 impl ImageFrame {
-    pub fn new(width: u32, height: u32, pixels: PixelData, delay: u32) -> ImageFrame {
+    pub(crate) fn new(width: u32, height: u32, pixels: PixelData, delay: u32) -> ImageFrame {
         ImageFrame {
             width,
             height,
@@ -499,7 +490,7 @@ impl PixelData {
 
     // Used as a last resort to correct the number of pixels in the image
     // in case something went wrong during decoding
-    pub fn correct_pixels(&mut self, width: u32, height: u32) -> () {
+    pub(crate) fn correct_pixels(&mut self, width: u32, height: u32) -> () {
         let components_per_pixel = match self {
             PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) | PixelData::RGB64F(_) => 3,
             PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::RGBA64F(_) => 4,

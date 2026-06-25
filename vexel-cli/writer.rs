@@ -54,7 +54,7 @@ impl Writer {
         let has_alpha = image.has_alpha();
         let mut timestamp_ms = 0i32;
         let pixel_bufs: Vec<(Vec<u8>, i32)> = image.frames().iter().map(|frame| {
-            let delta = if frame.delay == 0 { 1 } else { frame.delay as i32 };
+            let delta = if frame.delay() == 0 { 1 } else { frame.delay() as i32 };
             timestamp_ms += delta;
             let pixels = if has_alpha {
                 frame.clone().into_rgba8().pixels().as_bytes().to_vec()
@@ -95,7 +95,7 @@ impl Writer {
         file.write_all(format!("WIDTH {}\n", width).as_bytes())?;
         file.write_all(format!("HEIGHT {}\n", height).as_bytes())?;
 
-        match &image.frames()[0].pixels {
+        match image.frames()[0].pixels() {
             PixelData::RGB8(pixels) => {
                 file.write_all(b"DEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n")?;
                 file.write_all(pixels)?;
@@ -503,7 +503,7 @@ unsafe fn jxl_encode(
 ) -> Result<Vec<u8>, String> {
     let is_animated = image.frames().len() > 1;
     let first_frame = &image.frames()[0];
-    let info = pixel_info_for(&first_frame.pixels);
+    let info = pixel_info_for(first_frame.pixels());
 
     if is_animated {
         if JxlEncoderUseContainer(enc, JxlBool::True) != JxlEncoderStatus::Success {
@@ -573,14 +573,14 @@ unsafe fn jxl_encode(
             let mut frame_header = MaybeUninit::<jpegxl_sys::metadata::codestream_header::JxlFrameHeader>::uninit();
             JxlEncoderInitFrameHeader(frame_header.as_mut_ptr());
             let mut frame_header = frame_header.assume_init();
-            frame_header.duration = if frame.delay == 0 { 1 } else { frame.delay };
+            frame_header.duration = if frame.delay() == 0 { 1 } else { frame.delay() };
             if JxlEncoderSetFrameHeader(frame_settings, &frame_header) != JxlEncoderStatus::Success {
                 return Err("failed to set frame header".to_string());
             }
         }
 
         let f32_converted: Option<Vec<f32>>;
-        let (ptr, len) = match &frame.pixels {
+        let (ptr, len) = match frame.pixels() {
             PixelData::RGB64F(d) | PixelData::RGBA64F(d) | PixelData::L64F(d) | PixelData::LA64F(d) => {
                 let converted: Vec<f32> = d.iter().map(|&v| v as f32).collect();
                 f32_converted = Some(converted);

@@ -139,7 +139,7 @@ pub fn frame_to_reference_native(image: &Image, frame_idx: usize) -> ReferenceIm
     let height = image.height();
     let frame = &image.frames()[frame_idx];
 
-    let pixels = match &frame.pixels {
+    let pixels = match frame.pixels() {
         PixelData::L1(p) => {
             let n = (frame.width() * frame.height()) as usize;
             ReferencePixels::U8(p.iter().flat_map(|&b| (0..8).map(move |i| (b >> (7 - i)) & 1)).take(n).collect())

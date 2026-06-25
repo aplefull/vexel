@@ -32,13 +32,6 @@ impl<R: Read + Seek> HdrDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
 
     fn read_until_newline(&mut self) -> VexelResult<Vec<u8>> {
         let mut buffer = Vec::new();

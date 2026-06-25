@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fmt::Display;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -13,7 +11,6 @@ use js_sys::Date;
 
 const RESET: &str = "\x1b[0m";
 const BLUE: &str = "\x1b[34m";
-const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 
@@ -23,23 +20,6 @@ pub fn set_log_level(level: LogLevel) {
     MIN_LOG_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
-#[macro_export]
-macro_rules! log_info {
-    ($msg:expr) => {
-        $crate::utils::logger::Logger::log(
-            $crate::utils::logger::LogLevel::Info,
-            &$msg.to_string()
-        )
-    };
-    ($fmt:expr, $($arg:tt)*) => {
-        $crate::utils::logger::Logger::log(
-            $crate::utils::logger::LogLevel::Info,
-            &format!($fmt, $($arg)*)
-        )
-    };
-}
-
-#[macro_export]
 macro_rules! log_debug {
     ($msg:expr) => {
         $crate::utils::logger::Logger::log(
@@ -55,7 +35,6 @@ macro_rules! log_debug {
     };
 }
 
-#[macro_export]
 macro_rules! log_warn {
     ($msg:expr) => {
         $crate::utils::logger::Logger::log(
@@ -71,7 +50,6 @@ macro_rules! log_warn {
     };
 }
 
-#[macro_export]
 macro_rules! log_error {
     ($msg:expr) => {
         $crate::utils::logger::Logger::log(
@@ -87,13 +65,16 @@ macro_rules! log_error {
     };
 }
 
+pub(crate) use log_debug;
+pub(crate) use log_warn;
+pub(crate) use log_error;
+
 #[repr(u8)]
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub enum LogLevel {
     Debug = 0,
-    Info = 1,
-    Warning = 2,
-    Error = 3,
+    Warning = 1,
+    Error = 2,
 }
 
 pub struct Logger {}
@@ -128,7 +109,6 @@ impl Logger {
 
         let (level_str, color) = match level {
             LogLevel::Debug => ("DEBUG", BLUE),
-            LogLevel::Info => ("INFO", GREEN),
             LogLevel::Warning => ("WARN", YELLOW),
             LogLevel::Error => ("ERROR", RED),
         };

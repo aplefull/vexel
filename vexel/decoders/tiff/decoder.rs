@@ -40,13 +40,6 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
 
     fn read_file_header(&mut self) -> VexelResult<u32> {
         let mut byte_order_marker = [0u8; 2];

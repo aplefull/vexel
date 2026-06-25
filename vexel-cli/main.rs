@@ -56,7 +56,7 @@ struct Cli {
     #[arg(long, help = "Write each frame as a separate file")]
     frames: bool,
 
-    #[arg(long, value_parser = ["error", "warn", "info", "debug"], default_value = "error", help = "Minimum log level to display")]
+    #[arg(long, value_parser = ["error", "warn", "debug"], default_value = "error", help = "Minimum log level to display")]
     log_level: String,
 
     #[arg(long, default_value = "2048", help = "Maximum memory usage in MiB (0 = unlimited). Decoder will abort if this limit is exceeded.")]
@@ -808,7 +808,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let log_level = match cli.log_level.as_str() {
         "debug" => LogLevel::Debug,
-        "info" => LogLevel::Info,
         "warn" => LogLevel::Warning,
         _ => LogLevel::Error,
     };

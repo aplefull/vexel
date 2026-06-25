@@ -40,13 +40,6 @@ impl<R: Read + Seek> IcoDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
 
     pub fn get_info(&self) -> IcoInfo {
         IcoInfo {

@@ -14,6 +14,7 @@ use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
 
 pub(crate) use utils::bitreader;
+pub(crate) use utils::logger::{log_debug, log_warn, log_error};
 pub use utils::error::{VexelError, VexelResult};
 pub use utils::limits::Limits;
 pub use utils::image::Image;
@@ -40,7 +41,7 @@ macro_rules! impl_decode {
     };
 }
 
-pub enum Decoders<R: Read + Seek> {
+pub(crate) enum Decoders<R: Read + Seek> {
     Jpeg(JpegDecoder<R>),
     JpegLs(JpegLsDecoder<R>),
     Png(PngDecoder<R>),

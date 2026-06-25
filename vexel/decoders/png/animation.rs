@@ -147,16 +147,16 @@ impl AnimationDecoder {
             prev_dispose_op = fctl.dispose_op;
             prev_fctl = Some(fctl);
 
-            output_frames.push(ImageFrame {
-                width: self.width,
-                height: self.height,
-                delay: if fctl.delay_den == 0 {
+            output_frames.push(ImageFrame::new(
+                self.width,
+                self.height,
+                canvas.clone(),
+                if fctl.delay_den == 0 {
                     fctl.delay_num as u32 * 10
                 } else {
                     (fctl.delay_num as f32 / fctl.delay_den as f32 * 1000.0).round() as u32
                 },
-                pixels: canvas.clone(),
-            });
+            ));
         }
 
         Ok(output_frames)
