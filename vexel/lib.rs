@@ -439,7 +439,84 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     }
 }
 
-/// WebAssembly-compatible image type returned by the `decodeImage` JS export.
+/// WebAssembly entry point that mirrors the native [`Vexel`] API.
+#[wasm_bindgen(js_name = Decoder)]
+pub struct WasmDecoder {
+    decoder: Vexel<Cursor<Vec<u8>>>,
+}
+
+#[wasm_bindgen(js_class = Decoder)]
+impl WasmDecoder {
+    /// Creates a new decoder from raw image bytes.
+    ///
+    /// The image format is detected automatically from the magic bytes in `data`.
+    /// Returns an error if the format cannot be identified.
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: &[u8]) -> Result<WasmDecoder, String> {
+        let cursor = Cursor::new(data.to_vec());
+        let decoder = Vexel::new(cursor).map_err(|e| e.to_string())?;
+        Ok(WasmDecoder { decoder })
+    }
+
+    /// Sets resource limits that the decoder will enforce during decoding.
+    ///
+    /// `max_image_width` and `max_image_height` are in pixels; `max_alloc` is in bytes.
+    /// Pass `null` for any field to leave that constraint unconstrained. The default
+    /// when `setLimits` is not called caps `max_alloc` at 512 MiB with no dimension limits.
+    #[wasm_bindgen(js_name = setLimits)]
+    pub fn set_limits(&mut self, max_image_width: Option<u32>, max_image_height: Option<u32>, max_alloc: Option<f64>) {
+        self.decoder.set_limits(Limits {
+            max_image_width,
+            max_image_height,
+            max_alloc: max_alloc.map(|v| v as u64),
+        });
+    }
+
+    /// Decodes the image and returns a [`JsImage`] with all frames as RGBA8.
+    ///
+    /// Pixel data for each frame is a flat byte vector of length `width * height * 4`.
+    #[wasm_bindgen(js_name = decode)]
+    pub fn decode(&mut self) -> Result<JsImage, String> {
+        let image = self.decoder.decode().map_err(|e| e.to_string())?;
+
+        Ok(JsImage {
+            width: image.width(),
+            height: image.height(),
+            image_format: self.decoder.get_format(),
+            frames: image
+                .frames()
+                .iter()
+                .map(|frame| JsImageFrame {
+                    width: frame.width(),
+                    height: frame.height(),
+                    pixels: frame.as_rgba8(),
+                    delay: frame.delay(),
+                })
+                .collect(),
+        })
+    }
+
+    /// Returns format-specific metadata collected during the last `decode` call.
+    ///
+    /// `decode` must be called first; calling `getInfo` before it returns an empty struct.
+    #[wasm_bindgen(js_name = getInfo)]
+    pub fn get_info(&mut self) -> ImageInfo {
+        self.decoder.get_info()
+    }
+
+    /// Detects the image format from `data` without decoding it.
+    ///
+    /// Returns the format name as a string, or `"Unknown"` if the format cannot be identified.
+    #[wasm_bindgen(js_name = tryGuessFormat)]
+    pub fn try_guess_format(data: &[u8]) -> Result<String, String> {
+        let mut cursor = Cursor::new(data);
+        let format = Vexel::try_guess_format(&mut cursor).map_err(|e| e.to_string())?;
+
+        Ok(format!("{:?}", format))
+    }
+}
+
+/// WebAssembly-compatible image returned by [`WasmDecoder::decode`].
 ///
 /// Pixels in each frame are always RGBA8, regardless of the source format.
 #[derive(Serialize, Tsify)]
@@ -463,50 +540,7 @@ pub struct JsImageFrame {
     pub delay: u32,
 }
 
-/// Decodes `data` and returns format-specific metadata. JS name: `getInfo`.
-///
-/// Equivalent to calling [`Vexel::decode`] followed by [`Vexel::get_info`].
-/// The image is fully decoded internally; only the metadata is returned.
-/// Errors are returned as strings.
-#[wasm_bindgen(js_name = getInfo)]
-pub fn get_info(data: &[u8]) -> Result<ImageInfo, String> {
-    let cursor = Cursor::new(data);
-    let mut decoder = Vexel::new(cursor).map_err(|e| e.to_string())?;
-
-    decoder.decode().map_err(|e| e.to_string())?;
-    let info = decoder.get_info();
-
-    Ok(info)
-}
-
-/// Decodes `data` and returns a [`JsImage`] with all frames as RGBA8. JS name: `decodeImage`.
-///
-/// Errors are returned as strings.
-#[wasm_bindgen(js_name = decodeImage)]
-pub fn decode_image(data: &[u8]) -> Result<JsImage, String> {
-    let cursor = Cursor::new(data);
-    let mut decoder = Vexel::new(cursor).map_err(|e| e.to_string())?;
-
-    let image = decoder.decode().map_err(|e| e.to_string())?;
-
-    Ok(JsImage {
-        width: image.width(),
-        height: image.height(),
-        image_format: decoder.get_format(),
-        frames: image
-            .frames()
-            .iter()
-            .map(|frame| JsImageFrame {
-                width: frame.width(),
-                height: frame.height(),
-                pixels: frame.as_rgba8(),
-                delay: frame.delay(),
-            })
-            .collect(),
-    })
-}
-
-/// Sets the minimum log level for all decoders. JS name: `setLogLevel`.
+/// Sets the minimum log level for all decoders.
 ///
 /// Accepts `"Debug"`, `"Warning"`, or `"Error"` (case-sensitive).
 /// Returns an error string if the value is not recognised.
@@ -522,14 +556,3 @@ pub fn wasm_set_log_level(level: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Detects the image format from `data` and returns its debug name as a string. JS name: `tryGuessFormat`.
-///
-/// Does not decode the image. Returns `"Unknown"` if the format cannot be identified.
-/// Errors are returned as strings.
-#[wasm_bindgen(js_name = tryGuessFormat)]
-pub fn try_guess_format(data: &[u8]) -> Result<String, String> {
-    let mut cursor = Cursor::new(data);
-    let format = Vexel::try_guess_format(&mut cursor).map_err(|e| e.to_string())?;
-
-    Ok(format!("{:?}", format))
-}
