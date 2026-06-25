@@ -258,6 +258,10 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = tga_decoder.get_info();
                 ImageInfo::Tga(image_data)
             }
+            Decoders::Tiff(tiff_decoder) => {
+                let image_data = tiff_decoder.get_info();
+                ImageInfo::Tiff(image_data)
+            }
             _ => unimplemented!(),
         }
     }

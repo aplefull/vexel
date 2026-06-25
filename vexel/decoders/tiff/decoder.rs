@@ -3,6 +3,7 @@ use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::ImageFrame;
+use crate::utils::info::TiffInfo;
 use crate::utils::types::ByteOrder;
 use crate::{Image, Limits, log_warn};
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -13,7 +14,10 @@ use super::compression::{
 };
 use super::pixels::PixelReader;
 use super::reader::{read_multiple_rationals, read_multiple_values, read_rational, read_single_value};
-use super::types::{Compression, Predictor, SampleFormat, TiffHeader};
+use super::types::{
+    Compression, Predictor, SampleFormat, TiffFileHeaderData, TiffHeader, TiffIfdData, TiffPixelData,
+    TiffSectionData, TiffSectionInfo,
+};
 
 pub struct TiffDecoder<R: Read + Seek> {
     width: u32,
@@ -22,6 +26,8 @@ pub struct TiffDecoder<R: Read + Seek> {
     byte_order: ByteOrder,
     header: TiffHeader,
     reader: BitReader<R>,
+    sections: Vec<TiffSectionInfo>,
+    ifd_count: usize,
 }
 
 impl<R: Read + Seek> TiffDecoder<R> {
@@ -33,6 +39,14 @@ impl<R: Read + Seek> TiffDecoder<R> {
             byte_order: ByteOrder::LittleEndian,
             header: TiffHeader::default(),
             reader: BitReader::new(reader),
+            sections: Vec::new(),
+            ifd_count: 0,
+        }
+    }
+
+    pub fn get_info(&self) -> TiffInfo {
+        TiffInfo {
+            sections: self.sections.clone(),
         }
     }
 
@@ -42,6 +56,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
 
     fn read_file_header(&mut self) -> VexelResult<u32> {
+        let header_start = self.reader.stream_position().unwrap_or(0);
+
         let mut byte_order_marker = [0u8; 2];
         self.reader.read_exact(&mut byte_order_marker)?;
 
@@ -60,11 +76,26 @@ impl<R: Read + Seek> TiffDecoder<R> {
         }
 
         let ifd_offset = self.reader.read_u32()?;
+
+        self.sections.push(TiffSectionInfo {
+            start_offset: header_start,
+            data: TiffSectionData::FileHeader(TiffFileHeaderData {
+                byte_order: if byte_order == ByteOrder::LittleEndian {
+                    "LittleEndian".to_string()
+                } else {
+                    "BigEndian".to_string()
+                },
+                magic,
+                first_ifd_offset: ifd_offset,
+            }),
+        });
+
         Ok(ifd_offset)
     }
 
     fn read_ifd(&mut self, ifd_offset: u32) -> VexelResult<u32> {
         self.header = TiffHeader::default();
+        let ifd_start = ifd_offset as u64;
 
         self.reader.seek(SeekFrom::Start(ifd_offset as u64))?;
 
@@ -195,6 +226,50 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.limits.reserve_buffer(self.width, self.height, 4)?;
 
         let next_ifd_offset = self.reader.read_u32().unwrap_or(0);
+
+        let is_tiled = self.header.tile_width.is_some() && !self.header.tile_offsets.is_empty();
+        let is_volumetric = is_tiled && self.header.image_depth.max(1) > 1;
+        let ifd_index = self.ifd_count;
+        self.ifd_count += 1;
+
+        self.sections.push(TiffSectionInfo {
+            start_offset: ifd_start,
+            data: TiffSectionData::Ifd(TiffIfdData {
+                ifd_index,
+                image_width: self.header.image_width,
+                image_length: self.header.image_length,
+                bits_per_sample: self.header.bits_per_sample.clone(),
+                compression: self.header.compression,
+                photometric_interpretation: self.header.photometric_interpretation,
+                samples_per_pixel: self.header.samples_per_pixel,
+                rows_per_strip: self.header.rows_per_strip,
+                strip_count: self.header.strip_offsets.len(),
+                strip_offsets: self.header.strip_offsets.clone(),
+                strip_byte_counts: self.header.strip_byte_counts.clone(),
+                x_resolution: self.header.x_resolution,
+                y_resolution: self.header.y_resolution,
+                resolution_unit: self.header.resolution_unit,
+                planar_configuration: self.header.planar_configuration,
+                predictor: self.header.predictor,
+                sample_format: self.header.sample_format.clone(),
+                extra_samples: self.header.extra_samples.clone(),
+                color_map_entries: self.header.color_map.len(),
+                ycbcr_coefficients: self.header.ycbcr_coefficients,
+                ycbcr_sub_sampling: self.header.ycbcr_sub_sampling,
+                reference_black_white: self.header.reference_black_white,
+                tile_width: self.header.tile_width,
+                tile_length: self.header.tile_length,
+                tile_count: self.header.tile_offsets.len(),
+                tile_offsets: self.header.tile_offsets.clone(),
+                tile_byte_counts: self.header.tile_byte_counts.clone(),
+                jpeg_tables_length: self.header.jpeg_tables.len(),
+                image_depth: self.header.image_depth,
+                tile_depth: self.header.tile_depth,
+                is_tiled,
+                is_volumetric,
+            }),
+        });
+
         Ok(next_ifd_offset)
     }
 
@@ -757,7 +832,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
         };
 
         if is_volumetric {
+            let vol_offset = self.reader.stream_position().unwrap_or(0);
             let slices = self.read_tile_data_volumetric()?;
+            let total_vol_len: usize = slices.iter().map(|s| s.len()).sum();
             let header = make_header(&self.header);
             let pixel_reader = PixelReader {
                 byte_order: self.byte_order,
@@ -771,14 +848,24 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 pd.correct_pixels(self.width, self.height);
                 frames.push(ImageFrame::new(self.width, self.height, pd, 0));
             }
+
+            self.sections.push(TiffSectionInfo {
+                start_offset: vol_offset,
+                data: TiffSectionData::PixelData(TiffPixelData { length: total_vol_len }),
+            });
+
             return Ok(frames);
         }
+
+        let pixel_data_offset = self.reader.stream_position().unwrap_or(0);
 
         let bytes = if is_tiled {
             self.read_tile_data()?
         } else {
             self.read_strip_data()?
         };
+
+        let pixel_data_len = bytes.len();
 
         let pixel_data = if is_jpeg {
             let spp = self.header.samples_per_pixel.max(3);
@@ -800,10 +887,18 @@ impl<R: Read + Seek> TiffDecoder<R> {
             pd
         };
 
+        self.sections.push(TiffSectionInfo {
+            start_offset: pixel_data_offset,
+            data: TiffSectionData::PixelData(TiffPixelData { length: pixel_data_len }),
+        });
+
         Ok(vec![ImageFrame::new(self.width, self.height, pixel_data, 0)])
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
+        self.sections.clear();
+        self.ifd_count = 0;
+
         let first_ifd_offset = self.read_file_header()?;
 
         let mut frames: Vec<ImageFrame> = Vec::new();

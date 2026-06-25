@@ -1,4 +1,6 @@
 use crate::utils::error::VexelError;
+use serde::Serialize;
+use tsify::Tsify;
 
 // TODO some tags are commented out since they are duplicates, but with different values
 // This probably requires a different approach to handle them
@@ -356,7 +358,7 @@ pub enum TiffTags {
     DefaultUserCrop = 51125,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum Compression {
     None = 1,
     CCITTRLE = 2,
@@ -434,7 +436,7 @@ impl TryFrom<u16> for Compression {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum SampleFormat {
     UnsignedInt = 1,
     SignedInt = 2,
@@ -470,7 +472,7 @@ pub enum ExtraSampleType {
     UnassociatedAlpha = 2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum PhotometricInterpretation {
     WhiteIsZero = 0,
     BlackIsZero = 1,
@@ -511,7 +513,7 @@ impl TryFrom<u32> for PhotometricInterpretation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum ResolutionUnit {
     NoUnit = 1,
     Inch = 2,
@@ -531,6 +533,7 @@ impl TryFrom<u32> for ResolutionUnit {
     }
 }
 
+// TODO: go over each #[allow(dead_code)] and try to resolve them
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Orientation {
@@ -544,7 +547,7 @@ pub enum Orientation {
     LeftBottom = 8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum PlanarConfiguration {
     Chunky = 1, // RGB RGB RGB ...
     Planar = 2, // RRR... GGG... BBB...
@@ -565,7 +568,7 @@ impl TryFrom<u32> for PlanarConfiguration {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum Predictor {
     None = 1,
     HorizontalDifferencing = 2,
@@ -654,4 +657,66 @@ impl Default for TiffHeader {
             tile_depth: 1,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct TiffIfdData {
+    pub ifd_index: usize,
+    pub image_width: u32,
+    pub image_length: u32,
+    pub bits_per_sample: Vec<u16>,
+    pub compression: Compression,
+    pub photometric_interpretation: PhotometricInterpretation,
+    pub samples_per_pixel: u16,
+    pub rows_per_strip: u32,
+    pub strip_count: usize,
+    pub strip_offsets: Vec<u32>,
+    pub strip_byte_counts: Vec<u32>,
+    pub x_resolution: f32,
+    pub y_resolution: f32,
+    pub resolution_unit: ResolutionUnit,
+    pub planar_configuration: PlanarConfiguration,
+    pub predictor: Predictor,
+    pub sample_format: Vec<SampleFormat>,
+    pub extra_samples: Vec<u16>,
+    pub color_map_entries: usize,
+    pub ycbcr_coefficients: [f32; 3],
+    pub ycbcr_sub_sampling: [u16; 2],
+    pub reference_black_white: [f32; 6],
+    pub tile_width: Option<u32>,
+    pub tile_length: Option<u32>,
+    pub tile_count: usize,
+    pub tile_offsets: Vec<u32>,
+    pub tile_byte_counts: Vec<u32>,
+    pub jpeg_tables_length: usize,
+    pub image_depth: u32,
+    pub tile_depth: u32,
+    pub is_tiled: bool,
+    pub is_volumetric: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct TiffPixelData {
+    pub length: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct TiffFileHeaderData {
+    pub byte_order: String,
+    pub magic: u16,
+    pub first_ifd_offset: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[serde(tag = "type")]
+pub enum TiffSectionData {
+    FileHeader(TiffFileHeaderData),
+    Ifd(TiffIfdData),
+    PixelData(TiffPixelData),
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct TiffSectionInfo {
+    pub start_offset: u64,
+    pub data: TiffSectionData,
 }

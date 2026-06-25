@@ -8,6 +8,7 @@ use crate::decoders::jpeg_ls::types::JpegLsSectionInfo;
 use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::png::PngChunkInfo;
 use crate::decoders::tga::types::TgaSectionInfo;
+use crate::decoders::tiff::types::TiffSectionInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
 use serde::Serialize;
 use std::fmt;
@@ -27,6 +28,7 @@ pub enum ImageInfo {
     Jbig1(Jbig1Info),
     Ico(IcoInfo),
     Tga(TgaInfo),
+    Tiff(TiffInfo),
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -89,6 +91,12 @@ pub struct TgaInfo {
     pub sections: Vec<TgaSectionInfo>,
 }
 
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct TiffInfo {
+    pub sections: Vec<TiffSectionInfo>,
+}
+
 impl fmt::Display for ImageInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -102,6 +110,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Jbig1(info) => write!(f, "{}", info),
             ImageInfo::Ico(info) => write!(f, "{}", info),
             ImageInfo::Tga(info) => write!(f, "{}", info),
+            ImageInfo::Tiff(info) => write!(f, "{}", info),
         }
     }
 }
@@ -1165,6 +1174,84 @@ impl fmt::Display for TgaInfo {
                         writeln!(f, "  Gamma: {}/{}", ext.gamma_value_numerator, ext.gamma_value_denominator)?;
                     }
                     writeln!(f, "  Attributes type: {}", ext.attributes_type)?;
+                }
+            }
+            writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for TiffInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::tiff::types::TiffSectionData;
+
+        writeln!(f, "TIFF Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Total sections: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for section in &self.sections {
+            match &section.data {
+                TiffSectionData::FileHeader(h) => {
+                    writeln!(f, "Offset 0x{:08X}  File Header", section.start_offset)?;
+                    writeln!(f, "  Byte order: {}", h.byte_order)?;
+                    writeln!(f, "  Magic: {}", h.magic)?;
+                    writeln!(f, "  First IFD offset: 0x{:08X}", h.first_ifd_offset)?;
+                }
+                TiffSectionData::Ifd(ifd) => {
+                    writeln!(f, "Offset 0x{:08X}  IFD #{}", section.start_offset, ifd.ifd_index)?;
+                    writeln!(f, "  Dimensions: {}x{}", ifd.image_width, ifd.image_length)?;
+                    if ifd.image_depth > 1 {
+                        writeln!(f, "  Depth: {}", ifd.image_depth)?;
+                    }
+                    writeln!(f, "  Bits per sample: {:?}", ifd.bits_per_sample)?;
+                    writeln!(f, "  Samples per pixel: {}", ifd.samples_per_pixel)?;
+                    writeln!(f, "  Compression: {:?}", ifd.compression)?;
+                    writeln!(f, "  Photometric interpretation: {:?}", ifd.photometric_interpretation)?;
+                    writeln!(f, "  Planar configuration: {:?}", ifd.planar_configuration)?;
+                    writeln!(f, "  Predictor: {:?}", ifd.predictor)?;
+                    if !ifd.sample_format.is_empty() {
+                        writeln!(f, "  Sample format: {:?}", ifd.sample_format)?;
+                    }
+                    if !ifd.extra_samples.is_empty() {
+                        writeln!(f, "  Extra samples: {:?}", ifd.extra_samples)?;
+                    }
+                    if ifd.x_resolution != 0.0 || ifd.y_resolution != 0.0 {
+                        writeln!(f, "  Resolution: {}x{} ({:?})", ifd.x_resolution, ifd.y_resolution, ifd.resolution_unit)?;
+                    }
+                    if ifd.is_tiled {
+                        writeln!(f, "  Tile size: {}x{}",
+                            ifd.tile_width.unwrap_or(0),
+                            ifd.tile_length.unwrap_or(0))?;
+                        writeln!(f, "  Tile count: {}", ifd.tile_count)?;
+                        if ifd.is_volumetric {
+                            writeln!(f, "  Tile depth: {}", ifd.tile_depth)?;
+                            writeln!(f, "  Volumetric: true")?;
+                        }
+                    } else {
+                        writeln!(f, "  Rows per strip: {}", ifd.rows_per_strip)?;
+                        writeln!(f, "  Strip count: {}", ifd.strip_count)?;
+                    }
+                    if ifd.color_map_entries > 0 {
+                        writeln!(f, "  Color map entries: {}", ifd.color_map_entries)?;
+                    }
+                    if ifd.jpeg_tables_length > 0 {
+                        writeln!(f, "  JPEG tables: {} bytes", ifd.jpeg_tables_length)?;
+                    }
+                    let [yr, yg, yb] = ifd.ycbcr_coefficients;
+                    if yr != 0.299 || yg != 0.587 || yb != 0.114 {
+                        writeln!(f, "  YCbCr coefficients: [{}, {}, {}]", yr, yg, yb)?;
+                    }
+                    let [sh, sv] = ifd.ycbcr_sub_sampling;
+                    if sh != 2 || sv != 2 {
+                        writeln!(f, "  YCbCr sub-sampling: {}x{}", sh, sv)?;
+                    }
+                }
+                TiffSectionData::PixelData(pd) => {
+                    writeln!(f, "Offset 0x{:08X}  Pixel Data", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", pd.length)?;
                 }
             }
             writeln!(f)?;
