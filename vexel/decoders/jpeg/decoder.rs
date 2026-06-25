@@ -1046,8 +1046,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         for _ in 0..self.component_count {
             let id = self.reader.read_u8()?;
             let sampling_factors = self.reader.read_u8()?;
-            let horizontal_sampling_factor = (sampling_factors >> 4) & 0xF;
-            let vertical_sampling_factor = sampling_factors & 0xF;
+            let horizontal_sampling_factor = ((sampling_factors >> 4) & 0xF).max(1);
+            let vertical_sampling_factor = (sampling_factors & 0xF).max(1);
             let quantization_table_id = self.reader.read_u8()?;
 
             if id == 1 {
