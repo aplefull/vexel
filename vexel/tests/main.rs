@@ -4,7 +4,7 @@ mod formats;
 
 use std::path::Path;
 use harness::*;
-use vexel::Vexel;
+use vexel::{Vexel, VexelError};
 
 fn load_env_file() {
     let env_path = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".env");
@@ -184,6 +184,50 @@ pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
             println!("Error decoding image: {:?}", e);
             assert!(false);
         }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
+    let artifacts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/artifacts");
+
+    if !artifacts_dir.exists() {
+        return Ok(());
+    }
+
+    let mut checked = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+
+    for entry in walkdir::WalkDir::new(&artifacts_dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let data = std::fs::read(path)?;
+        let name = path.strip_prefix(&artifacts_dir).unwrap_or(path).display().to_string();
+
+        checked += 1;
+
+        let cursor = std::io::Cursor::new(data);
+        if let Ok(mut decoder) = Vexel::new(cursor) {
+            if let Err(VexelError::Panic(msg)) = decoder.decode() {
+                println!("  FAIL  {}  (panic: {})", name, msg);
+                failures.push(name);
+                continue;
+            }
+        }
+
+        println!("  OK    {}", name);
+    }
+
+    println!();
+    println!("  {}/{} artifacts passed", checked - failures.len(), checked);
+
+    if !failures.is_empty() {
+        return Err(format!("{} tests failed: {}", failures.len(), failures.join(", ")).into());
     }
 
     Ok(())

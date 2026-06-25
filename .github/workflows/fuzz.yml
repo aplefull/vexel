@@ -1,0 +1,50 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      format:
+        description: 'Format to fuzz'
+        required: true
+        default: all
+        type: choice
+        options: [all, jpeg, jpeg-ls, png, gif, bmp, tiff, hdr, tga, netpbm, ico, jbig1]
+      seconds:
+        description: 'Time limit per target (seconds)'
+        required: true
+        default: '300'
+
+jobs:
+  fuzz-all:
+    if: inputs.format == 'all'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [jpeg, jpeg-ls, png, gif, bmp, tiff, hdr, tga, netpbm, ico, jbig1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: extractions/setup-just@v2
+      - run: cargo install cargo-fuzz
+      - run: just fuzz ${{ matrix.format }} ${{ inputs.seconds }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: artifacts-${{ matrix.format }}
+          path: vexel/fuzz/artifacts/
+
+  fuzz-one:
+    if: inputs.format != 'all'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: extractions/setup-just@v2
+      - run: cargo install cargo-fuzz
+      - run: just fuzz ${{ inputs.format }} ${{ inputs.seconds }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: artifacts-${{ inputs.format }}
+          path: vexel/fuzz/artifacts/

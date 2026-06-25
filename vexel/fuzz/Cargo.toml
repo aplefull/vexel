@@ -1,0 +1,101 @@
+[workspace]
+
+[package]
+name = "vexel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.vexel]
+path = ".."
+default-features = false
+
+[[bin]]
+name = "decode_any"
+path = "fuzz_targets/decode_any.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_jpeg"
+path = "fuzz_targets/decode_jpeg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_jpeg_ls"
+path = "fuzz_targets/decode_jpeg_ls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_png"
+path = "fuzz_targets/decode_png.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_gif"
+path = "fuzz_targets/decode_gif.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_bmp"
+path = "fuzz_targets/decode_bmp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_tiff"
+path = "fuzz_targets/decode_tiff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_hdr"
+path = "fuzz_targets/decode_hdr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_tga"
+path = "fuzz_targets/decode_tga.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_netpbm"
+path = "fuzz_targets/decode_netpbm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_ico"
+path = "fuzz_targets/decode_ico.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_jbig1"
+path = "fuzz_targets/decode_jbig1.rs"
+test = false
+doc = false
+bench = false

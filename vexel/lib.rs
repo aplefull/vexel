@@ -95,30 +95,44 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        let result = panic::catch_unwind(AssertUnwindSafe(|| match &mut self.decoder {
-            Decoders::Jpeg(decoder) => impl_decode!(decoder),
-            Decoders::JpegLs(decoder) => impl_decode!(decoder),
-            Decoders::Png(decoder) => impl_decode!(decoder),
-            Decoders::Gif(decoder) => impl_decode!(decoder),
-            Decoders::Netpbm(decoder) => impl_decode!(decoder),
-            Decoders::Bmp(decoder) => impl_decode!(decoder),
-            Decoders::Hdr(decoder) => impl_decode!(decoder),
-            Decoders::Tiff(decoder) => impl_decode!(decoder),
-            Decoders::Tga(decoder) => impl_decode!(decoder),
-            Decoders::Jbig1(decoder) => impl_decode!(decoder),
-            Decoders::Ico(decoder) => impl_decode!(decoder),
-            Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
-        }));
+        macro_rules! dispatch {
+            () => {
+                match &mut self.decoder {
+                    Decoders::Jpeg(decoder) => impl_decode!(decoder),
+                    Decoders::JpegLs(decoder) => impl_decode!(decoder),
+                    Decoders::Png(decoder) => impl_decode!(decoder),
+                    Decoders::Gif(decoder) => impl_decode!(decoder),
+                    Decoders::Netpbm(decoder) => impl_decode!(decoder),
+                    Decoders::Bmp(decoder) => impl_decode!(decoder),
+                    Decoders::Hdr(decoder) => impl_decode!(decoder),
+                    Decoders::Tiff(decoder) => impl_decode!(decoder),
+                    Decoders::Tga(decoder) => impl_decode!(decoder),
+                    Decoders::Jbig1(decoder) => impl_decode!(decoder),
+                    Decoders::Ico(decoder) => impl_decode!(decoder),
+                    Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
+                }
+            };
+        }
 
-        result.unwrap_or_else(|payload| {
-            let msg = payload
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| payload.downcast_ref::<&str>().copied())
-                .unwrap_or("unknown panic");
-            
-            Err(VexelError::Panic(msg.to_string()))
-        })
+        #[cfg(fuzzing)]
+        {
+            return dispatch!();
+        }
+
+        #[cfg(not(fuzzing))]
+        {
+            let result = panic::catch_unwind(AssertUnwindSafe(|| dispatch!()));
+
+            result.unwrap_or_else(|payload| {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+
+                Err(VexelError::Panic(msg.to_string()))
+            })
+        }
     }
 
     pub fn get_format(&self) -> ImageFormat {

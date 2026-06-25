@@ -61,3 +61,7 @@ jxl input output="":
 # Run vexel binary
 vexel *args:
     target/release/vexel {{args}}
+
+# Fuzz a specific format
+fuzz format seconds="":
+    cd vexel && cargo fuzz run decode_{{replace(format, "-", "_")}} fuzz/corpus/decode_{{replace(format, "-", "_")}} tests/images/{{format}}/ {{ if seconds != "" { "-- -max_total_time=" + seconds } else { "" } }}

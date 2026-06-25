@@ -4,3 +4,6 @@
 /corpus-results
 .idea
 .env
+vexel/fuzz/target/
+vexel/fuzz/corpus/
+vexel/fuzz/coverage/
