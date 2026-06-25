@@ -1,7 +1,7 @@
 use crate::utils::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::TgaInfo;
-use crate::{log_warn, Image, PixelData};
+use crate::{Image, Limits, PixelData, log_warn};
 use std::io::{Read, Seek, SeekFrom};
 
 use super::types::{
@@ -16,6 +16,7 @@ use super::types::{
 
 pub struct TgaDecoder<R: Read + Seek> {
     reader: BitReader<R>,
+    limits: Limits,
     sections: Vec<TgaSectionInfo>,
 }
 
@@ -23,8 +24,13 @@ impl<R: Read + Seek> TgaDecoder<R> {
     pub fn new(reader: R) -> Self {
         Self {
             reader: BitReader::with_le(reader),
+            limits: Limits::default(),
             sections: Vec::new(),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn get_info(&self) -> TgaInfo {
@@ -402,6 +408,8 @@ impl<R: Read + Seek> TgaDecoder<R> {
                 height: header.height as u32,
             });
         }
+
+        self.limits.reserve_buffer(header.width as u32, header.height as u32, 4)?;
 
         let image_type = header.image_type_raw & IMAGE_TYPE_MASK;
         let is_rle = (header.image_type_raw & IMAGE_TYPE_FLAG_RLE) != 0;

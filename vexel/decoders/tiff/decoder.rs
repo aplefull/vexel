@@ -4,7 +4,7 @@ use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::ImageFrame;
 use crate::utils::types::ByteOrder;
-use crate::{Image, log_warn};
+use crate::{Image, Limits, log_warn};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use super::compression::{
@@ -18,6 +18,7 @@ use super::types::{Compression, Predictor, SampleFormat, TiffHeader};
 pub struct TiffDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    limits: Limits,
     byte_order: ByteOrder,
     header: TiffHeader,
     reader: BitReader<R>,
@@ -28,10 +29,15 @@ impl<R: Read + Seek> TiffDecoder<R> {
         TiffDecoder {
             width: 0,
             height: 0,
+            limits: Limits::default(),
             byte_order: ByteOrder::LittleEndian,
             header: TiffHeader::default(),
             reader: BitReader::new(reader),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn width(&self) -> u32 {
@@ -192,6 +198,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         self.width = self.header.image_width;
         self.height = self.header.image_length;
+
+        self.limits.reserve_buffer(self.width, self.height, 4)?;
 
         let next_ifd_offset = self.reader.read_u32().unwrap_or(0);
         Ok(next_ifd_offset)

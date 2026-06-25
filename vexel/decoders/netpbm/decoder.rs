@@ -2,7 +2,7 @@ use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{ImageFrame, PixelFormat};
 use crate::utils::info::NetpbmInfo;
-use crate::{log_warn, Image, PixelData};
+use crate::{Image, Limits, PixelData, log_warn};
 use std::io::{Cursor, Read, Seek};
 
 use super::simd;
@@ -11,6 +11,7 @@ use super::types::{NetpbmFormat, NetpbmHeaderData, NetpbmPixelDataInfo, NetpbmSe
 pub struct NetPbmDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    limits: Limits,
     max_value: u32,
     depth: u8,
     format: Option<NetpbmFormat>,
@@ -26,6 +27,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         Self {
             width: 0,
             height: 0,
+            limits: Limits::default(),
             max_value: 0,
             depth: 0,
             format: None,
@@ -35,6 +37,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             lookahead: None,
             sections: Vec::new(),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn width(&self) -> u32 {
@@ -187,6 +193,8 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             NetpbmFormat::P7 => self.read_pam_header()?,
             _ => self.read_standard_header(format)?,
         }
+
+        self.limits.reserve_buffer(self.width, self.height, 4)?;
 
         let depth = if self.depth > 0 { Some(self.depth) } else { None };
         self.sections.push(NetpbmSectionInfo {
@@ -714,11 +722,15 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         loop {
             self.reset_frame_state();
 
-            if let Err(_) = self.read_header() {
-                if frames.is_empty() {
-                    return Err(VexelError::Custom("Error reading header".to_string()));
+            match self.read_header() {
+                Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
+                Err(_) => {
+                    if frames.is_empty() {
+                        return Err(VexelError::Custom("Error reading header".to_string()));
+                    }
+                    break;
                 }
-                break;
+                Ok(_) => {}
             }
 
             let width = self.width;

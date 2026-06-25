@@ -3,7 +3,7 @@ use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::PngInfo;
-use crate::{log_debug, log_warn, Image, PixelData, PixelFormat};
+use crate::{Image, Limits, PixelData, PixelFormat, log_debug, log_warn};
 use std::io::{Read, Seek, SeekFrom};
 
 use super::animation::AnimationDecoder;
@@ -14,6 +14,7 @@ use super::types::*;
 pub struct PngDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    limits: Limits,
     bit_depth: u8,
     color_type: ColorType,
     compression_method: CompressionMethod,
@@ -44,6 +45,7 @@ impl<R: Read + Seek> PngDecoder<R> {
         Self {
             width: 0,
             height: 0,
+            limits: Limits::default(),
             bit_depth: 0,
             color_type: ColorType::RGB,
             compression_method: CompressionMethod::None,
@@ -68,6 +70,10 @@ impl<R: Read + Seek> PngDecoder<R> {
             chunks: Vec::new(),
             reader: BitReader::new(reader),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn width(&self) -> u32 {
@@ -206,6 +212,8 @@ impl<R: Read + Seek> PngDecoder<R> {
                                         });
                                     }
 
+                                    self.limits.reserve_buffer(self.width, self.height, 4)?;
+
                                     Ok(())
                                 }
                                 Err(e) => Err(e),
@@ -331,8 +339,10 @@ impl<R: Read + Seek> PngDecoder<R> {
                         PngChunk::IEND => ChunkReader::read_iend(&mut self.reader, &mut self.chunks),
                     };
 
-                    if let Err(e) = result {
-                        log_warn!("Error reading chunk {:?}: {:?}", chunk, e);
+                    match result {
+                        Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
+                        Err(e) => log_warn!("Error reading chunk {:?}: {:?}", chunk, e),
+                        Ok(_) => {}
                     }
 
                     if self.reader.seek(SeekFrom::Start(next_chunk_start)).is_err() {

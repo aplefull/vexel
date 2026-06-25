@@ -3,7 +3,7 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::ExifReader;
 use crate::utils::info::JpegInfo;
 use crate::utils::marker::Marker;
-use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
+use crate::{Image, ImageFrame, Limits, PixelData, PixelFormat, log_debug, log_warn};
 use crate::decoders::jpeg::idct::dequantize_and_idct;
 use crate::decoders::jpeg::bitreader::JpegBitReader;
 use std::fmt::Debug;
@@ -628,6 +628,7 @@ struct HierarchicalFrame {
 pub struct JpegDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    limits: Limits,
     jfif_header: Option<JFIFHeader>,
     comments: Vec<String>,
     mode: JpegMode,
@@ -664,6 +665,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Self {
             width: 0,
             height: 0,
+            limits: Limits::default(),
             comments: Vec::new(),
             jfif_header: None,
             mode: JpegMode::Baseline,
@@ -693,6 +695,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
             pending_expand_v: false,
             hierarchical_frames: Vec::new(),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn width(&self) -> u32 {
@@ -1018,6 +1024,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         if self.height == 0 {
             log_warn!("SOF height is 0, expecting DNL marker to define number of lines");
         }
+
+        self.limits.reserve_buffer(self.width, self.height, 4)?;
 
         // TODO rename them, they are not MCU dimensions, but dimensions of the image in MCUs
         self.mcu_width = (self.width + 7) / 8;
@@ -3796,6 +3804,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.dhp_width = width;
         self.dhp_height = height;
 
+        self.limits.reserve_buffer(width, height, 4)?;
+
         self.record_segment(segment_start, "DHP", JpegSegmentData::SOF(crate::decoders::jpeg::types::SOFData {
             length,
             marker: "DHP".to_string(),
@@ -3969,6 +3979,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                     match result {
                         Ok(_) => {}
+                        Err(VexelError::LimitExceeded(_)) => return Err(result.unwrap_err()),
                         Err(e) => {
                             log_warn!("Failed to process {:?} marker segment: {}", marker, e);
                         }

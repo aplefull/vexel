@@ -3,7 +3,7 @@ use crate::decoders::jbig1::arithmetic::ArithDecoder;
 use crate::decoders::jbig1::types::{self, *};
 use crate::utils::error::VexelResult;
 use crate::utils::info::Jbig1Info;
-use crate::{log_warn, Image, PixelData};
+use crate::{Image, Limits, PixelData, log_warn};
 use std::io::{Read, Seek};
 
 fn ceil_half(x: u32, n: u32) -> u32 {
@@ -16,6 +16,7 @@ pub struct Jbig1Decoder<R: Read + Seek> {
     planes: u8,
     xd: u32,
     yd: u32,
+    limits: Limits,
     l0: u32,
     mx: u8,
     my: u8,
@@ -62,6 +63,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             planes: 1,
             xd: 0,
             yd: 0,
+            limits: Limits::default(),
             l0: 0,
             mx: 0,
             my: 0,
@@ -91,6 +93,10 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             data_stream_offset: 0,
             reader: BitReader::new(reader),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn get_info(&self) -> Jbig1Info {
@@ -144,6 +150,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         if self.xd == 0 || self.yd == 0 {
             log_warn!("JBIG1: zero dimensions ({}x{})", self.xd, self.yd);
         }
+
+        self.limits.reserve_buffer(self.xd, self.yd, 1)?;
 
         if self.l0 == 0 {
             log_warn!("JBIG1: L0=0, defaulting to full image height at layer 0");

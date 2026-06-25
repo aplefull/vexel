@@ -8,6 +8,7 @@ pub enum VexelError {
     IoError(io::Error),
     UnsupportedFormat(String),
     InvalidDimensions { width: u32, height: u32 },
+    LimitExceeded(String),
     Custom(String),
     Panic(String),
 }
@@ -29,6 +30,7 @@ impl Display for VexelError {
             VexelError::InvalidDimensions { width, height } => {
                 write!(f, "Invalid image dimensions: {}x{}", width, height)
             }
+            VexelError::LimitExceeded(msg) => write!(f, "limit exceeded: {}", msg),
             VexelError::Custom(msg) => write!(f, "{}", msg),
             VexelError::Panic(msg) => write!(f, "Decoder panicked: {}", msg),
         }

@@ -64,4 +64,5 @@ vexel *args:
 
 # Fuzz a specific format
 fuzz format seconds="":
+    mkdir -p vexel/fuzz/corpus/decode_{{replace(format, "-", "_")}}
     cd vexel && cargo fuzz run decode_{{replace(format, "-", "_")}} fuzz/corpus/decode_{{replace(format, "-", "_")}} tests/images/{{format}}/ {{ if seconds != "" { "-- -max_total_time=" + seconds } else { "" } }}

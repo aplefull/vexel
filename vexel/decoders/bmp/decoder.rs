@@ -8,12 +8,13 @@ use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::BmpInfo;
-use crate::{log_error, log_warn, Image};
+use crate::{Image, Limits, log_error, log_warn};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 pub struct BmpDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    limits: Limits,
     file_header: BitmapFileHeader,
     dib_header: DibHeader,
     extra_masks: Option<(u32, u32, u32, u32)>,
@@ -30,6 +31,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         Self {
             width: 0,
             height: 0,
+            limits: Limits::default(),
             file_header: BitmapFileHeader {
                 file_size: 0,
                 reserved1: 0,
@@ -56,6 +58,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
             sections: Vec::new(),
             reader: BitReader::with_le(reader),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn width(&self) -> u32 {
@@ -95,6 +101,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.dib_header = dib_header;
         self.width = width;
         self.height = height;
+        self.limits.reserve_buffer(self.width, self.height, 4)?;
         self.sections.push(BmpSectionInfo {
             start_offset,
             data: BmpSectionData::DibHeader(self.dib_header.clone()),
@@ -341,6 +348,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         };
 
         match self.read_info_header() {
+            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
             Err(e) => {
                 log_error!("Error reading info header. This might be critical! Error: {}", e);
             }

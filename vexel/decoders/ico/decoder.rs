@@ -8,12 +8,13 @@ use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, ImageFrame, PixelData};
 use crate::utils::info::IcoInfo;
-use crate::{log_error, log_warn};
+use crate::{Limits, log_error, log_warn};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 pub struct IcoDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    limits: Limits,
     ico_type: IcoType,
     entries: Vec<IconDirEntry>,
     entry_offsets: Vec<u64>,
@@ -26,12 +27,17 @@ impl<R: Read + Seek> IcoDecoder<R> {
         Self {
             width: 0,
             height: 0,
+            limits: Limits::default(),
             ico_type: IcoType::Ico,
             entries: Vec::new(),
             entry_offsets: Vec::new(),
             sections: Vec::new(),
             reader: BitReader::with_le(reader),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn width(&self) -> u32 {
@@ -180,6 +186,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let png_bytes = self.reader.read_bytes(entry.bytes_in_res as usize)?;
 
         let mut png_decoder = PngDecoder::new(Cursor::new(png_bytes));
+        png_decoder.set_limits(self.limits.clone());
         let image = png_decoder.decode()?;
 
         let frame = image.frames().first().cloned().unwrap_or_else(|| {
@@ -253,6 +260,11 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let mut frames = Vec::with_capacity(entries.len());
 
         for entry in &entries {
+            if let Err(e) = self.limits.reserve_buffer(entry.width, entry.height, 4) {
+                log_warn!("ICO entry {}x{} exceeds limits, skipping: {}", entry.width, entry.height, e);
+                continue;
+            }
+
             let frame = match entry.image_format {
                 IcoImageFormat::Png => match self.decode_png_frame(entry) {
                     Ok(f) => f,

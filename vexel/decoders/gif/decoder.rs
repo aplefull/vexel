@@ -1,7 +1,7 @@
 use crate::bitreader::BitReader;
-use crate::utils::error::VexelResult;
+use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::GifInfo;
-use crate::{log_debug, log_warn, Image, ImageFrame, PixelData, PixelFormat};
+use crate::{Image, ImageFrame, Limits, PixelData, PixelFormat, log_debug, log_warn};
 use std::io::{Read, Seek};
 
 use super::compose_simd::compose_frame;
@@ -18,6 +18,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Self {
             width: 0,
             height: 0,
+            limits: Limits::default(),
             canvas_width: 0,
             canvas_height: 0,
             version: String::new(),
@@ -35,6 +36,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             sections: Vec::new(),
             reader: BitReader::new(reader),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn width(&self) -> u32 {
@@ -79,6 +84,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
         self.canvas_width = self.reader.read_u16()?.swap_bytes() as u32;
         self.canvas_height = self.reader.read_u16()?.swap_bytes() as u32;
+
+        self.limits.reserve_buffer(self.canvas_width, self.canvas_height, 4)?;
 
         let packed_fields = self.reader.read_u8()?;
 
@@ -592,6 +599,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     pub fn decode(&mut self) -> VexelResult<Image> {
         match self.read_header() {
             Ok(_) => {}
+            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
             Err(e) => {
                 log_warn!("Error reading header, this might be critical! Error: {:?}", e);
             }

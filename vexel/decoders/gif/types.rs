@@ -1,4 +1,4 @@
-use crate::bitreader::BitReader;
+use crate::{Limits, bitreader::BitReader};
 use serde::Serialize;
 use std::io::{Read, Seek};
 use tsify::Tsify;
@@ -118,6 +118,7 @@ pub struct GifFrameInfo {
 pub struct GifDecoder<R: Read + Seek> {
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) limits: Limits,
     pub(super) canvas_width: u32,
     pub(super) canvas_height: u32,
     pub(super) version: String,

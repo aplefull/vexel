@@ -4,7 +4,7 @@ use crate::decoders::jpeg::types::{APP14AdobeData, IccProfileSequenceInfo, JFIFD
 use crate::utils::error::VexelResult;
 use crate::utils::exif::ExifReader;
 use crate::utils::info::JpegLsInfo;
-use crate::{Image, PixelData, log_warn};
+use crate::{Image, Limits, PixelData, log_warn};
 use crate::bitreader::BitReader;
 
 use super::bitreader::JlsBitReader;
@@ -14,6 +14,7 @@ use super::types::*;
 
 pub struct JpegLsDecoder<R: Read + Seek> {
     reader: BitReader<R>,
+    limits: Limits,
     frame: Option<FrameHeader>,
     pending_scan: Option<ScanHeader>,
     scans: Vec<(ScanHeader, Vec<u8>)>,
@@ -26,6 +27,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
     pub fn new(reader: R) -> Self {
         Self {
             reader: BitReader::new(reader),
+            limits: Limits::default(),
             frame: None,
             pending_scan: None,
             scans: Vec::new(),
@@ -33,6 +35,10 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             restart_interval: 0,
             sections: Vec::new(),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn get_info(&self) -> JpegLsInfo {
@@ -76,6 +82,8 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 reserved: tq,
             });
         }
+
+        self.limits.reserve_buffer(width, height, 4).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
         self.frame = Some(FrameHeader {
             precision,

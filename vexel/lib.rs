@@ -15,6 +15,7 @@ use crate::decoders::tiff::TiffDecoder;
 
 pub(crate) use utils::bitreader;
 pub use utils::error::{VexelError, VexelResult};
+pub use utils::limits::Limits;
 pub use utils::image::Image;
 pub use utils::image::ImageFormat;
 pub use utils::image::ImageFrame;
@@ -57,6 +58,7 @@ pub enum Decoders<R: Read + Seek> {
 pub struct Vexel<R: Read + Seek> {
     decoder: Decoders<R>,
     format: ImageFormat,
+    limits: Limits,
 }
 
 impl Vexel<File> {
@@ -91,7 +93,25 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
-        Ok(Vexel { decoder, format })
+        Ok(Vexel { decoder, format, limits: Limits::default() })
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits.clone();
+        match &mut self.decoder {
+            Decoders::Jpeg(d) => d.set_limits(limits),
+            Decoders::JpegLs(d) => d.set_limits(limits),
+            Decoders::Png(d) => d.set_limits(limits),
+            Decoders::Gif(d) => d.set_limits(limits),
+            Decoders::Netpbm(d) => d.set_limits(limits),
+            Decoders::Bmp(d) => d.set_limits(limits),
+            Decoders::Hdr(d) => d.set_limits(limits),
+            Decoders::Tiff(d) => d.set_limits(limits),
+            Decoders::Tga(d) => d.set_limits(limits),
+            Decoders::Jbig1(d) => d.set_limits(limits),
+            Decoders::Ico(d) => d.set_limits(limits),
+            Decoders::Unknown => {}
+        }
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {

@@ -1,7 +1,7 @@
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::HdrInfo;
-use crate::{log_warn, Image};
+use crate::{Image, Limits, log_warn};
 use std::io::{Read, Seek};
 
 use super::pixels::PixelDecoder;
@@ -10,6 +10,7 @@ use super::types::{HdrFormat, HdrHeaderData, HdrPixelDataInfo, HdrSectionData, H
 pub struct HdrDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
+    limits: Limits,
     format: HdrFormat,
     reader: BitReader<R>,
     sections: Vec<HdrSectionInfo>,
@@ -20,10 +21,15 @@ impl<R: Read + Seek> HdrDecoder<R> {
         HdrDecoder {
             width: 0,
             height: 0,
+            limits: Limits::default(),
             format: HdrFormat::RGBE,
             reader: BitReader::new(reader),
             sections: Vec::new(),
         }
+    }
+
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn width(&self) -> u32 {
@@ -187,6 +193,8 @@ impl<R: Read + Seek> HdrDecoder<R> {
                     height: self.height,
                 });
             }
+
+            self.limits.reserve_buffer(self.width, self.height, 4)?;
 
             break;
         }

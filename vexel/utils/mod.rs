@@ -1,4 +1,5 @@
 pub mod bitreader;
+pub mod limits;
 pub mod channel_simd;
 pub mod deflate;
 pub mod error;
