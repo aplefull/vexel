@@ -77,6 +77,15 @@ pub enum PixelFormat {
     LA64F,
 }
 
+/// A decoded image, consisting of one or more frames.
+///
+/// Single-frame formats (JPEG, PNG, BMP, …) always produce exactly one frame.
+/// Animated formats (GIF, APNG) produce one frame per animation step, each
+/// with its own pixel data and display delay.
+///
+/// The pixel format reflects what the decoder produced and may vary by format
+/// and image content. Use [`into_rgb8`](Image::into_rgb8) or
+/// [`into_rgba8`](Image::into_rgba8) to normalize all frames to a known format.
 #[derive(Debug)]
 pub struct Image {
     width: u32,
@@ -109,18 +118,29 @@ impl Image {
         Image::from_frame(frame)
     }
 
+    /// Returns the width of the image in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Returns the height of the image in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// Returns the pixel format of the image.
+    ///
+    /// The pixel format describes the channel layout and bit depth of the image data,
+    /// such as [`PixelFormat::RGB8`] for 8-bit RGB or [`PixelFormat::RGBA16`] for 16-bit RGBA.
     pub fn pixel_format(&self) -> PixelFormat {
         self.pixel_format.clone()
     }
 
+    /// Returns a clone of the first frame's pixel data.
+    ///
+    /// For single-frame images this is the full image data. For animated images,
+    /// only the first frame is returned. Returns an empty [`PixelData::RGB8`] if
+    /// the image has no frames.
     pub fn pixels(&self) -> PixelData {
         if self.frames.len() > 0 {
             self.frames[0].pixels.clone()
@@ -129,6 +149,7 @@ impl Image {
         }
     }
 
+    /// Returns `true` if the image's pixel format includes an alpha channel.
     pub fn has_alpha(&self) -> bool {
         match self.pixel_format {
             PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::RGBA64F | PixelFormat::LA8 | PixelFormat::LA16 | PixelFormat::LA32F | PixelFormat::LA64F => {
@@ -138,13 +159,17 @@ impl Image {
         }
     }
 
+    /// Returns all frames of the image.
+    ///
+    /// Single-frame images have exactly one entry. Animated formats such as GIF
+    /// and APNG may have multiple frames, each with its own pixel data and delay.
     pub fn frames(&self) -> &Vec<ImageFrame> {
         &self.frames
     }
 
     /// Converts the image to RGB8 format, consuming the original image.
     ///
-    /// This method converts all frames to RGB8 format, while `as_rgb8` returns
+    /// This method converts all frames to RGB8 format, while [`as_rgb8`](Self::as_rgb8) returns
     /// vector of the first frame's pixels, converted to RGB8 format without
     /// modifying the original image
     pub fn into_rgb8(mut self) -> Image {
@@ -155,7 +180,7 @@ impl Image {
 
     /// Converts the image to RGBA8 format, consuming the original image.
     ///
-    /// This method converts all frames to RGBA8 format, while `as_rgba8` returns
+    /// This method converts all frames to RGBA8 format, while [`as_rgba8`](Self::as_rgba8) returns
     /// vector of the first frame's pixels, converted to RGBA8 format without
     /// modifying the original image
     pub fn into_rgba8(mut self) -> Image {
@@ -164,17 +189,33 @@ impl Image {
         Image::new(self.width, self.height, PixelFormat::RGBA8, new_frames)
     }
 
-    /// Returns the first frame's pixels as a vector of RGB8 bytes
+    /// Returns the first frame's pixels as a vector of RGB8 bytes.
+    ///
+    /// All pixel formats are converted to 8-bit RGB. Higher bit depths are scaled
+    /// down, alpha channels are dropped, and grayscale values are expanded to
+    /// three equal channels. Use [`into_rgb8`](Self::into_rgb8) to convert all
+    /// frames in place.
     pub fn as_rgb8(&self) -> Vec<u8> {
         self.pixels().into_rgb8().as_bytes().to_vec()
     }
 
-    /// Returns the first frame's pixels as a vector of RGBA8 bytes
+    /// Returns the first frame's pixels as a vector of RGBA8 bytes.
+    ///
+    /// All pixel formats are converted to 8-bit RGBA. Higher bit depths are scaled
+    /// down, opaque images without an alpha channel have 255 added, and grayscale
+    /// values are expanded to three equal channels with the appropriate alpha.
+    /// Use [`into_rgba8`](Self::into_rgba8) to convert all frames in place.
     pub fn as_rgba8(&self) -> Vec<u8> {
         self.pixels().into_rgba8().as_bytes().to_vec()
     }
 }
 
+/// A single frame within an [`Image`].
+///
+/// Contains the frame's dimensions, pixel data, and display delay. For
+/// single-frame images the delay is always `0`. Pixel data may be in any
+/// [`PixelData`] variant; use [`into_rgb8`](ImageFrame::into_rgb8) or
+/// [`into_rgba8`](ImageFrame::into_rgba8) to convert to a known format.
 #[derive(Debug, Clone)]
 pub struct ImageFrame {
     width: u32,
@@ -193,26 +234,40 @@ impl ImageFrame {
         }
     }
 
+    /// Returns the width of the frame in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Returns the height of the frame in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// Returns a reference to the frame's raw pixel data.
     pub fn pixels(&self) -> &PixelData {
         &self.pixels
     }
 
+    /// Returns the display delay for this frame in milliseconds.
+    ///
+    /// For single-frame images this is always 0. For animated formats such as
+    /// GIF and APNG, this controls how long the frame is shown before advancing
+    /// to the next one.
     pub fn delay(&self) -> u32 {
         self.delay
     }
 
+    /// Returns the pixel format of this frame.
+    ///
+    /// The pixel format describes the channel layout and bit depth of the frame
+    /// data, such as [`PixelFormat::RGB8`] for 8-bit RGB or [`PixelFormat::RGBA16`]
+    /// for 16-bit RGBA.
     pub fn pixel_format(&self) -> PixelFormat {
         self.pixels.pixel_format()
     }
 
+    /// Returns `true` if this frame's pixel format includes an alpha channel.
     pub fn has_alpha(&self) -> bool {
         match self.pixels {
             PixelData::RGBA8(_)
@@ -227,6 +282,11 @@ impl ImageFrame {
         }
     }
 
+    /// Converts this frame to RGB8 format, consuming the original frame.
+    ///
+    /// This method converts the frame's pixel data to RGB8 format, while
+    /// [`as_rgb8`](Self::as_rgb8) returns a vector of the frame's pixels
+    /// converted to RGB8 without consuming the frame.
     pub fn into_rgb8(self) -> ImageFrame {
         ImageFrame {
             width: self.width,
@@ -236,6 +296,12 @@ impl ImageFrame {
         }
     }
 
+    /// Returns this frame's pixels as a vector of RGB8 bytes.
+    ///
+    /// All pixel formats are converted to 8-bit RGB. Higher bit depths are scaled
+    /// down, alpha channels are dropped, and grayscale values are expanded to
+    /// three equal channels. Use [`into_rgb8`](Self::into_rgb8) to convert the
+    /// frame in place.
     pub fn as_rgb8(&self) -> Vec<u8> {
         match &self.pixels {
             PixelData::RGB8(pixels) => pixels.to_vec(),
@@ -243,6 +309,11 @@ impl ImageFrame {
         }
     }
 
+    /// Converts this frame to RGBA8 format, consuming the original frame.
+    ///
+    /// This method converts the frame's pixel data to RGBA8 format, while
+    /// [`as_rgba8`](Self::as_rgba8) returns a vector of the frame's pixels
+    /// converted to RGBA8 without consuming the frame.
     pub fn into_rgba8(self) -> ImageFrame {
         ImageFrame {
             width: self.width,
@@ -252,6 +323,12 @@ impl ImageFrame {
         }
     }
 
+    /// Returns this frame's pixels as a vector of RGBA8 bytes.
+    ///
+    /// All pixel formats are converted to 8-bit RGBA. Higher bit depths are scaled
+    /// down, opaque images without an alpha channel have 255 added, and grayscale
+    /// values are expanded to three equal channels with the appropriate alpha.
+    /// Use [`into_rgba8`](Self::into_rgba8) to convert the frame in place.
     pub fn as_rgba8(&self) -> Vec<u8> {
         match &self.pixels {
             PixelData::RGBA8(pixels) => pixels.to_vec(),
@@ -282,6 +359,7 @@ pub enum PixelData {
 }
 
 impl PixelData {
+    /// Returns the [`PixelFormat`] that corresponds to this variant.
     pub fn pixel_format(&self) -> PixelFormat {
         match self {
             PixelData::RGB8(_) => PixelFormat::RGB8,
@@ -304,6 +382,18 @@ impl PixelData {
         }
     }
 
+    /// Converts this pixel data to [`PixelData::RGB8`], consuming the original.
+    ///
+    /// Conversion rules by source format:
+    /// - `RGB8` — returned as-is
+    /// - `RGBA8` — alpha channel is dropped
+    /// - `RGB16` / `RGBA16` — values are scaled from `u16` to `u8`; alpha is dropped for RGBA
+    /// - `RGB32F` / `RGBA32F` — float values in `[0.0, 1.0]` are scaled to `[0, 255]`; alpha is dropped for RGBA
+    /// - `RGB64F` / `RGBA64F` — same as 32F variants
+    /// - `L1` — bit values `0`/`1` are expanded to `[0, 0, 0]` / `[255, 255, 255]`
+    /// - `L8` / `LA8` — gray value is replicated to all three channels; alpha is dropped
+    /// - `L16` / `LA16` — gray value is scaled to `u8`, then replicated; alpha is dropped
+    /// - `L32F` / `LA32F` / `L64F` / `LA64F` — float gray is scaled to `u8`, then replicated; alpha is dropped
     pub fn into_rgb8(self) -> PixelData {
         PixelData::RGB8(match self {
             PixelData::RGB8(p) => p,
@@ -350,6 +440,18 @@ impl PixelData {
         })
     }
 
+    /// Converts this pixel data to [`PixelData::RGBA8`], consuming the original.
+    ///
+    /// Conversion rules by source format:
+    /// - `RGBA8` — returned as-is
+    /// - `RGB8` — alpha channel is added with value `255`
+    /// - `RGB16` / `RGBA16` — values are scaled from `u16` to `u8`; alpha is added as `255` for RGB16
+    /// - `RGB32F` / `RGBA32F` — float values in `[0.0, 1.0]` are scaled to `[0, 255]`; alpha is added as `255` for RGB32F
+    /// - `RGB64F` / `RGBA64F` — same as 32F variants
+    /// - `L1` — bit values `0`/`1` are expanded to `[0, 0, 0, 255]` / `[255, 255, 255, 255]`
+    /// - `L8` / `LA8` — gray value is replicated to all three channels; alpha is `255` for L8, preserved for LA8
+    /// - `L16` / `LA16` — gray value is scaled to `u8`, then replicated; alpha is scaled and preserved for LA16
+    /// - `L32F` / `LA32F` / `L64F` / `LA64F` — float gray is scaled to `u8`, then replicated; alpha is scaled and preserved
     pub fn into_rgba8(self) -> PixelData {
         PixelData::RGBA8(match self {
             PixelData::RGB8(p) => add_transparency_channel(p),
@@ -396,6 +498,11 @@ impl PixelData {
         })
     }
 
+    /// Returns the raw pixel data as a byte slice.
+    ///
+    /// For multi-byte element types (`u16`, `f32`, `f64`) the slice reinterprets
+    /// the underlying memory directly with no endian conversion, so the byte order
+    /// matches the native platform.
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             PixelData::RGB8(pixels) => pixels,
@@ -442,6 +549,9 @@ impl PixelData {
         }
     }
 
+    /// Returns the raw pixel data as a mutable byte slice.
+    ///
+    /// Same layout and endian rules as [`as_bytes`](Self::as_bytes).
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
         match self {
             PixelData::RGB8(pixels) => pixels,

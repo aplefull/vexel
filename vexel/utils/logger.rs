@@ -16,6 +16,11 @@ const RED: &str = "\x1b[31m";
 
 static MIN_LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Error as u8);
 
+/// Sets the minimum log level for all decoders.
+///
+/// Messages below `level` are silently discarded. The level is stored in a
+/// process-global atomic, so it applies to every [`Vexel`](crate::Vexel) instance.
+/// The default level is [`LogLevel::Error`].
 pub fn set_log_level(level: LogLevel) {
     MIN_LOG_LEVEL.store(level as u8, Ordering::Relaxed);
 }

@@ -56,6 +56,21 @@ pub(crate) enum Decoders<R: Read + Seek> {
     Unknown,
 }
 
+/// The main image decoder.
+///
+/// Wraps any [`Read`] + [`Seek`] source, detects the image format from its
+/// magic bytes, and dispatches to the appropriate format-specific decoder.
+///
+/// # Basic usage
+///
+/// ```no_run
+/// use vexel::Vexel;
+///
+/// let mut decoder = Vexel::open("image.png")?;
+/// let image = decoder.decode()?;
+/// let pixels = image.as_rgba8();
+/// # Ok::<(), vexel::VexelError>(())
+/// ```
 pub struct Vexel<R: Read + Seek> {
     decoder: Decoders<R>,
     format: ImageFormat,
@@ -63,6 +78,11 @@ pub struct Vexel<R: Read + Seek> {
 }
 
 impl Vexel<File> {
+    /// Opens an image file at `path` and returns a decoder ready for use.
+    ///
+    /// The file is wrapped in a [`BufReader`]. The image
+    /// format is detected automatically from the file's magic bytes. Returns an
+    /// error if the file cannot be opened or the format cannot be identified.
     pub fn open<P: AsRef<Path>>(path: P) -> VexelResult<Vexel<BufReader<File>>> {
         let file = File::open(path)?;
         Vexel::new(BufReader::with_capacity(256 * 1024, file))
@@ -70,6 +90,12 @@ impl Vexel<File> {
 }
 
 impl<R: Read + Seek + Sync> Vexel<R> {
+    /// Creates a new decoder from any [`Read`] + [`Seek`] source.
+    ///
+    /// The image format is detected automatically from the first bytes of the
+    /// reader. Use [`open`](Vexel::open) when decoding a file on disk; use this
+    /// constructor when working with an in-memory buffer or a custom reader.
+    /// Returns an error if the format cannot be identified.
     pub fn new(mut reader: R) -> VexelResult<Vexel<R>> {
         let format = Vexel::try_guess_format(&mut reader)?;
 
@@ -97,6 +123,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         Ok(Vexel { decoder, format, limits: Limits::default() })
     }
 
+    /// Sets resource limits that the decoder will enforce during decoding.
+    ///
+    /// Limits can cap the maximum image dimensions and the total number of bytes
+    /// allocated for pixel data. Call this before [`decode`](Self::decode); limits
+    /// applied after decoding has started have no effect.
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits.clone();
         match &mut self.decoder {
@@ -115,6 +146,16 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         }
     }
 
+    /// Decodes the image and returns an [`Image`] containing all frames.
+    ///
+    /// # Errors
+    ///
+    /// - [`VexelError::IoError`] — underlying read or seek failed
+    /// - [`VexelError::UnsupportedFormat`] — format was not recognized at construction time
+    /// - [`VexelError::InvalidDimensions`] — decoded width or height is zero or otherwise invalid
+    /// - [`VexelError::LimitExceeded`] — a [`Limits`] constraint was breached during decoding
+    /// - [`VexelError::Custom`] — a format-specific error that does not fit another variant
+    /// - [`VexelError::Panic`] — the decoder panicked internally; the panic message is captured
     pub fn decode(&mut self) -> VexelResult<Image> {
         macro_rules! dispatch {
             () => {
@@ -156,10 +197,19 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         }
     }
 
+    /// Returns the detected image format.
+    ///
+    /// The format is determined during construction and does not change. If the
+    /// format could not be identified, [`ImageFormat::Unknown`] is returned.
     pub fn get_format(&self) -> ImageFormat {
         self.format.clone()
     }
 
+    /// Returns format-specific metadata collected during the last [`decode`](Self::decode) call.
+    ///
+    /// Metadata is populated as a side effect of decoding, so [`decode`](Self::decode) must be
+    /// called first. Calling `get_info` before `decode` returns an empty or zeroed struct.
+    /// The returned [`ImageInfo`] variant matches the detected format.
     pub fn get_info(&mut self) -> ImageInfo {
         match &mut self.decoder {
             Decoders::Jpeg(jpeg_decoder) => {
@@ -389,23 +439,35 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     }
 }
 
+/// WebAssembly-compatible image type returned by the `decodeImage` JS export.
+///
+/// Pixels in each frame are always RGBA8, regardless of the source format.
 #[derive(Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct JsImage {
-    width: u32,
-    height: u32,
-    image_format: ImageFormat,
-    frames: Vec<JsImageFrame>,
+    pub width: u32,
+    pub height: u32,
+    pub image_format: ImageFormat,
+    pub frames: Vec<JsImageFrame>,
 }
 
+/// A single frame within a [`JsImage`].
+///
+/// `pixels` is a flat RGBA8 byte vector with length `width * height * 4`.
+/// `delay` is the display duration in milliseconds; `0` for non-animated images.
 #[derive(Serialize, Tsify)]
 pub struct JsImageFrame {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
-    delay: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    pub delay: u32,
 }
 
+/// Decodes `data` and returns format-specific metadata. JS name: `getInfo`.
+///
+/// Equivalent to calling [`Vexel::decode`] followed by [`Vexel::get_info`].
+/// The image is fully decoded internally; only the metadata is returned.
+/// Errors are returned as strings.
 #[wasm_bindgen(js_name = getInfo)]
 pub fn get_info(data: &[u8]) -> Result<ImageInfo, String> {
     let cursor = Cursor::new(data);
@@ -417,6 +479,9 @@ pub fn get_info(data: &[u8]) -> Result<ImageInfo, String> {
     Ok(info)
 }
 
+/// Decodes `data` and returns a [`JsImage`] with all frames as RGBA8. JS name: `decodeImage`.
+///
+/// Errors are returned as strings.
 #[wasm_bindgen(js_name = decodeImage)]
 pub fn decode_image(data: &[u8]) -> Result<JsImage, String> {
     let cursor = Cursor::new(data);
@@ -441,6 +506,26 @@ pub fn decode_image(data: &[u8]) -> Result<JsImage, String> {
     })
 }
 
+/// Sets the minimum log level for all decoders. JS name: `setLogLevel`.
+///
+/// Accepts `"Debug"`, `"Warning"`, or `"Error"` (case-sensitive).
+/// Returns an error string if the value is not recognised.
+#[wasm_bindgen(js_name = setLogLevel)]
+pub fn wasm_set_log_level(level: &str) -> Result<(), String> {
+    let level = match level {
+        "Debug" => LogLevel::Debug,
+        "Warning" => LogLevel::Warning,
+        "Error" => LogLevel::Error,
+        other => return Err(format!("unknown log level: {}", other)),
+    };
+    set_log_level(level);
+    Ok(())
+}
+
+/// Detects the image format from `data` and returns its debug name as a string. JS name: `tryGuessFormat`.
+///
+/// Does not decode the image. Returns `"Unknown"` if the format cannot be identified.
+/// Errors are returned as strings.
 #[wasm_bindgen(js_name = tryGuessFormat)]
 pub fn try_guess_format(data: &[u8]) -> Result<String, String> {
     let mut cursor = Cursor::new(data);
