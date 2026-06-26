@@ -1,6 +1,7 @@
 mod writer;
 
 use clap::Parser;
+#[cfg(unix)]
 use libc::{rlimit, setrlimit, RLIMIT_AS};
 use eframe;
 use egui;
@@ -784,21 +785,27 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
 }
 
 fn apply_memory_limit(limit_mib: u64) {
-    if limit_mib == 0 {
-        return;
-    }
+    #[cfg(unix)]
+    {
+        if limit_mib == 0 {
+            return;
+        }
 
-    let limit_bytes = limit_mib.saturating_mul(1024 * 1024);
-    let rl = rlimit {
-        rlim_cur: limit_bytes,
-        rlim_max: limit_bytes,
-    };
+        let limit_bytes = limit_mib.saturating_mul(1024 * 1024);
+        let rl = rlimit {
+            rlim_cur: limit_bytes,
+            rlim_max: limit_bytes,
+        };
 
-    unsafe {
-        if setrlimit(RLIMIT_AS, &rl) != 0 {
-            eprintln!("Warning: failed to set memory limit");
+        unsafe {
+            if setrlimit(RLIMIT_AS, &rl) != 0 {
+                eprintln!("Warning: failed to set memory limit");
+            }
         }
     }
+
+    #[cfg(not(unix))]
+    let _ = limit_mib;
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -8,3 +8,10 @@ members = [
 [profile.release]
 debug=1
 opt-level = 3
+
+[profile.dist]
+inherits = "release"
+debug = false
+lto = "fat"
+codegen-units = 1
+strip = true
