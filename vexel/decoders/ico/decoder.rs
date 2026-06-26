@@ -176,7 +176,9 @@ impl<R: Read + Seek> IcoDecoder<R> {
 
     fn decode_png_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {
         self.reader.seek(SeekFrom::Start(entry.image_offset as u64))?;
-        let png_bytes = self.reader.read_bytes(entry.bytes_in_res as usize)?;
+        let bytes_available = self.reader.bytes_left().unwrap_or(0);
+        let bytes_to_read = (entry.bytes_in_res as u64).min(bytes_available) as usize;
+        let png_bytes = self.reader.read_bytes(bytes_to_read)?;
 
         let mut png_decoder = PngDecoder::new(Cursor::new(png_bytes));
         png_decoder.set_limits(self.limits.clone());
@@ -196,7 +198,9 @@ impl<R: Read + Seek> IcoDecoder<R> {
 
     fn decode_bmp_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {
         self.reader.seek(SeekFrom::Start(entry.image_offset as u64))?;
-        let bmp_bytes = self.reader.read_bytes(entry.bytes_in_res as usize)?;
+        let bytes_available = self.reader.bytes_left().unwrap_or(0);
+        let bytes_to_read = (entry.bytes_in_res as u64).min(bytes_available) as usize;
+        let bmp_bytes = self.reader.read_bytes(bytes_to_read)?;
 
         let (image, and_mask) = BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
 
@@ -253,6 +257,11 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let mut frames = Vec::with_capacity(entries.len());
 
         for entry in &entries {
+            if entry.width == 0 || entry.height == 0 {
+                log_warn!("ICO entry has zero dimensions ({}x{}), skipping", entry.width, entry.height);
+                continue;
+            }
+
             if let Err(e) = self.limits.reserve_buffer(entry.width, entry.height, 4) {
                 log_warn!("ICO entry {}x{} exceeds limits, skipping: {}", entry.width, entry.height, e);
                 continue;

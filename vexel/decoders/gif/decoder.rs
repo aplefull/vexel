@@ -78,6 +78,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.canvas_width = self.reader.read_u16()?.swap_bytes() as u32;
         self.canvas_height = self.reader.read_u16()?.swap_bytes() as u32;
 
+        if self.canvas_width == 0 || self.canvas_height == 0 {
+            return Err(VexelError::InvalidDimensions { width: self.canvas_width, height: self.canvas_height });
+        }
+
         self.limits.reserve_buffer(self.canvas_width, self.canvas_height, 4)?;
 
         let packed_fields = self.reader.read_u8()?;

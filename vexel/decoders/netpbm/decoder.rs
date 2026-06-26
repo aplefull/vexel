@@ -187,6 +187,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             _ => self.read_standard_header(format)?,
         }
 
+        if self.width == 0 || self.height == 0 {
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+        }
+
         self.limits.reserve_buffer(self.width, self.height, 4)?;
 
         let depth = if self.depth > 0 { Some(self.depth) } else { None };

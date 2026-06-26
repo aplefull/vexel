@@ -711,7 +711,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     fn skip_unknown_marker_segment(&mut self, marker: &str, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
 
-        for _ in 0..(length - 2) {
+        for _ in 0..length.saturating_sub(2) {
             self.reader.read_u8()?;
         }
 
@@ -1008,10 +1008,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.width = self.reader.read_u16()? as u32;
 
         if self.width == 0 {
-            return Err(VexelError::from(Error::new(
-                ErrorKind::InvalidData,
-                "Invalid image dimensions",
-            )));
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
         if self.height == 0 {
@@ -1276,12 +1273,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn read_dac(&mut self, segment_start: u64) -> VexelResult<()> {
         let segment_length = self.reader.read_u16()?;
-        let mut data_length = segment_length - 2;
+        let mut data_length = segment_length.saturating_sub(2);
 
         let mut ac_tables = Vec::new();
         let mut dc_tables = Vec::new();
 
-        while data_length > 0 {
+        while data_length >= 2 {
             let table_info = self.reader.read_u8()?;
             let table_class = (table_info >> 4) & 0x0F;
             let identifier = table_info & 0x0F;
@@ -4010,16 +4007,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
             self.finalize_current_frame();
         }
 
-        if self.width == 0 || self.height == 0 || self.components.is_empty() {
-            return Err(VexelError::from(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Invalid JPEG: dimensions={}x{}, components={}",
-                    self.width,
-                    self.height,
-                    self.components.len()
-                ),
-            )));
+        if self.width == 0 || self.height == 0 {
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+        }
+
+        if self.components.is_empty() {
+            return Err(VexelError::Custom("Invalid JPEG: no components".into()));
         }
 
         if self.is_hierarchical {

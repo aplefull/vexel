@@ -9,5 +9,4 @@ pub mod image;
 pub mod info;
 pub mod logger;
 pub mod marker;
-pub mod traits;
 pub mod types;

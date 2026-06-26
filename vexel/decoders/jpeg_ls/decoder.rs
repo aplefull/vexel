@@ -1,7 +1,7 @@
 use std::io::{Read, Seek};
 
 use crate::decoders::jpeg::types::{APP14AdobeData, IccProfileSequenceInfo, JFIFData};
-use crate::utils::error::VexelResult;
+use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::ExifReader;
 use crate::utils::info::JpegLsInfo;
 use crate::{Image, Limits, PixelData, log_warn};
@@ -55,14 +55,14 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         Ok(self.reader.read_bits(16)? as u16)
     }
 
-    fn read_sof(&mut self) -> std::io::Result<JpegLsSofData> {
+    fn read_sof(&mut self) -> VexelResult<JpegLsSofData> {
         let marker_len = self.read_u16()?;
         let precision = self.read_u8()?;
         let height = self.read_u16()? as u32;
         let width = self.read_u16()? as u32;
         let comp_count = self.read_u8()?;
 
-        let alpha = 1i32 << precision;
+        let alpha = 1i32.checked_shl(precision as u32).unwrap_or(i32::MAX);
 
         let mut components = Vec::new();
         let mut info_components = Vec::new();
@@ -83,7 +83,11 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             });
         }
 
-        self.limits.reserve_buffer(width, height, 4).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        if width == 0 || height == 0 {
+            return Err(VexelError::InvalidDimensions { width, height });
+        }
+
+        self.limits.reserve_buffer(width, height, 4)?;
 
         self.frame = Some(FrameHeader {
             precision,
@@ -558,6 +562,8 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 init_stats(&mut state, stats_alpha);
                 init_run_state(&mut state, 1);
 
+                self.limits.reserve_usize(plane_w.saturating_mul(plane_h).saturating_mul(2))?;
+
                 let plane = decode_single_plane(
                     &mut JlsBitReader::new(data),
                     &mut state,
@@ -576,6 +582,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             }
 
             let num_planes = planes.len();
+            self.limits.reserve_usize(width.saturating_mul(height).saturating_mul(num_planes).saturating_mul(2))?;
             let mut result = Vec::with_capacity(width * height * num_planes);
 
             if all_unity {
@@ -655,6 +662,8 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
             let restart_interval = scan.restart_interval;
             let mut br = JlsBitReader::new(data);
+
+            self.limits.reserve_usize(width.saturating_mul(height).saturating_mul(components).saturating_mul(2))?;
 
             match scan.interleave_mode {
                 InterleaveMode::None => {

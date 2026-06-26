@@ -1,6 +1,5 @@
 use crate::log_warn;
 use crate::utils::error::VexelResult;
-use crate::utils::traits::SafeAccess;
 use crate::PixelData;
 use super::types::{ColorType, TransparencyData};
 use super::filters::FilterDecoder;
@@ -138,10 +137,7 @@ impl PixelDecoder {
                     Some(key) => {
                         let mut output = Vec::with_capacity(input.len());
                         for gray in input.chunks_exact(2) {
-                            let v = u16::from_be_bytes([
-                                *gray.get_safe(0).unwrap_or_else(|_| &0),
-                                *gray.get_safe(1).unwrap_or_else(|_| &0),
-                            ]);
+                            let v = u16::from_be_bytes([gray[0], gray[1]]);
                             let alpha: u16 = if v == key { 0 } else { 65535 };
                             output.push(v);
                             output.push(alpha);
@@ -151,10 +147,7 @@ impl PixelDecoder {
                     None => {
                         let mut output = Vec::with_capacity(input.len() / 2);
                         for gray in input.chunks_exact(2) {
-                            output.push(u16::from_be_bytes([
-                                *gray.get_safe(0).unwrap_or_else(|_| &0),
-                                *gray.get_safe(1).unwrap_or_else(|_| &0),
-                            ]));
+                            output.push(u16::from_be_bytes([gray[0], gray[1]]));
                         }
                         Ok(PixelData::L16(output))
                     }

@@ -88,6 +88,10 @@ fn compose_frame_scalar(
     let clamped_h = frame_height.min(canvas_height.saturating_sub(frame_top));
     let clamped_w = frame_width.min(canvas_width.saturating_sub(frame_left));
 
+    if canvas.as_ptr() as usize % 4 != 0 || canvas.len() % 4 != 0 {
+        return;
+    }
+
     let canvas_u32 = unsafe {
         std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4)
     };
@@ -145,6 +149,10 @@ unsafe fn compose_frame_avx2(
 
     let clamped_h = frame_height.min(canvas_height.saturating_sub(frame_top));
     let clamped_w = frame_width.min(canvas_width.saturating_sub(frame_left));
+
+    if canvas.as_ptr() as usize % 4 != 0 || canvas.len() % 4 != 0 {
+        return;
+    }
 
     let canvas_u32 = std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4);
 
@@ -258,6 +266,10 @@ fn compose_frame_wasm(
 
     let clamped_h = frame_height.min(canvas_height.saturating_sub(frame_top));
     let clamped_w = frame_width.min(canvas_width.saturating_sub(frame_left));
+
+    if canvas.as_ptr() as usize % 4 != 0 || canvas.len() % 4 != 0 {
+        return;
+    }
 
     let canvas_u32 = unsafe {
         std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4)

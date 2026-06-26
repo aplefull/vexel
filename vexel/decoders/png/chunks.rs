@@ -1077,22 +1077,31 @@ pub fn capture_chunk_info<R: Read + Seek>(
     reader.read_exact(&mut chunk_type)?;
     let chunk_type_str = String::from_utf8_lossy(&chunk_type).to_string();
 
-    let mut chunk_data = vec![0; length_u32 as usize];
-    reader.read_exact(&mut chunk_data)?;
+    const MAX_CRC_CHECK_SIZE: u32 = 64 * 1024 * 1024;
 
-    let crc = reader.read_u32()?;
+    let crc = if length_u32 <= MAX_CRC_CHECK_SIZE {
+        let mut chunk_data = vec![0; length_u32 as usize];
+        reader.read_exact(&mut chunk_data)?;
 
-    let calculator = CrcCalculator::new();
-    let calculated_crc = calculator.calculate_crc_two_parts(&chunk_type, &chunk_data);
+        let crc = reader.read_u32()?;
 
-    if calculated_crc != crc {
-        log_warn!(
-            "CRC mismatch for chunk {}: expected 0x{:08x}, calculated 0x{:08x}",
-            chunk_type_str,
-            crc,
-            calculated_crc
-        );
-    }
+        let calculator = CrcCalculator::new();
+        let calculated_crc = calculator.calculate_crc_two_parts(&chunk_type, &chunk_data);
+
+        if calculated_crc != crc {
+            log_warn!(
+                "CRC mismatch for chunk {}: expected 0x{:08x}, calculated 0x{:08x}",
+                chunk_type_str,
+                crc,
+                calculated_crc
+            );
+        }
+
+        crc
+    } else {
+        log_warn!("Chunk {} is too large for CRC validation ({} bytes), skipping", chunk_type_str, length_u32);
+        0
+    };
 
     reader.seek(SeekFrom::Start(start_offset + 8))?;
 

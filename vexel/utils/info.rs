@@ -29,6 +29,7 @@ pub enum ImageInfo {
     Ico(IcoInfo),
     Tga(TgaInfo),
     Tiff(TiffInfo),
+    Unknown,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -111,6 +112,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Ico(info) => write!(f, "{}", info),
             ImageInfo::Tga(info) => write!(f, "{}", info),
             ImageInfo::Tiff(info) => write!(f, "{}", info),
+            ImageInfo::Unknown => write!(f, "Unknown format"),
         }
     }
 }

@@ -262,7 +262,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = tiff_decoder.get_info();
                 ImageInfo::Tiff(image_data)
             }
-            _ => unimplemented!(),
+            Decoders::Unknown => ImageInfo::Unknown,
         }
     }
 
@@ -546,7 +546,7 @@ pub struct JsImageFrame {
 
 /// Sets the minimum log level for all decoders.
 ///
-/// Accepts `"Debug"`, `"Warning"`, or `"Error"` (case-sensitive).
+/// Accepts `"Debug"`, `"Warning"`, `"Error"`, or `"None"` (case-sensitive).
 /// Returns an error string if the value is not recognised.
 #[wasm_bindgen(js_name = setLogLevel)]
 pub fn wasm_set_log_level(level: &str) -> Result<(), String> {
@@ -554,6 +554,7 @@ pub fn wasm_set_log_level(level: &str) -> Result<(), String> {
         "Debug" => LogLevel::Debug,
         "Warning" => LogLevel::Warning,
         "Error" => LogLevel::Error,
+        "None" => LogLevel::None,
         other => return Err(format!("unknown log level: {}", other)),
     };
     set_log_level(level);

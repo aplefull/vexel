@@ -23,12 +23,12 @@ jobs:
       matrix:
         format: [jpeg, jpeg-ls, png, gif, bmp, tiff, hdr, tga, netpbm, ico, jbig1]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - run: cargo install cargo-fuzz
       - run: just fuzz ${{ matrix.format }} ${{ inputs.seconds }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: artifacts-${{ matrix.format }}
@@ -38,12 +38,12 @@ jobs:
     if: inputs.format != 'all'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - run: cargo install cargo-fuzz
       - run: just fuzz ${{ inputs.format }} ${{ inputs.seconds }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: artifacts-${{ inputs.format }}

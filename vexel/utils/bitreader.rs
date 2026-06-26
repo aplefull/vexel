@@ -253,7 +253,7 @@ impl<R: Read + Seek> BitReader<R> {
         let end_pos = self.reader.seek(SeekFrom::End(0))?;
         self.reader.seek(SeekFrom::Start(current_pos))?;
 
-        Ok(end_pos - current_pos)
+        Ok(end_pos.saturating_sub(current_pos))
     }
 
     /// Reads the remaining bits in the bitstream and returns them as a vector of bytes,

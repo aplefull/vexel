@@ -27,46 +27,58 @@ pub fn set_log_level(level: LogLevel) {
 
 macro_rules! log_debug {
     ($msg:expr) => {
-        $crate::utils::logger::Logger::log(
-            $crate::utils::logger::LogLevel::Debug,
-            &$msg.to_string()
-        )
+        if $crate::utils::logger::Logger::is_enabled($crate::utils::logger::LogLevel::Debug) {
+            $crate::utils::logger::Logger::log(
+                $crate::utils::logger::LogLevel::Debug,
+                &$msg.to_string()
+            )
+        }
     };
     ($fmt:expr, $($arg:tt)*) => {
-        $crate::utils::logger::Logger::log(
-            $crate::utils::logger::LogLevel::Debug,
-            &format!($fmt, $($arg)*)
-        )
+        if $crate::utils::logger::Logger::is_enabled($crate::utils::logger::LogLevel::Debug) {
+            $crate::utils::logger::Logger::log(
+                $crate::utils::logger::LogLevel::Debug,
+                &format!($fmt, $($arg)*)
+            )
+        }
     };
 }
 
 macro_rules! log_warn {
     ($msg:expr) => {
-        $crate::utils::logger::Logger::log(
-            $crate::utils::logger::LogLevel::Warning,
-            &$msg.to_string()
-        )
+        if $crate::utils::logger::Logger::is_enabled($crate::utils::logger::LogLevel::Warning) {
+            $crate::utils::logger::Logger::log(
+                $crate::utils::logger::LogLevel::Warning,
+                &$msg.to_string()
+            )
+        }
     };
     ($fmt:expr, $($arg:tt)*) => {
-        $crate::utils::logger::Logger::log(
-            $crate::utils::logger::LogLevel::Warning,
-            &format!($fmt, $($arg)*)
-        )
+        if $crate::utils::logger::Logger::is_enabled($crate::utils::logger::LogLevel::Warning) {
+            $crate::utils::logger::Logger::log(
+                $crate::utils::logger::LogLevel::Warning,
+                &format!($fmt, $($arg)*)
+            )
+        }
     };
 }
 
 macro_rules! log_error {
     ($msg:expr) => {
-        $crate::utils::logger::Logger::log(
-            $crate::utils::logger::LogLevel::Error,
-            &$msg.to_string()
-        )
+        if $crate::utils::logger::Logger::is_enabled($crate::utils::logger::LogLevel::Error) {
+            $crate::utils::logger::Logger::log(
+                $crate::utils::logger::LogLevel::Error,
+                &$msg.to_string()
+            )
+        }
     };
     ($fmt:expr, $($arg:tt)*) => {
-        $crate::utils::logger::Logger::log(
-            $crate::utils::logger::LogLevel::Error,
-            &format!($fmt, $($arg)*)
-        )
+        if $crate::utils::logger::Logger::is_enabled($crate::utils::logger::LogLevel::Error) {
+            $crate::utils::logger::Logger::log(
+                $crate::utils::logger::LogLevel::Error,
+                &format!($fmt, $($arg)*)
+            )
+        }
     };
 }
 
@@ -80,6 +92,7 @@ pub enum LogLevel {
     Debug = 0,
     Warning = 1,
     Error = 2,
+    None = 3,
 }
 
 pub struct Logger {}
@@ -107,6 +120,10 @@ impl Logger {
         format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis)
     }
 
+    pub fn is_enabled(level: LogLevel) -> bool {
+        (level as u8) >= MIN_LOG_LEVEL.load(Ordering::Relaxed)
+    }
+
     pub fn log(level: LogLevel, message: impl Display) {
         if (level as u8) < MIN_LOG_LEVEL.load(Ordering::Relaxed) {
             return;
@@ -116,6 +133,7 @@ impl Logger {
             LogLevel::Debug => ("DEBUG", BLUE),
             LogLevel::Warning => ("WARN", YELLOW),
             LogLevel::Error => ("ERROR", RED),
+            LogLevel::None => return,
         };
 
         #[cfg(target_arch = "wasm32")]

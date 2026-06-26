@@ -911,7 +911,7 @@ impl ICCProfile {
     fn read_tag_table<R: Read>(reader: &mut R) -> Result<TagTable> {
         let mut buffer = [0u8; 4];
         reader.read_exact(&mut buffer)?;
-        let tag_count = u32::from_be_bytes(buffer);
+        let tag_count = u32::from_be_bytes(buffer).min(1024);
 
         let mut entries = Vec::with_capacity(tag_count as usize);
         for _ in 0..tag_count {

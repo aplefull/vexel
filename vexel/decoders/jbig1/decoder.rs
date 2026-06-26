@@ -1,7 +1,7 @@
 use crate::bitreader::BitReader;
 use crate::decoders::jbig1::arithmetic::ArithDecoder;
 use crate::decoders::jbig1::types::{self, *};
-use crate::utils::error::VexelResult;
+use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::Jbig1Info;
 use crate::{Image, Limits, PixelData, log_warn};
 use std::io::{Read, Seek};
@@ -148,7 +148,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         }
 
         if self.xd == 0 || self.yd == 0 {
-            log_warn!("JBIG1: zero dimensions ({}x{})", self.xd, self.yd);
+            return Err(VexelError::InvalidDimensions { width: self.xd, height: self.yd });
         }
 
         self.limits.reserve_buffer(self.xd, self.yd, 1)?;

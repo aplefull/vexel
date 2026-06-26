@@ -223,6 +223,10 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.width = self.header.image_width;
         self.height = self.header.image_length;
 
+        if self.width == 0 || self.height == 0 {
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+        }
+
         self.limits.reserve_buffer(self.width, self.height, 4)?;
 
         let next_ifd_offset = self.reader.read_u32().unwrap_or(0);
