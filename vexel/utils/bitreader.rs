@@ -155,6 +155,17 @@ impl<R: Read + Seek> BitReader<R> {
         self.reader.read_exact(buf)
     }
 
+    /// Reads bytes into the buffer, returning how many bytes were actually read.
+    /// Unlike `read_exact`, this may return fewer bytes than requested without error.
+    ///
+    /// # Returns
+    /// - The number of bytes read, which may be less than `buf.len()`
+    /// - `0` if the end of the stream has been reached
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        self.reader.read(buf)
+    }
+
     /// Clears the current bit buffer.
     /// Seeks back any whole bytes that were pre-fetched but not yet consumed.
     #[inline(always)]

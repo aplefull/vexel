@@ -138,8 +138,20 @@ impl ChunkReader {
 
         limits.reserve(length_u32 as u64)?;
         let mut chunk_data = vec![0u8; length_u32 as usize];
-        reader.read_exact(&mut chunk_data)?;
-        reader.read_u32()?;
+        let mut total_read = 0;
+        while total_read < chunk_data.len() {
+            match reader.read(&mut chunk_data[total_read..]) {
+                Ok(0) => break,
+                Ok(n) => total_read += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        if total_read < chunk_data.len() {
+            log_warn!("Truncated IDAT chunk: read {} of {} bytes", total_read, length_u32);
+            chunk_data.truncate(total_read);
+        }
+        reader.read_u32().ok();
 
         if !frames.is_empty() {
             let fctl_info = frames.last_mut().unwrap();
@@ -1114,15 +1126,27 @@ pub fn capture_chunk_info<R: Read + Seek>(
     const MAX_CRC_CHECK_SIZE: u32 = 64 * 1024 * 1024;
 
     let crc = if length_u32 <= MAX_CRC_CHECK_SIZE {
-        let mut chunk_data = vec![0; length_u32 as usize];
-        reader.read_exact(&mut chunk_data)?;
+        let mut chunk_data = vec![0u8; length_u32 as usize];
+        let mut total_read = 0;
+        while total_read < chunk_data.len() {
+            match reader.read(&mut chunk_data[total_read..]) {
+                Ok(0) => break,
+                Ok(n) => total_read += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
 
-        let crc = reader.read_u32()?;
+        if total_read < chunk_data.len() {
+            chunk_data.truncate(total_read);
+        }
+
+        let crc = reader.read_u32().unwrap_or(0);
 
         let calculator = CrcCalculator::new();
         let calculated_crc = calculator.calculate_crc_two_parts(&chunk_type, &chunk_data);
 
-        if calculated_crc != crc {
+        if total_read == length_u32 as usize && calculated_crc != crc {
             log_warn!(
                 "CRC mismatch for chunk {}: expected 0x{:08x}, calculated 0x{:08x}",
                 chunk_type_str,

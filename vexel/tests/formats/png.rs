@@ -50,5 +50,13 @@ pub fn test_cases() -> Vec<TestCase> {
                 reference_path: "png/rgb_alpha_8bit.avif"
             },
         },
+        TestCase {
+            name: "PNG corrupted truncated IDAT",
+            path: "png/corrupted/broken.png",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "png/corrupted/broken.jxl"
+            },
+        },
     ]
 }
