@@ -240,7 +240,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         png_decoder.decode()
     }
 
-    pub fn decode_ico_bmp(data: &[u8], dir_width: u32, dir_height: u32) -> VexelResult<(Image, Vec<u8>)> {
+    pub fn decode_ico_bmp(data: &[u8], dir_width: u32, dir_height: u32) -> VexelResult<(Image, Vec<u8>, u16)> {
         if data.len() < 4 {
             return Err(VexelError::Custom("ICO BMP data too short".to_string()));
         }
@@ -329,7 +329,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let mut decoder = BmpDecoder::new(Cursor::new(full_bmp));
         let image = decoder.decode()?;
 
-        Ok((image, and_mask))
+        Ok((image, and_mask, bpp))
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {

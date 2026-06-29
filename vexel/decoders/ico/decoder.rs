@@ -199,10 +199,9 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let bytes_to_read = (entry.bytes_in_res as u64).min(bytes_available) as usize;
         let bmp_bytes = self.reader.read_bytes(bytes_to_read)?;
 
-        let (image, and_mask) = BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
+        let (image, and_mask, actual_bpp) = BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
 
-        let bpp = entry.bit_count;
-        let mut pixels = apply_and_mask(image.pixels(), &and_mask, entry.width, entry.height, bpp);
+        let mut pixels = apply_and_mask(image.pixels(), &and_mask, entry.width, entry.height, actual_bpp);
         pixels.correct_pixels(entry.width, entry.height);
 
         Ok(ImageFrame::new(entry.width, entry.height, pixels, 0))

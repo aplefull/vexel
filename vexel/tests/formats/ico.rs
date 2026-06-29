@@ -112,5 +112,13 @@ pub fn test_cases() -> Vec<TestCase> {
             })),
             comparison: Comparison::None,
         },
+        TestCase {
+            name: "ICO 32bpp BMP reported as 8bpp in directory",
+            path: "ico/32bpp_dir_reports_8bpp.ico",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "ico/32bpp_dir_reports_8bpp.jxl",
+            },
+        },
     ]
 }
