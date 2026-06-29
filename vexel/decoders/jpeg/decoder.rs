@@ -832,7 +832,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             thumbnail_data: _thumbnail_data,
         });
 
-        let expected_len = 16 + thumbnail_width as u16 * thumbnail_height as u16 * 3;
+        let expected_len = (16u32 + thumbnail_width as u32 * thumbnail_height as u32 * 3).min(u16::MAX as u32) as u16;
         if length != expected_len {
             log_warn!(
                 "Invalid JFIF segment length, expected {}, got {}",
@@ -1034,11 +1034,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.components.clear();
 
         for _ in 0..self.component_count {
-            let id = self.reader.read_u8()?;
-            let sampling_factors = self.reader.read_u8()?;
+            let id = match self.reader.read_u8() {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let sampling_factors = self.reader.read_u8().unwrap_or(0x11);
             let horizontal_sampling_factor = ((sampling_factors >> 4) & 0xF).max(1);
             let vertical_sampling_factor = (sampling_factors & 0xF).max(1);
-            let quantization_table_id = self.reader.read_u8()?;
+            let quantization_table_id = self.reader.read_u8().unwrap_or(0);
 
             if id == 1 {
                 self.horizontal_sampling_factor = horizontal_sampling_factor;
@@ -1351,8 +1354,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        let start_spectral = self.reader.read_u8()?;
-        let end_spectral = self.reader.read_u8()?;
+        let start_spectral = self.reader.read_u8()?.min(63);
+        let end_spectral = self.reader.read_u8()?.min(63);
         let successive_approx = self.reader.read_u8()?;
         let successive_high = (successive_approx >> 4) & 0x0F;
         let successive_low = successive_approx & 0x0F;
@@ -3140,10 +3143,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let sy_near = if v == 0 { sy_above } else { sy_below };
                 let mut col_sums = vec![0i32; y_sw];
                 let mut prev_col_sums = vec![0i32; y_sw];
-                let src_row = &y_plane[sy * y_sw..(sy * y_sw + y_sw).min(y_plane.len())];
-                let near_row = &y_plane[sy_near * y_sw..(sy_near * y_sw + y_sw).min(y_plane.len())];
                 let prev_near = if v == 0 { sy_above } else { sy };
-                let prev_near_row = &y_plane[prev_near * y_sw..(prev_near * y_sw + y_sw).min(y_plane.len())];
+                let ylen = y_plane.len();
+                let src_start = (sy * y_sw).min(ylen);
+                let near_start = (sy_near * y_sw).min(ylen);
+                let prev_start = (prev_near * y_sw).min(ylen);
+                let src_row = &y_plane[src_start..(src_start + y_sw).min(ylen)];
+                let near_row = &y_plane[near_start..(near_start + y_sw).min(ylen)];
+                let prev_near_row = &y_plane[prev_start..(prev_start + y_sw).min(ylen)];
                 up::compute_col_sums(src_row, near_row, &mut col_sums, y_sw.min(src_row.len()).min(near_row.len()));
                 up::compute_col_sums(src_row, prev_near_row, &mut prev_col_sums, y_sw.min(src_row.len()).min(prev_near_row.len()));
                 up::upsample_h2v2_row(&col_sums, &prev_col_sums, tmp, y_sw, tw);
@@ -3161,7 +3168,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let p_is_h2v2 = p_h_2x && p_v_2x;
                 let p_is_identity = p_sw == tw && p_sh == th;
                 $tmp.resize(tw, 0);
-                if p_is_identity {
+                if $plane.is_empty() { }
+                else if p_is_identity {
                     let base = $dy * tw;
                     let avail = $plane.len().saturating_sub(base);
                     let copy_len = tw.min(avail);
@@ -3174,9 +3182,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let sy_below = (sy + 1).min(p_sh.saturating_sub(1));
                     let sy_near = if v == 0 { sy_above } else { sy_below };
                     let prev_near = if v == 0 { sy_above } else { sy };
-                    let src_row = &$plane[sy * p_sw..(sy * p_sw + p_sw).min($plane.len())];
-                    let near_row = &$plane[sy_near * p_sw..(sy_near * p_sw + p_sw).min($plane.len())];
-                    let prev_near_row = &$plane[prev_near * p_sw..(prev_near * p_sw + p_sw).min($plane.len())];
+                    let plen = $plane.len();
+                    let src_start = (sy * p_sw).min(plen);
+                    let near_start = (sy_near * p_sw).min(plen);
+                    let prev_start = (prev_near * p_sw).min(plen);
+                    let src_row = &$plane[src_start..(src_start + p_sw).min(plen)];
+                    let near_row = &$plane[near_start..(near_start + p_sw).min(plen)];
+                    let prev_near_row = &$plane[prev_start..(prev_start + p_sw).min(plen)];
                     let sw_eff = p_sw.min(src_row.len()).min(near_row.len());
                     let mut col_sums = vec![0i32; p_sw];
                     let mut prev_col_sums = vec![0i32; p_sw];
@@ -3185,15 +3197,20 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut $tmp, p_sw, tw);
                 } else if p_is_h2v1 {
                     let sy = $dy.min(p_sh.saturating_sub(1));
-                    let src_row = &$plane[sy * p_sw..(sy * p_sw + p_sw).min($plane.len())];
+                    let plen = $plane.len();
+                    let src_start = (sy * p_sw).min(plen);
+                    let src_row = &$plane[src_start..(src_start + p_sw).min(plen)];
                     up::upsample_h2v1_row(src_row, &mut $tmp, p_sw.min(src_row.len()), tw);
                 } else if p_is_h1v2 {
                     let sy = ($dy / 2).min(p_sh.saturating_sub(1));
                     let v = $dy % 2;
                     let sy_near = if v == 0 { sy.saturating_sub(1) } else { (sy + 1).min(p_sh.saturating_sub(1)) };
                     let bias = if v == 0 { 1i32 } else { 2i32 };
-                    let src_row = &$plane[sy * p_sw..(sy * p_sw + p_sw).min($plane.len())];
-                    let neighbor_row = &$plane[sy_near * p_sw..(sy_near * p_sw + p_sw).min($plane.len())];
+                    let plen = $plane.len();
+                    let src_start = (sy * p_sw).min(plen);
+                    let near_start = (sy_near * p_sw).min(plen);
+                    let src_row = &$plane[src_start..(src_start + p_sw).min(plen)];
+                    let neighbor_row = &$plane[near_start..(near_start + p_sw).min(plen)];
                     let sw_eff = p_sw.min(src_row.len()).min(neighbor_row.len()).min($tmp.len());
                     up::upsample_h1v2_row(src_row, neighbor_row, bias, &mut $tmp[..sw_eff.min(tw)], sw_eff);
                 } else {
@@ -3290,9 +3307,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
                         let sy_near = if v == 0 { sy_above } else { sy_below };
                         let prev_near = if v == 0 { sy_above } else { sy };
-                        let src_row = &y_plane[sy * y_sw..(sy * y_sw + y_sw).min(y_plane.len())];
-                        let near_row = &y_plane[sy_near * y_sw..(sy_near * y_sw + y_sw).min(y_plane.len())];
-                        let prev_near_row = &y_plane[prev_near * y_sw..(prev_near * y_sw + y_sw).min(y_plane.len())];
+                        let ylen = y_plane.len();
+                        let src_start = (sy * y_sw).min(ylen);
+                        let near_start = (sy_near * y_sw).min(ylen);
+                        let prev_start = (prev_near * y_sw).min(ylen);
+                        let src_row = &y_plane[src_start..(src_start + y_sw).min(ylen)];
+                        let near_row = &y_plane[near_start..(near_start + y_sw).min(ylen)];
+                        let prev_near_row = &y_plane[prev_start..(prev_start + y_sw).min(ylen)];
                         let sw_eff = y_sw.min(src_row.len()).min(near_row.len());
                         let mut col_sums = vec![0i32; y_sw];
                         let mut prev_col_sums = vec![0i32; y_sw];
@@ -3340,9 +3361,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
                         let sy_near = if v == 0 { sy_above } else { sy_below };
                         let prev_near = if v == 0 { sy_above } else { sy };
-                        let src_row = &y_plane[sy * y_sw..(sy * y_sw + y_sw).min(y_plane.len())];
-                        let near_row = &y_plane[sy_near * y_sw..(sy_near * y_sw + y_sw).min(y_plane.len())];
-                        let prev_near_row = &y_plane[prev_near * y_sw..(prev_near * y_sw + y_sw).min(y_plane.len())];
+                        let ylen = y_plane.len();
+                        let src_start = (sy * y_sw).min(ylen);
+                        let near_start = (sy_near * y_sw).min(ylen);
+                        let prev_start = (prev_near * y_sw).min(ylen);
+                        let src_row = &y_plane[src_start..(src_start + y_sw).min(ylen)];
+                        let near_row = &y_plane[near_start..(near_start + y_sw).min(ylen)];
+                        let prev_near_row = &y_plane[prev_start..(prev_start + y_sw).min(ylen)];
                         let sw_eff = y_sw.min(src_row.len()).min(near_row.len());
                         let mut col_sums = vec![0i32; y_sw];
                         let mut prev_col_sums = vec![0i32; y_sw];

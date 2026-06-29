@@ -212,15 +212,18 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
         checked += 1;
 
         let cursor = std::io::Cursor::new(data);
+        let start = std::time::Instant::now();
         if let Ok(mut decoder) = Vexel::new(cursor) {
             if let Err(VexelError::Panic(msg)) = decoder.decode() {
-                println!("  FAIL  {}  (panic: {})", name, msg);
+                let elapsed = start.elapsed();
+                println!("  FAIL  {}  (panic: {})  [{:.1}ms]", name, msg, elapsed.as_secs_f64() * 1000.0);
                 failures.push(name);
                 continue;
             }
         }
+        let elapsed = start.elapsed();
 
-        println!("  OK    {}", name);
+        println!("  OK    {}  [{:.1}ms]", name, elapsed.as_secs_f64() * 1000.0);
     }
 
     println!();

@@ -60,7 +60,7 @@ struct Cli {
     #[arg(long, value_parser = ["error", "warn", "debug", "none"], default_value = "error", help = "Minimum log level to display")]
     log_level: String,
 
-    #[arg(long, default_value = "2048", help = "Maximum memory usage in MiB (0 = unlimited). Decoder will abort if this limit is exceeded.")]
+    #[arg(long, default_value = "4096", help = "Maximum memory usage in MiB (0 = unlimited). Decoder will abort if this limit is exceeded.")]
     memory_limit: u64,
 }
 

@@ -16,6 +16,8 @@ pub struct Limits {
     /// the entire decode operation. Tracked as a decreasing budget: each
     /// allocation subtracts from it; `None` means no limit. Default is 512 MiB.
     pub max_alloc: Option<u64>,
+    /// Maximum total pixel count (width × height). `None` means no limit. Default is 64 Mpx.
+    pub max_pixel_count: Option<u64>,
 }
 
 impl Default for Limits {
@@ -24,6 +26,7 @@ impl Default for Limits {
             max_image_width: None,
             max_image_height: None,
             max_alloc: Some(512 * 1024 * 1024),
+            max_pixel_count: Some(64 * 1024 * 1024),
         }
     }
 }
@@ -35,6 +38,7 @@ impl Limits {
             max_image_width: None,
             max_image_height: None,
             max_alloc: None,
+            max_pixel_count: None,
         }
     }
 
@@ -52,6 +56,15 @@ impl Limits {
                 return Err(VexelError::LimitExceeded(format!(
                     "image height {} exceeds limit {}",
                     height, max_h
+                )));
+            }
+        }
+        if let Some(max_px) = self.max_pixel_count {
+            let pixels = u64::from(width).saturating_mul(u64::from(height));
+            if pixels > max_px {
+                return Err(VexelError::LimitExceeded(format!(
+                    "image pixel count {} exceeds limit {}",
+                    pixels, max_px
                 )));
             }
         }

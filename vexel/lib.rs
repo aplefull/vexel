@@ -473,6 +473,7 @@ impl WasmDecoder {
             max_image_width,
             max_image_height,
             max_alloc: max_alloc.map(|v| v as u64),
+            max_pixel_count: None,
         });
     }
 
