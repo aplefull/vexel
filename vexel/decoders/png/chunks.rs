@@ -3,6 +3,7 @@ use crate::log_warn;
 use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::VexelResult;
 use crate::utils::icc::ICCProfile;
+use crate::utils::limits::Limits;
 use std::io::{Read, Seek, SeekFrom};
 use super::types::*;
 
@@ -131,9 +132,11 @@ impl ChunkReader {
         chunks: &mut Vec<PngChunkInfo>,
         idat_data: &mut Vec<u8>,
         frames: &mut Vec<PngFrame>,
+        limits: &mut Limits,
     ) -> VexelResult<()> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
+        limits.reserve(length_u32 as u64)?;
         let mut chunk_data = vec![0u8; length_u32 as usize];
         reader.read_exact(&mut chunk_data)?;
         reader.read_u32()?;
@@ -161,8 +164,11 @@ impl ChunkReader {
     pub fn read_iccp<R: Read + Seek>(
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
+        limits: &mut Limits,
     ) -> VexelResult<(String, ICCProfile)> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
+
+        limits.reserve(length_u32 as u64)?;
 
         let length = length_u32;
         let mut num_read = 0;
@@ -202,7 +208,10 @@ impl ChunkReader {
             num_read += 1;
         }
 
-        let profile_data = ZlibDecoder::from_bytes(compressed_profile).decode();
+        let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
+        let profile_data = ZlibDecoder::from_bytes(compressed_profile).decode_with_max(max_decompress);
+        limits.free(length_u32 as u64);
+        limits.reserve_usize(profile_data.len())?;
 
         let icc = ICCProfile::new(&*profile_data)?;
         let profile_name = String::from_utf8_lossy(&profile_name_bytes).to_string();
@@ -464,7 +473,11 @@ impl ChunkReader {
                     log_warn!("tRNS chunk before PLTE chunk");
                 }
 
-                let mut value = vec![0; length as usize];
+                let clamped = (length as usize).min(256);
+                if length as usize > 256 {
+                    log_warn!("tRNS chunk length {} exceeds palette limit, clamping to 256", length);
+                }
+                let mut value = vec![0; clamped];
                 reader.read_exact(&mut value)?;
 
                 TransparencyData::Palette(value)
@@ -592,7 +605,11 @@ impl ChunkReader {
 
         let length = length_u32;
 
-        let mut chunk_data = vec![0; length as usize];
+        let clamped = (length as usize).min(4);
+        if length as usize > 4 {
+            log_warn!("sBIT chunk length {} exceeds maximum, clamping to 4", length);
+        }
+        let mut chunk_data = vec![0; clamped];
         reader.read_exact(&mut chunk_data)?;
 
         let sbit_data = match color_type {
@@ -764,9 +781,11 @@ impl ChunkReader {
     pub fn read_text<R: Read + Seek>(
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
+        limits: &mut Limits,
     ) -> VexelResult<PngText> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
+        limits.reserve(length_u32 as u64)?;
         let length = length_u32;
         let mut chunk_data = vec![0u8; length as usize];
         reader.read_exact(&mut chunk_data)?;
@@ -798,9 +817,11 @@ impl ChunkReader {
     pub fn read_ztxt<R: Read + Seek>(
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
+        limits: &mut Limits,
     ) -> VexelResult<PngText> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
+        limits.reserve(length_u32 as u64)?;
         let mut chunk_data = vec![0u8; length_u32 as usize];
         reader.read_exact(&mut chunk_data)?;
 
@@ -832,7 +853,10 @@ impl ChunkReader {
             Vec::new()
         };
 
-        let text_bytes = ZlibDecoder::from_bytes(compressed_text).decode();
+        let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
+        let text_bytes = ZlibDecoder::from_bytes(compressed_text).decode_with_max(max_decompress);
+        limits.free(length_u32 as u64);
+        limits.reserve_usize(text_bytes.len() * 3)?;
 
         let text = String::from_utf8_lossy(&text_bytes).to_string();
 
@@ -858,9 +882,11 @@ impl ChunkReader {
     pub fn read_itxt<R: Read + Seek>(
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
+        limits: &mut Limits,
     ) -> VexelResult<PngText> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
+        limits.reserve(length_u32 as u64)?;
         let mut chunk_data = vec![0u8; length_u32 as usize];
         reader.read_exact(&mut chunk_data)?;
 
@@ -890,7 +916,10 @@ impl ChunkReader {
                 log_warn!("Invalid compression method in iTXt chunk: {}", compression_method);
             }
 
-            let decompressed = ZlibDecoder::from_bytes(text_bytes).decode();
+            let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
+            let decompressed = ZlibDecoder::from_bytes(text_bytes).decode_with_max(max_decompress);
+            limits.free(length_u32 as u64);
+            limits.reserve_usize(decompressed.len() * 3)?;
             String::from_utf8_lossy(&decompressed).to_string()
         } else {
             String::from_utf8_lossy(&text_bytes).to_string()
@@ -951,6 +980,7 @@ impl ChunkReader {
         chunks: &mut Vec<PngChunkInfo>,
         width: u32,
         height: u32,
+        limits: &mut Limits,
     ) -> VexelResult<FctlChunk> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
@@ -964,7 +994,7 @@ impl ChunkReader {
         let mut dispose_op = reader.read_u8()?;
         let mut blend_op = reader.read_u8()?;
 
-        if x_offset + width_frame > width {
+        if x_offset.saturating_add(width_frame) > width {
             log_warn!(format!(
                 "fcTL width would overflow actual image width, clamping: x_offset={}, width={}, image_width={}",
                 x_offset, width_frame, width
@@ -972,7 +1002,7 @@ impl ChunkReader {
             width_frame = width.saturating_sub(x_offset);
         }
 
-        if y_offset + height_frame > height {
+        if y_offset.saturating_add(height_frame) > height {
             log_warn!(format!(
                 "fcTL height would overflow actual image height, clamping: y_offset={}, height={}, image_height={}",
                 y_offset, height_frame, height
@@ -983,6 +1013,8 @@ impl ChunkReader {
         if width_frame == 0 || height_frame == 0 {
             log_warn!(format!("Invalid fcTL parameters: width={}, height={}", width_frame, height_frame));
         }
+
+        limits.reserve_buffer(width_frame, height_frame, 4)?;
 
         if dispose_op > 2 {
             log_warn!(format!("Invalid fcTL dispose_op: {}", dispose_op));
@@ -1024,10 +1056,11 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
         frames: &mut Vec<PngFrame>,
+        limits: &mut Limits,
     ) -> VexelResult<()> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
-        let length = length_u32 - 4;
+        let length = length_u32.saturating_sub(4);
 
         let sequence_number = reader.read_u32()?;
 
@@ -1036,6 +1069,7 @@ impl ChunkReader {
             return Ok(());
         }
 
+        limits.reserve(length as u64)?;
         let mut frame_data = vec![0; length as usize];
         reader.read_exact(&mut frame_data)?;
 

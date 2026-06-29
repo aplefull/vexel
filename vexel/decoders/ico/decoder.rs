@@ -185,12 +185,9 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let image = png_decoder.decode()?;
 
         let frame = image.frames().first().cloned().unwrap_or_else(|| {
-            ImageFrame::new(
-                entry.width,
-                entry.height,
-                PixelData::RGBA8(vec![0u8; (entry.width * entry.height * 4) as usize]),
-                0,
-            )
+            let mut pixels = PixelData::RGBA8(vec![0u8; (entry.width * entry.height * 4) as usize]);
+            pixels.correct_pixels(entry.width, entry.height);
+            ImageFrame::new(entry.width, entry.height, pixels, 0)
         });
 
         Ok(frame)
@@ -205,7 +202,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let (image, and_mask) = BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
 
         let bpp = entry.bit_count;
-        let pixels = apply_and_mask(image.pixels(), &and_mask, entry.width, entry.height, bpp);
+        let mut pixels = apply_and_mask(image.pixels(), &and_mask, entry.width, entry.height, bpp);
+        pixels.correct_pixels(entry.width, entry.height);
 
         Ok(ImageFrame::new(entry.width, entry.height, pixels, 0))
     }

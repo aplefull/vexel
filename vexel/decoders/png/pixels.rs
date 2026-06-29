@@ -359,7 +359,7 @@ impl PixelDecoder {
                         let in_byte_idx = unfiltered_idx + (col / pixels_per_byte);
                         let in_bit_shift = (pixels_per_byte - 1 - (col % pixels_per_byte)) * bits_per_pixel as usize;
 
-                        if in_byte_idx > unfiltered.len() {
+                        if in_byte_idx >= unfiltered.len() {
                             log_warn!("Invalid byte index: {} > {}", in_byte_idx, unfiltered.len());
                             continue;
                         }

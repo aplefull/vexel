@@ -113,7 +113,8 @@ impl Image {
         }
     }
 
-    pub(crate) fn from_pixels(width: u32, height: u32, pixels: PixelData) -> Image {
+    pub(crate) fn from_pixels(width: u32, height: u32, mut pixels: PixelData) -> Image {
+        pixels.correct_pixels(width, height);
         let frame = ImageFrame::new(width, height, pixels, 0);
         Image::from_frame(frame)
     }

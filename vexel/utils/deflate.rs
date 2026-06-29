@@ -572,10 +572,18 @@ impl DeflateDecoder {
         DeflateDecoder { data }
     }
 
+    pub fn decode_with_max(&self, max_output: usize) -> Vec<u8> {
+        self.decode_impl(0, max_output)
+    }
+
     pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
+        let max_output = if capacity_hint > 0 { capacity_hint * 4 } else { 256 * 1024 * 1024 };
+        self.decode_impl(capacity_hint, max_output)
+    }
+
+    fn decode_impl(&self, capacity_hint: usize, max_output: usize) -> Vec<u8> {
         let mut bits = BitBuffer::new(self.data.clone());
         let mut output = Vec::with_capacity(capacity_hint);
-        let max_output = if capacity_hint > 0 { capacity_hint * 4 } else { 256 * 1024 * 1024 };
 
         let (fixed_litlen, fixed_dist) = build_fixed_tables();
 
@@ -645,14 +653,30 @@ impl ZlibDecoder {
         self.decode_with_capacity(0)
     }
 
+    pub fn decode_with_max(&self, max_output: usize) -> Vec<u8> {
+        if let Some(inner) = self.inner() {
+            inner.decode_with_max(max_output)
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
-        if self.data.len() < 2 { return Vec::new(); }
+        if let Some(inner) = self.inner() {
+            inner.decode_with_capacity(capacity_hint)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn inner(&self) -> Option<DeflateDecoder> {
+        if self.data.len() < 2 { return None; }
         let cmf = self.data[0];
         let flg = self.data[1];
-        if cmf & 0x0F != 8 { return Vec::new(); }
+        if cmf & 0x0F != 8 { return None; }
         let fdict = (flg >> 5) & 1;
         let offset = if fdict != 0 && self.data.len() >= 6 { 6 } else { 2 };
-        if offset >= self.data.len() { return Vec::new(); }
-        DeflateDecoder::from_bytes(self.data[offset..].to_vec()).decode_with_capacity(capacity_hint)
+        if offset >= self.data.len() { return None; }
+        Some(DeflateDecoder::from_bytes(self.data[offset..].to_vec()))
     }
 }

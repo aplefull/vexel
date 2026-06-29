@@ -94,8 +94,10 @@ impl<R: Read + Seek> PngDecoder<R> {
             };
             let bytes_per_row = ((bits_per_pixel * self.width + 7) / 8 + 1) as usize;
             let capacity = bytes_per_row * self.height as usize;
+            let compressed_len = self.idat_data.len();
             self.idat_data = ZlibDecoder::from_bytes(std::mem::take(&mut self.idat_data))
                 .decode_with_capacity(capacity);
+            self.limits.free_usize(compressed_len);
         }
 
         let bits_per_pixel = match self.color_type {
@@ -224,6 +226,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                                 &mut self.chunks,
                                 &mut self.idat_data,
                                 &mut self.frames,
+                                &mut self.limits,
                             )
                         }
                         PngChunk::GAMA => {
@@ -239,19 +242,19 @@ impl<R: Read + Seek> PngDecoder<R> {
                             }
                         }
                         PngChunk::TEXT => {
-                            match ChunkReader::read_text(&mut self.reader, &mut self.chunks) {
+                            match ChunkReader::read_text(&mut self.reader, &mut self.chunks, &mut self.limits) {
                                 Ok(text) => { self.text_chunks.push(text); Ok(()) }
                                 Err(e) => Err(e),
                             }
                         }
                         PngChunk::ZTXT => {
-                            match ChunkReader::read_ztxt(&mut self.reader, &mut self.chunks) {
+                            match ChunkReader::read_ztxt(&mut self.reader, &mut self.chunks, &mut self.limits) {
                                 Ok(text) => { self.text_chunks.push(text); Ok(()) }
                                 Err(e) => Err(e),
                             }
                         }
                         PngChunk::ITXT => {
-                            match ChunkReader::read_itxt(&mut self.reader, &mut self.chunks) {
+                            match ChunkReader::read_itxt(&mut self.reader, &mut self.chunks, &mut self.limits) {
                                 Ok(text) => { self.text_chunks.push(text); Ok(()) }
                                 Err(e) => Err(e),
                             }
@@ -311,7 +314,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                             }
                         }
                         PngChunk::FCTL => {
-                            match ChunkReader::read_fctl(&mut self.reader, &mut self.chunks, self.width, self.height) {
+                            match ChunkReader::read_fctl(&mut self.reader, &mut self.chunks, self.width, self.height, &mut self.limits) {
                                 Ok(fctl) => {
                                     self.frames.push(PngFrame {
                                         fctl_info: fctl,
@@ -322,9 +325,9 @@ impl<R: Read + Seek> PngDecoder<R> {
                                 Err(e) => Err(e),
                             }
                         }
-                        PngChunk::FDAT => ChunkReader::read_fdat(&mut self.reader, &mut self.chunks, &mut self.frames),
+                        PngChunk::FDAT => ChunkReader::read_fdat(&mut self.reader, &mut self.chunks, &mut self.frames, &mut self.limits),
                         PngChunk::ICCP => {
-                            match ChunkReader::read_iccp(&mut self.reader, &mut self.chunks) {
+                            match ChunkReader::read_iccp(&mut self.reader, &mut self.chunks, &mut self.limits) {
                                 Ok(icc) => { self.icc_profile = Some(icc); Ok(()) }
                                 Err(e) => Err(e),
                             }

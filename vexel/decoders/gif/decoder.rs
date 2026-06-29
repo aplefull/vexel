@@ -687,7 +687,9 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             match frame.disposal_method {
                 DisposalMethod::None => {
                     let next_canvas = canvas.clone();
-                    image_frames.push(ImageFrame::new(self.width, self.height, PixelData::RGBA8(canvas), frame.delay as u32));
+                    let mut pixels = PixelData::RGBA8(canvas);
+                    pixels.correct_pixels(self.width, self.height);
+                    image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
                     canvas = next_canvas;
                 }
                 DisposalMethod::Background => {
@@ -702,11 +704,15 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                             next_canvas[row_base..row_end].fill(0);
                         }
                     }
-                    image_frames.push(ImageFrame::new(self.width, self.height, PixelData::RGBA8(canvas), frame.delay as u32));
+                    let mut pixels = PixelData::RGBA8(canvas);
+                    pixels.correct_pixels(self.width, self.height);
+                    image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
                     canvas = next_canvas;
                 }
                 DisposalMethod::Previous => {
-                    image_frames.push(ImageFrame::new(self.width, self.height, PixelData::RGBA8(canvas), frame.delay as u32));
+                    let mut pixels = PixelData::RGBA8(canvas);
+                    pixels.correct_pixels(self.width, self.height);
+                    image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
                     canvas = saved_canvas.unwrap_or_else(|| vec![0u8; canvas_size]);
                 }
             }

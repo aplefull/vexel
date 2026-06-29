@@ -77,6 +77,11 @@ impl FilterDecoder {
 
         let bytes_per_pixel = (bits_per_pixel as usize + 7) / 8;
         let bytes_per_row = (pass_width as usize * bits_per_pixel as usize + 7) / 8;
+
+        if bytes_per_row == 0 {
+            return Ok(Vec::new());
+        }
+
         let scanline_bytes = 1 + bytes_per_row;
 
         let num_rows = data.len() / scanline_bytes;

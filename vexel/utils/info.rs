@@ -200,16 +200,20 @@ impl fmt::Display for PngInfo {
                     match &data.text {
                         crate::decoders::png::PngText::Basic { keyword, text } => {
                             writeln!(f, "  Keyword: {}", keyword)?;
-                            if text.len() > 60 {
-                                writeln!(f, "  Text: {}... ({} chars)", &text[..60], text.len())?;
+                            let char_count = text.chars().count();
+                            if char_count > 60 {
+                                let preview: String = text.chars().take(60).collect();
+                                writeln!(f, "  Text: {}... ({} chars)", preview, char_count)?;
                             } else {
                                 writeln!(f, "  Text: {}", text)?;
                             }
                         }
                         crate::decoders::png::PngText::Compressed { keyword, text } => {
                             writeln!(f, "  Keyword: {}", keyword)?;
-                            if text.len() > 60 {
-                                writeln!(f, "  Text (compressed): {}... ({} chars)", &text[..60], text.len())?;
+                            let char_count = text.chars().count();
+                            if char_count > 60 {
+                                let preview: String = text.chars().take(60).collect();
+                                writeln!(f, "  Text (compressed): {}... ({} chars)", preview, char_count)?;
                             } else {
                                 writeln!(f, "  Text (compressed): {}", text)?;
                             }
@@ -218,8 +222,10 @@ impl fmt::Display for PngInfo {
                             writeln!(f, "  Keyword: {}", keyword)?;
                             writeln!(f, "  Language: {}", language_tag)?;
                             writeln!(f, "  Translated keyword: {}", translated_keyword)?;
-                            if text.len() > 60 {
-                                writeln!(f, "  Text: {}... ({} chars)", &text[..60], text.len())?;
+                            let char_count = text.chars().count();
+                            if char_count > 60 {
+                                let preview: String = text.chars().take(60).collect();
+                                writeln!(f, "  Text: {}... ({} chars)", preview, char_count)?;
                             } else {
                                 writeln!(f, "  Text: {}", text)?;
                             }

@@ -398,18 +398,15 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
         while read_pos < HEADER_SIZE {
             match reader.read(&mut header[read_pos..]) {
-                Ok(0) | Err(_) => {
-                    for i in read_pos..HEADER_SIZE {
-                        header[i] = 0;
-                    }
-                }
+                Ok(0) | Err(_) => break,
                 Ok(n) => read_pos += n,
             }
         }
 
         let mut footer = [0u8; FOOTER_SIZE];
-        reader.seek(SeekFrom::End(-(FOOTER_SIZE as i64)))?;
-        reader.read_exact(&mut footer)?;
+        if reader.seek(SeekFrom::End(-(FOOTER_SIZE as i64))).is_ok() {
+            let _ = reader.read_exact(&mut footer);
+        }
 
         reader.seek(SeekFrom::Start(0))?;
 
