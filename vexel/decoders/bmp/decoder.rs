@@ -139,6 +139,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
             };
 
             let is_core = matches!(self.dib_header, DibHeader::Core(_));
+            let bytes_per_entry = if is_core { 3u64 } else { 4u64 };
+            let table_bytes = u64::from(num_colors).saturating_mul(bytes_per_entry);
+            self.limits.reserve(table_bytes)?;
+
             let start_offset = self.reader.stream_position().unwrap_or(0);
 
             for _ in 0..num_colors {
@@ -169,6 +173,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
             DibHeader::V5(h) if h.profile_size > 0 => (h.profile_data, h.profile_size),
             _ => return Ok(()),
         };
+
+        self.limits.reserve(u64::from(profile_size))?;
 
         let file_offset = 14u64 + profile_data_offset as u64;
         self.reader.seek(SeekFrom::Start(file_offset))?;
@@ -203,6 +209,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
             std::cmp::min(data_size as u64, bytes_until_eof)
         };
 
+        self.limits.reserve(bytes_to_read)?;
+
         self.sections.push(BmpSectionInfo {
             start_offset: pixel_offset,
             data: BmpSectionData::PixelData(BmpPixelDataInfo {
@@ -220,8 +228,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
         let image_size = self.dib_header.image_size();
         let jpeg_bytes = if image_size > 0 {
+            self.limits.reserve(u64::from(image_size))?;
             self.reader.read_bytes(image_size as usize)?
         } else {
+            let bytes_left = self.reader.bytes_left().unwrap_or(0);
+            self.limits.reserve(bytes_left)?;
             self.reader.read_to_end()?
         };
         let mut jpeg_decoder = JpegDecoder::new(Cursor::new(jpeg_bytes));
@@ -232,8 +243,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
         let image_size = self.dib_header.image_size();
         let png_bytes = if image_size > 0 {
+            self.limits.reserve(u64::from(image_size))?;
             self.reader.read_bytes(image_size as usize)?
         } else {
+            let bytes_left = self.reader.bytes_left().unwrap_or(0);
+            self.limits.reserve(bytes_left)?;
             self.reader.read_to_end()?
         };
         let mut png_decoder = PngDecoder::new(Cursor::new(png_bytes));
@@ -356,6 +370,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         };
 
         match self.read_color_table() {
+            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
             Err(e) => {
                 log_error!("Error reading color table. This might be critical! Error: {}", e);
             }
@@ -363,6 +378,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         };
 
         match self.read_icc_profile() {
+            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
             Err(e) => {
                 log_warn!("Error reading ICC profile: {}", e);
             }
@@ -370,6 +386,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         };
 
         match self.read_pixel_data() {
+            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
             Err(e) => {
                 log_error!("Error reading pixel data. This might be critical! Error: {}", e);
             }
@@ -386,7 +403,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     );
                 }
 
+                let raw_size = self.data.len();
+                let decoded_size = u64::from(self.width).saturating_mul(u64::from(self.height));
+                self.limits.reserve(decoded_size)?;
                 self.data = RleDecoder::decode_rle8(&self.data, self.width, self.height)?;
+                self.limits.free_usize(raw_size);
                 self.rle_decoded = true;
             }
             BitmapCompression::BiRle4 => {
@@ -397,7 +418,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     );
                 }
 
+                let raw_size = self.data.len();
+                let decoded_size = u64::from(self.width).saturating_mul(u64::from(self.height));
+                self.limits.reserve(decoded_size)?;
                 self.data = RleDecoder::decode_rle4(&self.data, self.width, self.height)?;
+                self.limits.free_usize(raw_size);
                 self.rle_decoded = true;
             }
             BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields => (),

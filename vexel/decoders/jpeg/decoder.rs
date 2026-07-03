@@ -18,14 +18,23 @@ struct ComponentPlane {
 }
 
 impl ComponentPlane {
-    fn new(width: u32, height: u32) -> Self {
+    fn try_new(width: u32, height: u32, limits: &mut Limits) -> VexelResult<Self> {
         let blocks_per_line = (width + 7) / 8;
         let block_lines = (height + 7) / 8;
-
-        Self {
+        let elem_count = (blocks_per_line as usize)
+            .saturating_mul(block_lines as usize)
+            .saturating_mul(64);
+        let byte_count = elem_count.saturating_mul(4);
+        limits.reserve_usize(byte_count)?;
+        Ok(Self {
             blocks_per_line,
-            data: vec![0; (blocks_per_line * block_lines * 64) as usize],
-        }
+            data: vec![0; elem_count],
+        })
+    }
+
+    fn free(&self, limits: &mut Limits) {
+        let byte_count = self.data.len().saturating_mul(4);
+        limits.free_usize(byte_count);
     }
 
     fn get_block_mut(&mut self, block_x: u32, block_y: u32) -> Option<&mut [i32; 64]> {
@@ -725,7 +734,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn read_app_generic(&mut self, marker: &str, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
-        let payload = self.reader.read_bytes((length as usize).saturating_sub(2))?;
+        let payload_len = (length as usize).saturating_sub(2);
+        self.limits.reserve_usize(payload_len)?;
+        let payload = self.reader.read_bytes(payload_len)?;
+        self.limits.free_usize(payload_len);
 
         let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len().min(32));
         let identifier = if null_pos > 0 {
@@ -746,10 +758,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
     fn read_com(&mut self, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
 
-        let mut comment_bytes = Vec::new();
-        for _ in 0..length - 2 {
+        let byte_count = (length as usize).saturating_sub(2);
+        self.limits.reserve_usize(byte_count)?;
+        let mut comment_bytes = Vec::with_capacity(byte_count);
+        for _ in 0..byte_count {
             comment_bytes.push(self.reader.read_u8()?);
         }
+        self.limits.free_usize(byte_count);
 
         let text = String::from_utf8_lossy(&comment_bytes).to_string();
         self.comments.push(text.clone());
@@ -799,10 +814,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         let payload_len = (length as usize).saturating_sub(7);
+        self.limits.reserve_usize(payload_len)?;
         let mut payload = vec![0u8; payload_len];
         for i in 0..payload_len {
             payload[i] = self.reader.read_u8().unwrap_or(0);
         }
+        self.limits.free_usize(payload_len);
 
         let get = |i: usize| -> u8 { payload.get(i).copied().unwrap_or(0) };
         let get_u16 = |i: usize| -> u16 { u16::from_be_bytes([get(i), get(i + 1)]) };
@@ -858,7 +875,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn read_app1_exif(&mut self, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
-        let payload = self.reader.read_bytes((length - 2) as usize)?;
+        let payload_len = (length as usize).saturating_sub(2);
+        self.limits.reserve_usize(payload_len)?;
+        let payload = self.reader.read_bytes(payload_len)?;
+        self.limits.free_usize(payload_len);
 
         let exif = if payload.starts_with(b"Exif\0\0") {
             ExifReader::parse(&payload[6..])
@@ -873,7 +893,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn read_app2_icc(&mut self, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
-        let payload = self.reader.read_bytes((length as usize).saturating_sub(2))?;
+        let payload_len = (length as usize).saturating_sub(2);
+        self.limits.reserve_usize(payload_len)?;
+        let payload = self.reader.read_bytes(payload_len)?;
+        self.limits.free_usize(payload_len);
 
         let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
         let identifier = String::from_utf8_lossy(&payload[..null_pos]).to_string();
@@ -1373,10 +1396,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
             0
         });
 
+        let scan_data_limit = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4).max(65536);
+        self.limits.reserve_usize(scan_data_limit)?;
         let mut scan_data = Vec::with_capacity((self.width as usize * self.height as usize) / 4);
         let is_arithmetic = self.coding_method == JpegCodingMethod::Arithmetic;
 
         loop {
+            if scan_data.len() >= scan_data_limit {
+                log_warn!("Scan data exceeded limit of {} bytes, truncating", scan_data_limit);
+                break;
+            }
+
             if current_byte != 0xFF {
                 scan_data.push(current_byte);
                 current_byte = match self.reader.read_u8() {
@@ -1444,7 +1474,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        let data_length = scan_data.len() as u64;
+        let actual_scan_size = scan_data.len();
+        self.limits.free_usize(scan_data_limit.saturating_sub(actual_scan_size));
+
+        let data_length = actual_scan_size as u64;
         let scan = ScanData {
             start_spectral,
             end_spectral,
@@ -1741,16 +1774,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
         let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
 
-        let mut component_planes: Vec<ComponentPlane> = self
-            .components
-            .iter()
-            .map(|comp| {
-                let comp_width = mcu_width * 8 * comp.horizontal_sampling_factor as u32;
-                let comp_height = mcu_height * 8 * comp.vertical_sampling_factor as u32;
-
-                ComponentPlane::new(comp_width, comp_height)
-            })
-            .collect();
+        let components_snapshot: Vec<_> = self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
+        let mut component_planes: Vec<ComponentPlane> = Vec::with_capacity(components_snapshot.len());
+        for (h, v) in &components_snapshot {
+            let comp_width = mcu_width * 8 * *h as u32;
+            let comp_height = mcu_height * 8 * *v as u32;
+            component_planes.push(ComponentPlane::try_new(comp_width, comp_height, &mut self.limits)?);
+        }
 
         match self.coding_method {
             JpegCodingMethod::Huffman => self.decode_progressive_scans(&mut component_planes)?,
@@ -1759,6 +1789,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.dequantize_and_idct_planes(&mut component_planes)?;
 
         let mut pixel_data = self.upsample_and_convert(&component_planes)?;
+        for plane in &component_planes {
+            plane.free(&mut self.limits);
+        }
         pixel_data.correct_pixels(self.width, self.height);
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
@@ -2095,10 +2128,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
     fn decode_differences(&mut self, scan: &ScanData) -> VexelResult<Vec<Vec<i32>>> {
         let mut reader = JpegBitReader::new(scan.data.as_slice());
 
-        let mut differences: Vec<Vec<i32>> = vec![vec![]; scan.components.len()];
-
         let width = self.width as usize;
         let height = self.height as usize;
+        let num_components = scan.components.len();
+        let buf_bytes = width.saturating_mul(height).saturating_mul(num_components).saturating_mul(4);
+        self.limits.reserve_usize(buf_bytes)?;
+
+        let mut differences: Vec<Vec<i32>> = vec![vec![]; num_components];
 
         for diffs in &mut differences {
             diffs.reserve(width * height);
@@ -2148,6 +2184,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let num_components = scan.components.len();
         let width = self.width as usize;
         let height = self.height as usize;
+
+        let diff_bytes = width.saturating_mul(height).saturating_mul(num_components).saturating_mul(4);
+        let db_bytes = width.saturating_mul(num_components).saturating_mul(4);
+        self.limits.reserve_usize(diff_bytes.saturating_add(db_bytes))?;
 
         let mut differences: Vec<Vec<i32>> = vec![vec![0i32; width * height]; num_components];
 
@@ -2205,6 +2245,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
+        self.limits.free_usize(db_bytes);
+
         Ok(differences)
     }
 
@@ -2244,7 +2286,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn reconstruct_samples(
-        &self,
+        &mut self,
         differences: Vec<Vec<i32>>,
         predictor: Predictor,
         point_transform: u8,
@@ -2252,6 +2294,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let width = self.width as usize;
         let height = self.height as usize;
         let components_count = differences.len();
+
+        let diff_bytes = width.saturating_mul(height).saturating_mul(components_count).saturating_mul(4);
+        let samples_bytes = width.saturating_mul(height).saturating_mul(components_count).saturating_mul(2);
+        self.limits.reserve_usize(samples_bytes)?;
 
         let mut samples = vec![vec![0u16; width * height]; components_count];
 
@@ -2310,13 +2356,18 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
+        self.limits.free_usize(diff_bytes);
+
         Ok(samples)
     }
 
-    fn samples_to_image(&self, samples: Vec<Vec<u16>>) -> VexelResult<Image> {
+    fn samples_to_image(&mut self, samples: Vec<Vec<u16>>) -> VexelResult<Image> {
         let width = self.width as usize;
         let height = self.height as usize;
         let components_count = samples.len();
+
+        let output_bytes = width.saturating_mul(height).saturating_mul(components_count).saturating_mul(2);
+        self.limits.reserve_usize(output_bytes)?;
 
         let mut output: Vec<u16> = Vec::new();
 
@@ -2331,16 +2382,22 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
+        let samples_bytes = width.saturating_mul(height).saturating_mul(components_count).saturating_mul(2);
+        drop(samples);
+        self.limits.free_usize(samples_bytes);
+
         if components_count == 1 {
             let frames = if self.precision <= 8 {
                 let precision_correction = 8 - self.precision;
                 let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
-
+                drop(output);
+                self.limits.free_usize(output_bytes);
                 Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::L8(pixels), 0)])
             } else {
                 let precision_correction = 16 - self.precision;
                 let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
-
+                drop(output);
+                self.limits.free_usize(output_bytes);
                 Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::L16(pixels), 0)])
             };
 
@@ -2358,12 +2415,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let frames = if self.precision <= 8 {
                 let precision_correction = 8 - self.precision;
                 let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
-
+                drop(output);
+                self.limits.free_usize(output_bytes);
                 Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::RGBA8(pixels), 0)])
             } else {
                 let precision_correction = 16 - self.precision;
                 let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
-
+                drop(output);
+                self.limits.free_usize(output_bytes);
                 Vec::from([ImageFrame::new(
                     width as u32,
                     height as u32,
@@ -2386,12 +2445,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let frames = if self.precision <= 8 {
                 let precision_correction = 8 - self.precision;
                 let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
-
+                drop(output);
+                self.limits.free_usize(output_bytes);
                 Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::RGB8(pixels), 0)])
             } else {
                 let precision_correction = 16 - self.precision;
                 let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
-
+                drop(output);
+                self.limits.free_usize(output_bytes);
                 Vec::from([ImageFrame::new(
                     width as u32,
                     height as u32,
@@ -3413,16 +3474,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
         let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
 
-        let mut component_planes: Vec<ComponentPlane> = self
-            .components
-            .iter()
-            .map(|comp| {
-                let comp_width = mcu_width * 8 * comp.horizontal_sampling_factor as u32;
-                let comp_height = mcu_height * 8 * comp.vertical_sampling_factor as u32;
-
-                ComponentPlane::new(comp_width, comp_height)
-            })
-            .collect();
+        let components_snapshot: Vec<_> = self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
+        let mut component_planes: Vec<ComponentPlane> = Vec::with_capacity(components_snapshot.len());
+        for (h, v) in &components_snapshot {
+            let comp_width = mcu_width * 8 * *h as u32;
+            let comp_height = mcu_height * 8 * *v as u32;
+            component_planes.push(ComponentPlane::try_new(comp_width, comp_height, &mut self.limits)?);
+        }
 
         match self.coding_method {
             JpegCodingMethod::Huffman => self.decode_huffman_to_planes(&mut component_planes)?,
@@ -3432,6 +3490,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.dequantize_and_idct_planes(&mut component_planes)?;
 
         let mut pixel_data = self.upsample_and_convert(&component_planes)?;
+        for plane in &component_planes {
+            plane.free(&mut self.limits);
+        }
         pixel_data.correct_pixels(self.width, self.height);
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
@@ -3522,7 +3583,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 };
 
                 let samples = self.reconstruct_samples(differences, predictor, point_transform)?;
+                let samples_bytes = self.width as usize * self.height as usize * samples.len() * 2;
                 let pixels: Vec<Vec<i32>> = samples.into_iter().map(|c| c.into_iter().map(|v| v as i32).collect()).collect();
+                self.limits.free_usize(samples_bytes);
 
                 Ok(pixels)
             }
@@ -3533,12 +3596,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let mcu_w = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
                 let mcu_h = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
 
-                let mut planes: Vec<ComponentPlane> = self.components.iter().map(|comp| {
-                    ComponentPlane::new(
-                        mcu_w * 8 * comp.horizontal_sampling_factor as u32,
-                        mcu_h * 8 * comp.vertical_sampling_factor as u32,
-                    )
-                }).collect();
+                let components_snapshot: Vec<_> = self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
+                let mut planes: Vec<ComponentPlane> = Vec::with_capacity(components_snapshot.len());
+                for (h, v) in &components_snapshot {
+                    planes.push(ComponentPlane::try_new(mcu_w * 8 * *h as u32, mcu_h * 8 * *v as u32, &mut self.limits)?);
+                }
 
                 match self.coding_method {
                     JpegCodingMethod::Huffman => self.decode_progressive_scans(&mut planes)?,
@@ -3546,8 +3608,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 }
 
                 self.dequantize_and_idct_planes(&mut planes)?;
-                
-                Ok(self.planes_to_component_pixels(&planes))
+                let result = self.planes_to_component_pixels(&planes);
+                for plane in &planes {
+                    plane.free(&mut self.limits);
+                }
+                Ok(result)
             }
 
             _ => {
@@ -3556,12 +3621,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let mcu_w = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
                 let mcu_h = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
 
-                let mut planes: Vec<ComponentPlane> = self.components.iter().map(|comp| {
-                    ComponentPlane::new(
-                        mcu_w * 8 * comp.horizontal_sampling_factor as u32,
-                        mcu_h * 8 * comp.vertical_sampling_factor as u32,
-                    )
-                }).collect();
+                let components_snapshot: Vec<_> = self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
+                let mut planes: Vec<ComponentPlane> = Vec::with_capacity(components_snapshot.len());
+                for (h, v) in &components_snapshot {
+                    planes.push(ComponentPlane::try_new(mcu_w * 8 * *h as u32, mcu_h * 8 * *v as u32, &mut self.limits)?);
+                }
 
                 match self.coding_method {
                     JpegCodingMethod::Huffman => self.decode_huffman_to_planes(&mut planes)?,
@@ -3570,7 +3634,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                 self.dequantize_and_idct_planes(&mut planes)?;
                 let result = self.planes_to_component_pixels(&planes);
-
+                for plane in &planes {
+                    plane.free(&mut self.limits);
+                }
                 Ok(result)
             }
         }
@@ -3693,6 +3759,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     *u = (*u + *d).clamp(0, max_val);
                 }
             }
+
+            let diff_raw_bytes = diff_raw.iter().map(|v| v.len() * 4).sum::<usize>();
+            self.limits.free_usize(diff_raw_bytes);
 
             current_pixels = upsampled;
             current_w = dst_w;

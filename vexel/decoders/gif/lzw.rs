@@ -3,7 +3,7 @@ use crate::{log_warn};
 
 use super::types::GifFrameInfo;
 
-pub fn decompress_lzw(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
+pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Vec<u8>> {
     let min_code_size = frame.lzw_minimum_code_size.clamp(2, 8) as u32;
     let clear_code = 1u32 << min_code_size;
     let end_code = clear_code + 1;
@@ -49,7 +49,8 @@ pub fn decompress_lzw(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
         Some(code)
     };
 
-    let mut result: Vec<u8> = Vec::with_capacity(frame.width as usize * frame.height as usize);
+    let initial_capacity = (frame.width as usize).saturating_mul(frame.height as usize).min(max_output);
+    let mut result: Vec<u8> = Vec::with_capacity(initial_capacity);
 
     let mut code_size = min_code_size + 1;
     let mut next_code = end_code + 1;
@@ -95,7 +96,8 @@ pub fn decompress_lzw(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
                     if let Some(&(prev_off, prev_len)) = table.get(prev as usize) {
                         if prev_len > 0 {
                             let new_offset = arena.len() as u32;
-                            arena.extend_from_slice(&arena[prev_off as usize..prev_off as usize + prev_len as usize].to_vec());
+                            arena.reserve(prev_len as usize + 1);
+                            arena.extend_from_within(prev_off as usize..prev_off as usize + prev_len as usize);
                             arena.push(first);
                             table.push((new_offset, prev_len + 1));
                             next_code += 1;
@@ -105,11 +107,12 @@ pub fn decompress_lzw(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
             } else if code == next_code {
                 if let Some(&(prev_off, prev_len)) = table.get(prev as usize) {
                     if prev_len > 0 {
+                        let new_len = prev_len + 1;
                         let first = arena[prev_off as usize];
                         let new_offset = arena.len() as u32;
-                        arena.extend_from_slice(&arena[prev_off as usize..prev_off as usize + prev_len as usize].to_vec());
+                        arena.reserve(new_len as usize);
+                        arena.extend_from_within(prev_off as usize..prev_off as usize + prev_len as usize);
                         arena.push(first);
-                        let new_len = prev_len + 1;
                         result.extend_from_slice(&arena[new_offset as usize..new_offset as usize + new_len as usize]);
                         if next_code < 4096 {
                             table.push((new_offset, new_len));

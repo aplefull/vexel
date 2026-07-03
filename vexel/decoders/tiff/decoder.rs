@@ -114,7 +114,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 257 => self.header.image_length = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
                 258 => {
                     self.header.bits_per_sample =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?
+                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?
                 }
                 259 => {
                     let compression_value: u32 = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
@@ -126,13 +126,13 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
                 273 => {
                     self.header.strip_offsets =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?
+                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?
                 }
                 277 => self.header.samples_per_pixel = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
                 278 => self.header.rows_per_strip = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
                 279 => {
                     self.header.strip_byte_counts =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?
+                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?
                 }
                 282 => self.header.x_resolution = read_rational(value_offset, &mut self.reader)?,
                 283 => self.header.y_resolution = read_rational(value_offset, &mut self.reader)?,
@@ -144,10 +144,13 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
                 320 => {
                     self.reader.seek(SeekFrom::Start(value_offset as u64))?;
+                    let color_map_bytes = (count as usize).saturating_mul(2);
+                    self.limits.reserve_usize(color_map_bytes)?;
                     let mut color_map = Vec::with_capacity(count as usize);
                     for _ in 0..count {
                         color_map.push(self.reader.read_u16()?);
                     }
+                    self.limits.free_usize(color_map_bytes);
                     self.header.color_map = color_map;
                 }
                 322 => {
@@ -158,11 +161,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
                 324 => {
                     self.header.tile_offsets =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?;
+                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
                 }
                 325 => {
                     self.header.tile_byte_counts =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?;
+                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
                 }
                 32997 => {
                     self.header.image_depth = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
@@ -172,11 +175,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
                 338 => {
                     self.header.extra_samples =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?;
+                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
                 }
                 339 => {
                     let raw_formats: Vec<u32> =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?;
+                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
                     self.header.sample_format = raw_formats
                         .into_iter()
                         .map(|v| SampleFormat::try_from(v).unwrap_or(SampleFormat::UnsignedInt))
@@ -184,25 +187,28 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
                 347 => {
                     self.reader.seek(SeekFrom::Start(value_offset as u64))?;
-                    let mut jpeg_tables = vec![0u8; count as usize];
+                    let jpeg_tables_len = count as usize;
+                    self.limits.reserve_usize(jpeg_tables_len)?;
+                    let mut jpeg_tables = vec![0u8; jpeg_tables_len];
                     self.reader.read_exact(&mut jpeg_tables)?;
+                    self.limits.free_usize(jpeg_tables_len);
                     self.header.jpeg_tables = jpeg_tables;
                 }
                 529 => {
-                    let rationals = read_multiple_rationals(count, value_offset, &mut self.reader)?;
+                    let rationals = read_multiple_rationals(count, value_offset, &mut self.reader, &mut self.limits)?;
                     if rationals.len() >= 3 {
                         self.header.ycbcr_coefficients = [rationals[0], rationals[1], rationals[2]];
                     }
                 }
                 530 => {
                     let values: Vec<u32> =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader)?;
+                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
                     if values.len() >= 2 {
                         self.header.ycbcr_sub_sampling = [values[0] as u16, values[1] as u16];
                     }
                 }
                 532 => {
-                    let rationals = read_multiple_rationals(count, value_offset, &mut self.reader)?;
+                    let rationals = read_multiple_rationals(count, value_offset, &mut self.reader, &mut self.limits)?;
                     if rationals.len() >= 6 {
                         self.header.reference_black_white = [
                             rationals[0],
@@ -411,7 +417,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
         for (strip_idx, (offset, byte_count)) in offsets.iter().zip(byte_counts.iter()).enumerate() {
             self.reader.seek(SeekFrom::Start(*offset as u64))?;
 
-            let mut strip_data = vec![0u8; *byte_count as usize];
+            let strip_len = *byte_count as usize;
+            self.limits.reserve_usize(strip_len)?;
+            let mut strip_data = vec![0u8; strip_len];
             self.reader.read_exact(&mut strip_data)?;
 
             let strip_within_plane = if is_planar && strips_per_plane > 0 {
@@ -432,6 +440,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
             } else {
                 self.decompress_chunk(strip_data)
             };
+            self.limits.free_usize(strip_len);
+
+            self.limits.reserve_usize(decompressed.len())?;
 
             if self.header.predictor != Predictor::None && !is_sgilog {
                 let bps = self.bits_for(0);
@@ -448,7 +459,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
             }
 
+            let decompressed_len = decompressed.len();
             bytes.extend_from_slice(&decompressed);
+            self.limits.free_usize(decompressed_len);
         }
 
         Ok(bytes)
@@ -461,7 +474,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let spp = self.header.samples_per_pixel as usize;
         let bytes_per_pixel = spp.max(3);
 
-        let mut image_data = vec![0u8; image_width * image_height * bytes_per_pixel];
+        let image_data_len = image_width * image_height * bytes_per_pixel;
+        self.limits.reserve_usize(image_data_len)?;
+        let mut image_data = vec![0u8; image_data_len];
 
         let offsets = self.header.strip_offsets.clone();
         let byte_counts = self.header.strip_byte_counts.clone();
@@ -470,7 +485,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
         for (strip_idx, (offset, byte_count)) in offsets.iter().zip(byte_counts.iter()).enumerate() {
             self.reader.seek(SeekFrom::Start(*offset as u64))?;
 
-            let mut strip_data = vec![0u8; *byte_count as usize];
+            let strip_len = *byte_count as usize;
+            self.limits.reserve_usize(strip_len)?;
+            let mut strip_data = vec![0u8; strip_len];
             self.reader.read_exact(&mut strip_data)?;
 
             let jpeg_data = if !jpeg_tables.is_empty() {
@@ -478,6 +495,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             } else {
                 strip_data
             };
+            self.limits.free_usize(strip_len);
 
             let cursor = Cursor::new(jpeg_data);
             let mut jpeg_decoder = JpegDecoder::new(cursor);
@@ -503,6 +521,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             }
         }
 
+        self.limits.free_usize(image_data_len);
         Ok(image_data)
     }
 
@@ -529,6 +548,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
             image_width * image_height * bytes_per_pixel
         };
 
+        let total_slices_size = slice_size.saturating_mul(image_depth);
+        self.limits.reserve_usize(total_slices_size)?;
         let mut slices = vec![vec![0u8; slice_size]; image_depth];
 
         let tile_offsets = self.header.tile_offsets.clone();
@@ -545,10 +566,14 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     let byte_count = tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
 
                     self.reader.seek(SeekFrom::Start(offset as u64))?;
-                    let mut raw_tile = vec![0u8; byte_count as usize];
+                    let raw_tile_len = byte_count as usize;
+                    self.limits.reserve_usize(raw_tile_len)?;
+                    let mut raw_tile = vec![0u8; raw_tile_len];
                     self.reader.read_exact(&mut raw_tile)?;
 
                     let mut tile_data = self.decompress_chunk(raw_tile);
+                    self.limits.free_usize(raw_tile_len);
+                    self.limits.reserve_usize(tile_data.len())?;
                     if self.header.predictor != Predictor::None && bps >= 8 {
                         self.apply_predictor(&mut tile_data, tile_width as u32);
                     }
@@ -608,10 +633,12 @@ impl<R: Read + Seek> TiffDecoder<R> {
                             }
                         }
                     }
+                    self.limits.free_usize(tile_data.len());
                 }
             }
         }
 
+        self.limits.free_usize(total_slices_size);
         Ok(slices)
     }
 
@@ -647,17 +674,23 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         if is_planar && !is_jpeg && !is_sub_byte {
             let plane_size = image_width * image_height * bytes_per_plane_sample;
-            let mut planar_data = vec![0u8; plane_size * spp];
+            let planar_data_len = plane_size.saturating_mul(spp);
+            self.limits.reserve_usize(planar_data_len)?;
+            let mut planar_data = vec![0u8; planar_data_len];
 
             for tile_idx in 0..tile_offsets.len() {
                 let offset = tile_offsets[tile_idx];
                 let byte_count = tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
 
                 self.reader.seek(SeekFrom::Start(offset as u64))?;
-                let mut raw_tile = vec![0u8; byte_count as usize];
+                let raw_tile_len = byte_count as usize;
+                self.limits.reserve_usize(raw_tile_len)?;
+                let mut raw_tile = vec![0u8; raw_tile_len];
                 self.reader.read_exact(&mut raw_tile)?;
 
                 let mut tile_data = self.decompress_chunk(raw_tile);
+                self.limits.free_usize(raw_tile_len);
+                self.limits.reserve_usize(tile_data.len())?;
                 if self.header.predictor != Predictor::None && bps >= 8 {
                     self.apply_predictor_planar(&mut tile_data, tile_width as u32);
                 }
@@ -696,11 +729,14 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         }
                     }
                 }
+                self.limits.free_usize(tile_data.len());
             }
 
+            self.limits.free_usize(planar_data_len);
             return Ok(planar_data);
         }
 
+        self.limits.reserve_usize(img_data_size)?;
         let mut image_data = vec![0u8; img_data_size];
 
         for tile_idx in 0..tile_offsets.len() {
@@ -708,7 +744,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
             let byte_count = tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
 
             self.reader.seek(SeekFrom::Start(offset as u64))?;
-            let mut raw_tile = vec![0u8; byte_count as usize];
+            let raw_tile_len = byte_count as usize;
+            self.limits.reserve_usize(raw_tile_len)?;
+            let mut raw_tile = vec![0u8; raw_tile_len];
             self.reader.read_exact(&mut raw_tile)?;
 
             let tile_data = if is_jpeg {
@@ -717,6 +755,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 } else {
                     raw_tile
                 };
+                self.limits.free_usize(raw_tile_len);
 
                 let cursor = Cursor::new(jpeg_data);
                 let mut jpeg_decoder = JpegDecoder::new(cursor);
@@ -726,11 +765,13 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
             } else {
                 let mut d = self.decompress_chunk(raw_tile);
+                self.limits.free_usize(raw_tile_len);
                 if self.header.predictor != Predictor::None && self.bits_for(0) >= 8 {
                     self.apply_predictor(&mut d, tile_width as u32);
                 }
                 d
             };
+            self.limits.reserve_usize(tile_data.len())?;
 
             let tile_col = tile_idx % tiles_x;
             let tile_row = tile_idx / tiles_x;
@@ -763,6 +804,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         }
                     }
                 }
+                self.limits.free_usize(tile_data.len());
             } else {
                 let expected_tile_bytes = tile_width * tile_height * bytes_per_pixel;
                 let mut tile_data = tile_data;
@@ -793,9 +835,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
                         }
                     }
                 }
+                self.limits.free_usize(tile_data.len());
             }
         }
 
+        self.limits.free_usize(img_data_size);
         Ok(image_data)
     }
 

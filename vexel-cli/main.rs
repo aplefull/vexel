@@ -759,12 +759,33 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                         .as_deref()
                         .unwrap_or("failed to decode image");
 
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{file_name}: {error}"))
-                                .color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b))
-                                .size(16.0),
-                        );
+                    let available = ui.available_rect_before_wrap();
+                    let max_width = (available.width() * 0.8).min(520.0);
+                    let center = available.center();
+
+                    ui.painter().rect_filled(available, egui::Rounding::ZERO, egui::Color32::TRANSPARENT);
+
+                    let content_height = 13.0 + 6.0 + 15.0 + 20.0;
+                    let top = center.y - content_height / 2.0;
+
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                        egui::pos2(center.x - max_width / 2.0, top),
+                        egui::vec2(max_width, available.height()),
+                    )), |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new(&file_name)
+                                    .color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b))
+                                    .size(13.0)
+                                    .monospace(),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(error)
+                                    .color(egui::Color32::from_rgb(0xff, 0xa0, 0xa0))
+                                    .size(15.0),
+                            );
+                        });
                     });
                 }
             });

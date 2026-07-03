@@ -121,6 +121,11 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let num_entries = 1u32 << (self.size_of_global_color_table + 1);
         let table_size = num_entries * 3;
 
+        if let Err(e) = self.limits.reserve(table_size as u64) {
+            log_warn!("Global color table too large, skipping: {:?}", e);
+            return;
+        }
+
         for _ in 0..table_size {
             let bit = match self.reader.read_u8() {
                 Ok(bit) => bit,
@@ -227,6 +232,14 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                     break;
                 }
 
+                if let Err(e) = self.limits.reserve_usize(sub_block_size) {
+                    log_warn!("Application extension data too large, truncating: {:?}", e);
+                    for _ in 0..sub_block_size {
+                        self.reader.read_u8()?;
+                    }
+                    break;
+                }
+
                 for _ in 0..sub_block_size {
                     data.push(self.reader.read_u8()?);
                 }
@@ -278,6 +291,14 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 break;
             }
 
+            if let Err(e) = self.limits.reserve_usize(sub_block_size) {
+                log_warn!("Plain text extension too large, truncating: {:?}", e);
+                for _ in 0..sub_block_size {
+                    self.reader.read_u8()?;
+                }
+                break;
+            }
+
             let mut block = Vec::with_capacity(sub_block_size);
             for _ in 0..sub_block_size {
                 block.push(self.reader.read_u8()?);
@@ -324,13 +345,21 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 break;
             }
 
+            if let Err(e) = self.limits.reserve(block_size as u64) {
+                log_warn!("Comment extension too large, truncating: {:?}", e);
+                for _ in 0..block_size {
+                    self.reader.read_u8()?;
+                }
+                break;
+            }
+
             let mut block = Vec::with_capacity(block_size as usize);
             for _ in 0..block_size {
                 let byte = self.reader.read_u8()?;
                 block.push(byte);
             }
 
-            let text = String::from_utf8(block).unwrap();
+            let text = String::from_utf8_lossy(&block).into_owned();
             full_text.push_str(&text);
             self.comments.push(text);
         }
@@ -433,6 +462,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             let lct_offset = self.reader.stream_position().unwrap_or(0);
             let num_entries = 1u32 << (size_of_local_color_table + 1);
             let table_size = num_entries * 3;
+            if let Err(e) = self.limits.reserve(table_size as u64) {
+                log_warn!("Local color table too large, skipping frame: {:?}", e);
+                return Ok(());
+            }
             for _ in 0..table_size {
                 local_color_table.push(self.reader.read_u8()?);
             }
@@ -465,6 +498,15 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             };
 
             data_length += 1 + block_size as u64;
+
+            if let Err(e) = self.limits.reserve_usize(block_size) {
+                log_warn!("Frame image data too large, truncating: {:?}", e);
+                for _ in 0..block_size {
+                    self.reader.read_u8().ok();
+                }
+                break;
+            }
+
             let mut buffer = vec![0u8; block_size];
             match self.reader.read_exact(&mut buffer) {
                 Ok(_) => {}
@@ -617,7 +659,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             self.frames
                 .par_iter()
                 .map(|frame| {
-                    let mut indices = match decompress_lzw(frame) {
+                    let max_output = (frame.width as usize).saturating_mul(frame.height as usize).max(1);
+                    let mut indices = match decompress_lzw(frame, max_output) {
                         Ok(i) => i,
                         Err(e) => {
                             log_warn!("Error decoding frame: {:?}", e);
@@ -639,7 +682,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             .frames
             .iter()
             .map(|frame| {
-                let mut indices = match decompress_lzw(frame) {
+                let max_output = (frame.width as usize).saturating_mul(frame.height as usize).max(1);
+                let mut indices = match decompress_lzw(frame, max_output) {
                     Ok(i) => i,
                     Err(e) => {
                         log_warn!("Error decoding frame: {:?}", e);
@@ -660,9 +704,16 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let mut image_frames = Vec::new();
 
         for (frame, indices) in self.frames.iter().zip(decoded_indices) {
-            let saved_canvas = match frame.disposal_method {
-                DisposalMethod::Previous | DisposalMethod::Background => Some(canvas.clone()),
-                DisposalMethod::None => None,
+            let needs_saved_canvas = matches!(frame.disposal_method, DisposalMethod::Previous | DisposalMethod::Background);
+            let saved_canvas = if needs_saved_canvas {
+                if let Err(e) = self.limits.reserve_usize(canvas_size) {
+                    log_warn!("Cannot clone canvas for disposal method, falling back: {:?}", e);
+                    None
+                } else {
+                    Some(canvas.clone())
+                }
+            } else {
+                None
             };
 
             let color_table = if frame.local_color_table_flag {
@@ -686,11 +737,18 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
             match frame.disposal_method {
                 DisposalMethod::None => {
-                    let next_canvas = canvas.clone();
-                    let mut pixels = PixelData::RGBA8(canvas);
-                    pixels.correct_pixels(self.width, self.height);
-                    image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
-                    canvas = next_canvas;
+                    if let Err(e) = self.limits.reserve_usize(canvas_size) {
+                        log_warn!("Cannot clone canvas for next frame, reusing: {:?}", e);
+                        let mut pixels = PixelData::RGBA8(std::mem::replace(&mut canvas, vec![0u8; canvas_size]));
+                        pixels.correct_pixels(self.width, self.height);
+                        image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
+                    } else {
+                        let next_canvas = canvas.clone();
+                        let mut pixels = PixelData::RGBA8(canvas);
+                        pixels.correct_pixels(self.width, self.height);
+                        image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
+                        canvas = next_canvas;
+                    }
                 }
                 DisposalMethod::Background => {
                     let mut next_canvas = saved_canvas.unwrap_or_else(|| vec![0u8; canvas_size]);
@@ -708,12 +766,14 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                     pixels.correct_pixels(self.width, self.height);
                     image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
                     canvas = next_canvas;
+                    self.limits.free_usize(canvas_size);
                 }
                 DisposalMethod::Previous => {
                     let mut pixels = PixelData::RGBA8(canvas);
                     pixels.correct_pixels(self.width, self.height);
                     image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
                     canvas = saved_canvas.unwrap_or_else(|| vec![0u8; canvas_size]);
+                    self.limits.free_usize(canvas_size);
                 }
             }
         }

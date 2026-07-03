@@ -1,5 +1,6 @@
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::limits::Limits;
 use crate::utils::types::ByteOrder;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -37,14 +38,19 @@ pub fn read_multiple_values<T, R: Read + Seek>(
     value_offset: u32,
     byte_order: ByteOrder,
     reader: &mut BitReader<R>,
+    limits: &mut Limits,
 ) -> VexelResult<Vec<T>>
 where
     T: TryFrom<u32>,
 {
+    let item_size = std::mem::size_of::<T>();
+    let vec_bytes = (count as usize).saturating_mul(item_size);
+    limits.reserve_usize(vec_bytes)?;
     let mut values = Vec::with_capacity(count as usize);
 
     if count == 1 {
         values.push(read_single_value(type_, value_offset, byte_order, reader)?);
+        limits.free_usize(vec_bytes);
         return Ok(values);
     }
 
@@ -74,6 +80,7 @@ where
             };
             values.push(T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
         }
+        limits.free_usize(vec_bytes);
         return Ok(values);
     }
 
@@ -90,6 +97,7 @@ where
         values.push(T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
     }
 
+    limits.free_usize(vec_bytes);
     Ok(values)
 }
 
@@ -109,8 +117,11 @@ pub fn read_multiple_rationals<R: Read + Seek>(
     count: u32,
     value_offset: u32,
     reader: &mut BitReader<R>,
+    limits: &mut Limits,
 ) -> VexelResult<Vec<f32>> {
     reader.seek(SeekFrom::Start(value_offset as u64))?;
+    let vec_bytes = (count as usize).saturating_mul(std::mem::size_of::<f32>());
+    limits.reserve_usize(vec_bytes)?;
     let mut values = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let numerator = reader.read_u32()?;
@@ -121,5 +132,6 @@ pub fn read_multiple_rationals<R: Read + Seek>(
             values.push(numerator as f32 / denominator as f32);
         }
     }
+    limits.free_usize(vec_bytes);
     Ok(values)
 }

@@ -107,7 +107,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         })
     }
 
-    fn read_lse(&mut self) -> std::io::Result<JpegLsLseData> {
+    fn read_lse(&mut self) -> VexelResult<JpegLsLseData> {
         let marker_len = self.read_u16()?;
         let id_type = self.read_u8()?;
 
@@ -131,6 +131,8 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             2 => {
                 let table_id = self.read_u8()?;
                 let entry_count = self.read_u16()?;
+                let entry_bytes = (entry_count as usize + 1).saturating_mul(2);
+                self.limits.reserve_usize(entry_bytes)?;
                 let mut entries = Vec::with_capacity(entry_count as usize + 1);
                 for _ in 0..=entry_count {
                     entries.push(self.read_u16()?);
@@ -139,6 +141,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             }
             3 => {
                 let remaining = (marker_len as usize).saturating_sub(3);
+                self.limits.reserve_usize(remaining)?;
                 let mut entries = Vec::with_capacity(remaining);
                 for _ in 0..remaining {
                     entries.push(self.read_u8()?);
@@ -227,9 +230,12 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         })
     }
 
-    fn try_read_hp_color_transform(&mut self) -> std::io::Result<JpegLsAppData> {
+    fn try_read_hp_color_transform(&mut self) -> VexelResult<JpegLsAppData> {
         let length = self.read_u16()?;
-        let payload = self.reader.read_bytes(length.saturating_sub(2) as usize)?;
+        let payload_len = length.saturating_sub(2) as usize;
+        self.limits.reserve_usize(payload_len)?;
+        let payload = self.reader.read_bytes(payload_len)?;
+        self.limits.free_usize(payload_len);
 
         let (identifier, color_transform) = if payload.len() >= 5 {
             let id = String::from_utf8(payload[..4].to_vec()).ok();
@@ -360,7 +366,10 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 }
                 JpegLsMarker::APP0 => {
                     let len = self.read_u16()?;
-                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let payload_len = len.saturating_sub(2) as usize;
+                    self.limits.reserve_usize(payload_len)?;
+                    let payload = self.reader.read_bytes(payload_len)?;
+                    self.limits.free_usize(payload_len);
                     let mut app = JpegLsAppData { marker: 0xFFE0, length: len, identifier: None, jfif: None, exif: None, icc_profile_sequence: None, adobe: None, color_transform: None };
                     if payload.len() >= 5 {
                         let id = String::from_utf8_lossy(&payload[..5]).to_string();
@@ -385,7 +394,10 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 }
                 JpegLsMarker::APP1 => {
                     let len = self.read_u16()?;
-                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let payload_len = len.saturating_sub(2) as usize;
+                    self.limits.reserve_usize(payload_len)?;
+                    let payload = self.reader.read_bytes(payload_len)?;
+                    self.limits.free_usize(payload_len);
                     let exif = if payload.starts_with(b"Exif\0\0") {
                         ExifReader::parse(&payload[6..])
                     } else {
@@ -401,7 +413,10 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 }
                 JpegLsMarker::APP2 => {
                     let len = self.read_u16()?;
-                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let payload_len = len.saturating_sub(2) as usize;
+                    self.limits.reserve_usize(payload_len)?;
+                    let payload = self.reader.read_bytes(payload_len)?;
+                    self.limits.free_usize(payload_len);
                     let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
                     let identifier = String::from_utf8_lossy(&payload[..null_pos]).to_string();
                     let icc = if identifier == "ICC_PROFILE" && payload.len() >= null_pos + 3 {
@@ -417,7 +432,10 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 }
                 JpegLsMarker::APP14 => {
                     let len = self.read_u16()?;
-                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let payload_len = len.saturating_sub(2) as usize;
+                    self.limits.reserve_usize(payload_len)?;
+                    let payload = self.reader.read_bytes(payload_len)?;
+                    self.limits.free_usize(payload_len);
                     let adobe = if payload.starts_with(b"Adobe") && payload.len() >= 12 {
                         Some(APP14AdobeData {
                             length: len,
@@ -449,7 +467,10 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 | JpegLsMarker::APP13
                 | JpegLsMarker::APP15 => {
                     let len = self.read_u16()?;
-                    let payload = self.reader.read_bytes(len.saturating_sub(2) as usize)?;
+                    let payload_len = len.saturating_sub(2) as usize;
+                    self.limits.reserve_usize(payload_len)?;
+                    let payload = self.reader.read_bytes(payload_len)?;
+                    self.limits.free_usize(payload_len);
                     let marker_u16 = marker.to_u16();
                     let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len().min(32));
                     let identifier = if null_pos > 0 && payload[..null_pos].iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
@@ -462,10 +483,12 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 JpegLsMarker::COM => {
                     let len = self.read_u16()?;
                     let payload_len = len.saturating_sub(2) as usize;
+                    self.limits.reserve_usize(payload_len)?;
                     let mut text_bytes = Vec::with_capacity(payload_len);
                     for _ in 0..payload_len {
                         text_bytes.push(self.read_u8()?);
                     }
+                    self.limits.free_usize(payload_len);
                     let text = String::from_utf8_lossy(&text_bytes).into_owned();
                     self.sections.push(JpegLsSectionInfo {
                         start_offset: marker_start,
@@ -557,6 +580,11 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 let mut state = DecoderState::new();
                 prepare_luts(&mut state, t1, t2, t3, near, lutmax);
                 if lossy {
+                    let quant = 2 * near + 1;
+                    let qbeta = (alpha + 2 * near + quant - 1) / quant;
+                    let beta = quant * qbeta;
+                    let qtable_bytes = ((2 * beta - 1) as usize).saturating_mul(4);
+                    self.limits.reserve_usize(qtable_bytes)?;
                     prepare_qtables(&mut state, alpha, near);
                 }
                 init_stats(&mut state, stats_alpha);
@@ -612,6 +640,12 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     }
                 }
             }
+
+            for (plane, pw, ph) in planes {
+                self.limits.free_usize(pw.saturating_mul(ph).saturating_mul(2));
+                drop(plane);
+            }
+
             result
         } else {
             let (scan, data) = scans.into_iter().next().unwrap();
@@ -655,6 +689,11 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             let mut state = DecoderState::new();
             prepare_luts(&mut state, t1, t2, t3, near, lutmax);
             if lossy {
+                let quant = 2 * near + 1;
+                let qbeta = (alpha + 2 * near + quant - 1) / quant;
+                let beta = quant * qbeta;
+                let qtable_bytes = ((2 * beta - 1) as usize).saturating_mul(4);
+                self.limits.reserve_usize(qtable_bytes)?;
                 prepare_qtables(&mut state, alpha, near);
             }
             init_stats(&mut state, stats_alpha);
