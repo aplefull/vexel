@@ -9,3 +9,4 @@ pub mod netpbm;
 pub mod png;
 pub mod tga;
 pub mod tiff;
+pub mod dng;

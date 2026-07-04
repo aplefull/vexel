@@ -8,15 +8,16 @@ use crate::utils::types::ByteOrder;
 use crate::{Image, Limits, log_warn};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use super::compression::{
+use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
     decompress_lzw, decompress_packbits, decompress_sgilog, decompress_sgilog24,
 };
-use super::pixels::PixelReader;
-use super::reader::{read_multiple_rationals, read_multiple_values, read_rational, read_single_value};
-use super::types::{
+use crate::utils::tiff::ifd::{self, Ifd};
+use crate::utils::tiff::jpeg::splice_jpeg_tables;
+use crate::utils::tiff::pixels::PixelReader;
+use crate::utils::tiff::types::{
     Compression, Predictor, SampleFormat, TiffFileHeaderData, TiffHeader, TiffIfdData, TiffPixelData,
-    TiffSectionData, TiffSectionInfo,
+    TiffSectionData, TiffSectionInfo, TiffTags,
 };
 
 pub struct TiffDecoder<R: Read + Seek> {
@@ -58,172 +59,121 @@ impl<R: Read + Seek> TiffDecoder<R> {
     fn read_file_header(&mut self) -> VexelResult<u32> {
         let header_start = self.reader.stream_position().unwrap_or(0);
 
-        let mut byte_order_marker = [0u8; 2];
-        self.reader.read_exact(&mut byte_order_marker)?;
-
-        let byte_order = match &byte_order_marker {
-            b"II" => ByteOrder::LittleEndian,
-            b"MM" => ByteOrder::BigEndian,
-            _ => return Err(VexelError::Custom("Invalid byte order marker".to_string())),
-        };
-
-        self.byte_order = byte_order;
-        self.reader.set_endianness(byte_order);
-
-        let magic = self.reader.read_u16()?;
-        if magic != 42 {
-            return Err(VexelError::Custom("Not a TIFF file".to_string()));
-        }
-
-        let ifd_offset = self.reader.read_u32()?;
+        let file_header = ifd::read_file_header(&mut self.reader)?;
+        self.byte_order = file_header.byte_order;
 
         self.sections.push(TiffSectionInfo {
             start_offset: header_start,
             data: TiffSectionData::FileHeader(TiffFileHeaderData {
-                byte_order: if byte_order == ByteOrder::LittleEndian {
+                byte_order: if self.byte_order == ByteOrder::LittleEndian {
                     "LittleEndian".to_string()
                 } else {
                     "BigEndian".to_string()
                 },
-                magic,
-                first_ifd_offset: ifd_offset,
+                magic: file_header.magic,
+                first_ifd_offset: file_header.first_ifd_offset,
             }),
         });
 
-        Ok(ifd_offset)
+        Ok(file_header.first_ifd_offset)
     }
 
     fn read_ifd(&mut self, ifd_offset: u32) -> VexelResult<u32> {
         self.header = TiffHeader::default();
         let ifd_start = ifd_offset as u64;
 
-        self.reader.seek(SeekFrom::Start(ifd_offset as u64))?;
+        let ifd = Ifd::read(&mut self.reader, ifd_offset, self.byte_order, &mut self.limits)?;
+        let ifd_end = self.reader.stream_position()?;
 
-        let num_entries = self.reader.read_u16()?;
-
-        for _ in 0..num_entries {
-            let tag = self.reader.read_u16()?;
-            let type_ = self.reader.read_u16()?;
-            let count = self.reader.read_u32()?;
-            let value_offset = self.reader.read_u32()?;
-
-            let current_pos = self.reader.stream_position()?;
-
-            match tag {
-                256 => self.header.image_width = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
-                257 => self.header.image_length = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
-                258 => {
-                    self.header.bits_per_sample =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?
-                }
-                259 => {
-                    let compression_value: u32 = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
-                    self.header.compression =
-                        Compression::try_from(compression_value as u16).unwrap_or(Compression::None);
-                }
-                262 => {
-                    self.header.photometric_interpretation = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?
-                }
-                273 => {
-                    self.header.strip_offsets =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?
-                }
-                277 => self.header.samples_per_pixel = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
-                278 => self.header.rows_per_strip = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
-                279 => {
-                    self.header.strip_byte_counts =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?
-                }
-                282 => self.header.x_resolution = read_rational(value_offset, &mut self.reader)?,
-                283 => self.header.y_resolution = read_rational(value_offset, &mut self.reader)?,
-                284 => self.header.planar_configuration = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
-                296 => self.header.resolution_unit = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?,
-                317 => {
-                    let predictor_value: u32 = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
-                    self.header.predictor = Predictor::try_from(predictor_value).unwrap_or(Predictor::None);
-                }
-                320 => {
-                    self.reader.seek(SeekFrom::Start(value_offset as u64))?;
-                    let color_map_bytes = (count as usize).saturating_mul(2);
-                    self.limits.reserve_usize(color_map_bytes)?;
-                    let mut color_map = Vec::with_capacity(count as usize);
-                    for _ in 0..count {
-                        color_map.push(self.reader.read_u16()?);
-                    }
-                    self.limits.free_usize(color_map_bytes);
-                    self.header.color_map = color_map;
-                }
-                322 => {
-                    self.header.tile_width = Some(read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?);
-                }
-                323 => {
-                    self.header.tile_length = Some(read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?);
-                }
-                324 => {
-                    self.header.tile_offsets =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
-                }
-                325 => {
-                    self.header.tile_byte_counts =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
-                }
-                32997 => {
-                    self.header.image_depth = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
-                }
-                32998 => {
-                    self.header.tile_depth = read_single_value(type_, value_offset, self.byte_order, &mut self.reader)?;
-                }
-                338 => {
-                    self.header.extra_samples =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
-                }
-                339 => {
-                    let raw_formats: Vec<u32> =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
-                    self.header.sample_format = raw_formats
-                        .into_iter()
-                        .map(|v| SampleFormat::try_from(v).unwrap_or(SampleFormat::UnsignedInt))
-                        .collect();
-                }
-                347 => {
-                    self.reader.seek(SeekFrom::Start(value_offset as u64))?;
-                    let jpeg_tables_len = count as usize;
-                    self.limits.reserve_usize(jpeg_tables_len)?;
-                    let mut jpeg_tables = vec![0u8; jpeg_tables_len];
-                    self.reader.read_exact(&mut jpeg_tables)?;
-                    self.limits.free_usize(jpeg_tables_len);
-                    self.header.jpeg_tables = jpeg_tables;
-                }
-                529 => {
-                    let rationals = read_multiple_rationals(count, value_offset, &mut self.reader, &mut self.limits)?;
-                    if rationals.len() >= 3 {
-                        self.header.ycbcr_coefficients = [rationals[0], rationals[1], rationals[2]];
-                    }
-                }
-                530 => {
-                    let values: Vec<u32> =
-                        read_multiple_values(type_, count, value_offset, self.byte_order, &mut self.reader, &mut self.limits)?;
-                    if values.len() >= 2 {
-                        self.header.ycbcr_sub_sampling = [values[0] as u16, values[1] as u16];
-                    }
-                }
-                532 => {
-                    let rationals = read_multiple_rationals(count, value_offset, &mut self.reader, &mut self.limits)?;
-                    if rationals.len() >= 6 {
-                        self.header.reference_black_white = [
-                            rationals[0],
-                            rationals[1],
-                            rationals[2],
-                            rationals[3],
-                            rationals[4],
-                            rationals[5],
-                        ];
-                    }
-                }
-                _ => {}
+        if let Some(v) = ifd.value(TiffTags::ImageWidth, &mut self.reader) {
+            self.header.image_width = v;
+        }
+        if let Some(v) = ifd.value(TiffTags::ImageLength, &mut self.reader) {
+            self.header.image_length = v;
+        }
+        if let Some(v) = ifd.values(TiffTags::BitsPerSample, &mut self.reader, &mut self.limits) {
+            self.header.bits_per_sample = v;
+        }
+        if let Some(v) = ifd.value::<u32, _>(TiffTags::Compression, &mut self.reader) {
+            self.header.compression = Compression::try_from(v as u16).unwrap_or(Compression::None);
+        }
+        if let Some(v) = ifd.value(TiffTags::PhotometricInterpretation, &mut self.reader) {
+            self.header.photometric_interpretation = v;
+        }
+        if let Some(v) = ifd.values(TiffTags::StripOffsets, &mut self.reader, &mut self.limits) {
+            self.header.strip_offsets = v;
+        }
+        if let Some(v) = ifd.value(TiffTags::SamplesPerPixel, &mut self.reader) {
+            self.header.samples_per_pixel = v;
+        }
+        if let Some(v) = ifd.value(TiffTags::RowsPerStrip, &mut self.reader) {
+            self.header.rows_per_strip = v;
+        }
+        if let Some(v) = ifd.values(TiffTags::StripByteCounts, &mut self.reader, &mut self.limits) {
+            self.header.strip_byte_counts = v;
+        }
+        if let Some(v) = ifd.rational(TiffTags::XResolution, &mut self.reader) {
+            self.header.x_resolution = v;
+        }
+        if let Some(v) = ifd.rational(TiffTags::YResolution, &mut self.reader) {
+            self.header.y_resolution = v;
+        }
+        if let Some(v) = ifd.value(TiffTags::PlanarConfiguration, &mut self.reader) {
+            self.header.planar_configuration = v;
+        }
+        if let Some(v) = ifd.value(TiffTags::ResolutionUnit, &mut self.reader) {
+            self.header.resolution_unit = v;
+        }
+        if let Some(v) = ifd.value::<u32, _>(TiffTags::Predictor, &mut self.reader) {
+            self.header.predictor = Predictor::try_from(v).unwrap_or(Predictor::None);
+        }
+        if let Some(v) = ifd.values(TiffTags::ColorMap, &mut self.reader, &mut self.limits) {
+            self.header.color_map = v;
+        }
+        if let Some(v) = ifd.value(TiffTags::TileWidth, &mut self.reader) {
+            self.header.tile_width = Some(v);
+        }
+        if let Some(v) = ifd.value(TiffTags::TileLength, &mut self.reader) {
+            self.header.tile_length = Some(v);
+        }
+        if let Some(v) = ifd.values(TiffTags::TileOffsets, &mut self.reader, &mut self.limits) {
+            self.header.tile_offsets = v;
+        }
+        if let Some(v) = ifd.values(TiffTags::TileByteCounts, &mut self.reader, &mut self.limits) {
+            self.header.tile_byte_counts = v;
+        }
+        if let Some(v) = ifd.value(TiffTags::ImageDepth, &mut self.reader) {
+            self.header.image_depth = v;
+        }
+        if let Some(v) = ifd.value(TiffTags::TileDepth, &mut self.reader) {
+            self.header.tile_depth = v;
+        }
+        if let Some(v) = ifd.values(TiffTags::ExtraSamples, &mut self.reader, &mut self.limits) {
+            self.header.extra_samples = v;
+        }
+        if let Some(v) = ifd.values::<u32, _>(TiffTags::SampleFormat, &mut self.reader, &mut self.limits) {
+            self.header.sample_format = v
+                .into_iter()
+                .map(|f| SampleFormat::try_from(f).unwrap_or(SampleFormat::UnsignedInt))
+                .collect();
+        }
+        if let Some(v) = ifd.byte_data(TiffTags::JPEGTables, &mut self.reader, &mut self.limits) {
+            self.header.jpeg_tables = v;
+        }
+        if let Some(v) = ifd.rationals(TiffTags::YCbCrCoefficients, &mut self.reader, &mut self.limits) {
+            if v.len() >= 3 {
+                self.header.ycbcr_coefficients = [v[0], v[1], v[2]];
             }
-
-            self.reader.seek(SeekFrom::Start(current_pos))?;
+        }
+        if let Some(v) = ifd.values::<u32, _>(TiffTags::YCbCrSubSampling, &mut self.reader, &mut self.limits) {
+            if v.len() >= 2 {
+                self.header.ycbcr_sub_sampling = [v[0] as u16, v[1] as u16];
+            }
+        }
+        if let Some(v) = ifd.rationals(TiffTags::ReferenceBlackWhite, &mut self.reader, &mut self.limits) {
+            if v.len() >= 6 {
+                self.header.reference_black_white = [v[0], v[1], v[2], v[3], v[4], v[5]];
+            }
         }
 
         self.width = self.header.image_width;
@@ -235,7 +185,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         self.limits.reserve_buffer(self.width, self.height, 4)?;
 
-        let next_ifd_offset = self.reader.read_u32().unwrap_or(0);
+        self.reader.seek(SeekFrom::Start(ifd_end))?;
 
         let is_tiled = self.header.tile_width.is_some() && !self.header.tile_offsets.is_empty();
         let is_volumetric = is_tiled && self.header.image_depth.max(1) > 1;
@@ -280,7 +230,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             }),
         });
 
-        Ok(next_ifd_offset)
+        Ok(ifd.next_ifd_offset)
     }
 
     fn bits_for(&self, channel: usize) -> u16 {
@@ -315,7 +265,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
     fn decompress_jpeg_strip(&self, strip_data: Vec<u8>) -> Vec<u8> {
         let jpeg_data = if !self.header.jpeg_tables.is_empty() {
-            self.splice_jpeg_tables(&self.header.jpeg_tables, &strip_data)
+            splice_jpeg_tables(&self.header.jpeg_tables, &strip_data)
         } else {
             strip_data
         };
@@ -326,32 +276,6 @@ impl<R: Read + Seek> TiffDecoder<R> {
         match jpeg_decoder.decode() {
             Ok(image) => image.as_rgb8(),
             Err(_) => Vec::new(),
-        }
-    }
-
-    fn splice_jpeg_tables(&self, tables: &[u8], strip: &[u8]) -> Vec<u8> {
-        if tables.len() < 4 || strip.len() < 2 {
-            return strip.to_vec();
-        }
-
-        let tables_body = if tables.starts_with(&[0xFF, 0xD8]) && tables.ends_with(&[0xFF, 0xD9]) {
-            &tables[2..tables.len() - 2]
-        } else {
-            tables
-        };
-
-        if strip.starts_with(&[0xFF, 0xD8]) {
-            let mut result = Vec::with_capacity(2 + tables_body.len() + strip.len() - 2);
-            result.extend_from_slice(&[0xFF, 0xD8]);
-            result.extend_from_slice(tables_body);
-            result.extend_from_slice(&strip[2..]);
-            result
-        } else {
-            let mut result = Vec::with_capacity(2 + tables_body.len() + strip.len());
-            result.extend_from_slice(&[0xFF, 0xD8]);
-            result.extend_from_slice(tables_body);
-            result.extend_from_slice(strip);
-            result
         }
     }
 
@@ -401,7 +325,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         let rows_per_strip = self.header.rows_per_strip;
         let image_width = self.width;
-        let is_planar = self.header.planar_configuration == super::types::PlanarConfiguration::Planar
+        let is_planar = self.header.planar_configuration == crate::utils::tiff::types::PlanarConfiguration::Planar
             && self.header.samples_per_pixel > 1;
         let mut bytes = Vec::new();
 
@@ -491,7 +415,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             self.reader.read_exact(&mut strip_data)?;
 
             let jpeg_data = if !jpeg_tables.is_empty() {
-                self.splice_jpeg_tables(&jpeg_tables, &strip_data)
+                splice_jpeg_tables(&jpeg_tables, &strip_data)
             } else {
                 strip_data
             };
@@ -644,7 +568,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
     fn read_tile_data(&mut self) -> VexelResult<Vec<u8>> {
         let is_jpeg = matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG);
-        let is_planar = self.header.planar_configuration == super::types::PlanarConfiguration::Planar
+        let is_planar = self.header.planar_configuration == crate::utils::tiff::types::PlanarConfiguration::Planar
             && self.header.samples_per_pixel > 1;
 
         let tile_width = self.header.tile_width.unwrap_or(self.width) as usize;
@@ -751,7 +675,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
             let tile_data = if is_jpeg {
                 let jpeg_data = if !jpeg_tables.is_empty() {
-                    self.splice_jpeg_tables(&jpeg_tables, &raw_tile)
+                    splice_jpeg_tables(&jpeg_tables, &raw_tile)
                 } else {
                     raw_tile
                 };

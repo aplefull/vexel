@@ -270,7 +270,7 @@ pub struct ScanComponent {
     pub ac_table_selector: u8,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Predictor {
     NoPrediction = 0,
     Ra = 1,

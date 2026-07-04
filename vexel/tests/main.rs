@@ -129,6 +129,11 @@ fn test_tiff() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_dng() -> Result<(), Box<dyn std::error::Error>> {
+    run_test_cases(formats::dng::test_cases())
+}
+
+#[test]
 fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
     let mut test_cases = Vec::new();
     test_cases.extend(formats::jpeg::test_cases());
@@ -142,6 +147,7 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
     test_cases.extend(formats::netpbm::test_cases());
     test_cases.extend(formats::hdr::test_cases());
     test_cases.extend(formats::tiff::test_cases());
+    test_cases.extend(formats::dng::test_cases());
 
     run_test_cases(test_cases)
 }

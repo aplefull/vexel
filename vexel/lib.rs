@@ -11,6 +11,7 @@ use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::tga::TgaDecoder;
+use crate::decoders::dng::DngDecoder;
 use crate::decoders::tiff::TiffDecoder;
 
 pub(crate) use utils::bitreader;
@@ -50,6 +51,7 @@ pub(crate) enum Decoders<R: Read + Seek> {
     Netpbm(NetPbmDecoder<R>),
     Hdr(HdrDecoder<R>),
     Tiff(TiffDecoder<R>),
+    Dng(DngDecoder<R>),
     Tga(TgaDecoder<R>),
     Jbig1(Jbig1Decoder<R>),
     Ico(IcoDecoder<R>),
@@ -114,6 +116,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Png => Decoders::Png(PngDecoder::new(reader)),
             ImageFormat::Hdr => Decoders::Hdr(HdrDecoder::new(reader)),
             ImageFormat::Tiff => Decoders::Tiff(TiffDecoder::new(reader)),
+            ImageFormat::Dng => Decoders::Dng(DngDecoder::new(reader)),
             ImageFormat::Tga => Decoders::Tga(TgaDecoder::new(reader)),
             ImageFormat::Jbig1 => Decoders::Jbig1(Jbig1Decoder::new(reader)),
             ImageFormat::Ico | ImageFormat::Cur => Decoders::Ico(IcoDecoder::new(reader)),
@@ -139,6 +142,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Bmp(d) => d.set_limits(limits),
             Decoders::Hdr(d) => d.set_limits(limits),
             Decoders::Tiff(d) => d.set_limits(limits),
+            Decoders::Dng(d) => d.set_limits(limits),
             Decoders::Tga(d) => d.set_limits(limits),
             Decoders::Jbig1(d) => d.set_limits(limits),
             Decoders::Ico(d) => d.set_limits(limits),
@@ -168,6 +172,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                     Decoders::Bmp(decoder) => impl_decode!(decoder),
                     Decoders::Hdr(decoder) => impl_decode!(decoder),
                     Decoders::Tiff(decoder) => impl_decode!(decoder),
+                    Decoders::Dng(decoder) => impl_decode!(decoder),
                     Decoders::Tga(decoder) => impl_decode!(decoder),
                     Decoders::Jbig1(decoder) => impl_decode!(decoder),
                     Decoders::Ico(decoder) => impl_decode!(decoder),
@@ -262,6 +267,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = tiff_decoder.get_info();
                 ImageInfo::Tiff(image_data)
             }
+            Decoders::Dng(_) => ImageInfo::Unknown,
             Decoders::Unknown => ImageInfo::Unknown,
         }
     }
@@ -340,11 +346,22 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             return Ok(ImageFormat::Hdr);
         }
 
-        // TIFF
+        // TIFF / DNG
         if (header.starts_with(b"II") || header.starts_with(b"MM"))
             && ((header[2] == 42 && header[3] == 0) || (header[2] == 0 && header[3] == 42))
         {
-            return Ok(ImageFormat::Tiff);
+            let is_le = header.starts_with(b"II");
+            let read_u16 = |b: &[u8], o: usize| -> u16 {
+                if is_le { u16::from_le_bytes([b[o], b[o + 1]]) } else { u16::from_be_bytes([b[o], b[o + 1]]) }
+            };
+            let read_u32 = |b: &[u8], o: usize| -> u32 {
+                if is_le { u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) }
+                else { u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) }
+            };
+            let ifd_offset = read_u32(&header, 4) as usize;
+            let is_dng = Vexel::tiff_has_dng_version(reader, ifd_offset, &read_u16, &read_u32);
+            reader.seek(SeekFrom::Start(0))?;
+            return if is_dng { Ok(ImageFormat::Dng) } else { Ok(ImageFormat::Tiff) };
         }
 
         // TGA
@@ -388,6 +405,39 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
         // If all else fails, let's try harder and pray that we get the right format
         Vexel::try_guess_format_harder(reader)
+    }
+
+    fn tiff_has_dng_version(
+        reader: &mut R,
+        ifd_offset: usize,
+        read_u16: &dyn Fn(&[u8], usize) -> u16,
+        _read_u32: &dyn Fn(&[u8], usize) -> u32,
+    ) -> bool {
+        if ifd_offset < 8 {
+            return false;
+        }
+        let mut count_buf = [0u8; 2];
+        if reader.seek(SeekFrom::Start(ifd_offset as u64)).is_err() {
+            return false;
+        }
+        if reader.read_exact(&mut count_buf).is_err() {
+            return false;
+        }
+        let num_entries = read_u16(&count_buf, 0) as usize;
+        if num_entries > 4096 {
+            return false;
+        }
+        let mut entry_buf = [0u8; 12];
+        for _ in 0..num_entries {
+            if reader.read_exact(&mut entry_buf).is_err() {
+                break;
+            }
+            let tag = read_u16(&entry_buf, 0);
+            if tag == 50706 {
+                return true;
+            }
+        }
+        false
     }
 
     fn try_guess_format_harder(reader: &mut R) -> VexelResult<ImageFormat> {

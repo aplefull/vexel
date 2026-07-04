@@ -8,7 +8,7 @@ use crate::decoders::jpeg_ls::types::JpegLsSectionInfo;
 use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::png::PngChunkInfo;
 use crate::decoders::tga::types::TgaSectionInfo;
-use crate::decoders::tiff::types::TiffSectionInfo;
+use crate::utils::tiff::types::TiffSectionInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
 use serde::Serialize;
 use std::fmt;
@@ -1193,7 +1193,7 @@ impl fmt::Display for TgaInfo {
 
 impl fmt::Display for TiffInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use crate::decoders::tiff::types::TiffSectionData;
+        use crate::utils::tiff::types::TiffSectionData;
 
         writeln!(f, "TIFF Information")?;
         writeln!(f, "=====================")?;

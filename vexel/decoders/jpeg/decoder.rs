@@ -717,6 +717,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
     }
 
+    pub fn precision(&self) -> u8 {
+        self.precision
+    }
+
     fn skip_unknown_marker_segment(&mut self, marker: &str, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
 
@@ -2140,9 +2144,19 @@ impl<R: Read + Seek> JpegDecoder<R> {
             diffs.reserve(width * height);
         }
 
-        // TODO handle restarts
+        let restart_interval = self.restart_interval as usize;
+        let mut mcus_until_restart = restart_interval;
+
         for _ in 0..height {
             for _ in 0..width {
+                if restart_interval > 0 {
+                    if mcus_until_restart == 0 {
+                        reader.clear_buffer();
+                        mcus_until_restart = restart_interval;
+                    }
+                    mcus_until_restart -= 1;
+                }
+
                 for (i, scan_component) in scan.components.iter().enumerate() {
                     let dc_table = match scan.dc_tables.iter().find(|t| t.id == scan_component.dc_table_selector) {
                         Some(table) => table,
@@ -2257,17 +2271,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
         predictor: Predictor,
         point_transform: u8,
         input_precision: u8,
+        at_interval_start: bool,
+        on_interval_first_line: bool,
         x: usize,
-        y: usize,
     ) -> i32 {
-        // TODO handle restarts as well
-        if x == 0 && y == 0 {
+        if at_interval_start {
             if input_precision > point_transform + 1 {
                 1 << (input_precision - point_transform - 1)
             } else {
                 0
             }
-        } else if y == 0 {
+        } else if on_interval_first_line {
             ra
         } else if x == 0 {
             rb
@@ -2301,7 +2315,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let mut samples = vec![vec![0u16; width * height]; components_count];
 
-        if predictor == Predictor::Ra {
+        let restart_interval = self.restart_interval as usize;
+
+        if predictor == Predictor::Ra && restart_interval == 0 {
             for component_index in 0..components_count {
                 let default_prediction = 1 << (self.precision - point_transform - 1);
 
@@ -2327,8 +2343,16 @@ impl<R: Read + Seek> JpegDecoder<R> {
         } else {
             for y in 0..height {
                 for x in 0..width {
+                    let index = y * width + x;
+
+                    let (at_interval_start, on_interval_first_line) = if restart_interval > 0 {
+                        let rel = index % restart_interval;
+                        (rel == 0, y == (index - rel) / width)
+                    } else {
+                        (index == 0, y == 0)
+                    };
+
                     for component_index in 0..components_count {
-                        let index = y * width + x;
                         let diff = differences[component_index][index];
 
                         let ra = if x > 0 {
@@ -2347,8 +2371,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
                             0
                         };
 
-                        let prediction =
-                            Self::predict(ra, rb, rc, predictor.clone(), point_transform, self.precision, x, y);
+                        let prediction = Self::predict(
+                            ra,
+                            rb,
+                            rc,
+                            predictor,
+                            point_transform,
+                            self.precision,
+                            at_interval_start,
+                            on_interval_first_line,
+                            x,
+                        );
 
                         samples[component_index][index] = (((prediction + diff) & 0xFFFF) as u16) << point_transform;
                     }
@@ -2361,138 +2394,142 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(samples)
     }
 
-    fn samples_to_image(&mut self, samples: Vec<Vec<u16>>) -> VexelResult<Image> {
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let components_count = samples.len();
+    fn interleaved_samples_to_image(&mut self, samples: Vec<u16>, components_count: usize) -> VexelResult<Image> {
+        let sample_bytes = samples.len().saturating_mul(2);
 
-        let output_bytes = width.saturating_mul(height).saturating_mul(components_count).saturating_mul(2);
-        self.limits.reserve_usize(output_bytes)?;
+        let (pixel_data, pixel_format) = if self.precision <= 8 {
+            let precision_correction = 8 - self.precision;
+            self.limits.reserve_usize(samples.len())?;
+            let pixels: Vec<u8> = samples.iter().map(|&s| (s as u8) << precision_correction).collect();
+            drop(samples);
+            self.limits.free_usize(sample_bytes);
 
-        let mut output: Vec<u16> = Vec::new();
-
-        for y in 0..height {
-            for x in 0..width {
-                let pixel_pos = y * width + x;
-
-                for component_index in 0..components_count {
-                    let sample = samples[component_index][pixel_pos];
-                    output.push(sample);
+            match components_count {
+                1 => (PixelData::L8(pixels), PixelFormat::L8),
+                2 => (PixelData::LA8(pixels), PixelFormat::LA8),
+                4 => (PixelData::RGBA8(pixels), PixelFormat::RGBA8),
+                _ => (PixelData::RGB8(pixels), PixelFormat::RGB8),
+            }
+        } else {
+            let precision_correction = 16 - self.precision;
+            let mut pixels = samples;
+            if precision_correction > 0 {
+                for v in pixels.iter_mut() {
+                    *v <<= precision_correction;
                 }
             }
-        }
 
-        let samples_bytes = width.saturating_mul(height).saturating_mul(components_count).saturating_mul(2);
-        drop(samples);
-        self.limits.free_usize(samples_bytes);
+            match components_count {
+                1 => (PixelData::L16(pixels), PixelFormat::L16),
+                2 => (PixelData::LA16(pixels), PixelFormat::LA16),
+                4 => (PixelData::RGBA16(pixels), PixelFormat::RGBA16),
+                _ => (PixelData::RGB16(pixels), PixelFormat::RGB16),
+            }
+        };
 
-        if components_count == 1 {
-            let frames = if self.precision <= 8 {
-                let precision_correction = 8 - self.precision;
-                let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
-                drop(output);
-                self.limits.free_usize(output_bytes);
-                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::L8(pixels), 0)])
-            } else {
-                let precision_correction = 16 - self.precision;
-                let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
-                drop(output);
-                self.limits.free_usize(output_bytes);
-                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::L16(pixels), 0)])
-            };
-
-            Ok(Image::new(
-                width as u32,
-                height as u32,
-                if self.precision <= 8 {
-                    PixelFormat::L8
-                } else {
-                    PixelFormat::L16
-                },
-                frames,
-            ))
-        } else if components_count == 4 {
-            let frames = if self.precision <= 8 {
-                let precision_correction = 8 - self.precision;
-                let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
-                drop(output);
-                self.limits.free_usize(output_bytes);
-                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::RGBA8(pixels), 0)])
-            } else {
-                let precision_correction = 16 - self.precision;
-                let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
-                drop(output);
-                self.limits.free_usize(output_bytes);
-                Vec::from([ImageFrame::new(
-                    width as u32,
-                    height as u32,
-                    PixelData::RGBA16(pixels),
-                    0,
-                )])
-            };
-
-            Ok(Image::new(
-                width as u32,
-                height as u32,
-                if self.precision <= 8 {
-                    PixelFormat::RGBA8
-                } else {
-                    PixelFormat::RGBA16
-                },
-                frames,
-            ))
-        } else {
-            let frames = if self.precision <= 8 {
-                let precision_correction = 8 - self.precision;
-                let pixels = output.iter().map(|&s| (s as u8) << precision_correction).collect();
-                drop(output);
-                self.limits.free_usize(output_bytes);
-                Vec::from([ImageFrame::new(width as u32, height as u32, PixelData::RGB8(pixels), 0)])
-            } else {
-                let precision_correction = 16 - self.precision;
-                let pixels: Vec<u16> = output.iter().map(|&s| s << precision_correction).collect();
-                drop(output);
-                self.limits.free_usize(output_bytes);
-                Vec::from([ImageFrame::new(
-                    width as u32,
-                    height as u32,
-                    PixelData::RGB16(pixels),
-                    0,
-                )])
-            };
-
-            Ok(Image::new(
-                width as u32,
-                height as u32,
-                if self.precision <= 8 {
-                    PixelFormat::RGB8
-                } else {
-                    PixelFormat::RGB16
-                },
-                frames,
-            ))
-        }
+        let frame = ImageFrame::new(self.width, self.height, pixel_data, 0);
+        Ok(Image::new(self.width, self.height, pixel_format, vec![frame]))
     }
 
     fn decode_lossless(&mut self) -> VexelResult<Image> {
-        // TODO there can be multiple scans in lossless mode somehow
-        let scan = match self.scans.first() {
-            Some(s) => s.clone(),
-            None => {
-                return Err(VexelError::from(Error::new(
-                    ErrorKind::InvalidData,
-                    "No scan data found",
-                )))
+        if self.scans.is_empty() {
+            return Err(VexelError::from(Error::new(ErrorKind::InvalidData, "No scan data found")));
+        }
+
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let num_components = self.components.len().max(1);
+
+        self.limits.free_usize(width.saturating_mul(height).saturating_mul(4));
+        let output_bytes = width
+            .saturating_mul(height)
+            .saturating_mul(num_components)
+            .saturating_mul(2);
+        self.limits.reserve_usize(output_bytes)?;
+        let mut output = vec![0u16; width * height * num_components];
+
+        let h_max = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1).max(1) as usize;
+        let v_max = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1).max(1) as usize;
+
+        let scans = std::mem::take(&mut self.scans);
+        for scan in &scans {
+            if scan.components.is_empty() {
+                continue;
             }
-        };
 
-        let differences = if self.coding_method == JpegCodingMethod::Arithmetic {
-            self.decode_differences_arithmetic(&scan)?
-        } else {
-            self.decode_differences(&scan)?
-        };
+            let component_indices: Vec<usize> = scan
+                .components
+                .iter()
+                .enumerate()
+                .map(|(i, sc)| {
+                    self.components.iter().position(|c| c.id == sc.component_id).unwrap_or_else(|| {
+                        log_warn!(
+                            "Scan component id {} not found among frame components, using scan order",
+                            sc.component_id
+                        );
+                        i.min(num_components - 1)
+                    })
+                })
+                .collect();
 
-        let point_transform = self.successive_approximation_low;
+            if scan.components.len() == 1 {
+                let ci = component_indices[0];
+                let (h_i, v_i) = self
+                    .components
+                    .get(ci)
+                    .map(|c| (c.horizontal_sampling_factor.max(1) as usize, c.vertical_sampling_factor.max(1) as usize))
+                    .unwrap_or((1, 1));
+                let comp_width = width.saturating_mul(h_i).div_ceil(h_max);
+                let comp_height = height.saturating_mul(v_i).div_ceil(v_max);
+
+                if comp_width == width && comp_height == height {
+                    self.decode_lossless_scan(scan, width, height, &[(ci, num_components)], &mut output);
+                } else {
+                    let plane_bytes = comp_width.saturating_mul(comp_height).saturating_mul(2);
+                    if self.limits.reserve_usize(plane_bytes).is_err() {
+                        log_warn!("Subsampled lossless component plane exceeds limits, skipping");
+                        continue;
+                    }
+                    let mut plane = vec![0u16; comp_width * comp_height];
+                    self.decode_lossless_scan(scan, comp_width, comp_height, &[(0, 1)], &mut plane);
+                    for y in 0..height {
+                        let sy = (y * comp_height / height.max(1)).min(comp_height.saturating_sub(1));
+                        for x in 0..width {
+                            let sx = (x * comp_width / width.max(1)).min(comp_width.saturating_sub(1));
+                            output[(y * width + x) * num_components + ci] = plane[sy * comp_width + sx];
+                        }
+                    }
+                    drop(plane);
+                    self.limits.free_usize(plane_bytes);
+                }
+            } else {
+                let mixed_sampling = scan.components.iter().any(|sc| {
+                    self.components
+                        .iter()
+                        .find(|c| c.id == sc.component_id)
+                        .map(|c| {
+                            (c.horizontal_sampling_factor.max(1) as usize, c.vertical_sampling_factor.max(1) as usize)
+                                != (h_max, v_max)
+                        })
+                        .unwrap_or(false)
+                });
+                if mixed_sampling {
+                    log_warn!(
+                        "Interleaved lossless scan with mixed sampling factors is not supported, decoding as full resolution"
+                    );
+                }
+
+                let views: Vec<(usize, usize)> = component_indices.iter().map(|&ci| (ci, num_components)).collect();
+                self.decode_lossless_scan(scan, width, height, &views, &mut output);
+            }
+        }
+        self.scans = scans;
+
+        self.interleaved_samples_to_image(output, num_components)
+    }
+
+    fn decode_lossless_scan(&mut self, scan: &ScanData, sw: usize, sh: usize, views: &[(usize, usize)], buf: &mut [u16]) {
+        let point_transform = scan.successive_low;
         let predictor = match scan.start_spectral {
             0 => Predictor::NoPrediction,
             1 => Predictor::Ra,
@@ -2508,9 +2545,248 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         };
 
-        let samples = self.reconstruct_samples(differences, predictor, point_transform)?;
+        if self.coding_method == JpegCodingMethod::Arithmetic {
+            self.decode_lossless_scan_arithmetic(scan, sw, sh, views, buf, predictor, point_transform);
+        } else {
+            self.decode_lossless_scan_huffman(scan, sw, sh, views, buf, predictor, point_transform);
+        }
+    }
 
-        self.samples_to_image(samples)
+    #[allow(clippy::too_many_arguments)]
+    fn decode_lossless_scan_huffman(
+        &mut self,
+        scan: &ScanData,
+        sw: usize,
+        sh: usize,
+        views: &[(usize, usize)],
+        buf: &mut [u16],
+        predictor: Predictor,
+        point_transform: u8,
+    ) {
+        let mut reader = JpegBitReader::new(scan.data.as_slice());
+
+        let tables: Vec<HuffmanTable> = scan
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, sc)| {
+                scan.dc_tables
+                    .iter()
+                    .find(|t| t.id == sc.dc_table_selector)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        log_warn!(
+                            "No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.",
+                            i
+                        );
+                        Self::default_lossless_dc_table()
+                    })
+            })
+            .collect();
+
+        let restart_interval = self.restart_interval as usize;
+        let mut mcus_until_restart = restart_interval;
+        let mut interval_start_row = 0usize;
+
+        let mut positions: Vec<usize> = views.iter().map(|&(offset, _)| offset).collect();
+        let row_strides: Vec<usize> = views.iter().map(|&(_, stride)| sw * stride).collect();
+
+        for y in 0..sh {
+            for x in 0..sw {
+                let (at_interval_start, on_interval_first_line) = if restart_interval > 0 {
+                    if mcus_until_restart == 0 {
+                        reader.clear_buffer();
+                        mcus_until_restart = restart_interval;
+                        interval_start_row = y;
+                    }
+                    let at_start = mcus_until_restart == restart_interval;
+                    mcus_until_restart -= 1;
+                    (at_start, y == interval_start_row)
+                } else {
+                    (x == 0 && y == 0, y == 0)
+                };
+
+                for (j, &(_, stride)) in views.iter().enumerate() {
+                    let bits_to_read = Self::get_next_symbol(&mut reader, &tables[j]);
+
+                    let diff = match bits_to_read {
+                        0 => 0,
+                        1..=15 => {
+                            let additional_bits = reader.read_bits(bits_to_read as u32) as i32;
+
+                            if additional_bits < (1 << (bits_to_read - 1)) {
+                                additional_bits + (-1 << bits_to_read) + 1
+                            } else {
+                                additional_bits
+                            }
+                        }
+                        16 => 32768,
+                        _ => {
+                            log_warn!("Invalid difference: {}", bits_to_read);
+                            0
+                        }
+                    };
+
+                    Self::reconstruct_lossless_sample(
+                        buf,
+                        positions[j],
+                        stride,
+                        row_strides[j],
+                        x,
+                        y,
+                        diff,
+                        predictor,
+                        point_transform,
+                        self.precision,
+                        at_interval_start,
+                        on_interval_first_line,
+                    );
+                    positions[j] += stride;
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_lossless_scan_arithmetic(
+        &mut self,
+        scan: &ScanData,
+        sw: usize,
+        sh: usize,
+        views: &[(usize, usize)],
+        buf: &mut [u16],
+        predictor: Predictor,
+        point_transform: u8,
+    ) {
+        let num_components = scan.components.len();
+
+        let l_values: Vec<u8> = scan
+            .components
+            .iter()
+            .map(|sc| {
+                scan.arith_dc_tables
+                    .iter()
+                    .find(|t| t.identifier == sc.dc_table_selector)
+                    .and_then(|t| t.values.first())
+                    .map(|v| v.length)
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        let u_values: Vec<u8> = scan
+            .components
+            .iter()
+            .map(|sc| {
+                scan.arith_dc_tables
+                    .iter()
+                    .find(|t| t.identifier == sc.dc_table_selector)
+                    .and_then(|t| t.values.first())
+                    .map(|v| v.value)
+                    .unwrap_or(1)
+            })
+            .collect();
+
+        let ctx_table_indices: Vec<usize> = scan
+            .components
+            .iter()
+            .map(|sc| (sc.dc_table_selector & 0x3) as usize)
+            .collect();
+
+        let mut all_contexts = vec![[0u8; 160]; 4];
+        let mut arith = ArithmeticDecoder::new(&scan.data);
+
+        let mut da: Vec<i32> = vec![0i32; num_components];
+        let mut db: Vec<Vec<i32>> = vec![vec![0i32; sw]; num_components];
+
+        let restart_interval = self.restart_interval as usize;
+        let mut mcus_until_restart = restart_interval;
+        let mut interval_start_row = 0usize;
+
+        let mut positions: Vec<usize> = views.iter().map(|&(offset, _)| offset).collect();
+        let row_strides: Vec<usize> = views.iter().map(|&(_, stride)| sw * stride).collect();
+
+        for y in 0..sh {
+            for v in da.iter_mut() {
+                *v = 0;
+            }
+
+            for x in 0..sw {
+                let (at_interval_start, on_interval_first_line) = if restart_interval > 0 {
+                    if mcus_until_restart == 0 {
+                        mcus_until_restart = restart_interval;
+                        interval_start_row = y;
+                    }
+                    let at_start = mcus_until_restart == restart_interval;
+                    mcus_until_restart -= 1;
+                    (at_start, y == interval_start_row)
+                } else {
+                    (x == 0 && y == 0, y == 0)
+                };
+
+                for (j, &(_, stride)) in views.iter().enumerate() {
+                    let diff = arith.decode_lossless_difference(
+                        &mut all_contexts[ctx_table_indices[j]],
+                        da[j],
+                        db[j][x],
+                        l_values[j],
+                        u_values[j],
+                    );
+
+                    da[j] = diff;
+                    db[j][x] = diff;
+
+                    Self::reconstruct_lossless_sample(
+                        buf,
+                        positions[j],
+                        stride,
+                        row_strides[j],
+                        x,
+                        y,
+                        diff,
+                        predictor,
+                        point_transform,
+                        self.precision,
+                        at_interval_start,
+                        on_interval_first_line,
+                    );
+                    positions[j] += stride;
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconstruct_lossless_sample(
+        buf: &mut [u16],
+        pos: usize,
+        stride: usize,
+        row_stride: usize,
+        x: usize,
+        y: usize,
+        diff: i32,
+        predictor: Predictor,
+        point_transform: u8,
+        precision: u8,
+        at_interval_start: bool,
+        on_interval_first_line: bool,
+    ) {
+        let ra = if x > 0 { buf[pos - stride] as i32 } else { 0 };
+        let rb = if y > 0 { buf[pos - row_stride] as i32 } else { 0 };
+        let rc = if x > 0 && y > 0 { buf[pos - row_stride - stride] as i32 } else { 0 };
+
+        let prediction = Self::predict(
+            ra,
+            rb,
+            rc,
+            predictor,
+            point_transform,
+            precision,
+            at_interval_start,
+            on_interval_first_line,
+            x,
+        );
+
+        buf[pos] = (((prediction + diff) & 0xFFFF) as u16) << point_transform;
     }
 
     fn decode_arithmetic_to_planes(&mut self, planes: &mut [ComponentPlane]) -> VexelResult<()> {

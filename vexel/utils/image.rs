@@ -49,6 +49,7 @@ pub enum ImageFormat {
     NetPbmP7,
     Hdr,
     Tiff,
+    Dng,
     Tga,
     Jbig1,
     Ico,

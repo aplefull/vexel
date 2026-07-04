@@ -1110,9 +1110,6 @@ pub fn capture_chunk_info<R: Read + Seek>(
 ) -> VexelResult<(u64, u32, String, u32)> {
     let pos_before = reader.stream_position()?;
 
-    // Reader is positioned right after chunk type (which was read into the window)
-    // Chunk structure: [length:4][type:4][data:length][crc:4]
-    // We're at position after type, so: start_offset = current - 4 (type) - 4 (length) = current - 8
     let start_offset = pos_before - 8;
 
     reader.seek(SeekFrom::Start(start_offset))?;

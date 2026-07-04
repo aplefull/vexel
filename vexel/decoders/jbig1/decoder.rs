@@ -514,9 +514,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             let lo_line_next = lo_line + 1;
 
             let lp2_off = lo_line * lbpl;
-            // C reference clamps lp1=lp2 when at the last lo-res row within the stripe
-            // ((i>>1) >= ll-1) OR at the last lo-res row of the image ((lo_line_next >= ly)).
-            // Missing the stripe-boundary clamp caused wrong context in the next stripe.
             let lp1_off = if (i >> 1) >= ll - 1 || lo_line_next >= ly as usize {
                 lp2_off
             } else {

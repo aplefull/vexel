@@ -9,4 +9,5 @@ pub mod image;
 pub mod info;
 pub mod logger;
 pub mod marker;
+pub mod tiff;
 pub mod types;
