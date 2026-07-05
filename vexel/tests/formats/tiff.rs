@@ -15,7 +15,15 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "tiff/RAW_KODAK_DCS460D_FILEVERSION_3.tiff",
             validation: None,
             comparison: Comparison::Exact {
-                reference_path: "tiff/RAW_KODAK_DCS460D_FILEVERSION_3.avif",
+                reference_path: "tiff/RAW_KODAK_DCS460D_FILEVERSION_3.jxl",
+            },
+        },
+        TestCase {
+            name: "TIFF RAW_KODAK_DCS560C",
+            path: "tiff/RAW_KODAK_DCS560C.tiff",
+            validation: None,
+            comparison: Comparison::Exact {
+                reference_path: "tiff/RAW_KODAK_DCS560C.jxl",
             },
         },
         TestCase {

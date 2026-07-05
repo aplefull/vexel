@@ -1,4 +1,13 @@
 use crate::utils::deflate::ZlibDecoder;
+use crate::utils::tiff::types::Predictor;
+
+pub fn predictor_x_factor(predictor: Predictor) -> u32 {
+    match predictor {
+        Predictor::FloatingPointX2 => 2,
+        Predictor::FloatingPointX4 => 4,
+        _ => 1,
+    }
+}
 
 const LZW_CLEAR_CODE: u16 = 256;
 const LZW_EOI_CODE: u16 = 257;

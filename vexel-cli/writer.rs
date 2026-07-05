@@ -16,6 +16,10 @@ use jpegxl_sys::encoder::encode::{
 };
 use jpegxl_sys::metadata::codestream_header::{JxlAnimationHeader, JxlBasicInfo};
 
+fn scale_to_u16(value: f64) -> u16 {
+    (value.clamp(0.0, 1.0) * 65535.0) as u16
+}
+
 struct PixelInfo {
     data_type: JxlDataType,
     num_channels: u32,
@@ -206,32 +210,116 @@ impl Writer {
         let width = image.width();
         let height = image.height();
 
-        let frame = image.frames()[0].clone();
-        let converted = if image.has_alpha() {
-            frame.into_rgba8()
-        } else {
-            frame.into_rgb8()
+        let (magic, maxval): (&[u8], &[u8]) = match image.frames()[0].pixels() {
+            PixelData::RGB8(_) | PixelData::RGBA8(_) => (b"P6", b"255"),
+            PixelData::RGB16(_) | PixelData::RGBA16(_) => (b"P6", b"65535"),
+            PixelData::RGB32F(_) | PixelData::RGBA32F(_) => (b"P6", b"65535"),
+            PixelData::RGB64F(_) | PixelData::RGBA64F(_) => (b"P6", b"65535"),
+            PixelData::L1(_) => (b"P5", b"255"),
+            PixelData::L8(_) | PixelData::LA8(_) => (b"P5", b"255"),
+            PixelData::L16(_) | PixelData::LA16(_) => (b"P5", b"65535"),
+            PixelData::L32F(_) | PixelData::LA32F(_) => (b"P5", b"65535"),
+            PixelData::L64F(_) | PixelData::LA64F(_) => (b"P5", b"65535"),
         };
-        let pixels = converted.pixels().as_bytes();
 
-        file.write_all(b"P6\n")?;
+        file.write_all(magic)?;
+        file.write_all(b"\n")?;
         file.write_all(format!("{} {}\n", width, height).as_bytes())?;
-        file.write_all(b"255\n")?;
+        file.write_all(maxval)?;
+        file.write_all(b"\n")?;
 
-        for y in 0..height {
-            for x in 0..width {
-                let pixel_index = ((y * width + x) * if image.has_alpha() { 4 } else { 3 }) as usize;
-
-                let r = pixels[pixel_index];
-                let g = pixels[pixel_index + 1];
-                let b = pixels[pixel_index + 2];
-
-                file.write_all(&[r, g, b])?;
+        match image.frames()[0].pixels() {
+            PixelData::RGB8(pixels) => {
+                file.write_all(pixels)?;
+            }
+            PixelData::RGBA8(pixels) => {
+                for chunk in pixels.chunks_exact(4) {
+                    file.write_all(&chunk[..3])?;
+                }
+            }
+            PixelData::RGB16(pixels) => {
+                for value in pixels {
+                    file.write_all(&value.to_be_bytes())?;
+                }
+            }
+            PixelData::RGBA16(pixels) => {
+                for chunk in pixels.chunks_exact(4) {
+                    for value in &chunk[..3] {
+                        file.write_all(&value.to_be_bytes())?;
+                    }
+                }
+            }
+            PixelData::RGB32F(pixels) => {
+                for &value in pixels {
+                    file.write_all(&scale_to_u16(value as f64).to_be_bytes())?;
+                }
+            }
+            PixelData::RGBA32F(pixels) => {
+                for chunk in pixels.chunks_exact(4) {
+                    for &value in &chunk[..3] {
+                        file.write_all(&scale_to_u16(value as f64).to_be_bytes())?;
+                    }
+                }
+            }
+            PixelData::RGB64F(pixels) => {
+                for &value in pixels {
+                    file.write_all(&scale_to_u16(value).to_be_bytes())?;
+                }
+            }
+            PixelData::RGBA64F(pixels) => {
+                for chunk in pixels.chunks_exact(4) {
+                    for &value in &chunk[..3] {
+                        file.write_all(&scale_to_u16(value).to_be_bytes())?;
+                    }
+                }
+            }
+            PixelData::L1(pixels) => {
+                for &value in pixels {
+                    file.write_all(&[value * 255])?;
+                }
+            }
+            PixelData::L8(pixels) => {
+                file.write_all(pixels)?;
+            }
+            PixelData::L16(pixels) => {
+                for value in pixels {
+                    file.write_all(&value.to_be_bytes())?;
+                }
+            }
+            PixelData::LA8(pixels) => {
+                for chunk in pixels.chunks_exact(2) {
+                    file.write_all(&chunk[..1])?;
+                }
+            }
+            PixelData::LA16(pixels) => {
+                for chunk in pixels.chunks_exact(2) {
+                    file.write_all(&chunk[0].to_be_bytes())?;
+                }
+            }
+            PixelData::L32F(pixels) => {
+                for &value in pixels {
+                    file.write_all(&scale_to_u16(value as f64).to_be_bytes())?;
+                }
+            }
+            PixelData::LA32F(pixels) => {
+                for chunk in pixels.chunks_exact(2) {
+                    file.write_all(&scale_to_u16(chunk[0] as f64).to_be_bytes())?;
+                }
+            }
+            PixelData::L64F(pixels) => {
+                for &value in pixels {
+                    file.write_all(&scale_to_u16(value).to_be_bytes())?;
+                }
+            }
+            PixelData::LA64F(pixels) => {
+                for chunk in pixels.chunks_exact(2) {
+                    file.write_all(&scale_to_u16(chunk[0]).to_be_bytes())?;
+                }
             }
         }
 
         Ok(())
-    }   
+    }
 
     pub fn write_image(image: &Image, format: &str, output_path: &PathBuf) -> Result<(), Error> {
         Writer::validate_image(image)?;

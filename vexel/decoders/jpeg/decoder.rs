@@ -623,6 +623,15 @@ enum JpegColorspace {
     Unknown,
 }
 
+struct LosslessComponent<'t> {
+    pos: usize,
+    stride: usize,
+    row_stride: usize,
+    table: &'t HuffmanTable,
+    ra: i32,
+    rb: i32,
+}
+
 struct HierarchicalFrame {
     width: u32,
     height: u32,
@@ -666,6 +675,7 @@ pub struct JpegDecoder<R: Read + Seek> {
     pending_expand_h: bool,
     pending_expand_v: bool,
     hierarchical_frames: Vec<HierarchicalFrame>,
+    lossless_ssss16_is_min: bool,
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
@@ -703,7 +713,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
             pending_expand_h: false,
             pending_expand_v: false,
             hierarchical_frames: Vec::new(),
+            lossless_ssss16_is_min: true,
         }
+    }
+
+    pub fn set_lossless_ssss16_is_min(&mut self, is_min: bool) {
+        self.lossless_ssss16_is_min = is_min;
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
@@ -2179,7 +2194,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                 additional_bits
                             }
                         }
-                        16 => 32768,
+                        16 if self.lossless_ssss16_is_min => 32768,
+                        16 => {
+                            let v = reader.read_bits(16) as i32;
+                            if v < (1 << 15) { v - 65535 } else { v }
+                        }
                         _ => {
                             log_warn!("Invalid difference: {}", bits_to_read);
                             0
@@ -2563,17 +2582,28 @@ impl<R: Read + Seek> JpegDecoder<R> {
         predictor: Predictor,
         point_transform: u8,
     ) {
-        let mut reader = JpegBitReader::new(scan.data.as_slice());
+        let total = sw.saturating_mul(sh);
+        if total == 0 || views.is_empty() {
+            return;
+        }
 
-        let tables: Vec<HuffmanTable> = scan
-            .components
-            .iter()
-            .enumerate()
-            .map(|(i, sc)| {
-                scan.dc_tables
-                    .iter()
-                    .find(|t| t.id == sc.dc_table_selector)
-                    .cloned()
+        let views_in_bounds = views.iter().all(|&(offset, stride)| {
+            (total - 1)
+                .checked_mul(stride)
+                .and_then(|last| last.checked_add(offset))
+                .is_some_and(|last| last < buf.len())
+        });
+
+        if !views_in_bounds {
+            log_warn!("Lossless scan views exceed sample buffer bounds, skipping scan");
+            return;
+        }
+
+        let tables: Vec<HuffmanTable> = (0..views.len())
+            .map(|i| {
+                scan.components
+                    .get(i)
+                    .and_then(|sc| scan.dc_tables.iter().find(|t| t.id == sc.dc_table_selector).cloned())
                     .unwrap_or_else(|| {
                         log_warn!(
                             "No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.",
@@ -2584,65 +2614,226 @@ impl<R: Read + Seek> JpegDecoder<R> {
             })
             .collect();
 
+        let mut reader = JpegBitReader::new(scan.data.as_slice());
         let restart_interval = self.restart_interval as usize;
-        let mut mcus_until_restart = restart_interval;
-        let mut interval_start_row = 0usize;
+        let default_prediction = if self.precision > point_transform + 1 {
+            1i32 << (self.precision - point_transform - 1)
+        } else {
+            0
+        };
 
-        let mut positions: Vec<usize> = views.iter().map(|&(offset, _)| offset).collect();
-        let row_strides: Vec<usize> = views.iter().map(|&(_, stride)| sw * stride).collect();
+        let make = |i: usize| LosslessComponent {
+            pos: views[i].0,
+            stride: views[i].1,
+            row_stride: sw * views[i].1,
+            table: &tables[i],
+            ra: 0,
+            rb: 0,
+        };
 
-        for y in 0..sh {
-            for x in 0..sw {
-                let (at_interval_start, on_interval_first_line) = if restart_interval > 0 {
-                    if mcus_until_restart == 0 {
-                        reader.clear_buffer();
-                        mcus_until_restart = restart_interval;
-                        interval_start_row = y;
-                    }
-                    let at_start = mcus_until_restart == restart_interval;
-                    mcus_until_restart -= 1;
-                    (at_start, y == interval_start_row)
-                } else {
-                    (x == 0 && y == 0, y == 0)
-                };
+        let ssss16_is_min = self.lossless_ssss16_is_min;
 
-                for (j, &(_, stride)) in views.iter().enumerate() {
-                    let bits_to_read = Self::get_next_symbol(&mut reader, &tables[j]);
+        macro_rules! run {
+            ($components:expr, $predict:expr) => {
+                Self::lossless_huffman_loop(
+                    &mut reader,
+                    sw,
+                    total,
+                    buf,
+                    restart_interval,
+                    point_transform,
+                    default_prediction,
+                    ssss16_is_min,
+                    $components,
+                    $predict,
+                )
+            };
+        }
 
-                    let diff = match bits_to_read {
-                        0 => 0,
-                        1..=15 => {
-                            let additional_bits = reader.read_bits(bits_to_read as u32) as i32;
-
-                            if additional_bits < (1 << (bits_to_read - 1)) {
-                                additional_bits + (-1 << bits_to_read) + 1
-                            } else {
-                                additional_bits
-                            }
-                        }
-                        16 => 32768,
-                        _ => {
-                            log_warn!("Invalid difference: {}", bits_to_read);
-                            0
-                        }
-                    };
-
-                    Self::reconstruct_lossless_sample(
-                        buf,
-                        positions[j],
-                        stride,
-                        row_strides[j],
-                        x,
-                        y,
-                        diff,
-                        predictor,
-                        point_transform,
-                        self.precision,
-                        at_interval_start,
-                        on_interval_first_line,
-                    );
-                    positions[j] += stride;
+        macro_rules! dispatch {
+            ($predict:expr) => {
+                match views.len() {
+                    1 => run!([make(0)], $predict),
+                    2 => run!([make(0), make(1)], $predict),
+                    3 => run!([make(0), make(1), make(2)], $predict),
+                    4 => run!([make(0), make(1), make(2), make(3)], $predict),
+                    n => run!((0..n).map(make).collect::<Vec<_>>(), $predict),
                 }
+            };
+        }
+
+        match predictor {
+            Predictor::NoPrediction => dispatch!(|_, _, _| 0),
+            Predictor::Ra => dispatch!(|ra, _, _| ra),
+            Predictor::Rb => dispatch!(|_, rb, _| rb),
+            Predictor::Rc => dispatch!(|_, _, rc| rc),
+            Predictor::RaRbRc1 => dispatch!(|ra, rb, rc| ra + rb - rc),
+            Predictor::RaRbRc2 => dispatch!(|ra, rb, rc| ra + ((rb - rc) >> 1)),
+            Predictor::RaRbRc3 => dispatch!(|ra, rb, rc| rb + ((ra - rc) >> 1)),
+            Predictor::RaRb => dispatch!(|ra, rb, _| (ra + rb) / 2),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lossless_huffman_loop<'t, C, F>(
+        reader: &mut JpegBitReader<'_>,
+        sw: usize,
+        total: usize,
+        buf: &mut [u16],
+        restart_interval: usize,
+        point_transform: u8,
+        default_prediction: i32,
+        ssss16_is_min: bool,
+        mut components: C,
+        predict: F,
+    ) where
+        C: AsMut<[LosslessComponent<'t>]>,
+        F: Fn(i32, i32, i32) -> i32,
+    {
+        let components = components.as_mut();
+
+        let interval = if restart_interval > 0 { restart_interval } else { total };
+        let mut mcu = 0usize;
+
+        while mcu < total {
+            if mcu > 0 {
+                reader.clear_buffer();
+            }
+            let end = (mcu + interval).min(total);
+
+            for c in components.iter_mut() {
+                let diff = Self::decode_lossless_diff(reader, c.table, ssss16_is_min);
+                let value = (((default_prediction + diff) & 0xFFFF) as u16) << point_transform;
+                unsafe { *buf.get_unchecked_mut(c.pos) = value };
+                c.pos += c.stride;
+                c.ra = value as i32;
+            }
+            mcu += 1;
+
+            let first_row_end = (((mcu - 1) / sw + 1) * sw).min(end);
+            while mcu < first_row_end {
+                for c in components.iter_mut() {
+                    let diff = Self::decode_lossless_diff(reader, c.table, ssss16_is_min);
+                    let value = (((c.ra + diff) & 0xFFFF) as u16) << point_transform;
+                    unsafe { *buf.get_unchecked_mut(c.pos) = value };
+                    c.pos += c.stride;
+                    c.ra = value as i32;
+                }
+                mcu += 1;
+            }
+
+            while mcu < end {
+                let row_end = (mcu + sw).min(end);
+
+                for c in components.iter_mut() {
+                    let diff = Self::decode_lossless_diff(reader, c.table, ssss16_is_min);
+                    let rb = unsafe { *buf.get_unchecked(c.pos - c.row_stride) } as i32;
+                    let value = (((rb + diff) & 0xFFFF) as u16) << point_transform;
+                    unsafe { *buf.get_unchecked_mut(c.pos) = value };
+                    c.pos += c.stride;
+                    c.ra = value as i32;
+                    c.rb = rb;
+                }
+                mcu += 1;
+
+                while mcu < row_end {
+                    for c in components.iter_mut() {
+                        let diff = Self::decode_lossless_diff(reader, c.table, ssss16_is_min);
+                        let rb = unsafe { *buf.get_unchecked(c.pos - c.row_stride) } as i32;
+                        let value = (((predict(c.ra, rb, c.rb) + diff) & 0xFFFF) as u16) << point_transform;
+                        unsafe { *buf.get_unchecked_mut(c.pos) = value };
+                        c.pos += c.stride;
+                        c.ra = value as i32;
+                        c.rb = rb;
+                    }
+                    mcu += 1;
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn decode_lossless_diff(reader: &mut JpegBitReader<'_>, table: &HuffmanTable, ssss16_is_min: bool) -> i32 {
+        if !reader.ensure(32) {
+            return Self::decode_lossless_diff_tail(reader, table, ssss16_is_min);
+        }
+
+        let window = reader.peek_unchecked(32);
+        let entry = unsafe { *table.fast_lookup.get_unchecked((window >> 23) as usize) };
+        let ssss = if entry >> 16 != 0 {
+            let len = entry & 0xFF;
+            let ssss = (entry >> 8) & 0xFF;
+            if ssss.wrapping_sub(1) < 15 {
+                reader.consume(len + ssss);
+                let v = ((window >> (32 - len - ssss)) & ((1 << ssss) - 1)) as i32;
+                return v + (((v >> (ssss - 1)) - 1) & ((-1i32 << ssss) + 1));
+            }
+            reader.consume(len);
+            ssss
+        } else {
+            reader.consume(9);
+            let mut code = window >> 23;
+            let mut symbol = u32::MAX;
+            for i in 9..16 {
+                code = (code << 1) | reader.read_bits_unchecked(1);
+                let first = unsafe { *table.first_code.get_unchecked(i) };
+                if first != u32::MAX {
+                    let count =
+                        unsafe { table.offsets.get_unchecked(i + 1).wrapping_sub(*table.offsets.get_unchecked(i)) };
+                    if code >= first && code - first < count {
+                        let idx = unsafe { *table.offsets.get_unchecked(i) } as usize + (code - first) as usize;
+                        symbol = unsafe { *table.symbols.get_unchecked(idx) } as u32;
+                        break;
+                    }
+                }
+            }
+            if symbol == u32::MAX {
+                log_warn!("Invalid Huffman code: {}, replacing with 0", code);
+                0
+            } else {
+                symbol
+            }
+        };
+
+        match ssss {
+            0 => 0,
+            1..=15 => {
+                let v = reader.read_bits(ssss) as i32;
+                v + (((v >> (ssss - 1)) - 1) & ((-1i32 << ssss) + 1))
+            }
+            16 if ssss16_is_min => 32768,
+            16 => {
+                let v = reader.read_bits(16) as i32;
+                v + (((v >> 15) - 1) & -65535)
+            }
+            _ => {
+                log_warn!("Invalid difference: {}", ssss);
+                0
+            }
+        }
+    }
+
+    #[cold]
+    fn decode_lossless_diff_tail(reader: &mut JpegBitReader<'_>, table: &HuffmanTable, ssss16_is_min: bool) -> i32 {
+        let ssss = Self::get_next_symbol(reader, table);
+        match ssss {
+            0 => 0,
+            1..=15 => {
+                let v = reader.read_bits(ssss as u32) as i32;
+                if v < (1 << (ssss - 1)) {
+                    v + (-1i32 << ssss) + 1
+                } else {
+                    v
+                }
+            }
+            16 if ssss16_is_min => 32768,
+            16 => {
+                let v = reader.read_bits(16) as i32;
+                if v < (1 << 15) { v - 65535 } else { v }
+            }
+            _ => {
+                log_warn!("Invalid difference: {}", ssss);
+                0
             }
         }
     }

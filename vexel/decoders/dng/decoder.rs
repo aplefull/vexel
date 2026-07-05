@@ -2,11 +2,14 @@ use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
-    decompress_lzw, decompress_packbits,
+    decompress_lzw, decompress_packbits, predictor_x_factor,
 };
 use crate::utils::tiff::ifd::{self, Ifd};
+use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, half_to_f32, u16_from_bytes};
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
-use crate::utils::tiff::types::{Compression, PhotometricInterpretation, Predictor, TiffHeader, TiffTags};
+use crate::utils::tiff::types::{
+    Compression, PhotometricInterpretation, Predictor, SampleFormat, TiffHeader, TiffTags,
+};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{ImageFrame, PixelData};
 use crate::utils::types::ByteOrder;
@@ -51,6 +54,7 @@ pub struct DngMetadata {
     pub cfa_pattern: Option<CfaPattern>,
     pub cfa_plane_color: Vec<u8>,
     pub linearization_table: Option<Vec<u16>>,
+    pub gray_response_curve: Option<Vec<u16>>,
     pub black_level: Option<BlackLevel>,
     pub black_level_repeat_rows: u32,
     pub black_level_repeat_cols: u32,
@@ -86,7 +90,9 @@ pub struct DngDecoder<R: Read + Seek> {
     dng: DngMetadata,
     width: u32,
     height: u32,
+    cfa_phase: (u32, u32),
     lossy_curves: Option<Box<[[u16; 256]; 3]>>,
+    float_scale: Option<f32>,
 }
 
 impl<R: Read + Seek> DngDecoder<R> {
@@ -99,7 +105,9 @@ impl<R: Read + Seek> DngDecoder<R> {
             dng: DngMetadata::default(),
             width: 0,
             height: 0,
+            cfa_phase: (0, 0),
             lossy_curves: None,
+            float_scale: None,
         }
     }
 
@@ -220,6 +228,17 @@ impl<R: Read + Seek> DngDecoder<R> {
                 self.header.jpeg_tables = v;
             }
         }
+        if is_raw_ifd || self.dng.gray_response_curve.is_none() {
+            if let Some(entry) = ifd.entry(TiffTags::GrayResponseCurve) {
+                if entry.count >= 2 {
+                    if let Some(table) = ifd.values::<u16, _>(TiffTags::GrayResponseCurve, &mut self.reader, &mut self.limits) {
+                        if !table.is_empty() {
+                            self.dng.gray_response_curve = Some(table);
+                        }
+                    }
+                }
+            }
+        }
 
         if let Some(v) = ifd.values::<u32, _>(TiffTags::DNGVersion, &mut self.reader, &mut self.limits) {
             if v.len() >= 4 {
@@ -256,6 +275,14 @@ impl<R: Read + Seek> DngDecoder<R> {
     }
 
     fn read_raster_calibration_tags(&mut self, ifd: &Ifd) {
+        if let Some(v) = ifd.values::<u32, _>(TiffTags::SampleFormat, &mut self.reader, &mut self.limits) {
+            if !v.is_empty() {
+                self.header.sample_format = v
+                    .into_iter()
+                    .map(|f| SampleFormat::try_from(f).unwrap_or(SampleFormat::UnsignedInt))
+                    .collect();
+            }
+        }
         if let Some(v) = ifd.values::<u32, _>(TiffTags::CFAPlaneColor, &mut self.reader, &mut self.limits) {
             self.dng.cfa_plane_color = v.into_iter().map(|x| x as u8).collect();
         }
@@ -303,6 +330,24 @@ impl<R: Read + Seek> DngDecoder<R> {
                 }
             }
         }
+
+        let delta_avg = self.read_black_level_delta_avg(ifd, TiffTags::BlackLevelDeltaH)
+            + self.read_black_level_delta_avg(ifd, TiffTags::BlackLevelDeltaV);
+        if delta_avg != 0.0 {
+            self.dng.black_level = Some(match self.dng.black_level.take() {
+                None => BlackLevel::Uniform(delta_avg),
+                Some(BlackLevel::Uniform(v)) => BlackLevel::Uniform(v + delta_avg),
+                Some(BlackLevel::PerChannel(v)) => {
+                    BlackLevel::PerChannel(v.into_iter().map(|x| x + delta_avg).collect())
+                }
+                Some(BlackLevel::Spatial { values, repeat_rows, repeat_cols }) => BlackLevel::Spatial {
+                    values: values.into_iter().map(|x| x + delta_avg).collect(),
+                    repeat_rows,
+                    repeat_cols,
+                },
+            });
+        }
+
         if self.dng.white_level.is_empty() {
             if let Some(v) = ifd.values(TiffTags::WhiteLevel, &mut self.reader, &mut self.limits) {
                 self.dng.white_level = v;
@@ -334,6 +379,22 @@ impl<R: Read + Seek> DngDecoder<R> {
                 let (count, value_offset) = (entry.count, entry.value_offset);
                 self.read_opcode_list(count, value_offset);
             }
+        }
+    }
+
+    fn read_black_level_delta_avg(&mut self, ifd: &Ifd, tag: TiffTags) -> f32 {
+        let Some(entry) = ifd.entry(tag) else { return 0.0 };
+        let values = if entry.field_type == 10 {
+            ifd.signed_rationals(tag, &mut self.reader, &mut self.limits)
+        } else {
+            ifd.rationals(tag, &mut self.reader, &mut self.limits)
+        }
+        .unwrap_or_default();
+
+        if values.is_empty() {
+            0.0
+        } else {
+            values.iter().sum::<f32>() / values.len() as f32
         }
     }
 
@@ -456,8 +517,8 @@ impl<R: Read + Seek> DngDecoder<R> {
 
     fn cfa_color(&self, x: u32, y: u32) -> usize {
         let pattern = self.dng.cfa_pattern.unwrap_or(CfaPattern::Rggb);
-        let row = (y & 1) as usize;
-        let col = (x & 1) as usize;
+        let row = ((y & 1) ^ self.cfa_phase.0) as usize;
+        let col = ((x & 1) ^ self.cfa_phase.1) as usize;
         match pattern {
             CfaPattern::Rggb => [[0usize, 1], [1, 2]][row][col],
             CfaPattern::Bggr => [[2usize, 1], [1, 0]][row][col],
@@ -473,6 +534,34 @@ impl<R: Read + Seek> DngDecoder<R> {
             dng: &self.dng,
             byte_order: self.byte_order,
             lossy_curves: self.lossy_curves.as_deref(),
+            float_scale: self.float_scale,
+        }
+    }
+
+    fn prepare_float_scale(&mut self) {
+        let bps = self.header.bits_per_sample.first().copied().unwrap_or(16);
+        let is_float = self.header.sample_format.first().copied() == Some(SampleFormat::Float);
+        if !is_float || !matches!(bps, 16 | 24 | 32) {
+            return;
+        }
+
+        self.dng.linearization_table = None;
+
+        let tmax = self.dng.white_level.first().copied().map(|w| w as f32).unwrap_or(1.0).max(f32::MIN_POSITIVE);
+        if (4096.0..=32767.0).contains(&tmax) {
+            self.float_scale = Some(1.0);
+            return;
+        }
+
+        let multip = 16383.0 / tmax;
+        self.float_scale = Some(multip);
+        self.dng.white_level = vec![16383];
+        if let Some(black) = &mut self.dng.black_level {
+            match black {
+                BlackLevel::Uniform(v) => *v *= multip,
+                BlackLevel::PerChannel(v) => v.iter_mut().for_each(|x| *x *= multip),
+                BlackLevel::Spatial { values, .. } => values.iter_mut().for_each(|x| *x *= multip),
+            }
         }
     }
 
@@ -642,11 +731,53 @@ impl<R: Read + Seek> DngDecoder<R> {
         *raw = cropped;
         self.width = new_width as u32;
         self.height = new_height as u32;
+        self.cfa_phase = ((self.cfa_phase.0 + top) & 1, (self.cfa_phase.1 + left) & 1);
     }
 
     fn crop_to_active_area(&mut self, raw: &mut Vec<u16>, spp: usize) {
         if let Some([top, left, bottom, right]) = self.dng.active_area {
             self.crop_raw(raw, spp, top, left, bottom, right);
+        }
+    }
+
+    fn kodak_dcs_model(&self) -> Option<String> {
+        if !self.dng.make.to_uppercase().starts_with("KODAK") {
+            return None;
+        }
+        let model = self.dng.model.to_uppercase();
+        if model.starts_with("DCS") || model.starts_with("EOSDCS") || model.starts_with("NC2000") {
+            Some(model)
+        } else {
+            None
+        }
+    }
+
+    fn apply_kodak_dcs_defaults(&mut self, ifd: &Ifd) {
+        let Some(model) = self.kodak_dcs_model() else { return };
+
+        if !self.dng.photometric_raw && self.header.samples_per_pixel <= 1 {
+            self.dng.photometric_raw = true;
+            self.dng.photometric_cfa = true;
+        }
+
+        if self.dng.photometric_cfa && self.dng.cfa_pattern.is_none() && !ifd.has(TiffTags::CFAPattern) {
+            self.dng.cfa_pattern = Some(CfaPattern::Grbg);
+        }
+
+        if self.dng.color_matrix1.is_none() && self.dng.color_matrix2.is_none() {
+            for (prefix, black, matrix) in KODAK_DCS_COLOR_TABLE {
+                if model.starts_with(prefix) {
+                    let mut cam_xyz = [[0.0f32; 3]; 3];
+                    for (i, &v) in matrix.iter().enumerate() {
+                        cam_xyz[i / 3][i % 3] = v as f32 / 10000.0;
+                    }
+                    self.dng.color_matrix1 = Some(cam_xyz);
+                    if *black > 0 && self.dng.black_level.is_none() {
+                        self.dng.black_level = Some(BlackLevel::Uniform(*black as f32));
+                    }
+                    break;
+                }
+            }
         }
     }
 
@@ -657,24 +788,57 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let make = self.dng.make.to_uppercase();
         let model = self.dng.model.to_uppercase();
-        let is_pentax = make.starts_with("PENTAX") || make.starts_with("RICOH");
+        let is_pentax = make.starts_with("PENTAX");
         let is_samsung = make.starts_with("SAMSUNG");
-        if !is_pentax && !is_samsung {
-            return;
+        let is_ricoh = make.starts_with("RICOH");
+        let is_kodak = make.starts_with("KODAK");
+
+        if is_kodak
+            && (model.starts_with("DCS4") || model.starts_with("EOSDCS") || model.starts_with("NC2000"))
+            && self.width > 4
+        {
+            self.crop_raw(raw, spp, 0, 2, self.height, self.width - 2);
         }
 
-        if self.width == 3936 && self.height == 2624 {
-            self.crop_raw(raw, spp, 0, 0, 2616, 3896);
-        } else if self.width == 4864 && self.height == 3136 {
-            self.crop_raw(raw, spp, 0, 0, 3124, 4688);
-        } else if self.width == 4352 && (model.contains("K-R") || model.contains("K-X")) {
-            self.crop_raw(raw, spp, 0, 0, self.height, 4309);
-        } else if self.width >= 4960 && model.contains("K-5") {
-            self.crop_raw(raw, spp, 0, 10, self.height, 10 + 4950);
+        if is_pentax || is_samsung {
+            if self.width == 3936 && self.height == 2624 {
+                self.crop_raw(raw, spp, 0, 0, 2616, 3896);
+            } else if self.width == 4864 && self.height == 3136 {
+                self.crop_raw(raw, spp, 0, 0, 3124, 4688);
+            }
+        }
+
+        if is_pentax {
+            if self.width == 4352 && (model.contains("K-R") || model.contains("K-X")) {
+                self.crop_raw(raw, spp, 0, 0, self.height, 4309);
+            } else if self.width >= 4960 && (model.contains("K-5")) {
+                self.crop_raw(raw, spp, 0, 10, self.height, 10 + 4950);
+            } else if self.width == 6080 && model.contains("K-70") {
+                self.crop_raw(raw, spp, 32, 60, 32 + 4016, 60 + 6020);
+            } else if self.width == 4736 && model.contains("K-7") && !model.contains("K-70") {
+                self.crop_raw(raw, spp, 2, 0, 2 + 3122, 4684);
+            } else if self.width == 6080 && model.contains("KF") {
+                self.crop_raw(raw, spp, 28, 56, 28 + 4024, 56 + 6024);
+            } else if self.width == 6080 && model.contains("K-3 II") && !model.contains("K-3 III") {
+                self.crop_raw(raw, spp, 0, 4, self.height, 4 + 6040);
+            } else if self.width == 6304 && model.contains("K-3 III") {
+                self.crop_raw(raw, spp, 34, 26, 34 + 4160, 26 + 6224);
+            } else if self.width == 6112 && model.contains("KP") {
+                let top = 28;
+                self.crop_raw(raw, spp, top, 54, self.height, 54 + 6028);
+            } else if self.width == 6080 && model.contains("K-3") && !model.contains("K-3 II") && !model.contains("K-3 III") {
+                self.crop_raw(raw, spp, 0, 4, self.height, 4 + 6040);
+            } else if self.width == 7424 && model.contains("645D") {
+                self.crop_raw(raw, spp, 29, 48, 29 + 5502, 48 + 7328);
+            }
+        }
+
+        if is_ricoh && self.width == 4096 && self.height == 3014 {
+            self.crop_raw(raw, spp, 0, 0, self.height, 4014);
         }
     }
 
-    fn apply_orientation(&mut self, data: Vec<u8>, channels: usize) -> Vec<u8> {
+    fn apply_orientation<T: Copy + Default>(&mut self, data: Vec<T>, channels: usize) -> Vec<T> {
         let orientation = self.dng.orientation;
         let w = self.width as usize;
         let h = self.height as usize;
@@ -683,7 +847,7 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
 
         let (dw, dh) = if orientation >= 5 { (h, w) } else { (w, h) };
-        let mut out = vec![0u8; data.len()];
+        let mut out = vec![T::default(); data.len()];
         for dy in 0..dh {
             for dx in 0..dw {
                 let (sx, sy) = match orientation {
@@ -752,8 +916,8 @@ impl<R: Read + Seek> DngDecoder<R> {
         let s = |dx: i32, dy: i32| self.sample(raw, xi + dx, yi + dy, w, h);
         let a = |offsets: &[(i32, i32)]| self.avg_in_bounds(raw, xi, yi, w, h, offsets);
         let pattern = self.dng.cfa_pattern.unwrap_or(CfaPattern::Rggb);
-        let row_parity = (y & 1) as usize;
-        let col_parity = (x & 1) as usize;
+        let row_parity = ((y as u32 & 1) ^ self.cfa_phase.0) as usize;
+        let col_parity = ((x as u32 & 1) ^ self.cfa_phase.1) as usize;
         let _ = color;
 
         let (r, g, b) = match pattern {
@@ -791,6 +955,18 @@ impl<R: Read + Seek> DngDecoder<R> {
     }
 
     fn build_color_transform(&self) -> ColorTransform {
+        let cam_mul: Option<[f32; 3]> = if self.dng.as_shot_neutral.len() >= 3
+            && self.dng.as_shot_neutral.iter().take(3).all(|v| v.abs() > 0.0001)
+        {
+            Some([
+                1.0 / self.dng.as_shot_neutral[0],
+                1.0 / self.dng.as_shot_neutral[1],
+                1.0 / self.dng.as_shot_neutral[2],
+            ])
+        } else {
+            None
+        };
+
         if let Some(cam_xyz) = self.dng.color_matrix2.or(self.dng.color_matrix1) {
             let mut cam_rgb = [[0.0f32; 3]; 3];
             for i in 0..3 {
@@ -801,34 +977,29 @@ impl<R: Read + Seek> DngDecoder<R> {
                 }
             }
 
-            let mut pre_mul = [1.0f32; 3];
+            let mut matrix_pre_mul = [1.0f32; 3];
             for i in 0..3 {
                 let num: f32 = cam_rgb[i].iter().sum();
                 if num > 0.00001 {
                     for v in cam_rgb[i].iter_mut() {
                         *v /= num;
                     }
-                    pre_mul[i] = 1.0 / num;
+                    matrix_pre_mul[i] = 1.0 / num;
                 } else {
                     cam_rgb[i] = [0.0; 3];
-                    pre_mul[i] = 1.0;
+                    matrix_pre_mul[i] = 1.0;
                 }
             }
 
             ColorTransform {
                 rgb_cam: Some(invert_3x3(&cam_rgb)),
-                pre_mul,
+                pre_mul: cam_mul.unwrap_or(matrix_pre_mul),
             }
         } else {
-            let mut pre_mul = [1.0f32; 3];
-            for c in 0..3 {
-                if let Some(&asn) = self.dng.as_shot_neutral.get(c) {
-                    if asn.abs() > 0.0001 {
-                        pre_mul[c] = 1.0 / asn;
-                    }
-                }
+            ColorTransform {
+                rgb_cam: None,
+                pre_mul: cam_mul.unwrap_or([1.0; 3]),
             }
-            ColorTransform { rgb_cam: None, pre_mul }
         }
     }
 
@@ -975,14 +1146,22 @@ impl<R: Read + Seek> DngDecoder<R> {
             }
         };
 
+        self.header = TiffHeader::default();
         self.read_ifd(best_ifd, true);
+        self.apply_kodak_dcs_defaults(best_ifd);
         self.detect_cfa_pattern(best_ifd);
+
+        if self.dng.linearization_table.is_none() {
+            self.dng.linearization_table = self.dng.gray_response_curve.take();
+        }
 
         if self.header.compression == Compression::LossyJPEG {
             self.dng.white_level = vec![65535];
             self.dng.black_level = None;
             self.dng.linearization_table = None;
         }
+
+        self.prepare_float_scale();
 
         self.width = self.header.image_width;
         self.height = self.header.image_length;
@@ -1011,11 +1190,18 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let transform = self.build_color_transform();
 
+        let deep = self.header.bits_per_sample.first().copied().unwrap_or(16) > 8;
+
         let pixel_data = if is_cfa {
             let scaled = self.scale_colors(&raw_pixels, transform.pre_mul, true);
             let demosaiced = self.demosaic_bilinear(&scaled);
-            let rgb8 = convert_to_rgb8(&demosaiced, w * h, transform.rgb_cam);
-            PixelData::RGB8(self.apply_orientation(rgb8, 3))
+            let rgb = convert_to_rgb16(&demosaiced, w * h, transform.rgb_cam);
+            let rgb = self.apply_orientation(rgb, 3);
+            if deep {
+                PixelData::RGB16(rgb)
+            } else {
+                PixelData::RGB8(downscale_to_u8(&rgb))
+            }
         } else if spp >= 3 {
             let scaled = self.scale_colors(&raw_pixels, transform.pre_mul, false);
             let pixel_count = w * h;
@@ -1026,12 +1212,22 @@ impl<R: Read + Seek> DngDecoder<R> {
                     rgb[i * 3 + c] = scaled.get(src + c).copied().unwrap_or(0);
                 }
             }
-            let rgb8 = convert_to_rgb8(&rgb, pixel_count, transform.rgb_cam);
-            PixelData::RGB8(self.apply_orientation(rgb8, 3))
+            let rgb = convert_to_rgb16(&rgb, pixel_count, transform.rgb_cam);
+            let rgb = self.apply_orientation(rgb, 3);
+            if deep {
+                PixelData::RGB16(rgb)
+            } else {
+                PixelData::RGB8(downscale_to_u8(&rgb))
+            }
         } else {
             let scaled = self.scale_colors(&raw_pixels, [1.0, 1.0, 1.0], false);
-            let gray8 = convert_to_gray8(&scaled);
-            PixelData::L8(self.apply_orientation(gray8, 1))
+            let gray = convert_to_gray16(&scaled);
+            let gray = self.apply_orientation(gray, 1);
+            if deep {
+                PixelData::L16(gray)
+            } else {
+                PixelData::L8(downscale_to_u8(&gray))
+            }
         };
 
         let frame = ImageFrame::new(self.width, self.height, pixel_data, 0);
@@ -1055,6 +1251,7 @@ struct StripContext<'a> {
     dng: &'a DngMetadata,
     byte_order: ByteOrder,
     lossy_curves: Option<&'a [[u16; 256]; 3]>,
+    float_scale: Option<f32>,
 }
 
 impl StripContext<'_> {
@@ -1096,27 +1293,13 @@ impl StripContext<'_> {
             Compression::None => data,
             Compression::LZW => {
                 let mut d = decompress_lzw(&data);
-                if self.header.predictor == Predictor::HorizontalDifferencing {
-                    if self.byte_order == ByteOrder::BigEndian {
-                        apply_predictor_horizontal_be(&mut d, width as u32, self.header.samples_per_pixel, bps);
-                    } else {
-                        apply_predictor_horizontal(&mut d, width as u32, self.header.samples_per_pixel, bps);
-                    }
-                }
+                self.apply_row_predictor(&mut d, width, bps);
                 d
             }
             Compression::PackBits => decompress_packbits(&data),
             Compression::AdobeDeflate | Compression::Deflate => {
                 let mut d = decompress_deflate(&data);
-                if self.header.predictor == Predictor::HorizontalDifferencing {
-                    if self.byte_order == ByteOrder::BigEndian {
-                        apply_predictor_horizontal_be(&mut d, width as u32, self.header.samples_per_pixel, bps);
-                    } else {
-                        apply_predictor_horizontal(&mut d, width as u32, self.header.samples_per_pixel, bps);
-                    }
-                } else if self.header.predictor == Predictor::FloatingPoint {
-                    apply_predictor_float(&mut d, width as u32, self.header.samples_per_pixel, bps, self.byte_order == ByteOrder::BigEndian);
-                }
+                self.apply_row_predictor(&mut d, width, bps);
                 d
             }
             Compression::JPEG | Compression::OldJPEG => {
@@ -1132,7 +1315,57 @@ impl StripContext<'_> {
         };
 
         let spp = (self.header.samples_per_pixel as usize).max(1);
-        Ok(self.unpack_pixels(&decompressed_bytes, rows * width * spp, bps))
+        let count = rows * width * spp;
+        match self.float_scale {
+            Some(scale) => Ok(self.unpack_float_pixels(&decompressed_bytes, count, bps, scale)),
+            None => Ok(self.unpack_pixels(&decompressed_bytes, count, bps)),
+        }
+    }
+
+    fn apply_row_predictor(&self, data: &mut Vec<u8>, width: usize, bps: u16) {
+        let spp = self.header.samples_per_pixel.max(1);
+        let big_endian = self.byte_order == ByteOrder::BigEndian;
+        match self.header.predictor {
+            Predictor::None => {}
+            Predictor::HorizontalDifferencing => {
+                if big_endian {
+                    apply_predictor_horizontal_be(data, width as u32, spp, bps);
+                } else {
+                    apply_predictor_horizontal(data, width as u32, spp, bps);
+                }
+            }
+            Predictor::FloatingPoint | Predictor::FloatingPointX2 | Predictor::FloatingPointX4 => {
+                let x = predictor_x_factor(self.header.predictor);
+                apply_predictor_float(data, (width as u32 / x).max(1), spp * x as u16, bps, big_endian);
+            }
+        }
+    }
+
+    fn unpack_float_pixels(&self, data: &[u8], count: usize, bps: u16, scale: f32) -> Vec<u16> {
+        let mut out = Vec::with_capacity(count);
+        let mut push = |v: f32| out.push((v * scale).clamp(0.0, 65535.0) as u16);
+
+        match bps {
+            16 => {
+                for chunk in data.chunks_exact(2).take(count) {
+                    push(half_to_f32(u16_from_bytes(chunk, self.byte_order)));
+                }
+            }
+            24 => {
+                for chunk in data.chunks_exact(3).take(count) {
+                    push(float24_to_f32(chunk, self.byte_order));
+                }
+            }
+            32 => {
+                for chunk in data.chunks_exact(4).take(count) {
+                    push(f32_from_bytes(chunk, self.byte_order));
+                }
+            }
+            _ => return self.unpack_pixels(data, count, bps),
+        }
+
+        out.resize(count, 0);
+        out
     }
 
     fn decompress_jpeg_lossless(&self, strip_data: Vec<u8>, rows: usize, width: usize) -> VexelResult<Vec<u16>> {
@@ -1147,6 +1380,7 @@ impl StripContext<'_> {
 
         let cursor = Cursor::new(jpeg_data);
         let mut jpeg_decoder = JpegDecoder::new(cursor);
+        jpeg_decoder.set_lossless_ssss16_is_min(self.dng.dng_version == 0 || self.dng.dng_version >= 0x01010000);
         let image = match jpeg_decoder.decode() {
             Ok(img) => img,
             Err(e) => {
@@ -1274,6 +1508,21 @@ struct ColorTransform {
     pre_mul: [f32; 3],
 }
 
+const KODAK_DCS_COLOR_TABLE: &[(&str, u16, [i16; 9])] = &[
+    ("NC2000", 0, [13891, -6055, -803, -465, 9919, 642, 2121, 82, 1291]),
+    ("DCS315C", 8, [17523, -4827, -2510, 756, 8546, -137, 6113, 1649, 2250]),
+    ("DCS330C", 8, [20620, -7572, -2801, -103, 10073, -396, 3551, -233, 2220]),
+    ("DCS420", 0, [10868, -1852, -644, -1537, 11083, 484, 2343, 628, 2216]),
+    ("DCS46", 0, [10592, -2206, -967, -1944, 11685, 230, 2206, 670, 1273]),
+    ("DCS520C", 178, [24542, -10860, -3401, -1490, 11370, -297, 2858, -605, 3225]),
+    ("DCS560C", 177, [20482, -7172, -3125, -1033, 10410, -285, 2542, 226, 3136]),
+    ("DCS620C", 177, [23617, -10175, -3149, -2054, 11749, -272, 2586, -489, 3453]),
+    ("DCS660C", 173, [18244, -6351, -2739, -791, 11193, -521, 3711, -129, 2802]),
+    ("DCS760C", 0, [16623, -6309, -1411, -4344, 13923, 323, 2285, 274, 2926]),
+    ("EOSDCS1", 0, [10592, -2206, -967, -1944, 11685, 230, 2206, 670, 1273]),
+    ("EOSDCS3", 0, [9898, -2700, -940, -2478, 12219, 206, 1985, 634, 1031]),
+];
+
 const XYZ_RGB: [[f32; 3]; 3] = [
     [0.4124564, 0.3575761, 0.1804375],
     [0.2126729, 0.7151522, 0.0721750],
@@ -1284,7 +1533,7 @@ const HISTOGRAM_SIZE: usize = 0x2000;
 const AUTO_BRIGHT_THRESHOLD: f64 = 0.01;
 const PARALLEL_CHUNK: usize = 0x10000;
 
-fn convert_to_rgb8(rgb: &[u16], pixel_count: usize, rgb_cam: Option<[[f32; 3]; 3]>) -> Vec<u8> {
+fn convert_to_rgb16(rgb: &[u16], pixel_count: usize, rgb_cam: Option<[[f32; 3]; 3]>) -> Vec<u16> {
     let converted: Cow<'_, [u16]> = match rgb_cam {
         Some(m) => Cow::Owned(apply_cam_matrix(rgb, &m)),
         None => Cow::Borrowed(rgb),
@@ -1296,7 +1545,7 @@ fn convert_to_rgb8(rgb: &[u16], pixel_count: usize, rgb_cam: Option<[[f32; 3]; 3
     map_through_curve(&converted, &curve)
 }
 
-fn convert_to_gray8(gray: &[u16]) -> Vec<u8> {
+fn convert_to_gray16(gray: &[u16]) -> Vec<u16> {
     let mut histogram = vec![[0u32; HISTOGRAM_SIZE]; 1];
     for &v in gray {
         histogram[0][(v >> 3) as usize] += 1;
@@ -1304,6 +1553,10 @@ fn convert_to_gray8(gray: &[u16]) -> Vec<u8> {
     let t_white = auto_bright_white(&histogram, gray.len(), 1);
     let curve = gamma_curve_bt709(t_white << 3);
     map_through_curve(gray, &curve)
+}
+
+fn downscale_to_u8(values: &[u16]) -> Vec<u8> {
+    values.iter().map(|&v| (v >> 8) as u8).collect()
 }
 
 fn apply_cam_matrix(rgb: &[u16], m: &[[f32; 3]; 3]) -> Vec<u16> {
@@ -1362,14 +1615,14 @@ fn build_rgb_histogram(rgb: &[u16]) -> Vec<[u32; HISTOGRAM_SIZE]> {
     accumulate(vec![[0u32; HISTOGRAM_SIZE]; 3], rgb)
 }
 
-fn map_through_curve(values: &[u16], curve: &[u16]) -> Vec<u8> {
+fn map_through_curve(values: &[u16], curve: &[u16]) -> Vec<u16> {
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
-        values.par_iter().map(|&v| (curve[v as usize] >> 8) as u8).collect()
+        values.par_iter().map(|&v| curve[v as usize]).collect()
     }
     #[cfg(not(feature = "rayon"))]
-    values.iter().map(|&v| (curve[v as usize] >> 8) as u8).collect()
+    values.iter().map(|&v| curve[v as usize]).collect()
 }
 
 fn auto_bright_white(histogram: &[[u32; HISTOGRAM_SIZE]], pixel_count: usize, channels: usize) -> i32 {

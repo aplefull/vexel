@@ -13,11 +13,42 @@ impl<'a> JpegBitReader<'a> {
 
     #[inline(always)]
     fn refill(&mut self) {
-        while self.bits <= 56 && self.pos < self.data.len() {
-            self.buf = (self.buf << 8) | self.data[self.pos] as u64;
-            self.pos += 1;
-            self.bits += 8;
+        if self.bits >= 56 {
+            return;
         }
+
+        if self.pos + 8 <= self.data.len() {
+            let chunk = u64::from_be_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+            let bytes = ((63 - self.bits) >> 3) as usize;
+            self.buf = (self.buf << (bytes * 8)) | (chunk >> (64 - bytes * 8));
+            self.pos += bytes;
+            self.bits += (bytes * 8) as u32;
+        } else {
+            while self.bits <= 56 && self.pos < self.data.len() {
+                self.buf = (self.buf << 8) | self.data[self.pos] as u64;
+                self.pos += 1;
+                self.bits += 8;
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn ensure(&mut self, n: u32) -> bool {
+        if self.bits < n {
+            self.refill();
+        }
+        self.bits >= n
+    }
+
+    #[inline(always)]
+    pub fn peek_unchecked(&self, n: u32) -> u32 {
+        ((self.buf >> (self.bits - n)) & ((1u64 << n) - 1)) as u32
+    }
+
+    #[inline(always)]
+    pub fn read_bits_unchecked(&mut self, n: u32) -> u32 {
+        self.bits -= n;
+        ((self.buf >> self.bits) & ((1u64 << n) - 1)) as u32
     }
 
     #[inline(always)]

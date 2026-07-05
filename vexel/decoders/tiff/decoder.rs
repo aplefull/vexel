@@ -10,7 +10,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
-    decompress_lzw, decompress_packbits, decompress_sgilog, decompress_sgilog24,
+    decompress_lzw, decompress_packbits, decompress_sgilog, decompress_sgilog24, predictor_x_factor,
 };
 use crate::utils::tiff::ifd::{self, Ifd};
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
@@ -290,8 +290,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     apply_predictor_horizontal(data, strip_width, spp, bps);
                 }
             }
-            Predictor::FloatingPoint => {
-                apply_predictor_float(data, strip_width, spp, bps, self.byte_order == ByteOrder::BigEndian);
+            Predictor::FloatingPoint | Predictor::FloatingPointX2 | Predictor::FloatingPointX4 => {
+                let x = predictor_x_factor(self.header.predictor);
+                apply_predictor_float(data, (strip_width / x).max(1), spp * x as u16, bps, self.byte_order == ByteOrder::BigEndian);
             }
             _ => {}
         }
@@ -307,8 +308,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     apply_predictor_horizontal(data, strip_width, 1, bps);
                 }
             }
-            Predictor::FloatingPoint => {
-                apply_predictor_float(data, strip_width, 1, bps, self.byte_order == ByteOrder::BigEndian);
+            Predictor::FloatingPoint | Predictor::FloatingPointX2 | Predictor::FloatingPointX4 => {
+                let x = predictor_x_factor(self.header.predictor);
+                apply_predictor_float(data, (strip_width / x).max(1), x as u16, bps, self.byte_order == ByteOrder::BigEndian);
             }
             _ => {}
         }

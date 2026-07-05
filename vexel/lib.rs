@@ -351,17 +351,14 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             && ((header[2] == 42 && header[3] == 0) || (header[2] == 0 && header[3] == 42))
         {
             let is_le = header.starts_with(b"II");
-            let read_u16 = |b: &[u8], o: usize| -> u16 {
-                if is_le { u16::from_le_bytes([b[o], b[o + 1]]) } else { u16::from_be_bytes([b[o], b[o + 1]]) }
+            let first_ifd_offset = if is_le {
+                u32::from_le_bytes([header[4], header[5], header[6], header[7]])
+            } else {
+                u32::from_be_bytes([header[4], header[5], header[6], header[7]])
             };
-            let read_u32 = |b: &[u8], o: usize| -> u32 {
-                if is_le { u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) }
-                else { u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) }
-            };
-            let ifd_offset = read_u32(&header, 4) as usize;
-            let is_dng = Vexel::tiff_has_dng_version(reader, ifd_offset, &read_u16, &read_u32);
+            let is_raw = Vexel::tiff_is_camera_raw(reader, first_ifd_offset, is_le);
             reader.seek(SeekFrom::Start(0))?;
-            return if is_dng { Ok(ImageFormat::Dng) } else { Ok(ImageFormat::Tiff) };
+            return if is_raw { Ok(ImageFormat::Dng) } else { Ok(ImageFormat::Tiff) };
         }
 
         // TGA
@@ -407,37 +404,113 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         Vexel::try_guess_format_harder(reader)
     }
 
-    fn tiff_has_dng_version(
-        reader: &mut R,
-        ifd_offset: usize,
-        read_u16: &dyn Fn(&[u8], usize) -> u16,
-        _read_u32: &dyn Fn(&[u8], usize) -> u32,
-    ) -> bool {
-        if ifd_offset < 8 {
-            return false;
-        }
-        let mut count_buf = [0u8; 2];
-        if reader.seek(SeekFrom::Start(ifd_offset as u64)).is_err() {
-            return false;
-        }
-        if reader.read_exact(&mut count_buf).is_err() {
-            return false;
-        }
-        let num_entries = read_u16(&count_buf, 0) as usize;
-        if num_entries > 4096 {
-            return false;
-        }
-        let mut entry_buf = [0u8; 12];
-        for _ in 0..num_entries {
-            if reader.read_exact(&mut entry_buf).is_err() {
-                break;
+    // Walk the IFD tree and try to figure out if a TIFF file is a camera raw
+    fn tiff_is_camera_raw(reader: &mut R, first_ifd_offset: u32, is_le: bool) -> bool {
+        const MAX_IFDS: usize = 16;
+        const MAX_ENTRIES: usize = 4096;
+
+        let read_u16 = |b: &[u8]| {
+            if is_le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) }
+        };
+        let read_u32 = |b: &[u8]| {
+            if is_le {
+                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+            } else {
+                u32::from_be_bytes([b[0], b[1], b[2], b[3]])
             }
-            let tag = read_u16(&entry_buf, 0);
-            if tag == 50706 {
-                return true;
+        };
+
+        let mut queue: Vec<u32> = vec![first_ifd_offset];
+        let mut visited: Vec<u32> = Vec::new();
+        let mut make = String::new();
+        let mut model = String::new();
+
+        while let Some(offset) = queue.pop() {
+            if offset < 8 || visited.contains(&offset) || visited.len() >= MAX_IFDS {
+                continue;
+            }
+            visited.push(offset);
+
+            if reader.seek(SeekFrom::Start(offset as u64)).is_err() {
+                continue;
+            }
+            let mut count_buf = [0u8; 2];
+            if reader.read_exact(&mut count_buf).is_err() {
+                continue;
+            }
+            let num_entries = (read_u16(&count_buf) as usize).min(MAX_ENTRIES);
+
+            let mut entries = vec![0u8; num_entries * 12];
+            if reader.read_exact(&mut entries).is_err() {
+                continue;
+            }
+            let mut next_buf = [0u8; 4];
+            if reader.read_exact(&mut next_buf).is_ok() {
+                queue.push(read_u32(&next_buf));
+            }
+
+            for entry in entries.chunks_exact(12) {
+                let tag = read_u16(&entry[0..2]);
+                let field_type = read_u16(&entry[2..4]);
+                let count = read_u32(&entry[4..8]);
+                let value = &entry[8..12];
+
+                match tag {
+                    // DNGVersion
+                    50706 => return true,
+                    // PhotometricInterpretation: CFA or LinearRaw
+                    262 => {
+                        let v = match field_type {
+                            3 => read_u16(&value[..2]) as u32,
+                            4 => read_u32(value),
+                            _ => continue,
+                        };
+                        if v == 32803 || v == 34892 {
+                            return true;
+                        }
+                    }
+                    // Make / Model
+                    271 | 272 => {
+                        let len = (count as usize).min(32);
+                        let bytes = if len <= 4 {
+                            value[..len].to_vec()
+                        } else {
+                            let mut buf = vec![0u8; len];
+                            if reader.seek(SeekFrom::Start(read_u32(value) as u64)).is_err()
+                                || reader.read_exact(&mut buf).is_err()
+                            {
+                                continue;
+                            }
+                            buf
+                        };
+                        let text = String::from_utf8_lossy(&bytes)
+                            .trim_end_matches('\0')
+                            .trim()
+                            .to_uppercase();
+                        if tag == 271 { make = text } else { model = text }
+                    }
+                    // SubIFDs
+                    330 => {
+                        if count == 1 {
+                            queue.push(read_u32(value));
+                        } else {
+                            let sub_count = (count as usize).min(8);
+                            let mut buf = vec![0u8; sub_count * 4];
+                            if reader.seek(SeekFrom::Start(read_u32(value) as u64)).is_ok()
+                                && reader.read_exact(&mut buf).is_ok()
+                            {
+                                for chunk in buf.chunks_exact(4) {
+                                    queue.push(read_u32(chunk));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-        false
+
+        make.starts_with("KODAK") && (model.starts_with("DCS") || model.starts_with("EOSDCS") || model.starts_with("NC2000"))
     }
 
     fn try_guess_format_harder(reader: &mut R) -> VexelResult<ImageFormat> {

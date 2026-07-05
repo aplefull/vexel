@@ -577,6 +577,8 @@ pub enum Predictor {
     None = 1,
     HorizontalDifferencing = 2,
     FloatingPoint = 3,
+    FloatingPointX2 = 34894,
+    FloatingPointX4 = 34895,
 }
 
 impl Default for Predictor {
@@ -593,6 +595,8 @@ impl TryFrom<u32> for Predictor {
             1 => Ok(Self::None),
             2 => Ok(Self::HorizontalDifferencing),
             3 => Ok(Self::FloatingPoint),
+            34894 => Ok(Self::FloatingPointX2),
+            34895 => Ok(Self::FloatingPointX4),
             _ => Err(VexelError::Custom(format!("Invalid predictor value: {}", value))),
         }
     }
