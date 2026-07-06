@@ -258,7 +258,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let mut png_decoder = PngDecoder::new(cursor);
 
         match png_decoder.decode() {
-            Ok(image) => image.as_rgb8(),
+            Ok(image) => image.into_pixels().into_rgb8_bytes(),
             Err(_) => Vec::new(),
         }
     }
@@ -274,7 +274,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let mut jpeg_decoder = JpegDecoder::new(cursor);
 
         match jpeg_decoder.decode() {
-            Ok(image) => image.as_rgb8(),
+            Ok(image) => image.into_pixels().into_rgb8_bytes(),
             Err(_) => Vec::new(),
         }
     }
@@ -427,7 +427,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             let mut jpeg_decoder = JpegDecoder::new(cursor);
 
             let strip_pixels = match jpeg_decoder.decode() {
-                Ok(image) => image.as_rgb8(),
+                Ok(image) => image.into_pixels().into_rgb8_bytes(),
                 Err(_) => continue,
             };
 
@@ -686,7 +686,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 let cursor = Cursor::new(jpeg_data);
                 let mut jpeg_decoder = JpegDecoder::new(cursor);
                 match jpeg_decoder.decode() {
-                    Ok(image) => image.as_rgb8(),
+                    Ok(image) => image.into_pixels().into_rgb8_bytes(),
                     Err(_) => vec![0u8; tile_width * tile_height * bytes_per_pixel],
                 }
             } else {

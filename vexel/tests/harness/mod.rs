@@ -110,13 +110,13 @@ pub fn image_to_reference_native(image: &Image) -> ReferenceImage {
             ReferencePixels::U8(p.iter().flat_map(|&b| (0..8).map(move |i| (b >> (7 - i)) & 1)).take(n).collect())
         }
         PixelData::RGB8(p) | PixelData::RGBA8(p) | PixelData::L8(p) | PixelData::LA8(p) => {
-            ReferencePixels::U8(p)
+            ReferencePixels::U8(p.clone())
         }
         PixelData::RGB16(p) | PixelData::RGBA16(p) | PixelData::L16(p) | PixelData::LA16(p) => {
-            ReferencePixels::U16(p)
+            ReferencePixels::U16(p.clone())
         }
         PixelData::RGB32F(p) | PixelData::RGBA32F(p) | PixelData::L32F(p) | PixelData::LA32F(p) => {
-            ReferencePixels::F32(p)
+            ReferencePixels::F32(p.clone())
         }
         PixelData::RGB64F(p) | PixelData::RGBA64F(p) | PixelData::L64F(p) | PixelData::LA64F(p) => {
             ReferencePixels::F32(p.iter().map(|&v| v as f32).collect())
@@ -130,7 +130,7 @@ pub fn image_to_reference_rgba8(image: &Image) -> ReferenceImage {
     ReferenceImage {
         width: image.width(),
         height: image.height(),
-        pixels: ReferencePixels::U8(image.as_rgba8()),
+        pixels: ReferencePixels::U8(image.to_rgba8()),
     }
 }
 
@@ -166,7 +166,7 @@ pub fn frame_to_reference_rgba8(image: &Image, frame_idx: usize) -> ReferenceIma
     ReferenceImage {
         width: frame.width(),
         height: frame.height(),
-        pixels: ReferencePixels::U8(frame.as_rgba8()),
+        pixels: ReferencePixels::U8(frame.to_rgba8()),
     }
 }
 

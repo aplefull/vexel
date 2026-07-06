@@ -1391,7 +1391,7 @@ impl StripContext<'_> {
 
         let precision = jpeg_decoder.precision() as u16;
 
-        let (raw_samples, stored_bits): (Vec<u16>, u16) = match image.pixels() {
+        let (raw_samples, stored_bits): (Vec<u16>, u16) = match image.into_pixels() {
             crate::utils::image::PixelData::L16(v) => (v, 16),
             crate::utils::image::PixelData::LA16(v) => (v, 16),
             crate::utils::image::PixelData::RGB16(v) => (v, 16),
@@ -1428,7 +1428,7 @@ impl StripContext<'_> {
             }
         };
 
-        let bytes: Vec<u8> = match image.pixels() {
+        let bytes: Vec<u8> = match image.into_pixels() {
             crate::utils::image::PixelData::RGB8(v) => v,
             crate::utils::image::PixelData::L8(v) => v,
             crate::utils::image::PixelData::RGBA8(v) => v,

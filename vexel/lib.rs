@@ -70,7 +70,7 @@ pub(crate) enum Decoders<R: Read + Seek> {
 ///
 /// let mut decoder = Vexel::open("image.png")?;
 /// let image = decoder.decode()?;
-/// let pixels = image.as_rgba8();
+/// let pixels = image.to_rgba8();
 /// # Ok::<(), vexel::VexelError>(())
 /// ```
 pub struct Vexel<R: Read + Seek> {
@@ -614,7 +614,7 @@ impl WasmDecoder {
                 .map(|frame| JsImageFrame {
                     width: frame.width(),
                     height: frame.height(),
-                    pixels: frame.as_rgba8(),
+                    pixels: frame.to_rgba8(),
                     delay: frame.delay(),
                 })
                 .collect(),

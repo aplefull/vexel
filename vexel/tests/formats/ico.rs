@@ -45,7 +45,7 @@ pub fn test_cases() -> Vec<TestCase> {
 
                 let frame = &frames[0];
                 let w = frame.width() as usize;
-                let [r, g, b, _] = get_pixel(&frame.as_rgba8(), w, 16, 25);
+                let [r, g, b, _] = get_pixel(&frame.to_rgba8(), w, 16, 25);
 
                 if [r, g, b] != [0x2E, 0x28, 0x3A] {
                     return Err(format!(
@@ -70,7 +70,7 @@ pub fn test_cases() -> Vec<TestCase> {
                         return Err(format!("frame {}: expected 16x16, got {}x{}", i, frame.width(), frame.height()));
                     }
                     let w = frame.width() as usize;
-                    let pixels = frame.as_rgba8();
+                    let pixels = frame.to_rgba8();
                     let [r, g, b, _] = get_pixel(&pixels, w, 8, 8);
                     let expected = if i % 2 == 0 { [0xFF, 0x00, 0x00] } else { [0x00, 0x00, 0x00] };
                     if [r, g, b] != expected {
@@ -95,7 +95,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 let expected = [[0x72, 0x6C, 0x5D], [0x69, 0x65, 0x5B], [0x6A, 0x70, 0x55], [0x75, 0x6D, 0x5A]];
                 for (i, frame) in frames.iter().enumerate() {
                     let w = frame.width() as usize;
-                    let pixels = frame.as_rgba8();
+                    let pixels = frame.to_rgba8();
                     let [_, _, _, a] = get_pixel(&pixels, w, 30, 30);
                     if a != 0x00 {
                         return Err(format!("frame {}: pixel (30, 30) expected transparent, got alpha={}", i, a));

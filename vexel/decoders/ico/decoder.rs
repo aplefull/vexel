@@ -201,7 +201,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
 
         let (image, and_mask, actual_bpp) = BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
 
-        let mut pixels = apply_and_mask(image.pixels(), &and_mask, entry.width, entry.height, actual_bpp);
+        let mut pixels = apply_and_mask(image.into_pixels(), &and_mask, entry.width, entry.height, actual_bpp);
         pixels.correct_pixels(entry.width, entry.height);
 
         Ok(ImageFrame::new(entry.width, entry.height, pixels, 0))

@@ -79,7 +79,7 @@ pub fn run(corpus_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             Ok(image) => {
                 let width = image.width();
                 let height = image.height();
-                let vexel_pixels = image.as_rgba8();
+                let vexel_pixels = image.to_rgba8();
 
                 let (mse, convert_ms) = match decode_via_convert(path, width, height) {
                     Ok((ref_pixels, conv_ms)) => {

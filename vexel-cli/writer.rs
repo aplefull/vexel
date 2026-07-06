@@ -1,4 +1,5 @@
 use std::{fs::File, io::{Error, ErrorKind, Write}, mem::MaybeUninit, path::{Path, PathBuf}};
+use std::borrow::Cow;
 use std::ffi::c_void;
 
 use vexel::{Image, PixelData};
@@ -18,6 +19,44 @@ use jpegxl_sys::metadata::codestream_header::{JxlAnimationHeader, JxlBasicInfo};
 
 fn scale_to_u16(value: f64) -> u16 {
     (value.clamp(0.0, 1.0) * 65535.0) as u16
+}
+
+fn u16_be_bytes(values: &[u16], step: usize, take: usize) -> Vec<u8> {
+    let mut out = vec![0u8; values.len() / step * take * 2];
+    for (chunk, group) in out.chunks_exact_mut(take * 2).zip(values.chunks_exact(step)) {
+        for (dst, v) in chunk.chunks_exact_mut(2).zip(&group[..take]) {
+            dst.copy_from_slice(&v.to_be_bytes());
+        }
+    }
+    out
+}
+
+fn f32_to_u16_be_bytes(values: &[f32], step: usize, take: usize) -> Vec<u8> {
+    let mut out = vec![0u8; values.len() / step * take * 2];
+    for (chunk, group) in out.chunks_exact_mut(take * 2).zip(values.chunks_exact(step)) {
+        for (dst, &v) in chunk.chunks_exact_mut(2).zip(&group[..take]) {
+            dst.copy_from_slice(&scale_to_u16(v as f64).to_be_bytes());
+        }
+    }
+    out
+}
+
+fn f64_to_u16_be_bytes(values: &[f64], step: usize, take: usize) -> Vec<u8> {
+    let mut out = vec![0u8; values.len() / step * take * 2];
+    for (chunk, group) in out.chunks_exact_mut(take * 2).zip(values.chunks_exact(step)) {
+        for (dst, &v) in chunk.chunks_exact_mut(2).zip(&group[..take]) {
+            dst.copy_from_slice(&scale_to_u16(v).to_be_bytes());
+        }
+    }
+    out
+}
+
+fn strip_channels(values: &[u8], step: usize, take: usize) -> Vec<u8> {
+    let mut out = vec![0u8; values.len() / step * take];
+    for (chunk, group) in out.chunks_exact_mut(take).zip(values.chunks_exact(step)) {
+        chunk.copy_from_slice(&group[..take]);
+    }
+    out
 }
 
 struct PixelInfo {
@@ -57,13 +96,14 @@ impl Writer {
 
         let has_alpha = image.has_alpha();
         let mut timestamp_ms = 0i32;
-        let pixel_bufs: Vec<(Vec<u8>, i32)> = image.frames().iter().map(|frame| {
+        let pixel_bufs: Vec<(Cow<[u8]>, i32)> = image.frames().iter().map(|frame| {
             let delta = if frame.delay() == 0 { 1 } else { frame.delay() as i32 };
             timestamp_ms += delta;
-            let pixels = if has_alpha {
-                frame.clone().into_rgba8().pixels().as_bytes().to_vec()
-            } else {
-                frame.clone().into_rgb8().pixels().as_bytes().to_vec()
+            let pixels: Cow<[u8]> = match (has_alpha, frame.pixels()) {
+                (true, PixelData::RGBA8(p)) => Cow::Borrowed(p.as_slice()),
+                (true, other) => Cow::Owned(other.clone().into_rgba8_bytes()),
+                (false, PixelData::RGB8(p)) => Cow::Borrowed(p.as_slice()),
+                (false, other) => Cow::Owned(other.clone().into_rgb8_bytes()),
             };
             (pixels, timestamp_ms)
         }).collect();
@@ -91,232 +131,69 @@ impl Writer {
     }
 
     pub fn write_pam(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
-        let mut file = File::create(output_path)?;
         let width = image.width();
         let height = image.height();
 
-        file.write_all(b"P7\n")?;
-        file.write_all(format!("WIDTH {}\n", width).as_bytes())?;
-        file.write_all(format!("HEIGHT {}\n", height).as_bytes())?;
+        let (meta, payload): (&str, Cow<[u8]>) = match image.frames()[0].pixels() {
+            PixelData::RGB8(p) => ("DEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\n", Cow::Borrowed(p.as_slice())),
+            PixelData::RGBA8(p) => ("DEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\n", Cow::Borrowed(p.as_slice())),
+            PixelData::RGB16(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
+            PixelData::RGBA16(p) => ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
+            PixelData::RGB32F(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
+            PixelData::RGBA32F(p) => ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
+            PixelData::RGB64F(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
+            PixelData::RGBA64F(p) => ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
+            PixelData::L1(p) => ("DEPTH 1\nMAXVAL 1\nTUPLTYPE GRAYSCALE\n", Cow::Borrowed(p.as_slice())),
+            PixelData::L8(p) => ("DEPTH 1\nMAXVAL 255\nTUPLTYPE GRAYSCALE\n", Cow::Borrowed(p.as_slice())),
+            PixelData::L16(p) => ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
+            PixelData::LA8(p) => ("DEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Borrowed(p.as_slice())),
+            PixelData::LA16(p) => ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
+            PixelData::L32F(p) => ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
+            PixelData::LA32F(p) => ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
+            PixelData::L64F(p) => ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
+            PixelData::LA64F(p) => ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
+        };
 
-        match image.frames()[0].pixels() {
-            PixelData::RGB8(pixels) => {
-                file.write_all(b"DEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n")?;
-                file.write_all(pixels)?;
-            }
-            PixelData::RGBA8(pixels) => {
-                file.write_all(b"DEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n")?;
-                file.write_all(pixels)?;
-            }
-            PixelData::RGB16(pixels) => {
-                file.write_all(b"DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\nENDHDR\n")?;
-                for value in pixels {
-                    file.write_all(&value.to_be_bytes())?;
-                }
-            }
-            PixelData::RGBA16(pixels) => {
-                file.write_all(b"DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n")?;
-                for value in pixels {
-                    file.write_all(&value.to_be_bytes())?;
-                }
-            }
-            PixelData::RGB32F(pixels) => {
-                file.write_all(b"DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\nENDHDR\n")?;
-                for &value in pixels {
-                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
-                    file.write_all(&value16.to_be_bytes())?;
-                }
-            }
-            PixelData::RGBA32F(pixels) => {
-                file.write_all(b"DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n")?;
-                for &value in pixels {
-                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
-                    file.write_all(&value16.to_be_bytes())?;
-                }
-            }
-            PixelData::RGB64F(pixels) => {
-                file.write_all(b"DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\nENDHDR\n")?;
-                for &value in pixels {
-                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
-                    file.write_all(&value16.to_be_bytes())?;
-                }
-            }
-            PixelData::RGBA64F(pixels) => {
-                file.write_all(b"DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n")?;
-                for &value in pixels {
-                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
-                    file.write_all(&value16.to_be_bytes())?;
-                }
-            }
-            PixelData::L1(pixels) => {
-                file.write_all(b"DEPTH 1\nMAXVAL 1\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
-                file.write_all(pixels)?;
-            }
-            PixelData::L8(pixels) => {
-                file.write_all(b"DEPTH 1\nMAXVAL 255\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
-                file.write_all(pixels)?;
-            }
-            PixelData::L16(pixels) => {
-                file.write_all(b"DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
-                for value in pixels {
-                    file.write_all(&value.to_be_bytes())?;
-                }
-            }
-            PixelData::LA8(pixels) => {
-                file.write_all(b"DEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
-                file.write_all(pixels)?;
-            }
-            PixelData::LA16(pixels) => {
-                file.write_all(b"DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
-                for value in pixels {
-                    file.write_all(&value.to_be_bytes())?;
-                }
-            }
-            PixelData::L32F(pixels) => {
-                file.write_all(b"DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
-                for &value in pixels {
-                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
-                    file.write_all(&value16.to_be_bytes())?;
-                }
-            }
-            PixelData::LA32F(pixels) => {
-                file.write_all(b"DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
-                for &value in pixels {
-                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
-                    file.write_all(&value16.to_be_bytes())?;
-                }
-            }
-            PixelData::L64F(pixels) => {
-                file.write_all(b"DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n")?;
-                for &value in pixels {
-                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
-                    file.write_all(&value16.to_be_bytes())?;
-                }
-            }
-            PixelData::LA64F(pixels) => {
-                file.write_all(b"DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n")?;
-                for &value in pixels {
-                    let value16 = (value.clamp(0.0, 1.0) * 65535.0) as u16;
-                    file.write_all(&value16.to_be_bytes())?;
-                }
-            }
-        }
+        let mut file = File::create(output_path)?;
+        let header = format!("P7\nWIDTH {}\nHEIGHT {}\n{}ENDHDR\n", width, height, meta);
+        file.write_all(header.as_bytes())?;
+        file.write_all(&payload)?;
 
         Ok(())
     }
 
     pub fn write_ppm(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
-        let mut file = File::create(output_path)?;
         let width = image.width();
         let height = image.height();
 
-        let (magic, maxval): (&[u8], &[u8]) = match image.frames()[0].pixels() {
-            PixelData::RGB8(_) | PixelData::RGBA8(_) => (b"P6", b"255"),
-            PixelData::RGB16(_) | PixelData::RGBA16(_) => (b"P6", b"65535"),
-            PixelData::RGB32F(_) | PixelData::RGBA32F(_) => (b"P6", b"65535"),
-            PixelData::RGB64F(_) | PixelData::RGBA64F(_) => (b"P6", b"65535"),
-            PixelData::L1(_) => (b"P5", b"255"),
-            PixelData::L8(_) | PixelData::LA8(_) => (b"P5", b"255"),
-            PixelData::L16(_) | PixelData::LA16(_) => (b"P5", b"65535"),
-            PixelData::L32F(_) | PixelData::LA32F(_) => (b"P5", b"65535"),
-            PixelData::L64F(_) | PixelData::LA64F(_) => (b"P5", b"65535"),
+        let (magic, maxval, payload): (&str, &str, Cow<[u8]>) = match image.frames()[0].pixels() {
+            PixelData::RGB8(p) => ("P6", "255", Cow::Borrowed(p.as_slice())),
+            PixelData::RGBA8(p) => ("P6", "255", Cow::Owned(strip_channels(p, 4, 3))),
+            PixelData::RGB16(p) => ("P6", "65535", Cow::Owned(u16_be_bytes(p, 1, 1))),
+            PixelData::RGBA16(p) => ("P6", "65535", Cow::Owned(u16_be_bytes(p, 4, 3))),
+            PixelData::RGB32F(p) => ("P6", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
+            PixelData::RGBA32F(p) => ("P6", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 4, 3))),
+            PixelData::RGB64F(p) => ("P6", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
+            PixelData::RGBA64F(p) => ("P6", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 4, 3))),
+            PixelData::L1(p) => (
+                "P5",
+                "255",
+                Cow::Owned(p.iter().map(|&v| if v != 0 { 255 } else { 0 }).collect()),
+            ),
+            PixelData::L8(p) => ("P5", "255", Cow::Borrowed(p.as_slice())),
+            PixelData::L16(p) => ("P5", "65535", Cow::Owned(u16_be_bytes(p, 1, 1))),
+            PixelData::LA8(p) => ("P5", "255", Cow::Owned(strip_channels(p, 2, 1))),
+            PixelData::LA16(p) => ("P5", "65535", Cow::Owned(u16_be_bytes(p, 2, 1))),
+            PixelData::L32F(p) => ("P5", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
+            PixelData::LA32F(p) => ("P5", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 2, 1))),
+            PixelData::L64F(p) => ("P5", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
+            PixelData::LA64F(p) => ("P5", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 2, 1))),
         };
 
-        file.write_all(magic)?;
-        file.write_all(b"\n")?;
-        file.write_all(format!("{} {}\n", width, height).as_bytes())?;
-        file.write_all(maxval)?;
-        file.write_all(b"\n")?;
-
-        match image.frames()[0].pixels() {
-            PixelData::RGB8(pixels) => {
-                file.write_all(pixels)?;
-            }
-            PixelData::RGBA8(pixels) => {
-                for chunk in pixels.chunks_exact(4) {
-                    file.write_all(&chunk[..3])?;
-                }
-            }
-            PixelData::RGB16(pixels) => {
-                for value in pixels {
-                    file.write_all(&value.to_be_bytes())?;
-                }
-            }
-            PixelData::RGBA16(pixels) => {
-                for chunk in pixels.chunks_exact(4) {
-                    for value in &chunk[..3] {
-                        file.write_all(&value.to_be_bytes())?;
-                    }
-                }
-            }
-            PixelData::RGB32F(pixels) => {
-                for &value in pixels {
-                    file.write_all(&scale_to_u16(value as f64).to_be_bytes())?;
-                }
-            }
-            PixelData::RGBA32F(pixels) => {
-                for chunk in pixels.chunks_exact(4) {
-                    for &value in &chunk[..3] {
-                        file.write_all(&scale_to_u16(value as f64).to_be_bytes())?;
-                    }
-                }
-            }
-            PixelData::RGB64F(pixels) => {
-                for &value in pixels {
-                    file.write_all(&scale_to_u16(value).to_be_bytes())?;
-                }
-            }
-            PixelData::RGBA64F(pixels) => {
-                for chunk in pixels.chunks_exact(4) {
-                    for &value in &chunk[..3] {
-                        file.write_all(&scale_to_u16(value).to_be_bytes())?;
-                    }
-                }
-            }
-            PixelData::L1(pixels) => {
-                for &value in pixels {
-                    file.write_all(&[value * 255])?;
-                }
-            }
-            PixelData::L8(pixels) => {
-                file.write_all(pixels)?;
-            }
-            PixelData::L16(pixels) => {
-                for value in pixels {
-                    file.write_all(&value.to_be_bytes())?;
-                }
-            }
-            PixelData::LA8(pixels) => {
-                for chunk in pixels.chunks_exact(2) {
-                    file.write_all(&chunk[..1])?;
-                }
-            }
-            PixelData::LA16(pixels) => {
-                for chunk in pixels.chunks_exact(2) {
-                    file.write_all(&chunk[0].to_be_bytes())?;
-                }
-            }
-            PixelData::L32F(pixels) => {
-                for &value in pixels {
-                    file.write_all(&scale_to_u16(value as f64).to_be_bytes())?;
-                }
-            }
-            PixelData::LA32F(pixels) => {
-                for chunk in pixels.chunks_exact(2) {
-                    file.write_all(&scale_to_u16(chunk[0] as f64).to_be_bytes())?;
-                }
-            }
-            PixelData::L64F(pixels) => {
-                for &value in pixels {
-                    file.write_all(&scale_to_u16(value).to_be_bytes())?;
-                }
-            }
-            PixelData::LA64F(pixels) => {
-                for chunk in pixels.chunks_exact(2) {
-                    file.write_all(&scale_to_u16(chunk[0]).to_be_bytes())?;
-                }
-            }
-        }
+        let mut file = File::create(output_path)?;
+        let header = format!("{}\n{} {}\n{}\n", magic, width, height, maxval);
+        file.write_all(header.as_bytes())?;
+        file.write_all(&payload)?;
 
         Ok(())
     }
@@ -333,10 +210,10 @@ impl Writer {
         }
     }
 
-    pub fn write_frames(output_path: &PathBuf, format: &str, image: &Image) -> Result<(), Error> {
-        Writer::validate_image(image)?;
+    pub fn write_frames(output_path: &PathBuf, format: &str, image: Image) -> Result<(), Error> {
+        Writer::validate_image(&image)?;
 
-        for (i, frame) in image.frames().iter().enumerate() {
+        for (i, frame) in image.into_frames().into_iter().enumerate() {
             let ext = match format {
                 "pam" => "pam",
                 "ppm" => "ppm",
@@ -349,7 +226,7 @@ impl Writer {
             let output_file_name = Path::new(output_path).file_stem().unwrap().to_str().unwrap();
             let output_path = output_dir.join(format!("{}_frame_{}.{}", output_file_name, i, ext));
 
-            let frame_image = Image::from_frame(frame.clone());
+            let frame_image = Image::from_frame(frame);
 
             match format {
                 "pam" => Writer::write_pam(&output_path, &frame_image)?,
@@ -402,7 +279,7 @@ impl Writer {
         };
 
         let expected_bytes = expected_pixels * channels * bytes_per_element;
-        let actual_bytes = image.pixels().as_bytes().len();
+        let actual_bytes = image.frames()[0].pixels().as_bytes().len();
 
         if actual_bytes != expected_bytes {
             let msg = format!(

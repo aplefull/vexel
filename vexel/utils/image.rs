@@ -19,18 +19,72 @@ fn add_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
 }
 
 #[inline(always)]
-fn scale_u16(v: u16) -> u8 {
-    (v as f32 * 255.0 / 65535.0).round() as u8
-}
-
-#[inline(always)]
-fn scale_f32(v: f32) -> u8 {
-    (v.clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
-#[inline(always)]
 fn scale_f64(v: f64) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn scale_f64_slice(src: &[f64]) -> Vec<u8> {
+    src.iter().map(|&v| scale_f64(v)).collect()
+}
+
+fn scale_u16_slice(src: &[u16]) -> Vec<u8> {
+    let mut dst = vec![0u8; src.len()];
+    channel_simd::scale_u16_to_u8(src, &mut dst);
+    dst
+}
+
+fn scale_f32_slice(src: &[f32]) -> Vec<u8> {
+    let mut dst = vec![0u8; src.len()];
+    channel_simd::scale_f32_to_u8(src, &mut dst);
+    dst
+}
+
+fn gray_to_rgb(gray: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; gray.len() * 3];
+    for (chunk, &g) in out.chunks_exact_mut(3).zip(gray) {
+        chunk[0] = g;
+        chunk[1] = g;
+        chunk[2] = g;
+    }
+    out
+}
+
+fn gray_to_rgba(gray: &[u8]) -> Vec<u8> {
+    let mut out = vec![255u8; gray.len() * 4];
+    for (chunk, &g) in out.chunks_exact_mut(4).zip(gray) {
+        chunk[0] = g;
+        chunk[1] = g;
+        chunk[2] = g;
+    }
+    out
+}
+
+fn gray_alpha_to_rgb(la: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; la.len() / 2 * 3];
+    for (chunk, pair) in out.chunks_exact_mut(3).zip(la.chunks_exact(2)) {
+        chunk[0] = pair[0];
+        chunk[1] = pair[0];
+        chunk[2] = pair[0];
+    }
+    out
+}
+
+fn gray_alpha_to_rgba(la: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; la.len() * 2];
+    for (chunk, pair) in out.chunks_exact_mut(4).zip(la.chunks_exact(2)) {
+        chunk[0] = pair[0];
+        chunk[1] = pair[0];
+        chunk[2] = pair[0];
+        chunk[3] = pair[1];
+    }
+    out
+}
+
+fn bits_to_bytes(mut bits: Vec<u8>) -> Vec<u8> {
+    for v in &mut bits {
+        *v = if *v != 0 { 255 } else { 0 };
+    }
+    bits
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -138,17 +192,26 @@ impl Image {
         self.pixel_format.clone()
     }
 
-    /// Returns a clone of the first frame's pixel data.
+    /// Returns a reference to the first frame's pixel data.
     ///
     /// For single-frame images this is the full image data. For animated images,
     /// only the first frame is returned. Returns an empty [`PixelData::RGB8`] if
-    /// the image has no frames.
-    pub fn pixels(&self) -> PixelData {
-        if self.frames.len() > 0 {
-            self.frames[0].pixels.clone()
-        } else {
-            PixelData::RGB8(Vec::new())
-        }
+    /// the image has no frames. Use [`into_pixels`](Self::into_pixels) to take
+    /// ownership of the data without copying.
+    pub fn pixels(&self) -> &PixelData {
+        static EMPTY: PixelData = PixelData::RGB8(Vec::new());
+        self.frames.first().map(|frame| &frame.pixels).unwrap_or(&EMPTY)
+    }
+
+    /// Consumes the image and returns the first frame's pixel data without copying.
+    ///
+    /// Returns an empty [`PixelData::RGB8`] if the image has no frames.
+    pub fn into_pixels(self) -> PixelData {
+        self.frames
+            .into_iter()
+            .next()
+            .map(|frame| frame.pixels)
+            .unwrap_or(PixelData::RGB8(Vec::new()))
     }
 
     /// Returns `true` if the image's pixel format includes an alpha channel.
@@ -169,9 +232,14 @@ impl Image {
         &self.frames
     }
 
+    /// Consumes the image and returns all of its frames without copying.
+    pub fn into_frames(self) -> Vec<ImageFrame> {
+        self.frames
+    }
+
     /// Converts the image to RGB8 format, consuming the original image.
     ///
-    /// This method converts all frames to RGB8 format, while [`as_rgb8`](Self::as_rgb8) returns
+    /// This method converts all frames to RGB8 format, while [`to_rgb8`](Self::to_rgb8) returns
     /// vector of the first frame's pixels, converted to RGB8 format without
     /// modifying the original image
     pub fn into_rgb8(mut self) -> Image {
@@ -182,7 +250,7 @@ impl Image {
 
     /// Converts the image to RGBA8 format, consuming the original image.
     ///
-    /// This method converts all frames to RGBA8 format, while [`as_rgba8`](Self::as_rgba8) returns
+    /// This method converts all frames to RGBA8 format, while [`to_rgba8`](Self::to_rgba8) returns
     /// vector of the first frame's pixels, converted to RGBA8 format without
     /// modifying the original image
     pub fn into_rgba8(mut self) -> Image {
@@ -197,8 +265,8 @@ impl Image {
     /// down, alpha channels are dropped, and grayscale values are expanded to
     /// three equal channels. Use [`into_rgb8`](Self::into_rgb8) to convert all
     /// frames in place.
-    pub fn as_rgb8(&self) -> Vec<u8> {
-        self.pixels().into_rgb8().as_bytes().to_vec()
+    pub fn to_rgb8(&self) -> Vec<u8> {
+        self.frames.first().map(|frame| frame.to_rgb8()).unwrap_or_default()
     }
 
     /// Returns the first frame's pixels as a vector of RGBA8 bytes.
@@ -207,8 +275,8 @@ impl Image {
     /// down, opaque images without an alpha channel have 255 added, and grayscale
     /// values are expanded to three equal channels with the appropriate alpha.
     /// Use [`into_rgba8`](Self::into_rgba8) to convert all frames in place.
-    pub fn as_rgba8(&self) -> Vec<u8> {
-        self.pixels().into_rgba8().as_bytes().to_vec()
+    pub fn to_rgba8(&self) -> Vec<u8> {
+        self.frames.first().map(|frame| frame.to_rgba8()).unwrap_or_default()
     }
 }
 
@@ -251,6 +319,11 @@ impl ImageFrame {
         &self.pixels
     }
 
+    /// Consumes the frame and returns its pixel data without copying.
+    pub fn into_pixels(self) -> PixelData {
+        self.pixels
+    }
+
     /// Returns the display delay for this frame in milliseconds.
     ///
     /// For single-frame images this is always 0. For animated formats such as
@@ -287,7 +360,7 @@ impl ImageFrame {
     /// Converts this frame to RGB8 format, consuming the original frame.
     ///
     /// This method converts the frame's pixel data to RGB8 format, while
-    /// [`as_rgb8`](Self::as_rgb8) returns a vector of the frame's pixels
+    /// [`to_rgb8`](Self::to_rgb8) returns a vector of the frame's pixels
     /// converted to RGB8 without consuming the frame.
     pub fn into_rgb8(self) -> ImageFrame {
         ImageFrame {
@@ -304,17 +377,17 @@ impl ImageFrame {
     /// down, alpha channels are dropped, and grayscale values are expanded to
     /// three equal channels. Use [`into_rgb8`](Self::into_rgb8) to convert the
     /// frame in place.
-    pub fn as_rgb8(&self) -> Vec<u8> {
+    pub fn to_rgb8(&self) -> Vec<u8> {
         match &self.pixels {
             PixelData::RGB8(pixels) => pixels.to_vec(),
-            _ => self.pixels.clone().into_rgb8().as_bytes().to_vec(),
+            _ => self.pixels.clone().into_rgb8_bytes(),
         }
     }
 
     /// Converts this frame to RGBA8 format, consuming the original frame.
     ///
     /// This method converts the frame's pixel data to RGBA8 format, while
-    /// [`as_rgba8`](Self::as_rgba8) returns a vector of the frame's pixels
+    /// [`to_rgba8`](Self::to_rgba8) returns a vector of the frame's pixels
     /// converted to RGBA8 without consuming the frame.
     pub fn into_rgba8(self) -> ImageFrame {
         ImageFrame {
@@ -331,10 +404,10 @@ impl ImageFrame {
     /// down, opaque images without an alpha channel have 255 added, and grayscale
     /// values are expanded to three equal channels with the appropriate alpha.
     /// Use [`into_rgba8`](Self::into_rgba8) to convert the frame in place.
-    pub fn as_rgba8(&self) -> Vec<u8> {
+    pub fn to_rgba8(&self) -> Vec<u8> {
         match &self.pixels {
             PixelData::RGBA8(pixels) => pixels.to_vec(),
-            _ => self.pixels.clone().into_rgba8().as_bytes().to_vec(),
+            _ => self.pixels.clone().into_rgba8_bytes(),
         }
     }
 }
@@ -397,49 +470,33 @@ impl PixelData {
     /// - `L16` / `LA16` — gray value is scaled to `u8`, then replicated; alpha is dropped
     /// - `L32F` / `LA32F` / `L64F` / `LA64F` — float gray is scaled to `u8`, then replicated; alpha is dropped
     pub fn into_rgb8(self) -> PixelData {
-        PixelData::RGB8(match self {
+        PixelData::RGB8(self.into_rgb8_bytes())
+    }
+
+    /// Converts this pixel data to raw RGB8 bytes, consuming the original.
+    ///
+    /// Same conversion rules as [`into_rgb8`](Self::into_rgb8), but returns the
+    /// byte vector directly without wrapping it in a [`PixelData`].
+    pub fn into_rgb8_bytes(self) -> Vec<u8> {
+        match self {
             PixelData::RGB8(p) => p,
             PixelData::RGBA8(p) => drop_transparency_channel(p),
-            PixelData::RGB16(p) => {
-                let mut dst = vec![0u8; p.len()];
-                channel_simd::scale_u16_to_u8(&p, &mut dst);
-                dst
-            }
-            PixelData::RGBA16(p) => {
-                let mut scaled = vec![0u8; p.len()];
-                channel_simd::scale_u16_to_u8(&p, &mut scaled);
-                drop_transparency_channel(scaled)
-            }
-            PixelData::RGB32F(p) => {
-                let mut dst = vec![0u8; p.len()];
-                channel_simd::scale_f32_to_u8(&p, &mut dst);
-                dst
-            }
-            PixelData::RGBA32F(p) => {
-                let mut scaled = vec![0u8; p.len()];
-                channel_simd::scale_f32_to_u8(&p, &mut scaled);
-                drop_transparency_channel(scaled)
-            }
-            PixelData::RGB64F(p) => p.iter().map(|&v| scale_f64(v)).collect(),
-            PixelData::RGBA64F(p) => drop_transparency_channel(p.iter().map(|&v| scale_f64(v)).collect()),
-            PixelData::L1(p) => p.iter().flat_map(|&v| [v * 255, v * 255, v * 255]).collect(),
-            PixelData::L8(p) => p.iter().flat_map(|&v| [v, v, v]).collect(),
-            PixelData::L16(p) => {
-                let mut scaled = vec![0u8; p.len()];
-                channel_simd::scale_u16_to_u8(&p, &mut scaled);
-                scaled.iter().flat_map(|&g| [g, g, g]).collect()
-            }
-            PixelData::LA8(p) => p.chunks_exact(2).flat_map(|c| [c[0], c[0], c[0]]).collect(),
-            PixelData::LA16(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_u16(c[0]); [g, g, g] }).collect(),
-            PixelData::L32F(p) => {
-                let mut scaled = vec![0u8; p.len()];
-                channel_simd::scale_f32_to_u8(&p, &mut scaled);
-                scaled.iter().flat_map(|&g| [g, g, g]).collect()
-            }
-            PixelData::LA32F(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_f32(c[0]); [g, g, g] }).collect(),
-            PixelData::L64F(p) => p.iter().flat_map(|&v| { let g = scale_f64(v); [g, g, g] }).collect(),
-            PixelData::LA64F(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_f64(c[0]); [g, g, g] }).collect(),
-        })
+            PixelData::RGB16(p) => scale_u16_slice(&p),
+            PixelData::RGBA16(p) => drop_transparency_channel(scale_u16_slice(&p)),
+            PixelData::RGB32F(p) => scale_f32_slice(&p),
+            PixelData::RGBA32F(p) => drop_transparency_channel(scale_f32_slice(&p)),
+            PixelData::RGB64F(p) => scale_f64_slice(&p),
+            PixelData::RGBA64F(p) => drop_transparency_channel(scale_f64_slice(&p)),
+            PixelData::L1(p) => gray_to_rgb(&bits_to_bytes(p)),
+            PixelData::L8(p) => gray_to_rgb(&p),
+            PixelData::L16(p) => gray_to_rgb(&scale_u16_slice(&p)),
+            PixelData::LA8(p) => gray_alpha_to_rgb(&p),
+            PixelData::LA16(p) => gray_alpha_to_rgb(&scale_u16_slice(&p)),
+            PixelData::L32F(p) => gray_to_rgb(&scale_f32_slice(&p)),
+            PixelData::LA32F(p) => gray_alpha_to_rgb(&scale_f32_slice(&p)),
+            PixelData::L64F(p) => gray_to_rgb(&scale_f64_slice(&p)),
+            PixelData::LA64F(p) => gray_alpha_to_rgb(&scale_f64_slice(&p)),
+        }
     }
 
     /// Converts this pixel data to [`PixelData::RGBA8`], consuming the original.
@@ -455,49 +512,33 @@ impl PixelData {
     /// - `L16` / `LA16` — gray value is scaled to `u8`, then replicated; alpha is scaled and preserved for LA16
     /// - `L32F` / `LA32F` / `L64F` / `LA64F` — float gray is scaled to `u8`, then replicated; alpha is scaled and preserved
     pub fn into_rgba8(self) -> PixelData {
-        PixelData::RGBA8(match self {
+        PixelData::RGBA8(self.into_rgba8_bytes())
+    }
+
+    /// Converts this pixel data to raw RGBA8 bytes, consuming the original.
+    ///
+    /// Same conversion rules as [`into_rgba8`](Self::into_rgba8), but returns the
+    /// byte vector directly without wrapping it in a [`PixelData`].
+    pub fn into_rgba8_bytes(self) -> Vec<u8> {
+        match self {
             PixelData::RGB8(p) => add_transparency_channel(p),
             PixelData::RGBA8(p) => p,
-            PixelData::RGB16(p) => {
-                let mut scaled = vec![0u8; p.len()];
-                channel_simd::scale_u16_to_u8(&p, &mut scaled);
-                add_transparency_channel(scaled)
-            }
-            PixelData::RGBA16(p) => {
-                let mut dst = vec![0u8; p.len()];
-                channel_simd::scale_u16_to_u8(&p, &mut dst);
-                dst
-            }
-            PixelData::RGB32F(p) => {
-                let mut scaled = vec![0u8; p.len()];
-                channel_simd::scale_f32_to_u8(&p, &mut scaled);
-                add_transparency_channel(scaled)
-            }
-            PixelData::RGBA32F(p) => {
-                let mut dst = vec![0u8; p.len()];
-                channel_simd::scale_f32_to_u8(&p, &mut dst);
-                dst
-            }
-            PixelData::RGB64F(p) => add_transparency_channel(p.iter().map(|&v| scale_f64(v)).collect()),
-            PixelData::RGBA64F(p) => p.iter().map(|&v| scale_f64(v)).collect(),
-            PixelData::L1(p) => p.iter().flat_map(|&v| [v * 255, v * 255, v * 255, 255]).collect(),
-            PixelData::L8(p) => p.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-            PixelData::L16(p) => {
-                let mut scaled = vec![0u8; p.len()];
-                channel_simd::scale_u16_to_u8(&p, &mut scaled);
-                scaled.iter().flat_map(|&g| [g, g, g, 255]).collect()
-            }
-            PixelData::LA8(p) => p.chunks_exact(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
-            PixelData::LA16(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_u16(c[0]); let a = scale_u16(c[1]); [g, g, g, a] }).collect(),
-            PixelData::L32F(p) => {
-                let mut scaled = vec![0u8; p.len()];
-                channel_simd::scale_f32_to_u8(&p, &mut scaled);
-                scaled.iter().flat_map(|&g| [g, g, g, 255]).collect()
-            }
-            PixelData::LA32F(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_f32(c[0]); let a = scale_f32(c[1]); [g, g, g, a] }).collect(),
-            PixelData::L64F(p) => p.iter().flat_map(|&v| { let g = scale_f64(v); [g, g, g, 255] }).collect(),
-            PixelData::LA64F(p) => p.chunks_exact(2).flat_map(|c| { let g = scale_f64(c[0]); let a = scale_f64(c[1]); [g, g, g, a] }).collect(),
-        })
+            PixelData::RGB16(p) => add_transparency_channel(scale_u16_slice(&p)),
+            PixelData::RGBA16(p) => scale_u16_slice(&p),
+            PixelData::RGB32F(p) => add_transparency_channel(scale_f32_slice(&p)),
+            PixelData::RGBA32F(p) => scale_f32_slice(&p),
+            PixelData::RGB64F(p) => add_transparency_channel(scale_f64_slice(&p)),
+            PixelData::RGBA64F(p) => scale_f64_slice(&p),
+            PixelData::L1(p) => gray_to_rgba(&bits_to_bytes(p)),
+            PixelData::L8(p) => gray_to_rgba(&p),
+            PixelData::L16(p) => gray_to_rgba(&scale_u16_slice(&p)),
+            PixelData::LA8(p) => gray_alpha_to_rgba(&p),
+            PixelData::LA16(p) => gray_alpha_to_rgba(&scale_u16_slice(&p)),
+            PixelData::L32F(p) => gray_to_rgba(&scale_f32_slice(&p)),
+            PixelData::LA32F(p) => gray_alpha_to_rgba(&scale_f32_slice(&p)),
+            PixelData::L64F(p) => gray_to_rgba(&scale_f64_slice(&p)),
+            PixelData::LA64F(p) => gray_alpha_to_rgba(&scale_f64_slice(&p)),
+        }
     }
 
     /// Returns the raw pixel data as a byte slice.
@@ -654,10 +695,7 @@ impl PixelData {
                     expected_len / components_per_pixel
                 );
 
-                let default_pixel = vec![T::default(); components_per_pixel];
-                while pixels.len() < expected_len {
-                    pixels.extend(default_pixel.iter().cloned());
-                }
+                pixels.resize(expected_len, T::default());
             }
         }
     }

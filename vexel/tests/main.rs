@@ -178,11 +178,11 @@ pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
                         i
                     ));
 
-                    let avif_data = libavif::encode_rgb8(frame.width(), frame.height(), &frame.as_rgba8())?;
+                    let avif_data = libavif::encode_rgb8(frame.width(), frame.height(), &frame.to_rgba8())?;
                     std::fs::write(frame_out_path, avif_data.as_ref())?;
                 }
             } else {
-                let avif_data = libavif::encode_rgb8(image.width(), image.height(), &image.as_rgba8())?;
+                let avif_data = libavif::encode_rgb8(image.width(), image.height(), &image.to_rgba8())?;
                 std::fs::write(out_path, avif_data.as_ref())?;
             }
         }

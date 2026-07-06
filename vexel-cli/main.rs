@@ -10,6 +10,7 @@ use glob::glob;
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use vexel::{Image, LogLevel, PixelData, Vexel};
 use writer::Writer;
@@ -201,7 +202,7 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
 
     println!("Writing to: {}", output_path.display());
     if cli.frames {
-        Writer::write_frames(&output_path, format, &image)?;
+        Writer::write_frames(&output_path, format, image)?;
     } else {
         Writer::write_image(&image, format, &output_path)?;
     }
@@ -298,9 +299,10 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
 fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn std::error::Error>> {
     struct App {
         texture: Option<egui::TextureHandle>,
+        checker_texture: Option<egui::TextureHandle>,
         files: Vec<PathBuf>,
         current_file_index: usize,
-        frames: Vec<egui::ColorImage>,
+        frames: Vec<Arc<egui::ColorImage>>,
         current_frame: usize,
         last_frame_time: Instant,
         frame_delays: Vec<u32>,
@@ -313,7 +315,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
     }
 
     impl App {
-        fn image_to_frames(image: &Image, normalize: bool) -> (Vec<egui::ColorImage>, Vec<u32>, [usize; 2]) {
+        fn image_to_frames(image: Image, normalize: bool) -> (Vec<Arc<egui::ColorImage>>, Vec<u32>, [usize; 2]) {
             const MAX_TEXTURE_SIZE: usize = 16384;
 
             let original_size = [image.width() as usize, image.height() as usize];
@@ -321,26 +323,18 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
             let mut frames = Vec::new();
             let mut frame_delays = Vec::new();
 
-            for frame in image.frames() {
+            for frame in image.into_frames() {
                 let src_width = frame.width() as usize;
                 let src_height = frame.height() as usize;
+                let delay = frame.delay();
+                let has_alpha = frame.has_alpha();
 
-                let pixels = if normalize {
-                    normalize_pixels(frame.pixels().clone())
-                } else {
-                    frame.pixels().clone()
-                };
+                let mut pixels = frame.into_pixels();
+                if normalize {
+                    pixels = normalize_pixels(pixels);
+                }
 
-                let buffer = if frame.has_alpha() {
-                    pixels.into_rgba8().as_bytes().to_vec()
-                } else {
-                    let rgb = pixels.into_rgb8().as_bytes().to_vec();
-                    let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
-                    for i in (0..rgb.len()).step_by(3) {
-                        rgba.extend_from_slice(&[rgb[i], rgb[i + 1], rgb[i + 2], 255]);
-                    }
-                    rgba
-                };
+                let buffer = pixels.into_rgba8_bytes();
 
                 let scale = (MAX_TEXTURE_SIZE as f32 / src_width as f32)
                     .min(MAX_TEXTURE_SIZE as f32 / src_height as f32)
@@ -368,12 +362,13 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                     (src_width, src_height, buffer)
                 };
 
-                frames.push(egui::ColorImage::from_rgba_unmultiplied(
-                    [dst_width, dst_height],
-                    &final_buffer,
-                ));
+                let color_image = if has_alpha {
+                    egui::ColorImage::from_rgba_unmultiplied([dst_width, dst_height], &final_buffer)
+                } else {
+                    egui::ColorImage::from_rgba_premultiplied([dst_width, dst_height], &final_buffer)
+                };
+                frames.push(Arc::new(color_image));
 
-                let delay = frame.delay();
                 frame_delays.push(if delay <= 10 { 100 } else { delay }.max(17));
             }
 
@@ -387,6 +382,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
         fn new(files: Vec<PathBuf>, start_index: usize) -> Self {
             let mut app = Self {
                 texture: None,
+                checker_texture: None,
                 files,
                 current_file_index: start_index,
                 frames: Vec::new(),
@@ -406,10 +402,10 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
             app
         }
 
-        fn load_image_from_path(path: &Path, normalize: bool) -> Result<(Vec<egui::ColorImage>, Vec<u32>, [usize; 2]), String> {
+        fn load_image_from_path(path: &Path, normalize: bool) -> Result<(Vec<Arc<egui::ColorImage>>, Vec<u32>, [usize; 2]), String> {
             let mut decoder = Vexel::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
             let image = decoder.decode().map_err(|e| format!("{}: {}", path.display(), e))?;
-            Ok(Self::image_to_frames(&image, normalize))
+            Ok(Self::image_to_frames(image, normalize))
         }
 
         fn load_current_file(&mut self) -> bool {
@@ -552,19 +548,11 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
     impl eframe::App for App {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             let panel_bg = egui::Color32::from_rgb(0x1e, 0x22, 0x27);
-            let main_bg = egui::Color32::from_rgb(0x28, 0x2c, 0x34);
             let separator_color = egui::Color32::from_rgb(0x3a, 0x3f, 0x4b);
             let label_color = egui::Color32::from_rgb(0x7a, 0x84, 0x96);
             let value_color = egui::Color32::WHITE;
             let handle_color = egui::Color32::from_rgb(0x4a, 0x50, 0x5e);
             let handle_hover_color = egui::Color32::from_rgb(0x6a, 0x72, 0x82);
-
-            let mut visuals = ctx.style().visuals.clone();
-            visuals.panel_fill = main_bg;
-            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x3a, 0x3f, 0x4b);
-            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x4a, 0x50, 0x5e);
-            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x52, 0x58, 0x68);
-            ctx.set_visuals(visuals);
 
             self.handle_dropped_files(ctx);
             self.handle_keyboard_navigation(ctx);
@@ -724,27 +712,36 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                             panel_rect.center().y - display_size.y / 2.0,
                         );
                         let image_rect = egui::Rect::from_min_size(image_min, display_size);
-                        let tile = 8.0;
-                        let light = egui::Color32::from_rgb(0xcc, 0xcc, 0xcc);
-                        let dark = egui::Color32::from_rgb(0x88, 0x88, 0x88);
-                        let col_start = (image_rect.left() / tile).floor() as i32;
-                        let col_end = (image_rect.right() / tile).ceil() as i32;
-                        let row_start = (image_rect.top() / tile).floor() as i32;
-                        let row_end = (image_rect.bottom() / tile).ceil() as i32;
-                        let painter = ui.painter();
-                        for row in row_start..row_end {
-                            for col in col_start..col_end {
-                                let color = if (row + col) % 2 == 0 { light } else { dark };
-                                let cell_rect = egui::Rect::from_min_size(
-                                    egui::pos2(col as f32 * tile, row as f32 * tile),
-                                    egui::vec2(tile, tile),
-                                );
-                                let clipped = cell_rect.intersect(image_rect);
-                                if !clipped.is_negative() {
-                                    painter.rect_filled(clipped, egui::Rounding::ZERO, color);
+                        let checker = self.checker_texture.get_or_insert_with(|| {
+                            let tile = 8usize;
+                            let light = egui::Color32::from_rgb(0xcc, 0xcc, 0xcc);
+                            let dark = egui::Color32::from_rgb(0x88, 0x88, 0x88);
+                            let size = tile * 2;
+                            let mut checker_image = egui::ColorImage::new([size, size], light);
+                            for y in 0..size {
+                                for x in 0..size {
+                                    if (x / tile + y / tile) % 2 == 1 {
+                                        checker_image.pixels[y * size + x] = dark;
+                                    }
                                 }
                             }
-                        }
+                            ctx.load_texture(
+                                "checker",
+                                checker_image,
+                                egui::TextureOptions {
+                                    magnification: egui::TextureFilter::Nearest,
+                                    minification: egui::TextureFilter::Nearest,
+                                    wrap_mode: egui::TextureWrapMode::Repeat,
+                                    ..Default::default()
+                                },
+                            )
+                        });
+                        let tex_size = checker.size_vec2();
+                        let uv = egui::Rect::from_min_max(
+                            egui::pos2(image_rect.left() / tex_size.x, image_rect.top() / tex_size.y),
+                            egui::pos2(image_rect.right() / tex_size.x, image_rect.bottom() / tex_size.y),
+                        );
+                        ui.painter().image(checker.id(), image_rect, uv, egui::Color32::WHITE);
                     }
 
                     ui.with_layout(
@@ -800,7 +797,19 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
         ..Default::default()
     };
 
-    eframe::run_native("Vexel", options, Box::new(move |_cc| Ok(Box::new(App::new(files, start_index)))))?;
+    eframe::run_native(
+        "Vexel",
+        options,
+        Box::new(move |cc| {
+            let mut visuals = cc.egui_ctx.style().visuals.clone();
+            visuals.panel_fill = egui::Color32::from_rgb(0x28, 0x2c, 0x34);
+            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x3a, 0x3f, 0x4b);
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x4a, 0x50, 0x5e);
+            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x52, 0x58, 0x68);
+            cc.egui_ctx.set_visuals(visuals);
+            Ok(Box::new(App::new(files, start_index)))
+        }),
+    )?;
 
     Ok(())
 }
