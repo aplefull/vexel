@@ -254,11 +254,8 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
     fn read_compressed_data(&mut self) -> std::io::Result<Vec<u8>> {
         use std::io::SeekFrom;
         let mut data = Vec::new();
-        loop {
-            let byte = match self.reader.read_bits(8) {
-                Ok(b) => b as u8,
-                Err(_) => break,
-            };
+        while let Ok(b) = self.reader.read_bits(8) {
+            let byte = b as u8;
 
             if byte == 0xFF {
                 let next = match self.reader.read_bits(8) {
@@ -266,10 +263,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     Err(_) => break,
                 };
 
-                if next & 0x80 == 0 {
-                    data.push(0xFF);
-                    data.push(next);
-                } else if (0xD0..=0xD7).contains(&next) {
+                if next & 0x80 == 0 || (0xD0..=0xD7).contains(&next) {
                     data.push(0xFF);
                     data.push(next);
                 } else {
@@ -844,8 +838,8 @@ fn decode_single_plane(
 
         curr_line[width + 2] = curr_line[width + 1];
 
-        for x in 2..=width + 1 {
-            result.push((curr_line[x].clamp(0, max_val) * scale) as u16);
+        for &v in curr_line.iter().take(width + 2).skip(2) {
+            result.push((v.clamp(0, max_val) * scale) as u16);
         }
 
         std::mem::swap(&mut prev_line, &mut curr_line);
@@ -877,7 +871,7 @@ fn decode_plane_interleaved(
     let max_val = alpha - 1;
     let scale = 65535 / max_val;
 
-    for comp in 0..components {
+    for (comp, plane) in planes.iter_mut().enumerate() {
         init_stats(state, stats_alpha);
         init_run_state(state, 1);
 
@@ -904,8 +898,8 @@ fn decode_plane_interleaved(
 
             curr_line[width + 2] = curr_line[width + 1];
 
-            for x in 2..=width + 1 {
-                planes[comp].push((curr_line[x].clamp(0, max_val) * scale) as u16);
+            for &v in curr_line.iter().take(width + 2).skip(2) {
+                plane.push((v.clamp(0, max_val) * scale) as u16);
             }
 
             std::mem::swap(&mut prev_line, &mut curr_line);
@@ -915,8 +909,8 @@ fn decode_plane_interleaved(
 
     let mut result = Vec::with_capacity(width * height * components);
     for i in 0..(width * height) {
-        for comp in 0..components {
-            result.push(planes[comp][i]);
+        for plane in planes.iter() {
+            result.push(plane[i]);
         }
     }
 
@@ -975,8 +969,8 @@ fn decode_line_interleaved(
             }
 
             for x in 2..=width + 1 {
-                for comp in 0..components {
-                    result.push((curr_lines[comp][x].clamp(0, max_val) * scale) as u16);
+                for curr_line in curr_lines.iter() {
+                    result.push((curr_line[x].clamp(0, max_val) * scale) as u16);
                 }
             }
 
@@ -1038,8 +1032,8 @@ fn decode_line_interleaved(
 
                 curr_lines[comp][cw + 2] = curr_lines[comp][cw + 1];
 
-                for x in 2..=cw + 1 {
-                    comp_data[comp].push(curr_lines[comp][x]);
+                for &v in curr_lines[comp].iter().take(cw + 2).skip(2) {
+                    comp_data[comp].push(v);
                 }
 
                 std::mem::swap(&mut prev_lines[comp], &mut curr_lines[comp]);
@@ -1587,7 +1581,7 @@ fn undoscanline(
     br: &mut JlsBitReader,
     state: &mut DecoderState,
     psl: &[i32],
-    sl: &mut Vec<i32>,
+    sl: &mut [i32],
     no: usize,
     color: usize,
     alpha: i32,
@@ -1605,7 +1599,7 @@ fn undoscanline(
 
     let mut i = 2usize;
     while i <= no + 1 {
-        let rd = if i + 1 <= no + 1 { psl[i + 1] } else { psl[no + 1] };
+        let rd = if i < no + 1 { psl[i + 1] } else { psl[no + 1] };
 
         let drd = (rd - rb).clamp(-(lutmax as i32 - 1), lutmax as i32 - 1);
         let drb = (rb - rc).clamp(-(lutmax as i32 - 1), lutmax as i32 - 1);
@@ -1661,7 +1655,7 @@ fn undoscanline(
 
         sl[i] = ra;
         rc = rb;
-        rb = if i + 1 <= no + 1 { psl[i + 1] } else { psl[no + 1] };
+        rb = if i < no + 1 { psl[i + 1] } else { psl[no + 1] };
         i += 1;
     }
 }
@@ -1670,7 +1664,7 @@ fn undoscanline_pixel(
     br: &mut JlsBitReader,
     state: &mut DecoderState,
     psl: &[i32],
-    sl: &mut Vec<i32>,
+    sl: &mut [i32],
     no: usize,
     components: usize,
     alpha: i32,
@@ -1744,6 +1738,7 @@ fn undoscanline_pixel(
 
             if n > 0 {
                 for j in 0..n as usize {
+                    #[allow(clippy::needless_range_loop)]
                     for nc in 0..comps {
                         let idx = i + j * comps + nc;
                         if idx < sl.len() {
@@ -1794,11 +1789,9 @@ fn undoscanline_pixel(
             c_bb[color] = c_dd[color];
             i += 1;
         } else {
-            for nc in 0..comps {
-                sl[i + nc] = c_aa[nc];
-                c_cc[nc] = c_bb[nc];
-                c_bb[nc] = c_dd[nc];
-            }
+            sl[i..i + comps].copy_from_slice(&c_aa);
+            c_cc.copy_from_slice(&c_bb);
+            c_bb.copy_from_slice(&c_dd);
             i += comps;
         }
     }

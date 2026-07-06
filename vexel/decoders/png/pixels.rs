@@ -313,7 +313,7 @@ impl PixelDecoder {
 
         let bits_per_pixel = self.get_bits_per_pixel();
 
-        let out_bytes = (bits_per_pixel as usize * width as usize + 7) / 8;
+        let out_bytes = (bits_per_pixel as usize * width as usize).div_ceil(8);
         let mut output = vec![0u8; out_bytes * height as usize];
         let mut data_offset = 0;
 
@@ -328,7 +328,7 @@ impl PixelDecoder {
             }
 
             let pass_bits_per_row = bits_per_pixel as usize * pass_width;
-            let pass_bytes_per_row = (pass_bits_per_row + 7) / 8;
+            let pass_bytes_per_row = pass_bits_per_row.div_ceil(8);
             let pass_size = (pass_bytes_per_row + 1) * pass_height;
 
             if data_offset + pass_size > data.len() {

@@ -88,7 +88,7 @@ fn compose_frame_scalar(
     let clamped_h = frame_height.min(canvas_height.saturating_sub(frame_top));
     let clamped_w = frame_width.min(canvas_width.saturating_sub(frame_left));
 
-    if canvas.as_ptr() as usize % 4 != 0 || canvas.len() % 4 != 0 {
+    if !(canvas.as_ptr() as usize).is_multiple_of(4) || !canvas.len().is_multiple_of(4) {
         return;
     }
 
@@ -150,7 +150,7 @@ unsafe fn compose_frame_avx2(
     let clamped_h = frame_height.min(canvas_height.saturating_sub(frame_top));
     let clamped_w = frame_width.min(canvas_width.saturating_sub(frame_left));
 
-    if canvas.as_ptr() as usize % 4 != 0 || canvas.len() % 4 != 0 {
+    if !(canvas.as_ptr() as usize).is_multiple_of(4) || !canvas.len().is_multiple_of(4) {
         return;
     }
 

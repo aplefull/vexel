@@ -192,7 +192,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         for layer in self.dl..=self.d {
             let hx = ceil_half(self.xd, (self.d - layer) as u32);
             let hy = ceil_half(self.yd, (self.d - layer) as u32);
-            let hbpl = ((hx + 7) / 8) as usize;
+            let hbpl = hx.div_ceil(8) as usize;
             let total = hbpl * hy as usize;
             for plane in 0..planes {
                 self.lhp[layer as usize & 1][plane] = vec![0u8; total];
@@ -208,7 +208,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
     fn stripes_for_layer(&self, layer: u8) -> u32 {
         let hy = ceil_half(self.yd, (self.d - layer) as u32);
         let hl = self.l0 << layer;
-        (hy + hl - 1) / hl
+        hy.div_ceil(hl)
     }
 
     fn process_stream(&mut self, data: &[u8]) -> VexelResult<()> {
@@ -440,11 +440,11 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
 
         let hx = ceil_half(self.xd, (self.d as u32).saturating_sub(layer as u32));
         let hy = ceil_half(self.yd, (self.d as u32).saturating_sub(layer as u32));
-        let hbpl = ((hx + 7) / 8) as usize;
+        let hbpl = hx.div_ceil(8) as usize;
 
         let lx = ceil_half(hx, 1);
         let ly = ceil_half(hy, 1);
-        let lbpl = ((lx + 7) / 8) as usize;
+        let lbpl = lx.div_ceil(8) as usize;
 
         let hl = (self.l0 << layer) as usize;
         let ll = hl >> 1;
@@ -587,9 +587,9 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
                 }
 
-                'pixel_pair: loop {
-                    if (x & 7) == 0 && x + 8 < hx as usize {
-                        if i > 0 || (y > 0 && !is_reset) {
+                'pixel_pair: {
+                    if (x & 7) == 0 && x + 8 < hx as usize
+                        && (i > 0 || (y > 0 && !is_reset)) {
                             let next_byte_off = (y - 1) * hbpl + byte_idx + 1;
                             if next_byte_off < self.lhp[lhp_hi][plane].len() {
                                 line_h2 |= self.lhp[lhp_hi][plane][next_byte_off] as u32;
@@ -601,7 +601,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                                 }
                             }
                         }
-                    }
 
                     let tp_cx = if !lntp {
                         Some(
@@ -740,7 +739,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         self.line_l3 = line_l3;
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn decode_diff_pixel(
         &mut self,
         plane: usize,
@@ -840,7 +838,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
 
         let hx = ceil_half(self.xd, (self.d as u32).saturating_sub(layer as u32));
         let hy = ceil_half(self.yd, (self.d as u32).saturating_sub(layer as u32));
-        let hbpl = ((hx + 7) / 8) as usize;
+        let hbpl = hx.div_ceil(8) as usize;
         let hl = (self.l0 << layer) as usize;
 
         let stripe = self.current_stripe as usize;
@@ -942,9 +940,9 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             let mut current_byte = 0u8;
 
             while x < hx as usize {
-                if x & 7 == 0 {
-                    if x < (hbpl * 8).saturating_sub(8) {
-                        if i > 0 || (y > 0 && !is_reset) {
+                if x & 7 == 0
+                    && x < (hbpl * 8).saturating_sub(8)
+                        && (i > 0 || (y > 0 && !is_reset)) {
                             let off = (y - 1) * hbpl + (x / 8) + 1;
                             if off < self.lhp[lhp_idx][plane].len() {
                                 line_h2 |= self.lhp[lhp_idx][plane][off] as u32;
@@ -956,8 +954,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                                 }
                             }
                         }
-                    }
-                }
 
                 let cx = if use_two_line {
                     if tx != 0 {
@@ -984,31 +980,29 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     } else {
                         ((line_h2 >> 9) & 0x3f0) | (line_h1 & 0x00f)
                     }
-                } else {
-                    if tx != 0 {
-                        let a = if tx as usize > x {
-                            0u32
-                        } else if tx < 8 {
-                            (line_h1 >> (tx as u32).wrapping_sub(3)) & 0x004
-                        } else {
-                            let o = (x as i32 - tx) & !7;
-                            let byte_off = (-o / 8) as usize;
-                            let bit_off = (7 - ((-o) & 7)) as u32;
-                            if byte_off < hbpl {
-                                let b_idx = row_offset + byte_idx.saturating_sub(byte_off);
-                                if b_idx < self.lhp[lhp_idx][plane].len() {
-                                    ((self.lhp[lhp_idx][plane][b_idx] >> bit_off) as u32 & 1) << 2
-                                } else {
-                                    0
-                                }
+                } else if tx != 0 {
+                    let a = if tx as usize > x {
+                        0u32
+                    } else if tx < 8 {
+                        (line_h1 >> (tx as u32).wrapping_sub(3)) & 0x004
+                    } else {
+                        let o = (x as i32 - tx) & !7;
+                        let byte_off = (-o / 8) as usize;
+                        let bit_off = (7 - ((-o) & 7)) as u32;
+                        if byte_off < hbpl {
+                            let b_idx = row_offset + byte_idx.saturating_sub(byte_off);
+                            if b_idx < self.lhp[lhp_idx][plane].len() {
+                                ((self.lhp[lhp_idx][plane][b_idx] >> bit_off) as u32 & 1) << 2
                             } else {
                                 0
                             }
-                        };
-                        ((line_h3 >> 7) & 0x380) | ((line_h2 >> 11) & 0x078) | a | (line_h1 & 0x003)
-                    } else {
-                        ((line_h3 >> 7) & 0x380) | ((line_h2 >> 11) & 0x07c) | (line_h1 & 0x003)
-                    }
+                        } else {
+                            0
+                        }
+                    };
+                    ((line_h3 >> 7) & 0x380) | ((line_h2 >> 11) & 0x078) | a | (line_h1 & 0x003)
+                } else {
+                    ((line_h3 >> 7) & 0x380) | ((line_h2 >> 11) & 0x07c) | (line_h1 & 0x003)
                 };
 
                 let pix = self.ar_decoders[plane][layer_idx].decode(cx as usize, data, &mut pos).unwrap_or(0);
@@ -1051,7 +1045,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
 
         let hx = self.xd;
         let hy = self.yd;
-        let hbpl = ((hx + 7) / 8) as usize;
+        let hbpl = hx.div_ceil(8) as usize;
 
         if self.planes == 1 {
             let plane_data = if plane_data_available(&self.lhp[lhp_idx], 0) {

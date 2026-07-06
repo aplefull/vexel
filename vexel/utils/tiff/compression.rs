@@ -28,8 +28,8 @@ impl LzwTable {
     fn new() -> Self {
         let mut prefix = vec![0u16; LZW_MAX_ENTRIES + 1];
         let mut suffix = vec![0u8; LZW_MAX_ENTRIES + 1];
-        for i in 0..256usize {
-            suffix[i] = i as u8;
+        for (i, s) in suffix.iter_mut().enumerate().take(256) {
+            *s = i as u8;
         }
         prefix[LZW_CLEAR_CODE as usize] = 0;
         prefix[LZW_EOI_CODE as usize] = 0;
@@ -161,12 +161,7 @@ fn decompress_lzw_msb(data: &[u8]) -> Vec<u8> {
     let mut reader = BitReaderMsb::new(data);
     let mut old_code: Option<u16> = None;
 
-    loop {
-        let code = match reader.read(table.nbits) {
-            Some(c) => c,
-            None => break,
-        };
-
+    while let Some(code) = reader.read(table.nbits) {
         if code == LZW_EOI_CODE {
             break;
         }
@@ -225,12 +220,7 @@ fn decompress_lzw_lsb(data: &[u8]) -> Vec<u8> {
     let mut reader = BitReaderLsb::new(data);
     let mut old_code: Option<u16> = None;
 
-    loop {
-        let code = match reader.read(table.nbits) {
-            Some(c) => c,
-            None => break,
-        };
-
+    while let Some(code) = reader.read(table.nbits) {
         if code == LZW_EOI_CODE {
             break;
         }
@@ -391,7 +381,7 @@ pub fn decompress_sgilog24(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
     out
 }
 
-pub fn apply_predictor_horizontal(data: &mut Vec<u8>, width: u32, samples_per_pixel: u16, bits_per_sample: u16) {
+pub fn apply_predictor_horizontal(data: &mut [u8], width: u32, samples_per_pixel: u16, bits_per_sample: u16) {
     if bits_per_sample == 8 {
         let spp = samples_per_pixel as usize;
         let row_stride = width as usize * spp;
@@ -481,16 +471,14 @@ pub fn apply_predictor_horizontal(data: &mut Vec<u8>, width: u32, samples_per_pi
                         data[prev_idx + 4], data[prev_idx + 5], data[prev_idx + 6], data[prev_idx + 7],
                     ]);
                     let result = val.wrapping_add(prev).to_ne_bytes();
-                    for i in 0..8 {
-                        data[idx + i] = result[i];
-                    }
+                    data[idx..idx + 8].copy_from_slice(&result);
                 }
             }
         }
     }
 }
 
-pub fn apply_predictor_horizontal_be(data: &mut Vec<u8>, width: u32, samples_per_pixel: u16, bits_per_sample: u16) {
+pub fn apply_predictor_horizontal_be(data: &mut [u8], width: u32, samples_per_pixel: u16, bits_per_sample: u16) {
     if bits_per_sample == 8 {
         apply_predictor_horizontal(data, width, samples_per_pixel, bits_per_sample);
         return;
@@ -568,16 +556,14 @@ pub fn apply_predictor_horizontal_be(data: &mut Vec<u8>, width: u32, samples_per
                         data[prev_idx + 4], data[prev_idx + 5], data[prev_idx + 6], data[prev_idx + 7],
                     ]);
                     let result = val.wrapping_add(prev).to_be_bytes();
-                    for i in 0..8 {
-                        data[idx + i] = result[i];
-                    }
+                    data[idx..idx + 8].copy_from_slice(&result);
                 }
             }
         }
     }
 }
 
-pub fn apply_predictor_float(data: &mut Vec<u8>, width: u32, samples_per_pixel: u16, bits_per_sample: u16, big_endian: bool) {
+pub fn apply_predictor_float(data: &mut [u8], width: u32, samples_per_pixel: u16, bits_per_sample: u16, big_endian: bool) {
     let bps = (bits_per_sample as usize) / 8;
     let spp = samples_per_pixel as usize;
     let row_stride = width as usize * spp * bps;

@@ -74,7 +74,7 @@ impl Writer {
         let compressed = unsafe { 
             let encoder = JxlEncoderCreate(std::ptr::null());
             if encoder.is_null() {
-                return Err(Error::new(ErrorKind::Other, "failed to create JXL encoder"));
+                return Err(Error::other("failed to create JXL encoder"));
             }
 
             let result = jxl_encode(encoder, image);
@@ -82,7 +82,7 @@ impl Writer {
             JxlEncoderDestroy(encoder);
 
             result
-        }.map_err(|e| Error::new(ErrorKind::Other, e))?;
+        }.map_err(Error::other)?;
 
         let mut file = File::create(output_path)?;
         file.write_all(&compressed)?;

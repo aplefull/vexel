@@ -67,12 +67,12 @@ impl HeaderReader {
 
         let (width, height) = match &dib_header {
             DibHeader::Core(h) => (h.width as u32, h.height as u32),
-            DibHeader::OS2V2(h) => (h.width.abs() as u32, h.height.abs() as u32),
-            DibHeader::Info(h) => (h.width.abs() as u32, h.height.abs() as u32),
-            DibHeader::V2(h) => (h.info.width.abs() as u32, h.info.height.abs() as u32),
-            DibHeader::V3(h) => (h.v2.info.width.abs() as u32, h.v2.info.height.abs() as u32),
-            DibHeader::V4(h) => (h.v3.v2.info.width.abs() as u32, h.v3.v2.info.height.abs() as u32),
-            DibHeader::V5(h) => (h.v4.v3.v2.info.width.abs() as u32, h.v4.v3.v2.info.height.abs() as u32),
+            DibHeader::OS2V2(h) => (h.width.unsigned_abs(), h.height.unsigned_abs()),
+            DibHeader::Info(h) => (h.width.unsigned_abs(), h.height.unsigned_abs()),
+            DibHeader::V2(h) => (h.info.width.unsigned_abs(), h.info.height.unsigned_abs()),
+            DibHeader::V3(h) => (h.v2.info.width.unsigned_abs(), h.v2.info.height.unsigned_abs()),
+            DibHeader::V4(h) => (h.v3.v2.info.width.unsigned_abs(), h.v3.v2.info.height.unsigned_abs()),
+            DibHeader::V5(h) => (h.v4.v3.v2.info.width.unsigned_abs(), h.v4.v3.v2.info.height.unsigned_abs()),
         };
 
         if width == 0 || height == 0 {

@@ -75,8 +75,8 @@ impl FilterDecoder {
     pub fn unfilter_scanlines(&self, data: &[u8], pass_width: u32) -> VexelResult<Vec<u8>> {
         let bits_per_pixel = self.get_bits_per_pixel();
 
-        let bytes_per_pixel = (bits_per_pixel as usize + 7) / 8;
-        let bytes_per_row = (pass_width as usize * bits_per_pixel as usize + 7) / 8;
+        let bytes_per_pixel = (bits_per_pixel as usize).div_ceil(8);
+        let bytes_per_row = (pass_width as usize * bits_per_pixel as usize).div_ceil(8);
 
         if bytes_per_row == 0 {
             return Ok(Vec::new());

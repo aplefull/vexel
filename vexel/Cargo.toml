@@ -32,5 +32,5 @@ harness = false
 [features]
 default = ["rayon"]
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+[lints]
+workspace = true

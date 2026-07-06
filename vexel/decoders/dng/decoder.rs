@@ -671,9 +671,10 @@ impl<R: Read + Seek> DngDecoder<R> {
             let batch_end = (tile_idx + batch).min(num_tiles);
 
             let mut tiles_data: Vec<(Vec<u8>, usize)> = Vec::with_capacity(batch_end - tile_idx);
-            for i in tile_idx..batch_end {
+            for offset in &offsets[tile_idx..batch_end] {
+                let i = tile_idx + tiles_data.len();
                 let byte_count = byte_counts.get(i).copied().unwrap_or(0);
-                self.reader.seek(SeekFrom::Start(offsets[i] as u64))?;
+                self.reader.seek(SeekFrom::Start(*offset as u64))?;
                 let mut tile_data = vec![0u8; byte_count as usize];
                 self.reader.read_exact(&mut tile_data)?;
                 tiles_data.push((tile_data, tile_height));
@@ -1322,7 +1323,7 @@ impl StripContext<'_> {
         }
     }
 
-    fn apply_row_predictor(&self, data: &mut Vec<u8>, width: usize, bps: u16) {
+    fn apply_row_predictor(&self, data: &mut [u8], width: usize, bps: u16) {
         let spp = self.header.samples_per_pixel.max(1);
         let big_endian = self.byte_order == ByteOrder::BigEndian;
         match self.header.predictor {
@@ -1526,7 +1527,7 @@ const KODAK_DCS_COLOR_TABLE: &[(&str, u16, [i16; 9])] = &[
 const XYZ_RGB: [[f32; 3]; 3] = [
     [0.4124564, 0.3575761, 0.1804375],
     [0.2126729, 0.7151522, 0.0721750],
-    [0.0193339, 0.1191920, 0.9503041],
+    [0.0193339, 0.119192, 0.9503041],
 ];
 
 const HISTOGRAM_SIZE: usize = 0x2000;

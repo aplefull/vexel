@@ -109,7 +109,7 @@ fn scale_u16_be_scalar(src: &[u8], dst: &mut [u16], max_value: u16) {
 }
 
 fn unpack_bits_scalar(src: &[u8], dst: &mut [u8], width: u32, height: u32) {
-    let bytes_per_row = ((width + 7) / 8) as usize;
+    let bytes_per_row = width.div_ceil(8) as usize;
     let width = width as usize;
 
     for row in 0..height as usize {
@@ -203,7 +203,7 @@ unsafe fn scale_u16_be_avx2(src: &[u8], dst: &mut [u16], max_value: u16) {
 unsafe fn unpack_bits_avx2(src: &[u8], dst: &mut [u8], width: u32, height: u32) {
     use std::arch::x86_64::*;
 
-    let bytes_per_row = ((width + 7) / 8) as usize;
+    let bytes_per_row = width.div_ceil(8) as usize;
     let width = width as usize;
 
     let bit_mask = _mm_set_epi8(1, 2, 4, 8, 16, 32, 64, -128i8, 1, 2, 4, 8, 16, 32, 64, -128i8);

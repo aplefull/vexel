@@ -19,8 +19,8 @@ struct ComponentPlane {
 
 impl ComponentPlane {
     fn try_new(width: u32, height: u32, limits: &mut Limits) -> VexelResult<Self> {
-        let blocks_per_line = (width + 7) / 8;
-        let block_lines = (height + 7) / 8;
+        let blocks_per_line = width.div_ceil(8);
+        let block_lines = height.div_ceil(8);
         let elem_count = (blocks_per_line as usize)
             .saturating_mul(block_lines as usize)
             .saturating_mul(64);
@@ -161,7 +161,6 @@ impl<'a> ArithmeticDecoder<'a> {
 
         let sv = *st as usize;
         let (qe, nl, nm, switch_mps) = ARITH_TABLE[sv & 0x7F];
-        let qe = qe as u32;
 
         let temp = self.a.wrapping_sub(qe);
         self.a = temp;
@@ -171,11 +170,11 @@ impl<'a> ArithmeticDecoder<'a> {
             self.c -= shifted;
             if self.a < qe {
                 self.a = qe;
-                *st = ((*st as u8) & 0x80) ^ nm;
+                *st = (*st & 0x80) ^ nm;
                 sv as u8 >> 7
             } else {
                 self.a = qe;
-                *st = ((*st as u8) & 0x80) ^ nl;
+                *st = (*st & 0x80) ^ nl;
                 if switch_mps != 0 {
                     *st ^= 0x80;
                 }
@@ -183,13 +182,13 @@ impl<'a> ArithmeticDecoder<'a> {
             }
         } else if self.a < 0x8000 {
             if self.a < qe {
-                *st = ((*st as u8) & 0x80) ^ nl;
+                *st = (*st & 0x80) ^ nl;
                 if switch_mps != 0 {
                     *st ^= 0x80;
                 }
                 1 - (sv as u8 >> 7)
             } else {
-                *st = ((*st as u8) & 0x80) ^ nm;
+                *st = (*st & 0x80) ^ nm;
                 sv as u8 >> 7
             }
         } else {
@@ -284,9 +283,9 @@ impl<'a> ArithmeticDecoder<'a> {
         dc_l: u8,
         dc_u: u8,
         successive_low: u8,
-        dc_context: &mut Vec<usize>,
-        last_dc_val: &mut Vec<i32>,
-        dc_stats: &mut Vec<Vec<u8>>,
+        dc_context: &mut [usize],
+        last_dc_val: &mut [i32],
+        dc_stats: &mut [Vec<u8>],
         is_differential: bool,
     ) {
         let val = self.decode_dc_coeff(comp_idx, dc_tbl, dc_l, dc_u, dc_context, last_dc_val, dc_stats, is_differential);
@@ -315,7 +314,7 @@ impl<'a> ArithmeticDecoder<'a> {
         ss: usize,
         se: usize,
         successive_low: u8,
-        ac_stats: &mut Vec<Vec<u8>>,
+        ac_stats: &mut [Vec<u8>],
     ) {
         if self.error || ac_tbl >= ac_stats.len() { return; }
 
@@ -394,7 +393,7 @@ impl<'a> ArithmeticDecoder<'a> {
         ss: usize,
         se: usize,
         successive_low: u8,
-        ac_stats: &mut Vec<Vec<u8>>,
+        ac_stats: &mut [Vec<u8>],
     ) {
         if self.error || ac_tbl >= ac_stats.len() { return; }
 
@@ -413,9 +412,8 @@ impl<'a> ArithmeticDecoder<'a> {
             let st_base = 3 * (k.saturating_sub(1));
             if st_base + 2 >= tbl_len { break; }
 
-            if k > kex {
-                if self.arith_decode(&mut ac_stats[ac_tbl][st_base]) != 0 { break; }
-            }
+            if k > kex
+                && self.arith_decode(&mut ac_stats[ac_tbl][st_base]) != 0 { break; }
 
             loop {
                 if k >= 64 { break 'outer; }
@@ -461,10 +459,10 @@ impl<'a> ArithmeticDecoder<'a> {
         dc_l: u8,
         dc_u: u8,
         ac_k: u8,
-        dc_context: &mut Vec<usize>,
-        last_dc_val: &mut Vec<i32>,
-        dc_stats: &mut Vec<Vec<u8>>,
-        ac_stats: &mut Vec<Vec<u8>>,
+        dc_context: &mut [usize],
+        last_dc_val: &mut [i32],
+        dc_stats: &mut [Vec<u8>],
+        ac_stats: &mut [Vec<u8>],
         is_differential: bool,
     ) {
         if self.error { return; }
@@ -560,9 +558,7 @@ impl<'a> ArithmeticDecoder<'a> {
                 2
             } else if abs <= threshold_u {
                 if diff < 0 { 1 } else { 3 }
-            } else {
-                if diff < 0 { 0 } else { 4 }
-            }
+            } else if diff < 0 { 0 } else { 4 }
         }
 
         let da_cls = classify(da, l, u);
@@ -835,8 +831,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let payload_len = (length as usize).saturating_sub(7);
         self.limits.reserve_usize(payload_len)?;
         let mut payload = vec![0u8; payload_len];
-        for i in 0..payload_len {
-            payload[i] = self.reader.read_u8().unwrap_or(0);
+        for byte in payload.iter_mut() {
+            *byte = self.reader.read_u8().unwrap_or(0);
         }
         self.limits.free_usize(payload_len);
 
@@ -1060,8 +1056,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.limits.reserve_buffer(self.width, self.height, 4)?;
 
         // TODO rename them, they are not MCU dimensions, but dimensions of the image in MCUs
-        self.mcu_width = (self.width + 7) / 8;
-        self.mcu_height = (self.height + 7) / 8;
+        self.mcu_width = self.width.div_ceil(8);
+        self.mcu_height = self.height.div_ceil(8);
 
         self.component_count = self.reader.read_u8()?;
 
@@ -1144,7 +1140,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             log_warn!("DNL specifies 0 lines, ignoring");
         } else {
             self.height = number_of_lines as u32;
-            self.mcu_height = (self.height + 7) / 8;
+            self.mcu_height = self.height.div_ceil(8);
             log_debug!("DNL: updated height to {}", self.height);
         }
 
@@ -1183,7 +1179,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 id,
                 precision,
                 table: table.clone(),
-                table_natural: Self::unzigzag_block(&table.as_slice()).to_vec(),
+                table_natural: Self::unzigzag_block(table.as_slice()).to_vec(),
             };
 
             new_tables.push(qt.clone());
@@ -1790,8 +1786,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             .max()
             .unwrap_or(1);
 
-        let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-        let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+        let mcu_width = self.width.div_ceil(8 * max_h_samp as u32);
+        let mcu_height = self.height.div_ceil(8 * max_v_samp as u32);
 
         let components_snapshot: Vec<_> = self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
         let mut component_planes: Vec<ComponentPlane> = Vec::with_capacity(components_snapshot.len());
@@ -1844,8 +1840,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 max_v_samp = 1;
             }
 
-            let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-            let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+            let mcu_width = self.width.div_ceil(8 * max_h_samp as u32);
+            let mcu_height = self.height.div_ceil(8 * max_v_samp as u32);
 
             struct ScanCompInfo {
                 plane_index: usize,
@@ -2070,26 +2066,23 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                                         }
 
                                                         coefficient = if reader.read_bits(1) != 0 { positive } else { negative };
-                                                    } else {
-                                                        if num_zeros != 15 {
-                                                            skips = 1 << num_zeros;
-                                                            skips += reader.read_bits(num_zeros as u32);
-                                                            break;
-                                                        }
+                                                    } else if num_zeros != 15 {
+                                                        skips = 1 << num_zeros;
+                                                        skips += reader.read_bits(num_zeros as u32);
+                                                        break;
                                                     }
 
                                                     loop {
                                                         let val = unsafe { component_data.get_unchecked_mut(ZIGZAG_MAP[k] as usize) };
                                                         if *val != 0 {
-                                                            if reader.read_bits(1) == 1 {
-                                                                if *val & positive == 0 {
+                                                            if reader.read_bits(1) == 1
+                                                                && *val & positive == 0 {
                                                                     if *val >= 0 {
                                                                         *val += positive;
                                                                     } else {
                                                                         *val += negative;
                                                                     }
                                                                 }
-                                                            }
                                                         } else {
                                                             if num_zeros == 0 {
                                                                 break;
@@ -2115,17 +2108,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
                                             if skips > 0 {
                                                 while k <= scan.end_spectral as usize {
                                                     let val = unsafe { component_data.get_unchecked_mut(ZIGZAG_MAP[k] as usize) };
-                                                    if *val != 0 {
-                                                        if reader.read_bits(1) == 1 {
-                                                            if *val & positive == 0 {
+                                                    if *val != 0
+                                                        && reader.read_bits(1) == 1
+                                                            && *val & positive == 0 {
                                                                 if *val >= 0 {
                                                                     *val += positive;
                                                                 } else {
                                                                     *val += negative;
                                                                 }
                                                             }
-                                                        }
-                                                    }
 
                                                     k += 1;
                                                 }
@@ -2253,11 +2244,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut db: Vec<Vec<i32>> = vec![vec![0i32; width]; num_components];
 
         for y in 0..height {
-            for c in 0..num_components {
-                da[c] = 0;
-            }
+            da.iter_mut().for_each(|d| *d = 0);
 
             for x in 0..width {
+                #[allow(clippy::needless_range_loop)]
                 for c in 0..num_components {
                     let l = l_values[c];
                     let u = u_values[c];
@@ -2571,7 +2561,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn decode_lossless_scan_huffman(
         &mut self,
         scan: &ScanData,
@@ -2674,7 +2663,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn lossless_huffman_loop<'t, C, F>(
         reader: &mut JpegBitReader<'_>,
         sw: usize,
@@ -2838,7 +2826,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn decode_lossless_scan_arithmetic(
         &mut self,
         scan: &ScanData,
@@ -2901,6 +2888,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 *v = 0;
             }
 
+            #[allow(clippy::needless_range_loop)]
             for x in 0..sw {
                 let (at_interval_start, on_interval_first_line) = if restart_interval > 0 {
                     if mcus_until_restart == 0 {
@@ -2946,7 +2934,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn reconstruct_lossless_sample(
         buf: &mut [u16],
         pos: usize,
@@ -3016,8 +3003,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let max_h_samp = if is_non_interleaved { 1 } else { self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1) };
         let max_v_samp = if is_non_interleaved { 1 } else { self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1) };
 
-        let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-        let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+        let mcu_width = self.width.div_ceil(8 * max_h_samp as u32);
+        let mcu_height = self.height.div_ceil(8 * max_v_samp as u32);
 
         let mut restart_counter = self.restart_interval as u32;
 
@@ -3114,11 +3101,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         per_scan_dc_context[plane_idx] = 0;
                     }
                 }
-                if !is_dc_scan {
-                    if ac_sel < per_scan_ac_stats.len() {
+                if !is_dc_scan
+                    && ac_sel < per_scan_ac_stats.len() {
                         per_scan_ac_stats[ac_sel].fill(0);
                     }
-                }
             }
 
             let get_dc_l = |tbl: usize| -> u8 {
@@ -3144,8 +3130,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1)
             };
 
-            let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-            let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+            let mcu_width = self.width.div_ceil(8 * max_h_samp as u32);
+            let mcu_height = self.height.div_ceil(8 * max_v_samp as u32);
 
             let restart_interval = self.restart_interval;
             let mut restart_counter = restart_interval as u32;
@@ -3252,7 +3238,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn decode_huffman_to_planes(&mut self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
-        if self.scans.len() < 1 {
+        if self.scans.is_empty() {
             // Well, nothing to do here, how did this even happen?
             log_warn!("No scans found in JPEG data");
             return Ok(());
@@ -3288,8 +3274,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             max_v_samp = 1;
         }
 
-        let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-        let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+        let mcu_width = self.width.div_ceil(8 * max_h_samp as u32);
+        let mcu_height = self.height.div_ceil(8 * max_v_samp as u32);
 
         let default_dc_table = Self::default_lossless_dc_table();
         let default_ac_table = Self::default_lossless_dc_table();
@@ -3465,7 +3451,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let idx = (dy * tw + dx) * 4;
                     for (c, plane) in ch.iter().enumerate() {
                         let dims = source_dims.get(c).copied().unwrap_or((tw, th));
-                        pixels[idx + c] = ((upsample(plane, dims, dx, dy) + mid as i32).clamp(0, max_val as i32) as u16) << shift;
+                        pixels[idx + c] = ((upsample(plane, dims, dx, dy) + mid).clamp(0, max_val) as u16) << shift;
                     }
                 }
             }
@@ -3483,12 +3469,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
         colorspace: JpegColorspace,
     ) -> VexelResult<PixelData> {
         let empty: Vec<i32> = vec![];
-        let ch0 = deinterleaved.get(0).map(|v| v.as_slice()).unwrap_or(&empty);
+        let ch0 = deinterleaved.first().map(|v| v.as_slice()).unwrap_or(&empty);
         let ch1 = deinterleaved.get(1).map(|v| v.as_slice()).unwrap_or(&empty);
         let ch2 = deinterleaved.get(2).map(|v| v.as_slice()).unwrap_or(&empty);
         let ch3 = deinterleaved.get(3).map(|v| v.as_slice()).unwrap_or(&empty);
 
-        let (y0_sw, y0_sh) = source_dims.get(0).copied().unwrap_or((tw, th));
+        let (y0_sw, y0_sh) = source_dims.first().copied().unwrap_or((tw, th));
 
         let upsample_chroma = |plane: &[i32], dims: (usize, usize), dx: usize, dy: usize| -> i32 {
             let (sw, sh) = dims;
@@ -3579,10 +3565,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             .components
             .iter()
             .map(|comp| {
-                let sw = ((self.width * comp.horizontal_sampling_factor as u32 + max_h_samp as u32 - 1)
-                    / max_h_samp as u32) as usize;
-                let sh = ((self.height * comp.vertical_sampling_factor as u32 + max_v_samp as u32 - 1)
-                    / max_v_samp as u32) as usize;
+                let sw = (self.width * comp.horizontal_sampling_factor as u32).div_ceil(max_h_samp as u32) as usize;
+                let sh = (self.height * comp.vertical_sampling_factor as u32).div_ceil(max_v_samp as u32) as usize;
                 (sw, sh)
             })
             .collect();
@@ -3606,24 +3590,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         if deinterleaved.len() == 1 {
             let src = &deinterleaved[0];
-            let (sw, sh) = source_dims[0];
             return if self.precision <= 8 {
                 let mut pixels = Vec::with_capacity(npixels);
-                if sw == tw && sh == th {
-                    for i in 0..npixels.min(src.len()) {
-                        pixels.push((src[i] + 128).clamp(0, 255) as u8);
-                    }
-                } else {
-                    for i in 0..npixels.min(src.len()) {
-                        pixels.push((src[i] + 128).clamp(0, 255) as u8);
-                    }
+                for &s in src.iter().take(npixels) {
+                    pixels.push((s + 128).clamp(0, 255) as u8);
                 }
                 pixels.resize(npixels, 0);
                 Ok(PixelData::L8(pixels))
             } else {
                 let mut pixels16 = Vec::with_capacity(npixels);
-                for i in 0..npixels.min(src.len()) {
-                    pixels16.push(((src[i] + 2048).clamp(0, 4095) as u16) << 4);
+                for &s in src.iter().take(npixels) {
+                    pixels16.push(((s + 2048).clamp(0, 4095) as u16) << 4);
                 }
                 pixels16.resize(npixels, 0);
                 Ok(PixelData::L16(pixels16))
@@ -3938,8 +3915,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             .max()
             .unwrap_or(1);
 
-        let mcu_width = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-        let mcu_height = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+        let mcu_width = self.width.div_ceil(8 * max_h_samp as u32);
+        let mcu_height = self.height.div_ceil(8 * max_v_samp as u32);
 
         let components_snapshot: Vec<_> = self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
         let mut component_planes: Vec<ComponentPlane> = Vec::with_capacity(components_snapshot.len());
@@ -4060,8 +4037,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             JpegMode::Progressive | JpegMode::DifferentialProgressive => {
                 let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
                 let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
-                let mcu_w = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-                let mcu_h = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+                let mcu_w = self.width.div_ceil(8 * max_h_samp as u32);
+                let mcu_h = self.height.div_ceil(8 * max_v_samp as u32);
 
                 let components_snapshot: Vec<_> = self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
                 let mut planes: Vec<ComponentPlane> = Vec::with_capacity(components_snapshot.len());
@@ -4085,8 +4062,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             _ => {
                 let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
                 let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
-                let mcu_w = (self.width + 8 * max_h_samp as u32 - 1) / (8 * max_h_samp as u32);
-                let mcu_h = (self.height + 8 * max_v_samp as u32 - 1) / (8 * max_v_samp as u32);
+                let mcu_w = self.width.div_ceil(8 * max_h_samp as u32);
+                let mcu_h = self.height.div_ceil(8 * max_v_samp as u32);
 
                 let components_snapshot: Vec<_> = self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
                 let mut planes: Vec<ComponentPlane> = Vec::with_capacity(components_snapshot.len());
@@ -4116,8 +4093,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let th = self.height as usize;
 
         planes.iter().zip(self.components.iter()).map(|(plane, comp)| {
-            let sw = ((self.width * comp.horizontal_sampling_factor as u32 + max_h_samp as u32 - 1) / max_h_samp as u32) as usize;
-            let sh = ((self.height * comp.vertical_sampling_factor as u32 + max_v_samp as u32 - 1) / max_v_samp as u32) as usize;
+            let sw = (self.width * comp.horizontal_sampling_factor as u32).div_ceil(max_h_samp as u32) as usize;
+            let sh = (self.height * comp.vertical_sampling_factor as u32).div_ceil(max_v_samp as u32) as usize;
             let raw = plane.deinterleave(sw as u32, sh as u32);
 
             if sw == tw && sh == th {
@@ -4253,14 +4230,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
         if nc == 1 {
             if precision <= 8 {
                 let mut pixels = vec![0u8; npixels];
-                for i in 0..npixels {
-                    pixels[i] = current_pixels[0].get(i).copied().unwrap_or(0).clamp(0, max_val) as u8;
+                for (i, p) in pixels.iter_mut().enumerate() {
+                    *p = current_pixels[0].get(i).copied().unwrap_or(0).clamp(0, max_val) as u8;
                 }
                 Ok(Image::from_pixels(final_width, final_height, PixelData::L8(pixels)))
             } else {
                 let mut pixels = vec![0u16; npixels];
-                for i in 0..npixels {
-                    pixels[i] = current_pixels[0].get(i).copied().unwrap_or(0).clamp(0, max_val) as u16;
+                for (i, p) in pixels.iter_mut().enumerate() {
+                    *p = current_pixels[0].get(i).copied().unwrap_or(0).clamp(0, max_val) as u16;
                 }
                 Ok(Image::from_pixels(final_width, final_height, PixelData::L16(pixels)))
             }

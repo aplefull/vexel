@@ -12,7 +12,7 @@ impl PixelDecoder {
 
         let width_usize = width as usize;
         let height_usize = height as usize;
-        let src_stride = (((width_usize + 7) / 8) + 3) & !3;
+        let src_stride = (width_usize.div_ceil(8) + 3) & !3;
 
         let mut image_data = vec![0u8; width_usize * height_usize * 3];
 
@@ -85,7 +85,7 @@ impl PixelDecoder {
 
         let width_usize = width as usize;
         let height_usize = height as usize;
-        let src_stride = (((width_usize + 3) / 4) + 3) & !3;
+        let src_stride = (width_usize.div_ceil(4) + 3) & !3;
 
         let mut image_data = vec![0u8; width_usize * height_usize * 3];
 
@@ -160,7 +160,7 @@ impl PixelDecoder {
 
         let width_usize = width as usize;
         let height_usize = height as usize;
-        let src_stride = (((width_usize + 1) / 2) + 3) & !3;
+        let src_stride = (width_usize.div_ceil(2) + 3) & !3;
 
         let mut image_data = vec![0u8; width_usize * height_usize * 3];
 
@@ -279,7 +279,7 @@ impl PixelDecoder {
     ) -> Image {
         let width_usize = width as usize;
         let height_usize = height as usize;
-        let src_stride = (((width_usize * 2) + 3) & !3) as usize;
+        let src_stride = ((width_usize * 2) + 3) & !3;
         let has_alpha = alpha_mask != 0;
 
         let r_shift = if red_mask != 0 { red_mask.trailing_zeros() } else { 0 };
@@ -336,7 +336,7 @@ impl PixelDecoder {
     pub fn decode_16bit_image(data: &[u8], width: u32, height: u32, bottom_up: bool) -> Image {
         let width_usize = width as usize;
         let height_usize = height as usize;
-        let src_stride = (((width_usize * 2) + 3) & !3) as usize;
+        let src_stride = ((width_usize * 2) + 3) & !3;
 
         let mut image_data = vec![0u8; width_usize * height_usize * 3];
 
@@ -373,7 +373,7 @@ impl PixelDecoder {
     pub fn decode_24bit_image(data: &[u8], width: u32, height: u32, bottom_up: bool) -> Image {
         let width_usize = width as usize;
         let height_usize = height as usize;
-        let src_stride = (((width_usize * 3) + 3) & !3) as usize;
+        let src_stride = ((width_usize * 3) + 3) & !3;
 
         let mut image_data = vec![0u8; width_usize * height_usize * 3];
 

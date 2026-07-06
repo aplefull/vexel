@@ -35,10 +35,12 @@ pub enum Comparison {
     },
 }
 
+pub type ValidationFn = Box<dyn Fn(&Image) -> Result<(), String>>;
+
 pub struct TestCase {
     pub name: &'static str,
     pub path: &'static str,
-    pub validation: Option<Box<dyn Fn(&Image) -> Result<(), String>>>,
+    pub validation: Option<ValidationFn>,
     pub comparison: Comparison,
 }
 

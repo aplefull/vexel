@@ -279,7 +279,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         }
     }
 
-    fn apply_predictor(&self, data: &mut Vec<u8>, strip_width: u32) {
+    fn apply_predictor(&self, data: &mut [u8], strip_width: u32) {
         let bps = self.bits_for(0);
         let spp = self.header.samples_per_pixel;
         match self.header.predictor {
@@ -298,7 +298,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         }
     }
 
-    fn apply_predictor_planar(&self, data: &mut Vec<u8>, strip_width: u32) {
+    fn apply_predictor_planar(&self, data: &mut [u8], strip_width: u32) {
         let bps = self.bits_for(0);
         match self.header.predictor {
             Predictor::HorizontalDifferencing => {
@@ -604,8 +604,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             self.limits.reserve_usize(planar_data_len)?;
             let mut planar_data = vec![0u8; planar_data_len];
 
-            for tile_idx in 0..tile_offsets.len() {
-                let offset = tile_offsets[tile_idx];
+            for (tile_idx, &offset) in tile_offsets.iter().enumerate() {
                 let byte_count = tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
 
                 self.reader.seek(SeekFrom::Start(offset as u64))?;
@@ -665,8 +664,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.limits.reserve_usize(img_data_size)?;
         let mut image_data = vec![0u8; img_data_size];
 
-        for tile_idx in 0..tile_offsets.len() {
-            let offset = tile_offsets[tile_idx];
+        for (tile_idx, &offset) in tile_offsets.iter().enumerate() {
             let byte_count = tile_byte_counts.get(tile_idx).copied().unwrap_or(0);
 
             self.reader.seek(SeekFrom::Start(offset as u64))?;

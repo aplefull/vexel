@@ -275,8 +275,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
             let rle_width = (b2 as u16) << 8 | b3 as u16;
 
             if rle_header == 0x0202 && rle_width == self.width as u16 {
-                for component in 0..4 {
-                    let dst = &mut channel_buf[component];
+                for dst in channel_buf.iter_mut() {
                     let mut pos = 0;
 
                     while pos < width {

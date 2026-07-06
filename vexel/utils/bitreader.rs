@@ -87,7 +87,7 @@ impl<R: Read + Seek> BitReader<R> {
         let mut result = 0;
         if self.little_endian {
             for i in 0..n {
-                result = result | ((self.read_bit()? as u32) << i);
+                result |= (self.read_bit()? as u32) << i;
             }
         } else {
             for _ in 0..n {
@@ -260,7 +260,7 @@ impl<R: Read + Seek> BitReader<R> {
     /// - The number of bytes left in the bitstream
     /// - `std::io::Error` if an I/O error occurs
     pub fn bytes_left(&mut self) -> Result<u64, std::io::Error> {
-        let current_pos = self.reader.seek(SeekFrom::Current(0))?;
+        let current_pos = self.reader.stream_position()?;
         let end_pos = self.reader.seek(SeekFrom::End(0))?;
         self.reader.seek(SeekFrom::Start(current_pos))?;
 

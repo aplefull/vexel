@@ -298,7 +298,7 @@ fn apply_and_mask(pixels: PixelData, and_mask: &[u8], width: u32, height: u32, b
         return pixels;
     }
 
-    let and_row_size = ((width + 31) / 32) * 4;
+    let and_row_size = width.div_ceil(32) * 4;
     let rgba = pixels.into_rgba8();
     let mut data = match rgba {
         PixelData::RGBA8(v) => v,

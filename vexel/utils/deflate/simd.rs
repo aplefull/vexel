@@ -84,8 +84,8 @@ unsafe fn copy_match_avx2(output: &mut Vec<u8>, match_dist: usize, match_len: us
     }
 
     let reg_bytes = std::mem::transmute::<__m128i, [u8; 16]>(reg);
-    for i in 0..(match_len - written) {
-        *dst_ptr.add(written + i) = reg_bytes[i];
+    for (i, &b) in reg_bytes.iter().enumerate().take(match_len - written) {
+        *dst_ptr.add(written + i) = b;
     }
 
     output.set_len(output.len() + match_len);
@@ -131,8 +131,8 @@ unsafe fn copy_match_ssse3(output: &mut Vec<u8>, match_dist: usize, match_len: u
 
     let tail_ptr = dst_ptr.add(written);
     let reg_bytes = std::mem::transmute::<__m128i, [u8; 16]>(reg);
-    for i in 0..(match_len - written) {
-        *tail_ptr.add(i) = reg_bytes[i];
+    for (i, &b) in reg_bytes.iter().enumerate().take(match_len - written) {
+        *tail_ptr.add(i) = b;
     }
 
     output.set_len(output.len() + match_len);

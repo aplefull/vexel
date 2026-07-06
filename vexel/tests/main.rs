@@ -187,8 +187,7 @@ pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => {
-            println!("Error decoding image: {:?}", e);
-            assert!(false);
+            panic!("Error decoding image: {:?}", e);
         }
     }
 

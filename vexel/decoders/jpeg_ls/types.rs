@@ -127,7 +127,7 @@ pub struct JpegLsComData {
 pub const MAX_COMPONENTS: usize = 6;
 pub const CREGIONS: usize = 9;
 pub const CONTEXTS1: usize = CREGIONS * CREGIONS * CREGIONS;
-pub const CONTEXTS: usize = (CONTEXTS1 + 1) / 2;
+pub const CONTEXTS: usize = CONTEXTS1.div_ceil(2);
 pub const EOR_CONTEXTS: usize = 2;
 pub const TOT_CONTEXTS: usize = CONTEXTS + EOR_CONTEXTS;
 pub const EOR_0: usize = CONTEXTS;
@@ -393,15 +393,15 @@ pub fn prepare_luts(state: &mut DecoderState, t1: i32, t2: i32, t3: i32, near: i
         let q2 = (i / CREGIONS) % CREGIONS;
         let q3 = i % CREGIONS;
 
-        let sgn = if (q1 % 2 != 0) || (q1 == 0 && q2 % 2 != 0) || (q1 == 0 && q2 == 0 && q3 % 2 != 0) {
+        let sgn = if !q1.is_multiple_of(2) || (q1 == 0 && !q2.is_multiple_of(2)) || (q1 == 0 && q2 == 0 && !q3.is_multiple_of(2)) {
             -1i32
         } else {
             1i32
         };
 
-        let n1 = if q1 != 0 { if q1 % 2 != 0 { q1 + 1 } else { q1 - 1 } } else { 0 };
-        let n2 = if q2 != 0 { if q2 % 2 != 0 { q2 + 1 } else { q2 - 1 } } else { 0 };
-        let n3 = if q3 != 0 { if q3 % 2 != 0 { q3 + 1 } else { q3 - 1 } } else { 0 };
+        let n1 = if q1 != 0 { if !q1.is_multiple_of(2) { q1 + 1 } else { q1 - 1 } } else { 0 };
+        let n2 = if q2 != 0 { if !q2.is_multiple_of(2) { q2 + 1 } else { q2 - 1 } } else { 0 };
+        let n3 = if q3 != 0 { if !q3.is_multiple_of(2) { q3 + 1 } else { q3 - 1 } } else { 0 };
 
         let ineg = (n1 * CREGIONS + n2) * CREGIONS + n3;
         j += 1;

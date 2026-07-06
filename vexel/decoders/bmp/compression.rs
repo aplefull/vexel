@@ -135,7 +135,7 @@ impl RleDecoder {
                             }
                         }
                         // Pad to word boundary
-                        if ((n + 1) / 2) % 2 == 1 {
+                        if n.div_ceil(2) % 2 == 1 {
                             let _ = reader.read_u8();
                         }
                     }

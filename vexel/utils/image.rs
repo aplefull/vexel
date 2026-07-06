@@ -4,16 +4,14 @@ use serde::Serialize;
 
 fn drop_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
     let num_pixels = pixels.len() / 4;
-    let mut out = Vec::with_capacity(num_pixels * 3);
-    unsafe { out.set_len(num_pixels * 3) };
+    let mut out = vec![0u8; num_pixels * 3];
     channel_simd::rgba_to_rgb(&pixels, &mut out);
     out
 }
 
 fn add_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
     let num_pixels = pixels.len() / 3;
-    let mut out = Vec::with_capacity(num_pixels * 4);
-    unsafe { out.set_len(num_pixels * 4) };
+    let mut out = vec![0u8; num_pixels * 4];
     channel_simd::rgb_to_rgba(&pixels, &mut out);
     out
 }
@@ -216,12 +214,10 @@ impl Image {
 
     /// Returns `true` if the image's pixel format includes an alpha channel.
     pub fn has_alpha(&self) -> bool {
-        match self.pixel_format {
-            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::RGBA64F | PixelFormat::LA8 | PixelFormat::LA16 | PixelFormat::LA32F | PixelFormat::LA64F => {
-                true
-            }
-            _ => false,
-        }
+        matches!(
+            self.pixel_format,
+            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::RGBA64F | PixelFormat::LA8 | PixelFormat::LA16 | PixelFormat::LA32F | PixelFormat::LA64F
+        )
     }
 
     /// Returns all frames of the image.
@@ -344,17 +340,17 @@ impl ImageFrame {
 
     /// Returns `true` if this frame's pixel format includes an alpha channel.
     pub fn has_alpha(&self) -> bool {
-        match self.pixels {
+        matches!(
+            self.pixels,
             PixelData::RGBA8(_)
-            | PixelData::RGBA16(_)
-            | PixelData::RGBA32F(_)
-            | PixelData::RGBA64F(_)
-            | PixelData::LA8(_)
-            | PixelData::LA16(_)
-            | PixelData::LA32F(_)
-            | PixelData::LA64F(_) => true,
-            _ => false,
-        }
+                | PixelData::RGBA16(_)
+                | PixelData::RGBA32F(_)
+                | PixelData::RGBA64F(_)
+                | PixelData::LA8(_)
+                | PixelData::LA16(_)
+                | PixelData::LA32F(_)
+                | PixelData::LA64F(_)
+        )
     }
 
     /// Converts this frame to RGB8 format, consuming the original frame.
@@ -643,7 +639,7 @@ impl PixelData {
 
     // Used as a last resort to correct the number of pixels in the image
     // in case something went wrong during decoding
-    pub(crate) fn correct_pixels(&mut self, width: u32, height: u32) -> () {
+    pub(crate) fn correct_pixels(&mut self, width: u32, height: u32) {
         let components_per_pixel = match self {
             PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) | PixelData::RGB64F(_) => 3,
             PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::RGBA64F(_) => 4,

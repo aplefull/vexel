@@ -131,7 +131,7 @@ impl ChunkReader {
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
         idat_data: &mut Vec<u8>,
-        frames: &mut Vec<PngFrame>,
+        frames: &mut [PngFrame],
         limits: &mut Limits,
     ) -> VexelResult<()> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
@@ -194,7 +194,7 @@ impl ChunkReader {
                 break;
             }
 
-            if !((byte >= 32 && byte <= 126) || byte >= 161) {
+            if !((32..=126).contains(&byte) || byte >= 161) {
                 log_warn!("Invalid character in iCCP profile name: {}, replacing with space", byte);
                 profile_name_bytes.push(32);
             } else {
@@ -225,7 +225,7 @@ impl ChunkReader {
         limits.free(length_u32 as u64);
         limits.reserve_usize(profile_data.len())?;
 
-        let icc = ICCProfile::new(&*profile_data)?;
+        let icc = ICCProfile::new(&profile_data)?;
         let profile_name = String::from_utf8_lossy(&profile_name_bytes).to_string();
 
         chunks.push(PngChunkInfo {
@@ -275,7 +275,7 @@ impl ChunkReader {
                 break;
             }
 
-            if !((byte >= 32 && byte <= 126) || byte >= 161) {
+            if !((32..=126).contains(&byte) || byte >= 161) {
                 log_warn!("Invalid character in sPLT name: {}, replacing with space", byte);
                 name.push(32);
             }
@@ -298,7 +298,7 @@ impl ChunkReader {
         let entry_size = if sample_depth == 8 { 6 } else { 10 };
         let remaining_bytes = length - (name.len() as u32 + 2);
 
-        if remaining_bytes % entry_size as u32 != 0 {
+        if !remaining_bytes.is_multiple_of(entry_size as u32) {
             log_warn!("Invalid sPLT chunk length");
         }
 
@@ -747,11 +747,11 @@ impl ChunkReader {
         let minute = reader.read_u8()?;
         let second = reader.read_u8()?;
 
-        if month < 1 || month > 12 {
+        if !(1..=12).contains(&month) {
             log_warn!("Invalid month in tIME chunk: {}", month);
         }
 
-        if day < 1 || day > 31 {
+        if !(1..=31).contains(&day) {
             log_warn!("Invalid day in tIME chunk: {}", day);
         }
 
@@ -1067,7 +1067,7 @@ impl ChunkReader {
     pub fn read_fdat<R: Read + Seek>(
         reader: &mut BitReader<R>,
         chunks: &mut Vec<PngChunkInfo>,
-        frames: &mut Vec<PngFrame>,
+        frames: &mut [PngFrame],
         limits: &mut Limits,
     ) -> VexelResult<()> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;

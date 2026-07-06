@@ -1,19 +1,19 @@
 const S: [f32; 8] = [
-    0.35355339059327373,
-    0.4903926402016152,
-    0.4619397662556434,
-    0.4157348061512726,
-    0.3535533905932737,
-    0.2777851165098011,
-    0.19134171618254492,
-    0.09754516100806417,
+    0.35355338,
+    0.49039263,
+    0.46193975,
+    0.4157348,
+    0.35355338,
+    0.27778512,
+    0.19134171,
+    0.09754516,
 ];
 
-const M1: f32 = 1.4142135623730951;
-const M2: f32 = 1.0823922002923940;
-const M3: f32 = 1.4142135623730951;
-const M4: f32 = 2.6131259297527580;
-const M5: f32 = 0.7653668647301796;
+const M1: f32 = std::f32::consts::SQRT_2;
+const M2: f32 = 1.0823922;
+const M3: f32 = std::f32::consts::SQRT_2;
+const M4: f32 = 2.613126;
+const M5: f32 = 0.76536685;
 
 pub fn dequantize_and_idct(blocks: &mut [i32], quant: &[u16], level_shift: i32) {
     let scaled = precompute_scaled_quant(quant);
@@ -87,17 +87,17 @@ fn idct_block_precomputed(block: &mut [i32], scaled_quant: &[f32; 64], level_shi
     let mut temp = [0.0f32; 64];
 
     for col in 0..8 {
-        let g0 = block[0 * 8 + col] as f32 * scaled_quant[0 * 8 + col];
+        let g0 = block[col] as f32 * scaled_quant[col];
         let g1 = block[4 * 8 + col] as f32 * scaled_quant[4 * 8 + col];
         let g2 = block[2 * 8 + col] as f32 * scaled_quant[2 * 8 + col];
         let g3 = block[6 * 8 + col] as f32 * scaled_quant[6 * 8 + col];
         let g4 = block[5 * 8 + col] as f32 * scaled_quant[5 * 8 + col];
-        let g5 = block[1 * 8 + col] as f32 * scaled_quant[1 * 8 + col];
+        let g5 = block[8 + col] as f32 * scaled_quant[8 + col];
         let g6 = block[7 * 8 + col] as f32 * scaled_quant[7 * 8 + col];
         let g7 = block[3 * 8 + col] as f32 * scaled_quant[3 * 8 + col];
         let (r0, r1, r2, r3, r4, r5, r6, r7) = aan_butterfly(g0, g1, g2, g3, g4, g5, g6, g7);
-        temp[0 * 8 + col] = r0;
-        temp[1 * 8 + col] = r1;
+        temp[col] = r0;
+        temp[8 + col] = r1;
         temp[2 * 8 + col] = r2;
         temp[3 * 8 + col] = r3;
         temp[4 * 8 + col] = r4;
@@ -107,7 +107,7 @@ fn idct_block_precomputed(block: &mut [i32], scaled_quant: &[f32; 64], level_shi
     }
 
     for row in 0..8 {
-        let g0 = temp[row * 8 + 0] * S[0];
+        let g0 = temp[row * 8] * S[0];
         let g1 = temp[row * 8 + 4] * S[4];
         let g2 = temp[row * 8 + 2] * S[2];
         let g3 = temp[row * 8 + 6] * S[6];
@@ -116,7 +116,7 @@ fn idct_block_precomputed(block: &mut [i32], scaled_quant: &[f32; 64], level_shi
         let g6 = temp[row * 8 + 7] * S[7];
         let g7 = temp[row * 8 + 3] * S[3];
         let (r0, r1, r2, r3, r4, r5, r6, r7) = aan_butterfly(g0, g1, g2, g3, g4, g5, g6, g7);
-        block[row * 8 + 0] = (r0.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+        block[row * 8] = (r0.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
         block[row * 8 + 1] = (r1.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
         block[row * 8 + 2] = (r2.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
         block[row * 8 + 3] = (r3.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
@@ -145,6 +145,7 @@ fn dequantize_and_idct_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(clippy::needless_range_loop)]
 unsafe fn idct_8blocks_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: i32) {
     use std::arch::x86_64::*;
 

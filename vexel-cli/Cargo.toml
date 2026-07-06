@@ -16,3 +16,6 @@ eframe = "0.29.1"
 jpegxl-sys = { version = "0.12.1", features = ["vendored"] }
 webp = "0.3.0"
 libc = "0.2"
+
+[lints]
+workspace = true

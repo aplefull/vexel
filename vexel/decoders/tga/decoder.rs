@@ -162,7 +162,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
     }
 
     fn read_palette(&mut self, header: &TgaHeader) -> Vec<[u8; 4]> {
-        let bytes_per_entry = ((header.palette_bpp as usize + 7) / 8).max(1);
+        let bytes_per_entry = (header.palette_bpp as usize).div_ceil(8).max(1);
         let skip_count = header.palette_first as usize;
         let read_count = (header.palette_length as usize).saturating_sub(skip_count);
         let has_alpha = header.palette_bpp == 32;
@@ -180,7 +180,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
         if header.palette_type != 1 || header.palette_length == 0 {
             return;
         }
-        let bytes_per_entry = ((header.palette_bpp as usize + 7) / 8).max(1);
+        let bytes_per_entry = (header.palette_bpp as usize).div_ceil(8).max(1);
         let total_bytes = header.palette_length as usize * bytes_per_entry;
         let _ = self.reader.seek(SeekFrom::Current(total_bytes as i64));
     }
@@ -428,7 +428,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
 
         if image_type == IMAGE_TYPE_PALETTED && header.palette_type == 1 && header.palette_length > 0 {
             let color_map_offset = self.reader.stream_position().unwrap_or(0);
-            let bytes_per_entry = ((header.palette_bpp as usize + 7) / 8).max(1);
+            let bytes_per_entry = (header.palette_bpp as usize).div_ceil(8).max(1);
             let data_length = header.palette_length as usize * bytes_per_entry;
             self.sections.push(TgaSectionInfo {
                 start_offset: color_map_offset,

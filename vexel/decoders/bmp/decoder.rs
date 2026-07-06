@@ -204,7 +204,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let bytes_to_read = if is_rle {
             bytes_until_eof
         } else {
-            let row_size = ((self.dib_header.bits_per_pixel() as u32 * self.width + 31) / 32) * 4;
+            let row_size = (self.dib_header.bits_per_pixel() as u32 * self.width).div_ceil(32) * 4;
             let data_size = row_size * self.height;
             std::cmp::min(data_size as u64, bytes_until_eof)
         };
@@ -289,11 +289,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let pixel_offset = 14 + header_size + extra_mask_bytes + (num_colors as usize * bytes_per_color);
 
         let xor_size = {
-            let row_size = (((bpp as u32 * dir_width) + 31) / 32) * 4;
+            let row_size = (bpp as u32 * dir_width).div_ceil(32) * 4;
             (row_size * dir_height) as usize
         };
         let and_start = pixel_offset - 14 + xor_size;
-        let and_mask_row_size = ((dir_width + 31) / 32) * 4;
+        let and_mask_row_size = dir_width.div_ceil(32) * 4;
         let and_size = (and_mask_row_size * dir_height) as usize;
         let and_mask = if and_start < data.len() {
             let end = (and_start + and_size).min(data.len());
@@ -347,11 +347,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        match self.read_file_header() {
-            Err(e) => {
-                log_error!("Error reading file header. This might be critical! Error: {}", e);
-            }
-            Ok(_) => (),
+        if let Err(e) = self.read_file_header() {
+            log_error!("Error reading file header. This might be critical! Error: {}", e);
         };
 
         match self.read_info_header() {
@@ -362,11 +359,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Ok(_) => (),
         };
 
-        match self.read_extra_masks() {
-            Err(e) => {
-                log_error!("Error reading extra masks. This might be critical! Error: {}", e);
-            }
-            Ok(_) => (),
+        if let Err(e) = self.read_extra_masks() {
+            log_error!("Error reading extra masks. This might be critical! Error: {}", e);
         };
 
         match self.read_color_table() {

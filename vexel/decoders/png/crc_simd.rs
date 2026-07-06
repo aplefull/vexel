@@ -1,10 +1,9 @@
 pub fn update_crc(crc: u32, buf: &[u8]) -> u32 {
     #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("pclmulqdq") && is_x86_feature_detected!("sse4.1") {
-        if buf.len() >= 16 {
+    if is_x86_feature_detected!("pclmulqdq") && is_x86_feature_detected!("sse4.1")
+        && buf.len() >= 16 {
             return !unsafe { update_crc_pclmul(!crc, buf) };
         }
-    }
 
     update_crc_scalar(crc, buf)
 }

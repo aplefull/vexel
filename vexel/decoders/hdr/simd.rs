@@ -19,7 +19,7 @@ pub fn xyz_to_rgb_scalar(src: &[f32], dst: &mut [f32]) {
         let z = src[i * 3 + 2];
 
         dst[i * 3] = (3.2404542 * x - 1.5371385 * y - 0.4985314 * z).max(0.0);
-        dst[i * 3 + 1] = (-0.9692660 * x + 1.8760108 * y + 0.0415560 * z).max(0.0);
+        dst[i * 3 + 1] = (-0.969266 * x + 1.8760108 * y + 0.0415560 * z).max(0.0);
         dst[i * 3 + 2] = (0.0556434 * x - 0.2040259 * y + 1.0572252 * z).max(0.0);
     }
 }
@@ -35,7 +35,7 @@ unsafe fn xyz_to_rgb_avx2(src: &[f32], dst: &mut [f32]) {
     let m00 = _mm256_set1_ps(3.2404542);
     let m01 = _mm256_set1_ps(-1.5371385);
     let m02 = _mm256_set1_ps(-0.4985314);
-    let m10 = _mm256_set1_ps(-0.9692660);
+    let m10 = _mm256_set1_ps(-0.969266);
     let m11 = _mm256_set1_ps(1.8760108);
     let m12 = _mm256_set1_ps(0.0415560);
     let m20 = _mm256_set1_ps(0.0556434);

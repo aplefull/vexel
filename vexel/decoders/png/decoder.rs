@@ -92,7 +92,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                 ColorType::GrayscaleAlpha => self.bit_depth as u32 * 2,
                 ColorType::RGBA => self.bit_depth as u32 * 4,
             };
-            let bytes_per_row = ((bits_per_pixel * self.width + 7) / 8 + 1) as usize;
+            let bytes_per_row = ((bits_per_pixel * self.width).div_ceil(8) + 1) as usize;
             let capacity = bytes_per_row * self.height as usize;
             let compressed_len = self.idat_data.len();
             self.idat_data = ZlibDecoder::from_bytes(std::mem::take(&mut self.idat_data))
@@ -107,9 +107,9 @@ impl<R: Read + Seek> PngDecoder<R> {
             ColorType::GrayscaleAlpha => self.bit_depth as u32 * 2,
             ColorType::RGBA => self.bit_depth as u32 * 4,
         };
-        let bytes_per_row = (bits_per_pixel * self.width + 7) / 8 + 1;
+        let bytes_per_row = (bits_per_pixel * self.width).div_ceil(8) + 1;
 
-        if !self.interlace && bytes_per_row > 0 && self.idat_data.len() > 0 {
+        if !self.interlace && bytes_per_row > 0 && !self.idat_data.is_empty() {
             let actual_rows = (self.idat_data.len() as u32) / bytes_per_row;
             if actual_rows < self.height {
                 log_warn!(
@@ -170,8 +170,8 @@ impl<R: Read + Seek> PngDecoder<R> {
 
         let _first_length = self.reader.read_u32()?;
 
-        for i in 0..4 {
-            window[i] = self.reader.read_u8()?;
+        for byte in window.iter_mut() {
+            *byte = self.reader.read_u8()?;
         }
 
         loop {
@@ -350,8 +350,8 @@ impl<R: Read + Seek> PngDecoder<R> {
                         Err(_) => break,
                     };
 
-                    for i in 0..4 {
-                        window[i] = match self.reader.read_u8() {
+                    for byte in window.iter_mut() {
+                        *byte = match self.reader.read_u8() {
                             Ok(b) => b,
                             Err(_) => break,
                         };
@@ -383,8 +383,8 @@ impl<R: Read + Seek> PngDecoder<R> {
                             Err(_) => break,
                         };
                         
-                        for i in 0..4 {
-                            window[i] = match self.reader.read_u8() {
+                        for byte in window.iter_mut() {
+                            *byte = match self.reader.read_u8() {
                                 Ok(b) => b,
                                 Err(_) => break,
                             };

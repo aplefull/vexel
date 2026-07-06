@@ -3,8 +3,6 @@ mod writer;
 use clap::Parser;
 #[cfg(unix)]
 use libc::{rlimit, setrlimit, RLIMIT_AS};
-use eframe;
-use egui;
 use egui::ViewportBuilder;
 use glob::glob;
 use std::cmp::Ordering;
@@ -249,7 +247,10 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
         let n = color_channels(step);
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for c in p.chunks_exact(step) {
-            for &v in &c[..n] { if v < lo { lo = v; } if v > hi { hi = v; } }
+            for &v in &c[..n] {
+                if v < lo { lo = v; }
+                if v > hi { hi = v; }
+            }
         }
         if hi > lo {
             let r = hi - lo;
@@ -264,7 +265,10 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
         let n = color_channels(step);
         let (mut lo, mut hi) = (f64::MAX, f64::MIN);
         for c in p.chunks_exact(step) {
-            for &v in &c[..n] { if v < lo { lo = v; } if v > hi { hi = v; } }
+            for &v in &c[..n] {
+                if v < lo { lo = v; }
+                if v > hi { hi = v; }
+            }
         }
         if hi > lo {
             let r = hi - lo;
@@ -297,6 +301,8 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
 }
 
 fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn std::error::Error>> {
+    type ImageFrames = (Vec<Arc<egui::ColorImage>>, Vec<u32>, [usize; 2]);
+
     struct App {
         texture: Option<egui::TextureHandle>,
         checker_texture: Option<egui::TextureHandle>,
@@ -315,7 +321,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
     }
 
     impl App {
-        fn image_to_frames(image: Image, normalize: bool) -> (Vec<Arc<egui::ColorImage>>, Vec<u32>, [usize; 2]) {
+        fn image_to_frames(image: Image, normalize: bool) -> ImageFrames {
             const MAX_TEXTURE_SIZE: usize = 16384;
 
             let original_size = [image.width() as usize, image.height() as usize];
@@ -402,7 +408,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
             app
         }
 
-        fn load_image_from_path(path: &Path, normalize: bool) -> Result<(Vec<Arc<egui::ColorImage>>, Vec<u32>, [usize; 2]), String> {
+        fn load_image_from_path(path: &Path, normalize: bool) -> Result<ImageFrames, String> {
             let mut decoder = Vexel::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
             let image = decoder.decode().map_err(|e| format!("{}: {}", path.display(), e))?;
             Ok(Self::image_to_frames(image, normalize))

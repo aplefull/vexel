@@ -95,11 +95,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     fn read_decimal(&mut self, first: u8) -> VexelResult<u32> {
         let mut number = (first - b'0') as u32;
 
-        loop {
-            let byte = match self.next_byte() {
-                Some(b) => b,
-                None => break,
-            };
+        while let Some(byte) = self.next_byte() {
             match byte {
                 b'0'..=b'9' => {
                     number = match number.checked_mul(10).and_then(|n| n.checked_add((byte - b'0') as u32)) {
@@ -624,6 +620,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                         let mut image_data = vec![0u16; pixel_count * 3];
                         let mut reader = BitReader::new(Cursor::new(data));
                         for chunk in image_data.chunks_exact_mut(3) {
+                            #[allow(clippy::needless_range_loop)]
                             for i in 0..depth {
                                 let v = reader.read_u16().unwrap_or(0);
                                 if i < 3 {
@@ -647,7 +644,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             Some(NetpbmFormat::P2) => self.decode_ascii_graymap(),
             Some(NetpbmFormat::P3) => self.decode_ascii_pixmap(),
             Some(NetpbmFormat::P4) => {
-                let bytes_per_row = ((self.width + 7) / 8) as usize;
+                let bytes_per_row = self.width.div_ceil(8) as usize;
                 let byte_count = bytes_per_row * self.height as usize;
                 let data = self.read_binary_frame_data(byte_count)?;
                 self.decode_binary_bitmap(&data)

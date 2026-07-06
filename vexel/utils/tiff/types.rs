@@ -441,18 +441,15 @@ impl TryFrom<u16> for Compression {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Default)]
 pub enum SampleFormat {
+    #[default]
     UnsignedInt = 1,
     SignedInt = 2,
     Float = 3,
     Void = 4,
 }
 
-impl Default for SampleFormat {
-    fn default() -> Self {
-        Self::UnsignedInt
-    }
-}
 
 impl TryFrom<u32> for SampleFormat {
     type Error = VexelError;
@@ -573,7 +570,9 @@ impl TryFrom<u32> for PlanarConfiguration {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Default)]
 pub enum Predictor {
+    #[default]
     None = 1,
     HorizontalDifferencing = 2,
     FloatingPoint = 3,
@@ -581,11 +580,6 @@ pub enum Predictor {
     FloatingPointX4 = 34895,
 }
 
-impl Default for Predictor {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 impl TryFrom<u32> for Predictor {
     type Error = VexelError;

@@ -65,8 +65,8 @@ fn deinterleave_blocks_scalar(data: &[i32], blocks_per_line: u32, sw: u32, sh: u
     let sh = sh as usize;
     let bpl = blocks_per_line as usize;
 
-    for by in 0..((sh + 7) / 8) {
-        for bx in 0..((sw + 7) / 8) {
+    for by in 0..sh.div_ceil(8) {
+        for bx in 0..sw.div_ceil(8) {
             let block_base = (by * bpl + bx) * 64;
             let full_row = bx * 8 + 8 <= sw;
             let full_col = by * 8 + 8 <= sh;
@@ -199,8 +199,8 @@ unsafe fn deinterleave_blocks_avx2(data: &[i32], blocks_per_line: u32, sw: u32, 
     let sh = sh as usize;
     let bpl = blocks_per_line as usize;
 
-    for by in 0..((sh + 7) / 8) {
-        for bx in 0..((sw + 7) / 8) {
+    for by in 0..sh.div_ceil(8) {
+        for bx in 0..sw.div_ceil(8) {
             let block_base = (by * bpl + bx) * 64;
             let full_row = bx * 8 + 8 <= sw;
             let full_col = by * 8 + 8 <= sh;

@@ -56,12 +56,7 @@ pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Ve
     let mut next_code = end_code + 1;
     let mut prev_code: Option<u32> = None;
 
-    loop {
-        let code = match read_code(&mut bit_buf, &mut n_bits, &mut byte_pos, code_size) {
-            Some(c) => c,
-            None => break,
-        };
-
+    while let Some(code) = read_code(&mut bit_buf, &mut n_bits, &mut byte_pos, code_size) {
         if code == clear_code {
             code_size = min_code_size + 1;
             next_code = end_code + 1;
@@ -123,10 +118,8 @@ pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Ve
             } else {
                 log_warn!("Invalid LZW code: {}", code);
             }
-        } else {
-            if let Some(&(offset, len)) = table.get(code as usize) {
-                result.extend_from_slice(&arena[offset as usize..offset as usize + len as usize]);
-            }
+        } else if let Some(&(offset, len)) = table.get(code as usize) {
+            result.extend_from_slice(&arena[offset as usize..offset as usize + len as usize]);
         }
 
         prev_code = Some(code);

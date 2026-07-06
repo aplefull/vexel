@@ -117,8 +117,8 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let hi = (chunk[0] >> 4) & 0xF;
-                        let out = if invert { 255 - hi * 17 } else { hi * 17 };
-                        out
+                        
+                        if invert { 255 - hi * 17 } else { hi * 17 }
                     })
                     .collect();
                 Ok(PixelData::L8(pixels))
