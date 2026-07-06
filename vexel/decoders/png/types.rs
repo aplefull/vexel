@@ -1,5 +1,6 @@
 use serde::Serialize;
 use tsify::Tsify;
+
 use crate::utils::icc::ICCProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -155,20 +156,9 @@ impl CrcCalculator {
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 pub enum PngText {
-    Basic {
-        keyword: String,
-        text: String,
-    },
-    Compressed {
-        keyword: String,
-        text: String,
-    },
-    International {
-        keyword: String,
-        language_tag: String,
-        translated_keyword: String,
-        text: String,
-    },
+    Basic { keyword: String, text: String },
+    Compressed { keyword: String, text: String },
+    International { keyword: String, language_tag: String, translated_keyword: String, text: String },
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]

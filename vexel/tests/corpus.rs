@@ -42,11 +42,7 @@ pub fn run(corpus_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, path) in entries.iter().enumerate() {
         let path_str = path.display().to_string();
-        let rel = path_str
-            .strip_prefix(corpus_path)
-            .unwrap_or(&path_str)
-            .trim_start_matches('/')
-            .to_string();
+        let rel = path_str.strip_prefix(corpus_path).unwrap_or(&path_str).trim_start_matches('/').to_string();
 
         let t0 = Instant::now();
         let decoded = match Vexel::open(path) {
@@ -62,19 +58,8 @@ pub fn run(corpus_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         let row = match decoded {
             Err(e) => {
-                println!(
-                    "{:<6}  {:<50}  {:>10.2}  {:>10}  {:>12}  {}",
-                    counter, rel, decode_ms, "n/a", "ERROR", e
-                );
-                Row {
-                    path: path_str,
-                    decode_ms,
-                    convert_ms: 0.0,
-                    width: 0,
-                    height: 0,
-                    mse: None,
-                    error: Some(e),
-                }
+                println!("{:<6}  {:<50}  {:>10.2}  {:>10}  {:>12}  {}", counter, rel, decode_ms, "n/a", "ERROR", e);
+                Row { path: path_str, decode_ms, convert_ms: 0.0, width: 0, height: 0, mse: None, error: Some(e) }
             }
             Ok(image) => {
                 let width = image.width();
@@ -82,9 +67,7 @@ pub fn run(corpus_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 let vexel_pixels = image.to_rgba8();
 
                 let (mse, convert_ms) = match decode_via_convert(path, width, height) {
-                    Ok((ref_pixels, conv_ms)) => {
-                        (Some(compute_mse(&vexel_pixels, &ref_pixels)), conv_ms)
-                    }
+                    Ok((ref_pixels, conv_ms)) => (Some(compute_mse(&vexel_pixels, &ref_pixels)), conv_ms),
                     Err(_) => (None, 0.0),
                 };
 
@@ -95,15 +78,7 @@ pub fn run(corpus_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     counter, rel, decode_ms, convert_ms, res, mse_str
                 );
 
-                Row {
-                    path: path_str,
-                    decode_ms,
-                    convert_ms,
-                    width,
-                    height,
-                    mse,
-                    error: None,
-                }
+                Row { path: path_str, decode_ms, convert_ms, width, height, mse, error: None }
             }
         };
 
@@ -113,11 +88,8 @@ pub fn run(corpus_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let ok_count = results.iter().filter(|r| r.error.is_none()).count();
     let err_count = results.len() - ok_count;
     let mse_values: Vec<f64> = results.iter().filter_map(|r| r.mse).collect();
-    let avg_mse = if mse_values.is_empty() {
-        None
-    } else {
-        Some(mse_values.iter().sum::<f64>() / mse_values.len() as f64)
-    };
+    let avg_mse =
+        if mse_values.is_empty() { None } else { Some(mse_values.iter().sum::<f64>() / mse_values.len() as f64) };
 
     println!("{:-<100}", "");
     println!(
@@ -131,10 +103,7 @@ pub fn run(corpus_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let results_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("corpus-results");
     std::fs::create_dir_all(&results_dir)?;
 
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     let csv_path = results_dir.join(format!("corpus_bench_{}.csv", timestamp));
     let mut csv = std::fs::File::create(&csv_path)?;
     writeln!(csv, "path,decode_ms,convert_ms,width,height,mse,error")?;

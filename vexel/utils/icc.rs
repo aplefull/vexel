@@ -1,6 +1,7 @@
-use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Result};
+
+use serde::Serialize;
 use tsify::Tsify;
 
 fn read_u8(data: &[u8], offset: usize) -> Option<u8> {
@@ -31,13 +32,8 @@ fn sig_to_string(bytes: &[u8]) -> String {
 }
 
 fn decode_utf16_be(data: &[u8]) -> String {
-    let words: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|c| u16::from_be_bytes([c[0], c[1]]))
-        .collect();
-    String::from_utf16_lossy(&words)
-        .trim_end_matches('\0')
-        .to_string()
+    let words: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+    String::from_utf16_lossy(&words).trim_end_matches('\0').to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -342,9 +338,7 @@ fn parse_text_tag(data: &[u8]) -> ICCTagData {
         return ICCTagData::Unknown(data.to_vec());
     }
     let text_bytes = &data[8..];
-    let text = String::from_utf8_lossy(text_bytes)
-        .trim_end_matches('\0')
-        .to_string();
+    let text = String::from_utf8_lossy(text_bytes).trim_end_matches('\0').to_string();
     ICCTagData::Text(text)
 }
 
@@ -535,10 +529,7 @@ fn parse_chrm_tag(data: &[u8]) -> ICCTagData {
         channels.push([x, y]);
     }
 
-    ICCTagData::Chromaticity(ChromaticityData {
-        colorant_type: decode_colorant_type(colorant_type),
-        channels,
-    })
+    ICCTagData::Chromaticity(ChromaticityData { colorant_type: decode_colorant_type(colorant_type), channels })
 }
 
 fn parse_clro_tag(data: &[u8]) -> ICCTagData {
@@ -566,9 +557,7 @@ fn parse_clrt_tag(data: &[u8]) -> ICCTagData {
             break;
         }
         let name_bytes = &data[offset..offset + 32];
-        let name = String::from_utf8_lossy(name_bytes)
-            .trim_end_matches('\0')
-            .to_string();
+        let name = String::from_utf8_lossy(name_bytes).trim_end_matches('\0').to_string();
         let pcs = [
             read_u16_be(data, offset + 32).unwrap_or(0),
             read_u16_be(data, offset + 34).unwrap_or(0),
@@ -742,9 +731,7 @@ fn parse_desc_tag(data: &[u8]) -> ICCTagData {
     if ascii_end > data.len() {
         return ICCTagData::Unknown(data.to_vec());
     }
-    let ascii = String::from_utf8_lossy(&data[12..ascii_end])
-        .trim_end_matches('\0')
-        .to_string();
+    let ascii = String::from_utf8_lossy(&data[12..ascii_end]).trim_end_matches('\0').to_string();
 
     let mut unicode_language_code = 0u32;
     let mut unicode = String::new();
@@ -770,13 +757,7 @@ fn parse_desc_tag(data: &[u8]) -> ICCTagData {
         }
     }
 
-    ICCTagData::TextDescription(TextDescriptionData {
-        ascii,
-        unicode_language_code,
-        unicode,
-        script_code,
-        script,
-    })
+    ICCTagData::TextDescription(TextDescriptionData { ascii, unicode_language_code, unicode, script_code, script })
 }
 
 fn parse_tag(type_sig: &str, data: &[u8]) -> ICCTagData {
@@ -977,10 +958,7 @@ impl ICCProfile {
         println!("\nTag Table:");
         println!("Number of Tags: {}", self.tag_table.tag_count);
         for entry in &self.tag_table.entries {
-            println!(
-                "  {} - Offset: {}, Size: {} bytes",
-                entry.signature, entry.offset, entry.size
-            );
+            println!("  {} - Offset: {}, Size: {} bytes", entry.signature, entry.offset, entry.size);
         }
     }
 }

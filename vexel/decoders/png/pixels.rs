@@ -1,8 +1,7 @@
-use crate::log_warn;
-use crate::utils::error::VexelResult;
-use crate::PixelData;
-use super::types::{ColorType, TransparencyData};
 use super::filters::FilterDecoder;
+use super::types::{ColorType, TransparencyData};
+use crate::utils::error::VexelResult;
+use crate::{log_warn, PixelData};
 
 pub struct PixelDecoder {
     bit_depth: u8,
@@ -22,14 +21,7 @@ impl PixelDecoder {
         palette: Option<Vec<[u8; 3]>>,
         transparency: Option<TransparencyData>,
     ) -> Self {
-        Self {
-            bit_depth,
-            color_type,
-            width,
-            interlace,
-            palette,
-            transparency,
-        }
+        Self { bit_depth, color_type, width, interlace, palette, transparency }
     }
 
     fn get_bits_per_pixel(&self) -> u32 {
@@ -51,11 +43,7 @@ impl PixelDecoder {
             }
         };
 
-        let trans = if let Some(TransparencyData::Palette(alpha)) = &self.transparency {
-            Some(alpha)
-        } else {
-            None
-        };
+        let trans = if let Some(TransparencyData::Palette(alpha)) = &self.transparency { Some(alpha) } else { None };
 
         let mut output = Vec::new();
         let has_trans = trans.is_some();
@@ -132,27 +120,25 @@ impl PixelDecoder {
                     Ok(PixelData::L8(input))
                 }
             }
-            16 => {
-                match trans_key {
-                    Some(key) => {
-                        let mut output = Vec::with_capacity(input.len());
-                        for gray in input.chunks_exact(2) {
-                            let v = u16::from_be_bytes([gray[0], gray[1]]);
-                            let alpha: u16 = if v == key { 0 } else { 65535 };
-                            output.push(v);
-                            output.push(alpha);
-                        }
-                        Ok(PixelData::LA16(output))
+            16 => match trans_key {
+                Some(key) => {
+                    let mut output = Vec::with_capacity(input.len());
+                    for gray in input.chunks_exact(2) {
+                        let v = u16::from_be_bytes([gray[0], gray[1]]);
+                        let alpha: u16 = if v == key { 0 } else { 65535 };
+                        output.push(v);
+                        output.push(alpha);
                     }
-                    None => {
-                        let mut output = Vec::with_capacity(input.len() / 2);
-                        for gray in input.chunks_exact(2) {
-                            output.push(u16::from_be_bytes([gray[0], gray[1]]));
-                        }
-                        Ok(PixelData::L16(output))
-                    }
+                    Ok(PixelData::LA16(output))
                 }
-            }
+                None => {
+                    let mut output = Vec::with_capacity(input.len() / 2);
+                    for gray in input.chunks_exact(2) {
+                        output.push(u16::from_be_bytes([gray[0], gray[1]]));
+                    }
+                    Ok(PixelData::L16(output))
+                }
+            },
             1 | 2 | 4 => {
                 let bits_per_pixel = self.bit_depth as usize;
                 let pixels_per_byte = 8 / bits_per_pixel;
@@ -217,10 +203,7 @@ impl PixelDecoder {
                 Ok(PixelData::LA16(output))
             }
             _ => {
-                log_warn!(
-                    "Invalid bit depth for grayscale alpha: {}, assuming 8 bits",
-                    self.bit_depth
-                );
+                log_warn!("Invalid bit depth for grayscale alpha: {}, assuming 8 bits", self.bit_depth);
 
                 Ok(PixelData::LA8(input))
             }
@@ -229,48 +212,44 @@ impl PixelDecoder {
 
     pub fn decode_rgb(&self, input: Vec<u8>) -> VexelResult<PixelData> {
         match self.bit_depth {
-            8 => {
-                match &self.transparency {
-                    Some(TransparencyData::RGB(key_r, key_g, key_b)) => {
-                        let (kr, kg, kb) = (*key_r as u8, *key_g as u8, *key_b as u8);
-                        let mut output = Vec::with_capacity(input.len() / 3 * 4);
-                        for rgb in input.chunks_exact(3) {
-                            let alpha = if rgb[0] == kr && rgb[1] == kg && rgb[2] == kb { 0 } else { 255 };
-                            output.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
-                        }
-                        Ok(PixelData::RGBA8(output))
+            8 => match &self.transparency {
+                Some(TransparencyData::RGB(key_r, key_g, key_b)) => {
+                    let (kr, kg, kb) = (*key_r as u8, *key_g as u8, *key_b as u8);
+                    let mut output = Vec::with_capacity(input.len() / 3 * 4);
+                    for rgb in input.chunks_exact(3) {
+                        let alpha = if rgb[0] == kr && rgb[1] == kg && rgb[2] == kb { 0 } else { 255 };
+                        output.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
                     }
-                    _ => Ok(PixelData::RGB8(input)),
+                    Ok(PixelData::RGBA8(output))
                 }
-            }
-            16 => {
-                match &self.transparency {
-                    Some(TransparencyData::RGB(key_r, key_g, key_b)) => {
-                        let (kr, kg, kb) = (*key_r, *key_g, *key_b);
-                        let mut output = Vec::with_capacity((input.len() / 6) * 4);
-                        for rgb in input.chunks_exact(6) {
-                            let r = u16::from_be_bytes([rgb[0], rgb[1]]);
-                            let g = u16::from_be_bytes([rgb[2], rgb[3]]);
-                            let b = u16::from_be_bytes([rgb[4], rgb[5]]);
-                            let alpha: u16 = if r == kr && g == kg && b == kb { 0 } else { 65535 };
-                            output.push(r);
-                            output.push(g);
-                            output.push(b);
-                            output.push(alpha);
-                        }
-                        Ok(PixelData::RGBA16(output))
+                _ => Ok(PixelData::RGB8(input)),
+            },
+            16 => match &self.transparency {
+                Some(TransparencyData::RGB(key_r, key_g, key_b)) => {
+                    let (kr, kg, kb) = (*key_r, *key_g, *key_b);
+                    let mut output = Vec::with_capacity((input.len() / 6) * 4);
+                    for rgb in input.chunks_exact(6) {
+                        let r = u16::from_be_bytes([rgb[0], rgb[1]]);
+                        let g = u16::from_be_bytes([rgb[2], rgb[3]]);
+                        let b = u16::from_be_bytes([rgb[4], rgb[5]]);
+                        let alpha: u16 = if r == kr && g == kg && b == kb { 0 } else { 65535 };
+                        output.push(r);
+                        output.push(g);
+                        output.push(b);
+                        output.push(alpha);
                     }
-                    _ => {
-                        let mut output = Vec::with_capacity((input.len() / 6) * 3);
-                        for rgb in input.chunks_exact(6) {
-                            output.push(u16::from_be_bytes([rgb[0], rgb[1]]));
-                            output.push(u16::from_be_bytes([rgb[2], rgb[3]]));
-                            output.push(u16::from_be_bytes([rgb[4], rgb[5]]));
-                        }
-                        Ok(PixelData::RGB16(output))
-                    }
+                    Ok(PixelData::RGBA16(output))
                 }
-            }
+                _ => {
+                    let mut output = Vec::with_capacity((input.len() / 6) * 3);
+                    for rgb in input.chunks_exact(6) {
+                        output.push(u16::from_be_bytes([rgb[0], rgb[1]]));
+                        output.push(u16::from_be_bytes([rgb[2], rgb[3]]));
+                        output.push(u16::from_be_bytes([rgb[4], rgb[5]]));
+                    }
+                    Ok(PixelData::RGB16(output))
+                }
+            },
             _ => {
                 log_warn!("Invalid bit depth for RGB color: {}, assuming 8 bits", self.bit_depth);
                 Ok(PixelData::RGB8(input))

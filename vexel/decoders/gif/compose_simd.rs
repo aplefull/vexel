@@ -92,9 +92,7 @@ fn compose_frame_scalar(
         return;
     }
 
-    let canvas_u32 = unsafe {
-        std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4)
-    };
+    let canvas_u32 = unsafe { std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4) };
 
     for y in 0..clamped_h {
         let index_row_start = y * frame_width;
@@ -218,10 +216,8 @@ unsafe fn compose_frame_avx2(
 
                     let vindex = _mm256_set_epi32(idx7, idx6, idx5, idx4, idx3, idx2, idx1, idx0);
 
-                    let not_transparent = _mm256_andnot_si256(
-                        _mm256_cmpeq_epi32(vindex, v_transparent),
-                        _mm256_set1_epi32(-1),
-                    );
+                    let not_transparent =
+                        _mm256_andnot_si256(_mm256_cmpeq_epi32(vindex, v_transparent), _mm256_set1_epi32(-1));
 
                     let voffsets = _mm256_mullo_epi32(vindex, v_scale);
                     let colors = _mm256_i32gather_epi32(palette_ptr, voffsets, 1);
@@ -271,9 +267,7 @@ fn compose_frame_wasm(
         return;
     }
 
-    let canvas_u32 = unsafe {
-        std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4)
-    };
+    let canvas_u32 = unsafe { std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4) };
 
     for y in 0..clamped_h {
         let index_row_start = y * frame_width;

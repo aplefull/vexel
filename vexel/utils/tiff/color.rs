@@ -145,44 +145,23 @@ impl YCbCrTables {
         for i in 0..256i32 {
             let x = i - 128;
 
-            let cr = code2v(
-                x as f32,
-                ref_black_white[4] - 128.0,
-                ref_black_white[5] - 128.0,
-                127.0,
-            )
-            .clamp(-128.0 * 32.0, 128.0 * 32.0) as i32;
+            let cr = code2v(x as f32, ref_black_white[4] - 128.0, ref_black_white[5] - 128.0, 127.0)
+                .clamp(-128.0 * 32.0, 128.0 * 32.0) as i32;
 
-            let cb = code2v(
-                x as f32,
-                ref_black_white[2] - 128.0,
-                ref_black_white[3] - 128.0,
-                127.0,
-            )
-            .clamp(-128.0 * 32.0, 128.0 * 32.0) as i32;
+            let cb = code2v(x as f32, ref_black_white[2] - 128.0, ref_black_white[3] - 128.0, 127.0)
+                .clamp(-128.0 * 32.0, 128.0 * 32.0) as i32;
 
             cr_r_tab[i as usize] = (d1 * cr + ONE_HALF) >> SHIFT;
             cb_b_tab[i as usize] = (d3 * cb + ONE_HALF) >> SHIFT;
             cr_g_tab[i as usize] = d2 * cr;
             cb_g_tab[i as usize] = d4 * cb + ONE_HALF;
 
-            let y_val = code2v(
-                (x + 128) as f32,
-                ref_black_white[0],
-                ref_black_white[1],
-                255.0,
-            )
-            .clamp(-128.0 * 32.0, 128.0 * 32.0);
+            let y_val = code2v((x + 128) as f32, ref_black_white[0], ref_black_white[1], 255.0)
+                .clamp(-128.0 * 32.0, 128.0 * 32.0);
             y_tab[i as usize] = y_val as i32;
         }
 
-        Self {
-            y_tab,
-            cr_r_tab,
-            cb_b_tab,
-            cr_g_tab,
-            cb_g_tab,
-        }
+        Self { y_tab, cr_r_tab, cb_b_tab, cr_g_tab, cb_g_tab }
     }
 
     pub fn convert(&self, y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
@@ -198,11 +177,8 @@ impl YCbCrTables {
     }
 }
 
-pub const SRGB_MATRIX: [[f32; 3]; 3] = [
-    [3.2410, -1.5374, -0.4986],
-    [-0.9692, 1.8760, 0.0416],
-    [0.0556, -0.2040, 1.0570],
-];
+pub const SRGB_MATRIX: [[f32; 3]; 3] =
+    [[3.2410, -1.5374, -0.4986], [-0.9692, 1.8760, 0.0416], [0.0556, -0.2040, 1.0570]];
 
 pub const D50_WHITE: [f32; 3] = [0.9642, 1.0000, 0.8251];
 pub const D65_WHITE: [f32; 3] = [0.9505, 1.0000, 1.0890];
@@ -230,11 +206,7 @@ pub fn xyz_to_srgb(x: f32, y: f32, z: f32) -> (u8, u8, u8) {
 
     fn linear_to_srgb(v: f32) -> u8 {
         let v = v.clamp(0.0, 1.0);
-        let srgb = if v <= 0.0031308 {
-            v * 12.92
-        } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
-        };
+        let srgb = if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
         (srgb * 255.0).round() as u8
     }
 
@@ -295,11 +267,21 @@ fn logl16_to_y(p16: u32) -> f64 {
         return 0.0;
     }
     let y = (std::f64::consts::LN_2 / 256.0 * (le as f64 + 0.5) - std::f64::consts::LN_2 * 64.0).exp();
-    if p16 & 0x8000 != 0 { -y } else { y }
+    if p16 & 0x8000 != 0 {
+        -y
+    } else {
+        y
+    }
 }
 
 fn logluv_gamma(c: f64) -> u8 {
-    if c <= 0.0 { 0 } else if c >= 1.0 { 255 } else { (256.0 * c.sqrt()) as u8 }
+    if c <= 0.0 {
+        0
+    } else if c >= 1.0 {
+        255
+    } else {
+        (256.0 * c.sqrt()) as u8
+    }
 }
 
 pub fn logluv32_to_rgb(p: u32) -> (u8, u8, u8) {

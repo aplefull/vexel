@@ -1,7 +1,8 @@
-use crate::log_warn;
-use crate::utils::icc::ICCProfile;
 use serde::Serialize;
 use tsify::Tsify;
+
+use crate::log_warn;
+use crate::utils::icc::ICCProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum BitmapCompression {
@@ -131,7 +132,9 @@ impl DibHeader {
             DibHeader::V2(h) => Some((h.red_mask, h.green_mask, h.blue_mask, 0)),
             DibHeader::V3(h) => Some((h.v2.red_mask, h.v2.green_mask, h.v2.blue_mask, h.alpha_mask)),
             DibHeader::V4(h) => Some((h.v3.v2.red_mask, h.v3.v2.green_mask, h.v3.v2.blue_mask, h.v3.alpha_mask)),
-            DibHeader::V5(h) => Some((h.v4.v3.v2.red_mask, h.v4.v3.v2.green_mask, h.v4.v3.v2.blue_mask, h.v4.v3.alpha_mask)),
+            DibHeader::V5(h) => {
+                Some((h.v4.v3.v2.red_mask, h.v4.v3.v2.green_mask, h.v4.v3.v2.blue_mask, h.v4.v3.alpha_mask))
+            }
             _ => None,
         }
     }

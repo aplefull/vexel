@@ -1,11 +1,12 @@
+use std::io::{Read, Seek, SeekFrom};
+
+use super::types::*;
 use crate::bitreader::BitReader;
 use crate::log_warn;
 use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::VexelResult;
 use crate::utils::icc::ICCProfile;
 use crate::utils::limits::Limits;
-use std::io::{Read, Seek, SeekFrom};
-use super::types::*;
 
 pub struct ChunkReader;
 
@@ -118,10 +119,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::PLTE(PlteChunkData {
-                entries: palette.clone(),
-                crc,
-            }),
+            data: PngChunkData::PLTE(PlteChunkData { entries: palette.clone(), crc }),
         });
 
         Ok(palette)
@@ -164,10 +162,7 @@ impl ChunkReader {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
-            data: PngChunkData::IDAT(IdatChunkData {
-                data_length: length_u32,
-                crc,
-            }),
+            data: PngChunkData::IDAT(IdatChunkData { data_length: length_u32, crc }),
         });
 
         Ok(())
@@ -233,20 +228,13 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::ICCP(IccpChunkData {
-                profile_name: profile_name.clone(),
-                profile: icc.clone(),
-                crc,
-            }),
+            data: PngChunkData::ICCP(IccpChunkData { profile_name: profile_name.clone(), profile: icc.clone(), crc }),
         });
 
         Ok((profile_name, icc))
     }
 
-    pub fn read_iend<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<()> {
+    pub fn read_iend<R: Read + Seek>(reader: &mut BitReader<R>, chunks: &mut Vec<PngChunkInfo>) -> VexelResult<()> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         chunks.push(PngChunkInfo {
@@ -307,47 +295,24 @@ impl ChunkReader {
         let mut entries = Vec::new();
         for _ in 0..num_entries {
             let (red, green, blue, alpha) = if sample_depth == 8 {
-                (
-                    reader.read_u8()? as u16,
-                    reader.read_u8()? as u16,
-                    reader.read_u8()? as u16,
-                    reader.read_u8()? as u16,
-                )
+                (reader.read_u8()? as u16, reader.read_u8()? as u16, reader.read_u8()? as u16, reader.read_u8()? as u16)
             } else {
-                (
-                    reader.read_u16()?,
-                    reader.read_u16()?,
-                    reader.read_u16()?,
-                    reader.read_u16()?,
-                )
+                (reader.read_u16()?, reader.read_u16()?, reader.read_u16()?, reader.read_u16()?)
             };
             let frequency = reader.read_u16()?;
 
-            entries.push(SuggestedPaletteSample {
-                red,
-                green,
-                blue,
-                alpha,
-                frequency,
-            });
+            entries.push(SuggestedPaletteSample { red, green, blue, alpha, frequency });
         }
 
         let name_str = String::from_utf8_lossy(name.as_slice()).to_string();
-        let palette = SuggestedPalette {
-            name: name_str,
-            sample_depth,
-            samples: entries,
-        };
+        let palette = SuggestedPalette { name: name_str, sample_depth, samples: entries };
 
         chunks.push(PngChunkInfo {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::SPLT(SpltChunkData {
-                palette: palette.clone(),
-                crc,
-            }),
+            data: PngChunkData::SPLT(SpltChunkData { palette: palette.clone(), crc }),
         });
 
         Ok(palette)
@@ -375,19 +340,13 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::SRGB(SrgbChunkData {
-                rendering_intent: intent,
-                crc,
-            }),
+            data: PngChunkData::SRGB(SrgbChunkData { rendering_intent: intent, crc }),
         });
 
         Ok(intent)
     }
 
-    pub fn read_gama<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<f32> {
+    pub fn read_gama<R: Read + Seek>(reader: &mut BitReader<R>, chunks: &mut Vec<PngChunkInfo>) -> VexelResult<f32> {
         let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
 
         let gamma_int = reader.read_u32()?;
@@ -398,11 +357,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::GAMA(GamaChunkData {
-                gamma,
-                gamma_raw: gamma_int,
-                crc,
-            }),
+            data: PngChunkData::GAMA(GamaChunkData { gamma, gamma_raw: gamma_int, crc }),
         });
 
         Ok(gamma)
@@ -441,10 +396,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::CHRM(ChrmChunkData {
-                chromaticities,
-                crc,
-            }),
+            data: PngChunkData::CHRM(ChrmChunkData { chromaticities, crc }),
         });
 
         Ok(chromaticities)
@@ -505,10 +457,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::TRNS(TrnsChunkData {
-                transparency: trns_data.clone(),
-                crc,
-            }),
+            data: PngChunkData::TRNS(TrnsChunkData { transparency: trns_data.clone(), crc }),
         });
 
         Ok(trns_data)
@@ -563,10 +512,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::BKGD(BkgdChunkData {
-                background: background.clone(),
-                crc,
-            }),
+            data: PngChunkData::BKGD(BkgdChunkData { background: background.clone(), crc }),
         });
 
         Ok(background)
@@ -588,21 +534,14 @@ impl ChunkReader {
             _ => PhysicalUnit::Unknown,
         };
 
-        let dimensions = PhysicalDimensions {
-            pixels_per_unit_x,
-            pixels_per_unit_y,
-            unit,
-        };
+        let dimensions = PhysicalDimensions { pixels_per_unit_x, pixels_per_unit_y, unit };
 
         chunks.push(PngChunkInfo {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::PHYS(PhysChunkData {
-                physical_dimensions: dimensions.clone(),
-                crc,
-            }),
+            data: PngChunkData::PHYS(PhysChunkData { physical_dimensions: dimensions.clone(), crc }),
         });
 
         Ok(dimensions)
@@ -630,9 +569,7 @@ impl ChunkReader {
                     log_warn!("Invalid sBIT length for grayscale: {}", length);
                 }
 
-                SignificantBits::Grayscale {
-                    gray: *chunk_data.first().unwrap_or(&0),
-                }
+                SignificantBits::Grayscale { gray: *chunk_data.first().unwrap_or(&0) }
             }
             ColorType::RGB => {
                 if length != 3 {
@@ -685,10 +622,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::SBIT(SbitChunkData {
-                significant_bits: sbit_data.clone(),
-                crc,
-            }),
+            data: PngChunkData::SBIT(SbitChunkData { significant_bits: sbit_data.clone(), crc }),
         });
 
         Ok(sbit_data)
@@ -725,10 +659,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::HIST(HistChunkData {
-                frequencies: frequencies.clone(),
-                crc,
-            }),
+            data: PngChunkData::HIST(HistChunkData { frequencies: frequencies.clone(), crc }),
         });
 
         Ok(frequencies)
@@ -767,24 +698,14 @@ impl ChunkReader {
             log_warn!("Invalid second in tIME chunk: {}", second);
         }
 
-        let time = ImageTime {
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
-        };
+        let time = ImageTime { year, month, day, hour, minute, second };
 
         chunks.push(PngChunkInfo {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::TIME(TimeChunkData {
-                time: time.clone(),
-                crc,
-            }),
+            data: PngChunkData::TIME(TimeChunkData { time: time.clone(), crc }),
         });
 
         Ok(time)
@@ -807,20 +728,14 @@ impl ChunkReader {
         let text_bytes = if null_pos + 1 < chunk_data.len() { &chunk_data[null_pos + 1..] } else { &[] };
         let text = String::from_utf8_lossy(text_bytes).to_string();
 
-        let png_text = PngText::Basic {
-            keyword: keyword.clone(),
-            text: text.clone(),
-        };
+        let png_text = PngText::Basic { keyword: keyword.clone(), text: text.clone() };
 
         chunks.push(PngChunkInfo {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::TEXT(TextChunkData {
-                text: png_text.clone(),
-                crc,
-            }),
+            data: PngChunkData::TEXT(TextChunkData { text: png_text.clone(), crc }),
         });
 
         Ok(png_text)
@@ -850,20 +765,14 @@ impl ChunkReader {
                 start_offset,
                 chunk_type: chunk_type_str,
                 length: length_u32,
-    
-                data: PngChunkData::ZTXT(TextChunkData {
-                    text: png_text.clone(),
-                    crc,
-                }),
+
+                data: PngChunkData::ZTXT(TextChunkData { text: png_text.clone(), crc }),
             });
             return Ok(png_text);
         }
 
-        let compressed_text = if after_null + 1 < chunk_data.len() {
-            chunk_data[after_null + 1..].to_vec()
-        } else {
-            Vec::new()
-        };
+        let compressed_text =
+            if after_null + 1 < chunk_data.len() { chunk_data[after_null + 1..].to_vec() } else { Vec::new() };
 
         let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
         let text_bytes = ZlibDecoder::from_bytes(compressed_text).decode_with_max(max_decompress);
@@ -872,20 +781,14 @@ impl ChunkReader {
 
         let text = String::from_utf8_lossy(&text_bytes).to_string();
 
-        let png_text = PngText::Compressed {
-            keyword: keyword.clone(),
-            text: text.clone(),
-        };
+        let png_text = PngText::Compressed { keyword: keyword.clone(), text: text.clone() };
 
         chunks.push(PngChunkInfo {
             start_offset,
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::ZTXT(TextChunkData {
-                text: png_text.clone(),
-                crc,
-            }),
+            data: PngChunkData::ZTXT(TextChunkData { text: png_text.clone(), crc }),
         });
 
         Ok(png_text)
@@ -913,11 +816,17 @@ impl ChunkReader {
         let compression_method = chunk_data.get(pos).copied().unwrap_or(0);
         pos += 1;
 
-        let lang_end = chunk_data[pos.min(chunk_data.len())..].iter().position(|&b| b == 0).unwrap_or(chunk_data.len().saturating_sub(pos));
+        let lang_end = chunk_data[pos.min(chunk_data.len())..]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(chunk_data.len().saturating_sub(pos));
         let language_tag = String::from_utf8_lossy(&chunk_data[pos..pos + lang_end]).to_string();
         pos += lang_end + 1;
 
-        let trans_end = chunk_data[pos.min(chunk_data.len())..].iter().position(|&b| b == 0).unwrap_or(chunk_data.len().saturating_sub(pos));
+        let trans_end = chunk_data[pos.min(chunk_data.len())..]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(chunk_data.len().saturating_sub(pos));
         let translated_keyword = String::from_utf8_lossy(&chunk_data[pos..pos + trans_end]).to_string();
         pos += trans_end + 1;
 
@@ -949,10 +858,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::ITXT(TextChunkData {
-                text: png_text.clone(),
-                crc,
-            }),
+            data: PngChunkData::ITXT(TextChunkData { text: png_text.clone(), crc }),
         });
 
         Ok(png_text)
@@ -978,10 +884,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::ACTL(ActlChunkData {
-                actl: actl.clone(),
-                crc,
-            }),
+            data: PngChunkData::ACTL(ActlChunkData { actl: actl.clone(), crc }),
         });
 
         Ok(actl)
@@ -1055,10 +958,7 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::FCTL(FctlChunkData {
-                fctl: fctl.clone(),
-                crc,
-            }),
+            data: PngChunkData::FCTL(FctlChunkData { fctl: fctl.clone(), crc }),
         });
 
         Ok(fctl)
@@ -1094,20 +994,14 @@ impl ChunkReader {
             chunk_type: chunk_type_str,
             length: length_u32,
 
-            data: PngChunkData::FDAT(FdatChunkData {
-                sequence_number,
-                data_length: length,
-                crc,
-            }),
+            data: PngChunkData::FDAT(FdatChunkData { sequence_number, data_length: length, crc }),
         });
 
         Ok(())
     }
 }
 
-pub fn capture_chunk_info<R: Read + Seek>(
-    reader: &mut BitReader<R>,
-) -> VexelResult<(u64, u32, String, u32)> {
+pub fn capture_chunk_info<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(u64, u32, String, u32)> {
     let pos_before = reader.stream_position()?;
 
     let start_offset = pos_before - 8;

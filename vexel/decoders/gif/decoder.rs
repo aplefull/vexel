@@ -1,17 +1,16 @@
-use crate::bitreader::BitReader;
-use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::GifInfo;
-use crate::{Image, ImageFrame, Limits, PixelData, PixelFormat, log_debug, log_warn};
 use std::io::{Read, Seek};
 
 use super::compose_simd::compose_frame;
 use super::lzw::decompress_lzw;
 use super::types::{
-    ApplicationExtension, DisposalMethod, GifApplicationExtensionData, GifColorTableInfo,
-    GifCommentData, GifDecoder, GifFrameInfo, GifGraphicsControlData, GifHeaderData,
-    GifImageDataInfo, GifImageDescriptorData, GifPlainTextData, GifSectionData, GifSectionInfo,
-    GraphicsControlExtension, PlainTextExtension,
+    ApplicationExtension, DisposalMethod, GifApplicationExtensionData, GifColorTableInfo, GifCommentData, GifDecoder,
+    GifFrameInfo, GifGraphicsControlData, GifHeaderData, GifImageDataInfo, GifImageDescriptorData, GifPlainTextData,
+    GifSectionData, GifSectionInfo, GraphicsControlExtension, PlainTextExtension,
 };
+use crate::bitreader::BitReader;
+use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::GifInfo;
+use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData, PixelFormat};
 
 impl<R: Read + Seek + Sync> GifDecoder<R> {
     pub fn new(reader: R) -> Self {
@@ -42,11 +41,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.limits = limits;
     }
 
-
     pub fn get_info(&self) -> GifInfo {
-        GifInfo {
-            sections: self.sections.clone(),
-        }
+        GifInfo { sections: self.sections.clone() }
     }
 
     fn read_header(&mut self) -> VexelResult<()> {
@@ -56,7 +52,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let mut n = 0;
         while n < buf.len() {
             match self.reader.read_u8() {
-                Ok(b) => { buf[n] = b; n += 1; }
+                Ok(b) => {
+                    buf[n] = b;
+                    n += 1;
+                }
                 Err(_) => break,
             }
         }
@@ -72,7 +71,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             log_warn!("GIF signature at offset {}, possibly corrupted header", offset);
         }
         let sig_len = if buf[offset..].starts_with(b"GIF") { 6 } else { 5 };
-        self.version = String::from_utf8_lossy(buf.get(offset + (sig_len - 3)..offset + sig_len).unwrap_or(b"87a")).to_string();
+        self.version =
+            String::from_utf8_lossy(buf.get(offset + (sig_len - 3)..offset + sig_len).unwrap_or(b"87a")).to_string();
         self.reader.seek(std::io::SeekFrom::Start((offset + sig_len) as u64))?;
 
         self.canvas_width = self.reader.read_u16()?.swap_bytes() as u32;
@@ -138,9 +138,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             self.global_color_table.push(bit);
         }
 
-        let entries = self.global_color_table.chunks_exact(3)
-            .map(|c| [c[0], c[1], c[2]])
-            .collect();
+        let entries = self.global_color_table.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
 
         self.sections.push(GifSectionInfo {
             start_offset,
@@ -418,10 +416,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 }
                 // End of image (0x3B)
                 0x3B => {
-                    self.sections.push(GifSectionInfo {
-                        start_offset: block_start,
-                        data: GifSectionData::Trailer,
-                    });
+                    self.sections.push(GifSectionInfo { start_offset: block_start, data: GifSectionData::Trailer });
                     break;
                 }
                 _ => {}
@@ -469,9 +464,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             for _ in 0..table_size {
                 local_color_table.push(self.reader.read_u8()?);
             }
-            let entries = local_color_table.chunks_exact(3)
-                .map(|c| [c[0], c[1], c[2]])
-                .collect();
+            let entries = local_color_table.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
             self.sections.push(GifSectionInfo {
                 start_offset: lct_offset,
                 data: GifSectionData::LocalColorTable(GifColorTableInfo {
@@ -522,10 +515,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
         self.sections.push(GifSectionInfo {
             start_offset: image_data_offset,
-            data: GifSectionData::ImageData(GifImageDataInfo {
-                lzw_minimum_code_size,
-                data_length,
-            }),
+            data: GifSectionData::ImageData(GifImageDataInfo { lzw_minimum_code_size, data_length }),
         });
 
         let frame = GifFrameInfo {
@@ -540,14 +530,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             local_color_table,
             lzw_minimum_code_size,
             user_input: gce.as_ref().map(|gce| gce.user_input).unwrap_or(false),
-            transparent_index: gce
-                .as_ref()
-                .filter(|gce| gce.transparency)
-                .map(|gce| gce.transparent_color_index),
-            disposal_method: gce
-                .as_ref()
-                .map(|gce| gce.disposal_method)
-                .unwrap_or(DisposalMethod::None),
+            transparent_index: gce.as_ref().filter(|gce| gce.transparency).map(|gce| gce.transparent_color_index),
+            disposal_method: gce.as_ref().map(|gce| gce.disposal_method).unwrap_or(DisposalMethod::None),
             delay: gce.map(|gce| gce.delay).unwrap_or(100),
             data,
         };
@@ -598,13 +582,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             }),
         });
 
-        Ok(GraphicsControlExtension {
-            disposal_method,
-            user_input,
-            transparency,
-            delay,
-            transparent_color_index,
-        })
+        Ok(GraphicsControlExtension { disposal_method, user_input, transparency, delay, transparent_color_index })
     }
 
     fn deinterlace_indices(width: u32, height: u32, indices: &[u8]) -> Vec<u8> {
@@ -633,7 +611,6 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
         result
     }
-
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         match self.read_header() {
@@ -704,7 +681,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let mut image_frames = Vec::new();
 
         for (frame, indices) in self.frames.iter().zip(decoded_indices) {
-            let needs_saved_canvas = matches!(frame.disposal_method, DisposalMethod::Previous | DisposalMethod::Background);
+            let needs_saved_canvas =
+                matches!(frame.disposal_method, DisposalMethod::Previous | DisposalMethod::Background);
             let saved_canvas = if needs_saved_canvas {
                 if let Err(e) = self.limits.reserve_usize(canvas_size) {
                     log_warn!("Cannot clone canvas for disposal method, falling back: {:?}", e);
@@ -716,11 +694,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 None
             };
 
-            let color_table = if frame.local_color_table_flag {
-                &frame.local_color_table
-            } else {
-                &self.global_color_table
-            };
+            let color_table =
+                if frame.local_color_table_flag { &frame.local_color_table } else { &self.global_color_table };
 
             compose_frame(
                 &indices,
@@ -787,10 +762,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         }
 
         if self.width == 0 || self.height == 0 {
-            return Err(crate::utils::error::VexelError::InvalidDimensions {
-                width: self.width,
-                height: self.height,
-            });
+            return Err(crate::utils::error::VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
         Ok(Image::new(self.width, self.height, PixelFormat::RGBA8, image_frames))

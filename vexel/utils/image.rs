@@ -1,6 +1,7 @@
+use serde::Serialize;
+
 use crate::log_warn;
 use crate::utils::channel_simd;
-use serde::Serialize;
 
 fn drop_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
     let num_pixels = pixels.len() / 4;
@@ -149,12 +150,7 @@ pub struct Image {
 
 impl Image {
     pub(crate) fn new(width: u32, height: u32, pixel_format: PixelFormat, frames: Vec<ImageFrame>) -> Image {
-        Image {
-            width,
-            height,
-            pixel_format,
-            frames,
-        }
+        Image { width, height, pixel_format, frames }
     }
 
     pub fn from_frame(frame: ImageFrame) -> Image {
@@ -205,18 +201,21 @@ impl Image {
     ///
     /// Returns an empty [`PixelData::RGB8`] if the image has no frames.
     pub fn into_pixels(self) -> PixelData {
-        self.frames
-            .into_iter()
-            .next()
-            .map(|frame| frame.pixels)
-            .unwrap_or(PixelData::RGB8(Vec::new()))
+        self.frames.into_iter().next().map(|frame| frame.pixels).unwrap_or(PixelData::RGB8(Vec::new()))
     }
 
     /// Returns `true` if the image's pixel format includes an alpha channel.
     pub fn has_alpha(&self) -> bool {
         matches!(
             self.pixel_format,
-            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::RGBA64F | PixelFormat::LA8 | PixelFormat::LA16 | PixelFormat::LA32F | PixelFormat::LA64F
+            PixelFormat::RGBA8
+                | PixelFormat::RGBA16
+                | PixelFormat::RGBA32F
+                | PixelFormat::RGBA64F
+                | PixelFormat::LA8
+                | PixelFormat::LA16
+                | PixelFormat::LA32F
+                | PixelFormat::LA64F
         )
     }
 
@@ -292,12 +291,7 @@ pub struct ImageFrame {
 
 impl ImageFrame {
     pub(crate) fn new(width: u32, height: u32, pixels: PixelData, delay: u32) -> ImageFrame {
-        ImageFrame {
-            width,
-            height,
-            pixels,
-            delay,
-        }
+        ImageFrame { width, height, pixels, delay }
     }
 
     /// Returns the width of the frame in pixels.
@@ -359,12 +353,7 @@ impl ImageFrame {
     /// [`to_rgb8`](Self::to_rgb8) returns a vector of the frame's pixels
     /// converted to RGB8 without consuming the frame.
     pub fn into_rgb8(self) -> ImageFrame {
-        ImageFrame {
-            width: self.width,
-            height: self.height,
-            pixels: self.pixels.into_rgb8(),
-            delay: self.delay,
-        }
+        ImageFrame { width: self.width, height: self.height, pixels: self.pixels.into_rgb8(), delay: self.delay }
     }
 
     /// Returns this frame's pixels as a vector of RGB8 bytes.
@@ -386,12 +375,7 @@ impl ImageFrame {
     /// [`to_rgba8`](Self::to_rgba8) returns a vector of the frame's pixels
     /// converted to RGBA8 without consuming the frame.
     pub fn into_rgba8(self) -> ImageFrame {
-        ImageFrame {
-            width: self.width,
-            height: self.height,
-            pixels: self.pixels.into_rgba8(),
-            delay: self.delay,
-        }
+        ImageFrame { width: self.width, height: self.height, pixels: self.pixels.into_rgba8(), delay: self.delay }
     }
 
     /// Returns this frame's pixels as a vector of RGBA8 bytes.

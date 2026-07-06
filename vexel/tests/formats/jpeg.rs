@@ -16,57 +16,43 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "JPEG Lossless",
             path: "jpeg/2x2_lossless.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/2x2_lossless.avif",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/2x2_lossless.avif" },
         },
         TestCase {
             name: "JPEG Lossless 16-bit",
             path: "jpeg/jpeg_lossless16bit.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/jpeg_lossless16bit.jxl",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/jpeg_lossless16bit.jxl" },
         },
         TestCase {
             name: "JPEG Lossless 8-bit RGB",
             path: "jpeg/jpeg_lossless_sel1-rgb.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/jpeg_lossless_sel1-rgb.jxl",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/jpeg_lossless_sel1-rgb.jxl" },
         },
         TestCase {
             name: "JPEG Lossless 10-bit",
             path: "jpeg/jpeg-lossless-XA1.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/jpeg-lossless-XA1.jxl",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/jpeg-lossless-XA1.jxl" },
         },
         TestCase {
             name: "JPEG Lossless 12-bit",
             path: "jpeg/jpeg-lossless-MR4.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/jpeg-lossless-MR4.jxl",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/jpeg-lossless-MR4.jxl" },
         },
         TestCase {
             name: "JPEG lossless 4 components",
             path: "jpeg/rgb_alpha_u1_lossless.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/rgb_alpha_u1_lossless.jxl",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/rgb_alpha_u1_lossless.jxl" },
         },
         TestCase {
             name: "JPEG lossless 4 components 12-bit",
             path: "jpeg/rgb_alpha_u2_lossless.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/rgb_alpha_u2_lossless.jxl",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/rgb_alpha_u2_lossless.jxl" },
         },
         TestCase {
             name: "JPEG 4 components",
@@ -175,17 +161,13 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "JPEG lossless arithmetic",
             path: "jpeg/2x2_lossless_arithmetic.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/2x2_lossless_arithmetic.avif",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/2x2_lossless_arithmetic.avif" },
         },
         TestCase {
             name: "JPEG lossless arithmetic 2",
             path: "jpeg/cat_lossless_arithmetic.jpg",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "jpeg/cat_lossless_arithmetic.avif",
-            },
+            comparison: Comparison::Exact { reference_path: "jpeg/cat_lossless_arithmetic.avif" },
         },
         TestCase {
             name: "JPEG extended sequential",

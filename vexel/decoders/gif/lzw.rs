@@ -1,7 +1,6 @@
-use crate::utils::error::VexelResult;
-use crate::{log_warn};
-
 use super::types::GifFrameInfo;
+use crate::log_warn;
+use crate::utils::error::VexelResult;
 
 pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Vec<u8>> {
     let min_code_size = frame.lzw_minimum_code_size.clamp(2, 8) as u32;

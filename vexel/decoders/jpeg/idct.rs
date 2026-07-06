@@ -1,13 +1,4 @@
-const S: [f32; 8] = [
-    0.35355338,
-    0.49039263,
-    0.46193975,
-    0.4157348,
-    0.35355338,
-    0.27778512,
-    0.19134171,
-    0.09754516,
-];
+const S: [f32; 8] = [0.35355338, 0.49039263, 0.46193975, 0.4157348, 0.35355338, 0.27778512, 0.19134171, 0.09754516];
 
 const M1: f32 = std::f32::consts::SQRT_2;
 const M2: f32 = 1.0823922;
@@ -43,8 +34,14 @@ fn precompute_scaled_quant(quant: &[u16]) -> [f32; 64] {
 
 #[inline(always)]
 fn aan_butterfly(
-    g0: f32, g1: f32, g2: f32, g3: f32,
-    g4: f32, g5: f32, g6: f32, g7: f32,
+    g0: f32,
+    g1: f32,
+    g2: f32,
+    g3: f32,
+    g4: f32,
+    g5: f32,
+    g6: f32,
+    g7: f32,
 ) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
     let f4 = g4 - g7;
     let f5 = g5 + g6;
@@ -170,7 +167,9 @@ unsafe fn idct_8blocks_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
 
     for col in 0..8usize {
         macro_rules! load_row {
-            ($r:expr) => { _mm256_loadu_ps(staging.as_ptr().add(($r * 8 + col) * 8)) };
+            ($r:expr) => {
+                _mm256_loadu_ps(staging.as_ptr().add(($r * 8 + col) * 8))
+            };
         }
         let g0 = load_row!(0);
         let g1 = load_row!(4);
@@ -184,7 +183,9 @@ unsafe fn idct_8blocks_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
         let (r0, r1, r2, r3, r4, r5, r6, r7) = aan_butterfly_avx2(g0, g1, g2, g3, g4, g5, g6, g7);
 
         macro_rules! store_row {
-            ($r:expr, $v:expr) => { _mm256_storeu_ps(temp.as_mut_ptr().add(($r * 8 + col) * 8), $v) };
+            ($r:expr, $v:expr) => {
+                _mm256_storeu_ps(temp.as_mut_ptr().add(($r * 8 + col) * 8), $v)
+            };
         }
         store_row!(0, r0);
         store_row!(1, r1);
@@ -197,29 +198,36 @@ unsafe fn idct_8blocks_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
     }
 
     let vs = [
-        _mm256_set1_ps(S[0]), _mm256_set1_ps(S[1]), _mm256_set1_ps(S[2]),
-        _mm256_set1_ps(S[3]), _mm256_set1_ps(S[4]), _mm256_set1_ps(S[5]),
-        _mm256_set1_ps(S[6]), _mm256_set1_ps(S[7]),
+        _mm256_set1_ps(S[0]),
+        _mm256_set1_ps(S[1]),
+        _mm256_set1_ps(S[2]),
+        _mm256_set1_ps(S[3]),
+        _mm256_set1_ps(S[4]),
+        _mm256_set1_ps(S[5]),
+        _mm256_set1_ps(S[6]),
+        _mm256_set1_ps(S[7]),
     ];
 
-    let vhalf     = _mm256_set1_ps(0.5f32);
+    let vhalf = _mm256_set1_ps(0.5f32);
     let vsign_bit = _mm256_set1_ps(-0.0f32);
-    let vmin      = _mm256_set1_ps(-level_shift as f32);
-    let vmax      = _mm256_set1_ps((level_shift * 2 - 1) as f32);
+    let vmin = _mm256_set1_ps(-level_shift as f32);
+    let vmax = _mm256_set1_ps((level_shift * 2 - 1) as f32);
 
     macro_rules! round_clamp_to_i32 {
         ($v:expr) => {{
             let sign = _mm256_and_ps($v, vsign_bit);
             let half = _mm256_or_ps(vhalf, sign);
-            let r    = _mm256_add_ps($v, half);
-            let c    = _mm256_min_ps(_mm256_max_ps(r, vmin), vmax);
+            let r = _mm256_add_ps($v, half);
+            let c = _mm256_min_ps(_mm256_max_ps(r, vmin), vmax);
             _mm256_cvttps_epi32(c)
         }};
     }
 
     for row in 0..8usize {
         macro_rules! load_col {
-            ($c:expr) => { _mm256_loadu_ps(temp.as_ptr().add((row * 8 + $c) * 8)) };
+            ($c:expr) => {
+                _mm256_loadu_ps(temp.as_ptr().add((row * 8 + $c) * 8))
+            };
         }
         let g0 = _mm256_mul_ps(load_col!(0), vs[0]);
         let g1 = _mm256_mul_ps(load_col!(4), vs[4]);
@@ -233,10 +241,14 @@ unsafe fn idct_8blocks_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
         let (r0, r1, r2, r3, r4, r5, r6, r7) = aan_butterfly_avx2(g0, g1, g2, g3, g4, g5, g6, g7);
 
         let out = [
-            round_clamp_to_i32!(r0), round_clamp_to_i32!(r1),
-            round_clamp_to_i32!(r2), round_clamp_to_i32!(r3),
-            round_clamp_to_i32!(r4), round_clamp_to_i32!(r5),
-            round_clamp_to_i32!(r6), round_clamp_to_i32!(r7),
+            round_clamp_to_i32!(r0),
+            round_clamp_to_i32!(r1),
+            round_clamp_to_i32!(r2),
+            round_clamp_to_i32!(r3),
+            round_clamp_to_i32!(r4),
+            round_clamp_to_i32!(r5),
+            round_clamp_to_i32!(r6),
+            round_clamp_to_i32!(r7),
         ];
 
         let t = transpose8x8_epi32(out);
@@ -285,9 +297,7 @@ unsafe fn transpose8x8_ps(rows: [std::arch::x86_64::__m256; 8]) -> [std::arch::x
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn transpose8x8_epi32(
-    rows: [std::arch::x86_64::__m256i; 8],
-) -> [std::arch::x86_64::__m256i; 8] {
+unsafe fn transpose8x8_epi32(rows: [std::arch::x86_64::__m256i; 8]) -> [std::arch::x86_64::__m256i; 8] {
     use std::arch::x86_64::*;
 
     let f: [__m256; 8] = std::mem::transmute(rows);
@@ -308,10 +318,14 @@ unsafe fn aan_butterfly_avx2(
     g6: std::arch::x86_64::__m256,
     g7: std::arch::x86_64::__m256,
 ) -> (
-    std::arch::x86_64::__m256, std::arch::x86_64::__m256,
-    std::arch::x86_64::__m256, std::arch::x86_64::__m256,
-    std::arch::x86_64::__m256, std::arch::x86_64::__m256,
-    std::arch::x86_64::__m256, std::arch::x86_64::__m256,
+    std::arch::x86_64::__m256,
+    std::arch::x86_64::__m256,
+    std::arch::x86_64::__m256,
+    std::arch::x86_64::__m256,
+    std::arch::x86_64::__m256,
+    std::arch::x86_64::__m256,
+    std::arch::x86_64::__m256,
+    std::arch::x86_64::__m256,
 ) {
     use std::arch::x86_64::*;
 
@@ -349,10 +363,14 @@ unsafe fn aan_butterfly_avx2(
     let b4 = _mm256_sub_ps(c4, c8);
     let b6 = _mm256_sub_ps(c6, e7);
     (
-        _mm256_add_ps(b0, e7), _mm256_add_ps(b1, b6),
-        _mm256_add_ps(b2, c8), _mm256_add_ps(b3, b4),
-        _mm256_sub_ps(b3, b4), _mm256_sub_ps(b2, c8),
-        _mm256_sub_ps(b1, b6), _mm256_sub_ps(b0, e7),
+        _mm256_add_ps(b0, e7),
+        _mm256_add_ps(b1, b6),
+        _mm256_add_ps(b2, c8),
+        _mm256_add_ps(b3, b4),
+        _mm256_sub_ps(b3, b4),
+        _mm256_sub_ps(b2, c8),
+        _mm256_sub_ps(b1, b6),
+        _mm256_sub_ps(b0, e7),
     )
 }
 
@@ -427,8 +445,8 @@ fn idct_4blocks_wasm(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: 
             macro_rules! store_row4 {
                 ($r:expr, $v:expr) => {{
                     let base = ($r * 4) * 8 + col;
-                    *temp.get_unchecked_mut(base)      = f32x4_extract_lane::<0>($v);
-                    *temp.get_unchecked_mut(base + 8)  = f32x4_extract_lane::<1>($v);
+                    *temp.get_unchecked_mut(base) = f32x4_extract_lane::<0>($v);
+                    *temp.get_unchecked_mut(base + 8) = f32x4_extract_lane::<1>($v);
                     *temp.get_unchecked_mut(base + 16) = f32x4_extract_lane::<2>($v);
                     *temp.get_unchecked_mut(base + 24) = f32x4_extract_lane::<3>($v);
                 }};
@@ -446,21 +464,27 @@ fn idct_4blocks_wasm(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: 
     }
 
     let vs = [
-        f32x4_splat(S[0]), f32x4_splat(S[1]), f32x4_splat(S[2]), f32x4_splat(S[3]),
-        f32x4_splat(S[4]), f32x4_splat(S[5]), f32x4_splat(S[6]), f32x4_splat(S[7]),
+        f32x4_splat(S[0]),
+        f32x4_splat(S[1]),
+        f32x4_splat(S[2]),
+        f32x4_splat(S[3]),
+        f32x4_splat(S[4]),
+        f32x4_splat(S[5]),
+        f32x4_splat(S[6]),
+        f32x4_splat(S[7]),
     ];
 
-    let vhalf     = f32x4_splat(0.5f32);
+    let vhalf = f32x4_splat(0.5f32);
     let vsign_bit = f32x4_splat(-0.0f32);
-    let vmin      = f32x4_splat(-level_shift as f32);
-    let vmax      = f32x4_splat((level_shift * 2 - 1) as f32);
+    let vmin = f32x4_splat(-level_shift as f32);
+    let vmax = f32x4_splat((level_shift * 2 - 1) as f32);
 
     macro_rules! round_clamp_to_i32_wasm {
         ($v:expr) => {{
             let sign = v128_and($v, vsign_bit);
             let half = v128_or(vhalf, sign);
-            let r    = f32x4_add($v, half);
-            let c    = f32x4_min(f32x4_max(r, vmin), vmax);
+            let r = f32x4_add($v, half);
+            let c = f32x4_min(f32x4_max(r, vmin), vmax);
             i32x4_trunc_sat_f32x4(c)
         }};
     }
@@ -491,10 +515,14 @@ fn idct_4blocks_wasm(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: 
             let (r0, r1, r2, r3, r4, r5, r6, r7) = aan_butterfly_wasm(g0, g1, g2, g3, g4, g5, g6, g7);
 
             let out = [
-                round_clamp_to_i32_wasm!(r0), round_clamp_to_i32_wasm!(r1),
-                round_clamp_to_i32_wasm!(r2), round_clamp_to_i32_wasm!(r3),
-                round_clamp_to_i32_wasm!(r4), round_clamp_to_i32_wasm!(r5),
-                round_clamp_to_i32_wasm!(r6), round_clamp_to_i32_wasm!(r7),
+                round_clamp_to_i32_wasm!(r0),
+                round_clamp_to_i32_wasm!(r1),
+                round_clamp_to_i32_wasm!(r2),
+                round_clamp_to_i32_wasm!(r3),
+                round_clamp_to_i32_wasm!(r4),
+                round_clamp_to_i32_wasm!(r5),
+                round_clamp_to_i32_wasm!(r6),
+                round_clamp_to_i32_wasm!(r7),
             ];
 
             for b in 0..4usize {
@@ -528,10 +556,14 @@ fn aan_butterfly_wasm(
     g6: std::arch::wasm32::v128,
     g7: std::arch::wasm32::v128,
 ) -> (
-    std::arch::wasm32::v128, std::arch::wasm32::v128,
-    std::arch::wasm32::v128, std::arch::wasm32::v128,
-    std::arch::wasm32::v128, std::arch::wasm32::v128,
-    std::arch::wasm32::v128, std::arch::wasm32::v128,
+    std::arch::wasm32::v128,
+    std::arch::wasm32::v128,
+    std::arch::wasm32::v128,
+    std::arch::wasm32::v128,
+    std::arch::wasm32::v128,
+    std::arch::wasm32::v128,
+    std::arch::wasm32::v128,
+    std::arch::wasm32::v128,
 ) {
     use std::arch::wasm32::*;
 
@@ -569,9 +601,13 @@ fn aan_butterfly_wasm(
     let b4 = f32x4_sub(c4, c8);
     let b6 = f32x4_sub(c6, e7);
     (
-        f32x4_add(b0, e7), f32x4_add(b1, b6),
-        f32x4_add(b2, c8), f32x4_add(b3, b4),
-        f32x4_sub(b3, b4), f32x4_sub(b2, c8),
-        f32x4_sub(b1, b6), f32x4_sub(b0, e7),
+        f32x4_add(b0, e7),
+        f32x4_add(b1, b6),
+        f32x4_add(b2, c8),
+        f32x4_add(b3, b4),
+        f32x4_sub(b3, b4),
+        f32x4_sub(b2, c8),
+        f32x4_sub(b1, b6),
+        f32x4_sub(b0, e7),
     )
 }

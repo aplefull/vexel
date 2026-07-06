@@ -1,21 +1,21 @@
-use std::{fs::File, io::{Error, ErrorKind, Write}, mem::MaybeUninit, path::{Path, PathBuf}};
 use std::borrow::Cow;
 use std::ffi::c_void;
-
-use vexel::{Image, PixelData};
-
-use webp::{AnimEncoder, AnimFrame, WebPConfig};
+use std::fs::File;
+use std::io::{Error, ErrorKind, Write};
+use std::mem::MaybeUninit;
+use std::path::{Path, PathBuf};
 
 use jpegxl_sys::color::color_encoding::JxlColorEncoding;
 use jpegxl_sys::common::types::{JxlBool, JxlDataType, JxlEndianness, JxlPixelFormat};
 use jpegxl_sys::encoder::encode::{
-    JxlColorEncodingSetToSRGB, JxlEncoderAddImageFrame, JxlEncoderCloseInput, JxlEncoderCreate,
-    JxlEncoderDestroy, JxlEncoderFrameSettingsCreate, JxlEncoderInitBasicInfo,
-    JxlEncoderInitFrameHeader, JxlEncoderProcessOutput, JxlEncoderSetBasicInfo,
-    JxlEncoderSetCodestreamLevel, JxlEncoderSetColorEncoding, JxlEncoderSetFrameHeader,
+    JxlColorEncodingSetToSRGB, JxlEncoderAddImageFrame, JxlEncoderCloseInput, JxlEncoderCreate, JxlEncoderDestroy,
+    JxlEncoderFrameSettingsCreate, JxlEncoderInitBasicInfo, JxlEncoderInitFrameHeader, JxlEncoderProcessOutput,
+    JxlEncoderSetBasicInfo, JxlEncoderSetCodestreamLevel, JxlEncoderSetColorEncoding, JxlEncoderSetFrameHeader,
     JxlEncoderSetFrameLossless, JxlEncoderStatus, JxlEncoderUseContainer,
 };
 use jpegxl_sys::metadata::codestream_header::{JxlAnimationHeader, JxlBasicInfo};
+use vexel::{Image, PixelData};
+use webp::{AnimEncoder, AnimFrame, WebPConfig};
 
 fn scale_to_u16(value: f64) -> u16 {
     (value.clamp(0.0, 1.0) * 65535.0) as u16
@@ -71,7 +71,7 @@ pub struct Writer {}
 
 impl Writer {
     pub fn write_jxl(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
-        let compressed = unsafe { 
+        let compressed = unsafe {
             let encoder = JxlEncoderCreate(std::ptr::null());
             if encoder.is_null() {
                 return Err(Error::other("failed to create JXL encoder"));
@@ -82,7 +82,8 @@ impl Writer {
             JxlEncoderDestroy(encoder);
 
             result
-        }.map_err(Error::other)?;
+        }
+        .map_err(Error::other)?;
 
         let mut file = File::create(output_path)?;
         file.write_all(&compressed)?;
@@ -96,17 +97,21 @@ impl Writer {
 
         let has_alpha = image.has_alpha();
         let mut timestamp_ms = 0i32;
-        let pixel_bufs: Vec<(Cow<[u8]>, i32)> = image.frames().iter().map(|frame| {
-            let delta = if frame.delay() == 0 { 1 } else { frame.delay() as i32 };
-            timestamp_ms += delta;
-            let pixels: Cow<[u8]> = match (has_alpha, frame.pixels()) {
-                (true, PixelData::RGBA8(p)) => Cow::Borrowed(p.as_slice()),
-                (true, other) => Cow::Owned(other.clone().into_rgba8_bytes()),
-                (false, PixelData::RGB8(p)) => Cow::Borrowed(p.as_slice()),
-                (false, other) => Cow::Owned(other.clone().into_rgb8_bytes()),
-            };
-            (pixels, timestamp_ms)
-        }).collect();
+        let pixel_bufs: Vec<(Cow<[u8]>, i32)> = image
+            .frames()
+            .iter()
+            .map(|frame| {
+                let delta = if frame.delay() == 0 { 1 } else { frame.delay() as i32 };
+                timestamp_ms += delta;
+                let pixels: Cow<[u8]> = match (has_alpha, frame.pixels()) {
+                    (true, PixelData::RGBA8(p)) => Cow::Borrowed(p.as_slice()),
+                    (true, other) => Cow::Owned(other.clone().into_rgba8_bytes()),
+                    (false, PixelData::RGB8(p)) => Cow::Borrowed(p.as_slice()),
+                    (false, other) => Cow::Owned(other.clone().into_rgb8_bytes()),
+                };
+                (pixels, timestamp_ms)
+            })
+            .collect();
 
         let mut config = WebPConfig::new().unwrap();
         config.lossless = 1i32;
@@ -140,18 +145,32 @@ impl Writer {
             PixelData::RGB16(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
             PixelData::RGBA16(p) => ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
             PixelData::RGB32F(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
-            PixelData::RGBA32F(p) => ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
+            PixelData::RGBA32F(p) => {
+                ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1)))
+            }
             PixelData::RGB64F(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
-            PixelData::RGBA64F(p) => ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
+            PixelData::RGBA64F(p) => {
+                ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1)))
+            }
             PixelData::L1(p) => ("DEPTH 1\nMAXVAL 1\nTUPLTYPE GRAYSCALE\n", Cow::Borrowed(p.as_slice())),
             PixelData::L8(p) => ("DEPTH 1\nMAXVAL 255\nTUPLTYPE GRAYSCALE\n", Cow::Borrowed(p.as_slice())),
             PixelData::L16(p) => ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
             PixelData::LA8(p) => ("DEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Borrowed(p.as_slice())),
-            PixelData::LA16(p) => ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
-            PixelData::L32F(p) => ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
-            PixelData::LA32F(p) => ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
-            PixelData::L64F(p) => ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
-            PixelData::LA64F(p) => ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
+            PixelData::LA16(p) => {
+                ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(u16_be_bytes(p, 1, 1)))
+            }
+            PixelData::L32F(p) => {
+                ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1)))
+            }
+            PixelData::LA32F(p) => {
+                ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1)))
+            }
+            PixelData::L64F(p) => {
+                ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1)))
+            }
+            PixelData::LA64F(p) => {
+                ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1)))
+            }
         };
 
         let mut file = File::create(output_path)?;
@@ -175,11 +194,7 @@ impl Writer {
             PixelData::RGBA32F(p) => ("P6", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 4, 3))),
             PixelData::RGB64F(p) => ("P6", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
             PixelData::RGBA64F(p) => ("P6", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 4, 3))),
-            PixelData::L1(p) => (
-                "P5",
-                "255",
-                Cow::Owned(p.iter().map(|&v| if v != 0 { 255 } else { 0 }).collect()),
-            ),
+            PixelData::L1(p) => ("P5", "255", Cow::Owned(p.iter().map(|&v| if v != 0 { 255 } else { 0 }).collect())),
             PixelData::L8(p) => ("P5", "255", Cow::Borrowed(p.as_slice())),
             PixelData::L16(p) => ("P5", "65535", Cow::Owned(u16_be_bytes(p, 1, 1))),
             PixelData::LA8(p) => ("P5", "255", Cow::Owned(strip_channels(p, 2, 1))),
@@ -300,18 +315,10 @@ impl Writer {
 
 fn pixel_data_ptr_and_len(pixel_data: &PixelData) -> (*const c_void, usize) {
     match pixel_data {
-        PixelData::RGB8(d) | PixelData::RGBA8(d) => {
-            (d.as_ptr() as *const c_void, d.len())
-        }
-        PixelData::L1(d) | PixelData::L8(d) | PixelData::LA8(d) => {
-            (d.as_ptr() as *const c_void, d.len())
-        }
-        PixelData::RGB16(d) | PixelData::RGBA16(d) => {
-            (d.as_ptr() as *const c_void, d.len() * 2)
-        }
-        PixelData::L16(d) | PixelData::LA16(d) => {
-            (d.as_ptr() as *const c_void, d.len() * 2)
-        }
+        PixelData::RGB8(d) | PixelData::RGBA8(d) => (d.as_ptr() as *const c_void, d.len()),
+        PixelData::L1(d) | PixelData::L8(d) | PixelData::LA8(d) => (d.as_ptr() as *const c_void, d.len()),
+        PixelData::RGB16(d) | PixelData::RGBA16(d) => (d.as_ptr() as *const c_void, d.len() * 2),
+        PixelData::L16(d) | PixelData::LA16(d) => (d.as_ptr() as *const c_void, d.len() * 2),
         PixelData::RGB32F(d) | PixelData::RGBA32F(d) | PixelData::L32F(d) | PixelData::LA32F(d) => {
             (d.as_ptr() as *const c_void, d.len() * 4)
         }
@@ -462,10 +469,7 @@ fn pixel_info_for(pixel_data: &PixelData) -> PixelInfo {
     }
 }
 
-unsafe fn jxl_encode(
-    enc: *mut jpegxl_sys::encoder::encode::JxlEncoder,
-    image: &Image,
-) -> Result<Vec<u8>, String> {
+unsafe fn jxl_encode(enc: *mut jpegxl_sys::encoder::encode::JxlEncoder, image: &Image) -> Result<Vec<u8>, String> {
     let is_animated = image.frames().len() > 1;
     let first_frame = &image.frames()[0];
     let info = pixel_info_for(first_frame.pixels());
@@ -558,9 +562,7 @@ unsafe fn jxl_encode(
             }
         };
 
-        if JxlEncoderAddImageFrame(frame_settings, &pixel_format, ptr, len)
-            != JxlEncoderStatus::Success
-        {
+        if JxlEncoderAddImageFrame(frame_settings, &pixel_format, ptr, len) != JxlEncoderStatus::Success {
             return Err("failed to add image frame".to_string());
         }
     }

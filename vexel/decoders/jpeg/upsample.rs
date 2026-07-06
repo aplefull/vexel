@@ -245,20 +245,26 @@ unsafe fn upsample_h2v1_row_avx2(src: &[i32], dst: &mut [i32], sw: usize, tw: us
     let mut sx = 1usize;
     while sx + 8 < sw {
         let prev = _mm256_loadu_si256(src.as_ptr().add(sx - 1) as *const __m256i);
-        let cur  = _mm256_loadu_si256(src.as_ptr().add(sx) as *const __m256i);
+        let cur = _mm256_loadu_si256(src.as_ptr().add(sx) as *const __m256i);
         let next = _mm256_loadu_si256(src.as_ptr().add(sx + 1) as *const __m256i);
 
         let cur3 = _mm256_mullo_epi32(cur, _mm256_set1_epi32(3));
-        let left  = _mm256_srai_epi32(_mm256_add_epi32(_mm256_add_epi32(cur3, prev), _mm256_set1_epi32(1)), 2);
+        let left = _mm256_srai_epi32(_mm256_add_epi32(_mm256_add_epi32(cur3, prev), _mm256_set1_epi32(1)), 2);
         let right = _mm256_srai_epi32(_mm256_add_epi32(_mm256_add_epi32(cur3, next), _mm256_set1_epi32(2)), 2);
 
-        let lo_left  = _mm256_extracti128_si256::<0>(left);
-        let hi_left  = _mm256_extracti128_si256::<1>(left);
+        let lo_left = _mm256_extracti128_si256::<0>(left);
+        let hi_left = _mm256_extracti128_si256::<1>(left);
         let lo_right = _mm256_extracti128_si256::<0>(right);
         let hi_right = _mm256_extracti128_si256::<1>(right);
 
-        let out0 = _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(_mm_unpacklo_epi32(lo_left, lo_right)), _mm_unpackhi_epi32(lo_left, lo_right));
-        let out1 = _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(_mm_unpacklo_epi32(hi_left, hi_right)), _mm_unpackhi_epi32(hi_left, hi_right));
+        let out0 = _mm256_inserti128_si256::<1>(
+            _mm256_castsi128_si256(_mm_unpacklo_epi32(lo_left, lo_right)),
+            _mm_unpackhi_epi32(lo_left, lo_right),
+        );
+        let out1 = _mm256_inserti128_si256::<1>(
+            _mm256_castsi128_si256(_mm_unpacklo_epi32(hi_left, hi_right)),
+            _mm_unpackhi_epi32(hi_left, hi_right),
+        );
 
         let dx = sx * 2;
         if dx + 16 <= tw {
@@ -293,7 +299,7 @@ unsafe fn upsample_h1v2_row_avx2(src: &[i32], neighbor: &[i32], bias: i32, dst: 
     let mut i = 0usize;
 
     while i + 8 <= sw {
-        let vsrc  = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+        let vsrc = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
         let vneig = _mm256_loadu_si256(neighbor.as_ptr().add(i) as *const __m256i);
         let sum = _mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(vsrc, v3), vneig), vbias);
         let out = _mm256_srai_epi32(sum, 2);
@@ -316,7 +322,7 @@ unsafe fn compute_col_sums_avx2(src: &[i32], neighbor: &[i32], col_sums: &mut [i
     let mut i = 0usize;
 
     while i + 8 <= sw {
-        let vsrc  = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+        let vsrc = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
         let vneig = _mm256_loadu_si256(neighbor.as_ptr().add(i) as *const __m256i);
         let out = _mm256_add_epi32(_mm256_mullo_epi32(vsrc, v3), vneig);
         _mm256_storeu_si256(col_sums.as_mut_ptr().add(i) as *mut __m256i, out);
@@ -455,20 +461,24 @@ fn upsample_h2v1_row_wasm(src: &[i32], dst: &mut [i32], sw: usize, tw: usize) {
     while sx + 4 < sw {
         unsafe {
             let prev = v128_load(src.as_ptr().add(sx - 1) as *const v128);
-            let cur  = v128_load(src.as_ptr().add(sx) as *const v128);
+            let cur = v128_load(src.as_ptr().add(sx) as *const v128);
             let next = v128_load(src.as_ptr().add(sx + 1) as *const v128);
 
-            let cur3  = i32x4_mul(cur, i32x4_splat(3));
-            let left  = i32x4_shr(i32x4_add(i32x4_add(cur3, prev), i32x4_splat(1)), 2);
+            let cur3 = i32x4_mul(cur, i32x4_splat(3));
+            let left = i32x4_shr(i32x4_add(i32x4_add(cur3, prev), i32x4_splat(1)), 2);
             let right = i32x4_shr(i32x4_add(i32x4_add(cur3, next), i32x4_splat(2)), 2);
 
             let out0 = i32x4(
-                i32x4_extract_lane::<0>(left), i32x4_extract_lane::<0>(right),
-                i32x4_extract_lane::<1>(left), i32x4_extract_lane::<1>(right),
+                i32x4_extract_lane::<0>(left),
+                i32x4_extract_lane::<0>(right),
+                i32x4_extract_lane::<1>(left),
+                i32x4_extract_lane::<1>(right),
             );
             let out1 = i32x4(
-                i32x4_extract_lane::<2>(left), i32x4_extract_lane::<2>(right),
-                i32x4_extract_lane::<3>(left), i32x4_extract_lane::<3>(right),
+                i32x4_extract_lane::<2>(left),
+                i32x4_extract_lane::<2>(right),
+                i32x4_extract_lane::<3>(left),
+                i32x4_extract_lane::<3>(right),
             );
 
             let dx = sx * 2;
@@ -504,7 +514,7 @@ fn upsample_h1v2_row_wasm(src: &[i32], neighbor: &[i32], bias: i32, dst: &mut [i
 
     while i + 4 <= sw {
         unsafe {
-            let vsrc  = v128_load(src.as_ptr().add(i) as *const v128);
+            let vsrc = v128_load(src.as_ptr().add(i) as *const v128);
             let vneig = v128_load(neighbor.as_ptr().add(i) as *const v128);
             let sum = i32x4_add(i32x4_add(i32x4_mul(vsrc, v3), vneig), vbias);
             let out = i32x4_shr(sum, 2);
@@ -528,7 +538,7 @@ fn compute_col_sums_wasm(src: &[i32], neighbor: &[i32], col_sums: &mut [i32], sw
 
     while i + 4 <= sw {
         unsafe {
-            let vsrc  = v128_load(src.as_ptr().add(i) as *const v128);
+            let vsrc = v128_load(src.as_ptr().add(i) as *const v128);
             let vneig = v128_load(neighbor.as_ptr().add(i) as *const v128);
             let out = i32x4_add(i32x4_mul(vsrc, v3), vneig);
             v128_store(col_sums.as_mut_ptr().add(i) as *mut v128, out);

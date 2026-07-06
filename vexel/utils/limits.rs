@@ -34,29 +34,18 @@ impl Default for Limits {
 impl Limits {
     /// Returns a `Limits` with all fields set to `None`, disabling every constraint.
     pub fn no_limits() -> Self {
-        Self {
-            max_image_width: None,
-            max_image_height: None,
-            max_alloc: None,
-            max_pixel_count: None,
-        }
+        Self { max_image_width: None, max_image_height: None, max_alloc: None, max_pixel_count: None }
     }
 
     pub(crate) fn check_dimensions(&self, width: u32, height: u32) -> VexelResult<()> {
         if let Some(max_w) = self.max_image_width {
             if width > max_w {
-                return Err(VexelError::LimitExceeded(format!(
-                    "image width {} exceeds limit {}",
-                    width, max_w
-                )));
+                return Err(VexelError::LimitExceeded(format!("image width {} exceeds limit {}", width, max_w)));
             }
         }
         if let Some(max_h) = self.max_image_height {
             if height > max_h {
-                return Err(VexelError::LimitExceeded(format!(
-                    "image height {} exceeds limit {}",
-                    height, max_h
-                )));
+                return Err(VexelError::LimitExceeded(format!("image height {} exceeds limit {}", height, max_h)));
             }
         }
         if let Some(max_px) = self.max_pixel_count {
@@ -87,18 +76,16 @@ impl Limits {
     pub(crate) fn reserve_usize(&mut self, bytes: usize) -> VexelResult<()> {
         match u64::try_from(bytes) {
             Ok(n) => self.reserve(n),
-            Err(_) if self.max_alloc.is_some() => Err(VexelError::LimitExceeded(
-                "allocation size overflows u64".to_string(),
-            )),
+            Err(_) if self.max_alloc.is_some() => {
+                Err(VexelError::LimitExceeded("allocation size overflows u64".to_string()))
+            }
             Err(_) => Ok(()),
         }
     }
 
     pub(crate) fn reserve_buffer(&mut self, width: u32, height: u32, bytes_per_pixel: u8) -> VexelResult<()> {
         self.check_dimensions(width, height)?;
-        let size = u64::from(width)
-            .saturating_mul(u64::from(height))
-            .saturating_mul(u64::from(bytes_per_pixel));
+        let size = u64::from(width).saturating_mul(u64::from(height)).saturating_mul(u64::from(bytes_per_pixel));
         self.reserve(size)
     }
 

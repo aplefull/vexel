@@ -1,16 +1,15 @@
 use std::io::{Read, Seek};
 
+use super::bitreader::JlsBitReader;
+use super::markers::{JpegLsMarker, JPEG_LS_MARKERS};
+use super::types::*;
+use crate::bitreader::BitReader;
 use crate::decoders::jpeg::types::{APP14AdobeData, IccProfileSequenceInfo, JFIFData};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::ExifReader;
 use crate::utils::info::JpegLsInfo;
-use crate::{Image, Limits, PixelData, log_warn};
-use crate::bitreader::BitReader;
-
-use super::bitreader::JlsBitReader;
 use crate::utils::marker::Marker;
-use super::markers::{JPEG_LS_MARKERS, JpegLsMarker};
-use super::types::*;
+use crate::{log_warn, Image, Limits, PixelData};
 
 pub struct JpegLsDecoder<R: Read + Seek> {
     reader: BitReader<R>,
@@ -42,9 +41,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
     }
 
     pub fn get_info(&self) -> JpegLsInfo {
-        JpegLsInfo {
-            sections: self.sections.clone(),
-        }
+        JpegLsInfo { sections: self.sections.clone() }
     }
 
     fn read_u8(&mut self) -> std::io::Result<u8> {
@@ -89,13 +86,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
         self.limits.reserve_buffer(width, height, 4)?;
 
-        self.frame = Some(FrameHeader {
-            precision,
-            height,
-            width,
-            components,
-            alpha,
-        });
+        self.frame = Some(FrameHeader { precision, height, width, components, alpha });
 
         Ok(JpegLsSofData {
             length: marker_len,
@@ -248,7 +239,16 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             (None, None)
         };
 
-        Ok(JpegLsAppData { marker: 0xFFE8, length, identifier, jfif: None, exif: None, icc_profile_sequence: None, adobe: None, color_transform })
+        Ok(JpegLsAppData {
+            marker: 0xFFE8,
+            length,
+            identifier,
+            jfif: None,
+            exif: None,
+            icc_profile_sequence: None,
+            adobe: None,
+            color_transform,
+        })
     }
 
     fn read_compressed_data(&mut self) -> std::io::Result<Vec<u8>> {
@@ -288,24 +288,17 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
             match marker {
                 JpegLsMarker::SOI => {
-                    self.sections.push(JpegLsSectionInfo {
-                        start_offset: marker_start,
-                        data: JpegLsSectionData::Soi,
-                    });
+                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::Soi });
                 }
                 JpegLsMarker::SOF55 => {
                     let sof = self.read_sof()?;
-                    self.sections.push(JpegLsSectionInfo {
-                        start_offset: marker_start,
-                        data: JpegLsSectionData::Sof(sof),
-                    });
+                    self.sections
+                        .push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::Sof(sof) });
                 }
                 JpegLsMarker::LSE => {
                     let lse = self.read_lse()?;
-                    self.sections.push(JpegLsSectionInfo {
-                        start_offset: marker_start,
-                        data: JpegLsSectionData::Lse(lse),
-                    });
+                    self.sections
+                        .push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::Lse(lse) });
                 }
                 JpegLsMarker::SOS => {
                     let mut sos = self.read_sos()?;
@@ -314,16 +307,11 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     let mut scan = self.pending_scan.take().unwrap_or_default();
                     scan.restart_interval = self.restart_interval;
                     self.scans.push((scan, data));
-                    self.sections.push(JpegLsSectionInfo {
-                        start_offset: marker_start,
-                        data: JpegLsSectionData::Sos(sos),
-                    });
+                    self.sections
+                        .push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::Sos(sos) });
                 }
                 JpegLsMarker::EOI => {
-                    self.sections.push(JpegLsSectionInfo {
-                        start_offset: marker_start,
-                        data: JpegLsSectionData::Eoi,
-                    });
+                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::Eoi });
                     break;
                 }
                 JpegLsMarker::DRI => {
@@ -332,31 +320,22 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     self.restart_interval = interval as usize;
                     self.sections.push(JpegLsSectionInfo {
                         start_offset: marker_start,
-                        data: JpegLsSectionData::Dri(JpegLsDriData {
-                            length: len,
-                            restart_interval: interval,
-                        }),
+                        data: JpegLsSectionData::Dri(JpegLsDriData { length: len, restart_interval: interval }),
                     });
                 }
-                JpegLsMarker::DNL => {
-                    match self.read_dnl() {
-                        Ok(dnl) => {
-                            self.sections.push(JpegLsSectionInfo {
-                                start_offset: marker_start,
-                                data: JpegLsSectionData::Dnl(dnl),
-                            });
-                        }
-                        Err(e) => {
-                            log_warn!("Failed to read DNL segment: {}", e);
-                        }
+                JpegLsMarker::DNL => match self.read_dnl() {
+                    Ok(dnl) => {
+                        self.sections
+                            .push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::Dnl(dnl) });
                     }
-                }
+                    Err(e) => {
+                        log_warn!("Failed to read DNL segment: {}", e);
+                    }
+                },
                 JpegLsMarker::APP8 => {
                     let app = self.try_read_hp_color_transform()?;
-                    self.sections.push(JpegLsSectionInfo {
-                        start_offset: marker_start,
-                        data: JpegLsSectionData::App(app),
-                    });
+                    self.sections
+                        .push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(app) });
                 }
                 JpegLsMarker::APP0 => {
                     let len = self.read_u16()?;
@@ -364,7 +343,16 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     self.limits.reserve_usize(payload_len)?;
                     let payload = self.reader.read_bytes(payload_len)?;
                     self.limits.free_usize(payload_len);
-                    let mut app = JpegLsAppData { marker: 0xFFE0, length: len, identifier: None, jfif: None, exif: None, icc_profile_sequence: None, adobe: None, color_transform: None };
+                    let mut app = JpegLsAppData {
+                        marker: 0xFFE0,
+                        length: len,
+                        identifier: None,
+                        jfif: None,
+                        exif: None,
+                        icc_profile_sequence: None,
+                        adobe: None,
+                        color_transform: None,
+                    };
                     if payload.len() >= 5 {
                         let id = String::from_utf8_lossy(&payload[..5]).to_string();
                         app.identifier = Some(id.trim_end_matches('\0').to_string());
@@ -384,7 +372,8 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                             });
                         }
                     }
-                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(app) });
+                    self.sections
+                        .push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(app) });
                 }
                 JpegLsMarker::APP1 => {
                     let len = self.read_u16()?;
@@ -392,18 +381,26 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     self.limits.reserve_usize(payload_len)?;
                     let payload = self.reader.read_bytes(payload_len)?;
                     self.limits.free_usize(payload_len);
-                    let exif = if payload.starts_with(b"Exif\0\0") {
-                        ExifReader::parse(&payload[6..])
-                    } else {
-                        None
-                    };
+                    let exif = if payload.starts_with(b"Exif\0\0") { ExifReader::parse(&payload[6..]) } else { None };
                     let identifier = if payload.len() >= 4 {
                         let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len().min(32));
                         String::from_utf8_lossy(&payload[..null_pos]).into_owned().into()
                     } else {
                         None
                     };
-                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(JpegLsAppData { marker: 0xFFE1, length: len, identifier, jfif: None, exif, icc_profile_sequence: None, adobe: None, color_transform: None }) });
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::App(JpegLsAppData {
+                            marker: 0xFFE1,
+                            length: len,
+                            identifier,
+                            jfif: None,
+                            exif,
+                            icc_profile_sequence: None,
+                            adobe: None,
+                            color_transform: None,
+                        }),
+                    });
                 }
                 JpegLsMarker::APP2 => {
                     let len = self.read_u16()?;
@@ -422,7 +419,19 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     } else {
                         None
                     };
-                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(JpegLsAppData { marker: 0xFFE2, length: len, identifier: Some(identifier), jfif: None, exif: None, icc_profile_sequence: icc, adobe: None, color_transform: None }) });
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::App(JpegLsAppData {
+                            marker: 0xFFE2,
+                            length: len,
+                            identifier: Some(identifier),
+                            jfif: None,
+                            exif: None,
+                            icc_profile_sequence: icc,
+                            adobe: None,
+                            color_transform: None,
+                        }),
+                    });
                 }
                 JpegLsMarker::APP14 => {
                     let len = self.read_u16()?;
@@ -447,7 +456,19 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     } else {
                         None
                     };
-                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(JpegLsAppData { marker: 0xFFEE, length: len, identifier, jfif: None, exif: None, icc_profile_sequence: None, adobe, color_transform: None }) });
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::App(JpegLsAppData {
+                            marker: 0xFFEE,
+                            length: len,
+                            identifier,
+                            jfif: None,
+                            exif: None,
+                            icc_profile_sequence: None,
+                            adobe,
+                            color_transform: None,
+                        }),
+                    });
                 }
                 JpegLsMarker::APP3
                 | JpegLsMarker::APP4
@@ -467,12 +488,25 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     self.limits.free_usize(payload_len);
                     let marker_u16 = marker.to_u16();
                     let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len().min(32));
-                    let identifier = if null_pos > 0 && payload[..null_pos].iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
-                        String::from_utf8(payload[..null_pos].to_vec()).ok()
-                    } else {
-                        None
-                    };
-                    self.sections.push(JpegLsSectionInfo { start_offset: marker_start, data: JpegLsSectionData::App(JpegLsAppData { marker: marker_u16, length: len, identifier, jfif: None, exif: None, icc_profile_sequence: None, adobe: None, color_transform: None }) });
+                    let identifier =
+                        if null_pos > 0 && payload[..null_pos].iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+                            String::from_utf8(payload[..null_pos].to_vec()).ok()
+                        } else {
+                            None
+                        };
+                    self.sections.push(JpegLsSectionInfo {
+                        start_offset: marker_start,
+                        data: JpegLsSectionData::App(JpegLsAppData {
+                            marker: marker_u16,
+                            length: len,
+                            identifier,
+                            jfif: None,
+                            exif: None,
+                            icc_profile_sequence: None,
+                            adobe: None,
+                            color_transform: None,
+                        }),
+                    });
                 }
                 JpegLsMarker::COM => {
                     let len = self.read_u16()?;
@@ -493,7 +527,6 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     log_warn!("Unhandled JPEG-LS marker: {:?}", marker);
                 }
             }
-
         }
 
         let frame = match self.frame.as_ref() {
@@ -548,11 +581,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     (bpp, alpha)
                 };
 
-                let limit = if bpp < 8 {
-                    2 * (bpp + 8) - qbpp - 1
-                } else {
-                    4 * bpp - qbpp - 1
-                };
+                let limit = if bpp < 8 { 2 * (bpp + 8) - qbpp - 1 } else { 4 * bpp - qbpp - 1 };
 
                 let lutmax = if alpha > 256 { LUTMAX16 } else { LUTMAX8 };
                 let (t1, t2, t3) = compute_thresholds(alpha, near, scan.t1, scan.t2, scan.t3);
@@ -614,7 +643,9 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     }
                 }
             } else {
-                let comp_samplings: Vec<(usize, usize)> = frame.components.iter()
+                let comp_samplings: Vec<(usize, usize)> = frame
+                    .components
+                    .iter()
                     .map(|c| (c.horizontal_sampling as usize, c.vertical_sampling as usize))
                     .collect();
 
@@ -622,11 +653,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     for x in 0..width {
                         for p in 0..num_planes {
                             let (plane, pw, ph) = &planes[p];
-                            let (h_samp, v_samp) = if p < comp_samplings.len() {
-                                comp_samplings[p]
-                            } else {
-                                (1, 1)
-                            };
+                            let (h_samp, v_samp) = if p < comp_samplings.len() { comp_samplings[p] } else { (1, 1) };
                             let src_x = (x * h_samp / max_h).min(pw.saturating_sub(1));
                             let src_y = (row * v_samp / max_v).min(ph.saturating_sub(1));
                             result.push(plane[src_y * pw + src_x]);
@@ -670,11 +697,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 (bpp, alpha)
             };
 
-            let limit = if bpp < 8 {
-                2 * (bpp + 8) - qbpp - 1
-            } else {
-                4 * bpp - qbpp - 1
-            };
+            let limit = if bpp < 8 { 2 * (bpp + 8) - qbpp - 1 } else { 4 * bpp - qbpp - 1 };
 
             let lutmax = if alpha > 256 { LUTMAX16 } else { LUTMAX8 };
             let (t1, t2, t3) = compute_thresholds(alpha, near, scan.t1, scan.t2, scan.t3);
@@ -699,30 +722,56 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             self.limits.reserve_usize(width.saturating_mul(height).saturating_mul(components).saturating_mul(2))?;
 
             match scan.interleave_mode {
-                InterleaveMode::None => {
-                    decode_plane_interleaved(
-                        &mut br, &mut state, width, height, components,
-                        alpha, near, lossy, limit, qbpp, reset,
-                        restart_interval, stats_alpha,
-                    )
-                }
+                InterleaveMode::None => decode_plane_interleaved(
+                    &mut br,
+                    &mut state,
+                    width,
+                    height,
+                    components,
+                    alpha,
+                    near,
+                    lossy,
+                    limit,
+                    qbpp,
+                    reset,
+                    restart_interval,
+                    stats_alpha,
+                ),
                 InterleaveMode::Line => {
-                    let sampling: Vec<(u8, u8)> = frame.components.iter()
-                        .map(|c| (c.horizontal_sampling, c.vertical_sampling))
-                        .collect();
+                    let sampling: Vec<(u8, u8)> =
+                        frame.components.iter().map(|c| (c.horizontal_sampling, c.vertical_sampling)).collect();
                     decode_line_interleaved(
-                        &mut br, &mut state, width, height, components,
-                        alpha, near, lossy, limit, qbpp, reset, &sampling,
-                        restart_interval, stats_alpha,
+                        &mut br,
+                        &mut state,
+                        width,
+                        height,
+                        components,
+                        alpha,
+                        near,
+                        lossy,
+                        limit,
+                        qbpp,
+                        reset,
+                        &sampling,
+                        restart_interval,
+                        stats_alpha,
                     )
                 }
-                InterleaveMode::Sample => {
-                    decode_sample_interleaved(
-                        &mut br, &mut state, width, height, components,
-                        alpha, near, lossy, limit, qbpp, reset,
-                        restart_interval, stats_alpha,
-                    )
-                }
+                InterleaveMode::Sample => decode_sample_interleaved(
+                    &mut br,
+                    &mut state,
+                    width,
+                    height,
+                    components,
+                    alpha,
+                    near,
+                    lossy,
+                    limit,
+                    qbpp,
+                    reset,
+                    restart_interval,
+                    stats_alpha,
+                ),
             }
         };
 
@@ -864,9 +913,7 @@ fn decode_plane_interleaved(
     restart_interval: usize,
     stats_alpha: i32,
 ) -> Vec<u16> {
-    let mut planes: Vec<Vec<u16>> = (0..components)
-        .map(|_| Vec::with_capacity(width * height))
-        .collect();
+    let mut planes: Vec<Vec<u16>> = (0..components).map(|_| Vec::with_capacity(width * height)).collect();
 
     let max_val = alpha - 1;
     let scale = 65535 / max_val;
@@ -963,7 +1010,20 @@ fn decode_line_interleaved(
                 curr_lines[comp][1] = first_prev_pixel;
 
                 let prev_clone = prev_lines[comp].clone();
-                undoscanline(br, state, &prev_clone, &mut curr_lines[comp], width, comp, alpha, near, lossy, limit, qbpp, reset);
+                undoscanline(
+                    br,
+                    state,
+                    &prev_clone,
+                    &mut curr_lines[comp],
+                    width,
+                    comp,
+                    alpha,
+                    near,
+                    lossy,
+                    limit,
+                    qbpp,
+                    reset,
+                );
 
                 curr_lines[comp][width + 2] = curr_lines[comp][width + 1];
             }
@@ -990,9 +1050,8 @@ fn decode_line_interleaved(
     let c_widths: Vec<usize> = sampling.iter().map(|&(h, _)| width * h as usize / max_h).collect();
     let c_heights: Vec<usize> = sampling.iter().map(|&(_, v)| height * v as usize / max_v).collect();
 
-    let mut comp_data: Vec<Vec<i32>> = (0..components)
-        .map(|c| Vec::with_capacity(c_widths[c] * c_heights[c]))
-        .collect();
+    let mut comp_data: Vec<Vec<i32>> =
+        (0..components).map(|c| Vec::with_capacity(c_widths[c] * c_heights[c])).collect();
 
     let mut prev_lines: Vec<Vec<i32>> = (0..components).map(|c| vec![0i32; c_widths[c] + 3]).collect();
     let mut curr_lines: Vec<Vec<i32>> = (0..components).map(|c| vec![0i32; c_widths[c] + 3]).collect();
@@ -1028,7 +1087,20 @@ fn decode_line_interleaved(
                 curr_lines[comp][1] = first_prev_pixel;
 
                 let prev_clone = prev_lines[comp].clone();
-                undoscanline(br, state, &prev_clone, &mut curr_lines[comp], cw, comp, alpha, near, lossy, limit, qbpp, reset);
+                undoscanline(
+                    br,
+                    state,
+                    &prev_clone,
+                    &mut curr_lines[comp],
+                    cw,
+                    comp,
+                    alpha,
+                    near,
+                    lossy,
+                    limit,
+                    qbpp,
+                    reset,
+                );
 
                 curr_lines[comp][cw + 2] = curr_lines[comp][cw + 1];
 
@@ -1107,7 +1179,20 @@ fn decode_sample_interleaved(
         }
 
         let prev_clone = prev_line.clone();
-        undoscanline_pixel(br, state, &prev_clone, &mut curr_line, total_samples, components, alpha, near, lossy, limit, qbpp, reset);
+        undoscanline_pixel(
+            br,
+            state,
+            &prev_clone,
+            &mut curr_line,
+            total_samples,
+            components,
+            alpha,
+            near,
+            lossy,
+            limit,
+            qbpp,
+            reset,
+        );
 
         for nc in 0..components {
             curr_line[total_samples + 2 * components + nc] = curr_line[total_samples + components + nc];
@@ -1174,19 +1259,11 @@ fn lossless_regular_mode(
         }
     };
 
-    let errval = if abs_errval & 1 != 0 {
-        -(abs_errval + 1) / 2
-    } else {
-        abs_errval / 2
-    };
+    let errval = if abs_errval & 1 != 0 { -(abs_errval + 1) / 2 } else { abs_errval / 2 };
 
     let bt = state.b[q];
 
-    let errval = if k == 0 && 2 * bt <= -nt {
-        -(errval + 1)
-    } else {
-        errval
-    };
+    let errval = if k == 0 && 2 * bt <= -nt { -(errval + 1) } else { errval };
 
     let abs_errval = errval.abs();
 
@@ -1244,11 +1321,7 @@ fn lossless_end_of_run(
 ) -> i32 {
     let q = EOR_0 + ri_type as usize;
     let nt = state.n[q];
-    let at = if ri_type != 0 {
-        state.a[q].saturating_add(nt / 2)
-    } else {
-        state.a[q]
-    };
+    let at = if ri_type != 0 { state.a[q].saturating_add(nt / 2) } else { state.a[q] };
 
     let mut k = 0i32;
     {
@@ -1276,11 +1349,7 @@ fn lossless_end_of_run(
         }
     };
 
-    let oldmap = if k == 0 && (ri_type != 0 || merrval != 0) && 2 * state.b[q] < nt {
-        1i32
-    } else {
-        0i32
-    };
+    let oldmap = if k == 0 && (ri_type != 0 || merrval != 0) && 2 * state.b[q] < nt { 1i32 } else { 0i32 };
 
     let merrval = merrval + ri_type + oldmap;
 
@@ -1295,11 +1364,7 @@ fn lossless_end_of_run(
         (e, ae)
     };
 
-    let ix = if rb < ra {
-        (rb - errval) & (alpha - 1)
-    } else {
-        (rb + errval) & (alpha - 1)
-    };
+    let ix = if rb < ra { (rb - errval) & (alpha - 1) } else { (rb + errval) & (alpha - 1) };
 
     state.a[q] = state.a[q].saturating_add(abs_errval);
 
@@ -1314,12 +1379,7 @@ fn lossless_end_of_run(
     ix
 }
 
-fn process_run_dec(
-    br: &mut JlsBitReader,
-    state: &mut DecoderState,
-    line_left: i32,
-    color: usize,
-) -> i32 {
+fn process_run_dec(br: &mut JlsBitReader, state: &mut DecoderState, line_left: i32, color: usize) -> i32 {
     let mut runlen = 0i32;
 
     loop {
@@ -1415,18 +1475,10 @@ fn lossy_regular_mode(
         }
     };
 
-    let errval = if abs_errval & 1 != 0 {
-        -(abs_errval + 1) / 2
-    } else {
-        abs_errval / 2
-    };
+    let errval = if abs_errval & 1 != 0 { -(abs_errval + 1) / 2 } else { abs_errval / 2 };
 
     let bt = state.b[q];
-    let errval = if k == 0 && near == 0 && 2 * bt <= -nt {
-        -(errval + 1)
-    } else {
-        errval
-    };
+    let errval = if k == 0 && near == 0 && 2 * bt <= -nt { -(errval + 1) } else { errval };
 
     let abs_errval = errval.abs();
     let errval = state.qmul(errval);
@@ -1494,11 +1546,7 @@ fn lossy_end_of_run(
 ) -> i32 {
     let q = EOR_0 + ri_type as usize;
     let nt = state.n[q];
-    let at = if ri_type != 0 {
-        state.a[q].saturating_add(nt / 2)
-    } else {
-        state.a[q]
-    };
+    let at = if ri_type != 0 { state.a[q].saturating_add(nt / 2) } else { state.a[q] };
 
     let mut k = 0i32;
     {
@@ -1526,11 +1574,7 @@ fn lossy_end_of_run(
         }
     };
 
-    let oldmap = if k == 0 && (ri_type != 0 || merrval != 0) && 2 * state.b[q] < nt {
-        1i32
-    } else {
-        0i32
-    };
+    let oldmap = if k == 0 && (ri_type != 0 || merrval != 0) && 2 * state.b[q] < nt { 1i32 } else { 0i32 };
 
     let merrval = merrval + ri_type + oldmap;
 
@@ -1640,11 +1684,8 @@ fn undoscanline(
             let px = predict(ra, rb, rc);
 
             let cont_mapped = state.classmap[cont as usize];
-            let (sign, q) = if cont_mapped < 0 {
-                (-1i32, (-cont_mapped) as usize)
-            } else {
-                (1i32, cont_mapped as usize)
-            };
+            let (sign, q) =
+                if cont_mapped < 0 { (-1i32, (-cont_mapped) as usize) } else { (1i32, cont_mapped as usize) };
 
             if lossy {
                 ra = lossy_regular_mode(br, state, q, sign, px, alpha, near, limit, qbpp, reset);
@@ -1770,11 +1811,8 @@ fn undoscanline_pixel(
         } else {
             let px = predict(ra, rb, rc);
             let cont_mapped = state.classmap[cont as usize];
-            let (sign, q) = if cont_mapped < 0 {
-                (-1i32, (-cont_mapped) as usize)
-            } else {
-                (1i32, cont_mapped as usize)
-            };
+            let (sign, q) =
+                if cont_mapped < 0 { (-1i32, (-cont_mapped) as usize) } else { (1i32, cont_mapped as usize) };
 
             c_aa[color] = if lossy {
                 lossy_regular_mode(br, state, q, sign, px, alpha, near, limit, qbpp, reset)

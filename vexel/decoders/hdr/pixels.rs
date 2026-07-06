@@ -1,8 +1,7 @@
-use crate::utils::error::VexelResult;
-use crate::PixelData;
-
 use super::simd;
 use super::types::HdrFormat;
+use crate::utils::error::VexelResult;
+use crate::PixelData;
 
 pub struct PixelDecoder {
     width: u32,
@@ -49,13 +48,10 @@ fn decode_rgbe(rgbe_data: &[u8], rgb_data: &mut [f32], width: usize) {
     {
         use rayon::prelude::*;
 
-        rgb_data
-            .par_chunks_mut(width * 3)
-            .enumerate()
-            .for_each(|(row, rgb_row)| {
-                let rgbe_row = &rgbe_data[row * width * 4..];
-                decode_rgbe_row(rgbe_row, rgb_row, width, &exp2_table);
-            });
+        rgb_data.par_chunks_mut(width * 3).enumerate().for_each(|(row, rgb_row)| {
+            let rgbe_row = &rgbe_data[row * width * 4..];
+            decode_rgbe_row(rgbe_row, rgb_row, width, &exp2_table);
+        });
     }
 
     #[cfg(not(feature = "rayon"))]
@@ -94,12 +90,9 @@ fn convert_xyze_to_rgb(xyz_data: &[f32], rgb_data: &mut [f32], width: usize) {
 
         let row_floats = width * 3;
 
-        xyz_data
-            .par_chunks(row_floats)
-            .zip(rgb_data.par_chunks_mut(row_floats))
-            .for_each(|(src_row, dst_row)| {
-                simd::xyz_to_rgb(src_row, dst_row);
-            });
+        xyz_data.par_chunks(row_floats).zip(rgb_data.par_chunks_mut(row_floats)).for_each(|(src_row, dst_row)| {
+            simd::xyz_to_rgb(src_row, dst_row);
+        });
     }
 
     #[cfg(not(feature = "rayon"))]

@@ -1,4 +1,4 @@
-use crate::harness::{Comparison, TestCase, get_pixel};
+use crate::harness::{get_pixel, Comparison, TestCase};
 
 pub fn test_cases() -> Vec<TestCase> {
     vec![
@@ -6,33 +6,25 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "ICO image",
             path: "ico/image.cur",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "ico/image.avif",
-            },
+            comparison: Comparison::Exact { reference_path: "ico/image.avif" },
         },
         TestCase {
             name: "ICO sample",
             path: "ico/sample.ico",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "ico/sample.avif",
-            },
+            comparison: Comparison::Exact { reference_path: "ico/sample.avif" },
         },
         TestCase {
             name: "ICO demo",
             path: "ico/demo.ico",
             validation: None,
-            comparison: Comparison::ExactFrames {
-                reference_path: "ico/demo.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "ico/demo.avif" },
         },
         TestCase {
             name: "ICO demo BMP",
             path: "ico/demo_bmp.ico",
             validation: None,
-                comparison: Comparison::ExactFrames {
-                reference_path: "ico/demo_bmp.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "ico/demo_bmp.avif" },
         },
         TestCase {
             name: "ICO kuromi CUR",
@@ -48,10 +40,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 let [r, g, b, _] = get_pixel(&frame.to_rgba8(), w, 16, 25);
 
                 if [r, g, b] != [0x2E, 0x28, 0x3A] {
-                    return Err(format!(
-                        "frame 0: pixel (16, 25) expected #2E283A, got #{:02X}{:02X}{:02X}",
-                        r, g, b
-                    ));
+                    return Err(format!("frame 0: pixel (16, 25) expected #2E283A, got #{:02X}{:02X}{:02X}", r, g, b));
                 }
                 Ok(())
             })),
@@ -116,9 +105,7 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "ICO 32bpp BMP reported as 8bpp in directory",
             path: "ico/32bpp_dir_reports_8bpp.ico",
             validation: None,
-            comparison: Comparison::Exact {
-                reference_path: "ico/32bpp_dir_reports_8bpp.jxl",
-            },
+            comparison: Comparison::Exact { reference_path: "ico/32bpp_dir_reports_8bpp.jxl" },
         },
     ]
 }

@@ -1,15 +1,16 @@
+use std::io::{Cursor, Read, Seek, SeekFrom};
+
 use crate::bitreader::BitReader;
 use crate::decoders::bmp::decoder::BmpDecoder;
 use crate::decoders::ico::types::{
-    IconDirEntry, IcoIconDirData, IcoIconDirEntryData, IcoImageDataInfo, IcoImageFormat,
-    IcoSectionData, IcoSectionInfo, IcoType,
+    IcoIconDirData, IcoIconDirEntryData, IcoImageDataInfo, IcoImageFormat, IcoSectionData, IcoSectionInfo, IcoType,
+    IconDirEntry,
 };
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, ImageFrame, PixelData};
 use crate::utils::info::IcoInfo;
-use crate::{Limits, log_error, log_warn};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use crate::{log_error, log_warn, Limits};
 
 pub struct IcoDecoder<R: Read + Seek> {
     width: u32,
@@ -40,11 +41,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
         self.limits = limits;
     }
 
-
     pub fn get_info(&self) -> IcoInfo {
-        IcoInfo {
-            sections: self.sections.clone(),
-        }
+        IcoInfo { sections: self.sections.clone() }
     }
 
     fn read_header(&mut self) -> VexelResult<u16> {
@@ -69,10 +67,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
 
         self.sections.push(IcoSectionInfo {
             start_offset: header_offset,
-            data: IcoSectionData::IconDir(IcoIconDirData {
-                ico_type: self.ico_type,
-                image_count: count,
-            }),
+            data: IcoSectionData::IconDir(IcoIconDirData { ico_type: self.ico_type, image_count: count }),
         });
 
         Ok(count)
@@ -122,12 +117,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
     fn detect_image_formats(&mut self) -> VexelResult<()> {
         let png_sig = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
-        let offsets: Vec<(usize, u64)> = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (i, e.image_offset as u64))
-            .collect();
+        let offsets: Vec<(usize, u64)> =
+            self.entries.iter().enumerate().map(|(i, e)| (i, e.image_offset as u64)).collect();
 
         for (idx, offset) in offsets {
             self.reader.seek(SeekFrom::Start(offset))?;
@@ -199,7 +190,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let bytes_to_read = (entry.bytes_in_res as u64).min(bytes_available) as usize;
         let bmp_bytes = self.reader.read_bytes(bytes_to_read)?;
 
-        let (image, and_mask, actual_bpp) = BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
+        let (image, and_mask, actual_bpp) =
+            BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
 
         let mut pixels = apply_and_mask(image.into_pixels(), &and_mask, entry.width, entry.height, actual_bpp);
         pixels.correct_pixels(entry.width, entry.height);
@@ -240,12 +232,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
             return Err(VexelError::Custom("ICO file contains no valid entries".to_string()));
         }
 
-        let largest = self
-            .entries
-            .iter()
-            .max_by_key(|e| e.width * e.height)
-            .cloned()
-            .unwrap();
+        let largest = self.entries.iter().max_by_key(|e| e.width * e.height).cloned().unwrap();
 
         self.width = largest.width;
         self.height = largest.height;

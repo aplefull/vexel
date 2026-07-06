@@ -1,5 +1,6 @@
-use criterion::{criterion_group, criterion_main, Criterion};
 use std::fs;
+
+use criterion::{criterion_group, criterion_main, Criterion};
 
 const IMAGE_SEARCH_PATHS: &[&str] = &["benches/images", "tests/images"];
 
@@ -43,9 +44,7 @@ fn bench_jpeg(c: &mut Criterion) {
 fn bench_png(c: &mut Criterion) {
     let mut group = c.benchmark_group("png");
 
-    let cases = [
-        BenchCase { name: "7b00e7bc", path: "png/7b00e7bc5b225e9495861e17183db6da.png" },
-    ];
+    let cases = [BenchCase { name: "7b00e7bc", path: "png/7b00e7bc5b225e9495861e17183db6da.png" }];
 
     for case in &cases {
         let data = find_image(case.path);
@@ -64,9 +63,7 @@ fn bench_png(c: &mut Criterion) {
 fn bench_hdr(c: &mut Criterion) {
     let mut group = c.benchmark_group("hdr");
 
-    let cases = [
-        BenchCase { name: "venice_sunset_8k", path: "hdr/venice_sunset_8k.hdr" },
-    ];
+    let cases = [BenchCase { name: "venice_sunset_8k", path: "hdr/venice_sunset_8k.hdr" }];
 
     for case in &cases {
         let data = find_image(case.path);
@@ -85,9 +82,7 @@ fn bench_hdr(c: &mut Criterion) {
 fn bench_netpbm(c: &mut Criterion) {
     let mut group = c.benchmark_group("netpbm");
 
-    let cases = [
-        BenchCase { name: "P3_16bit", path: "netpbm/P3_16bit.ppm" },
-    ];
+    let cases = [BenchCase { name: "P3_16bit", path: "netpbm/P3_16bit.ppm" }];
 
     for case in &cases {
         let data = find_image(case.path);
@@ -106,9 +101,7 @@ fn bench_netpbm(c: &mut Criterion) {
 fn bench_tiff(c: &mut Criterion) {
     let mut group = c.benchmark_group("tiff");
 
-    let cases = [
-        BenchCase { name: "RAW_NIKON_D800_M", path: "tiff/RAW_NIKON_D800_M.tiff" },
-    ];
+    let cases = [BenchCase { name: "RAW_NIKON_D800_M", path: "tiff/RAW_NIKON_D800_M.tiff" }];
 
     for case in &cases {
         let data = find_image(case.path);

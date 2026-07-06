@@ -1,6 +1,7 @@
-use crate::utils::error::VexelError;
 use serde::Serialize;
 use tsify::Tsify;
+
+use crate::utils::error::VexelError;
 
 // TODO some tags are commented out since they are duplicates, but with different values
 // This probably requires a different approach to handle them
@@ -440,8 +441,7 @@ impl TryFrom<u16> for Compression {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify, Default)]
 pub enum SampleFormat {
     #[default]
     UnsignedInt = 1,
@@ -449,7 +449,6 @@ pub enum SampleFormat {
     Float = 3,
     Void = 4,
 }
-
 
 impl TryFrom<u32> for SampleFormat {
     type Error = VexelError;
@@ -506,10 +505,7 @@ impl TryFrom<u32> for PhotometricInterpretation {
             10 => Ok(Self::ITULab),
             32844 => Ok(Self::LogL),
             32845 => Ok(Self::LogLuv),
-            _ => Err(VexelError::Custom(format!(
-                "Invalid photometric interpretation value: {}",
-                value
-            ))),
+            _ => Err(VexelError::Custom(format!("Invalid photometric interpretation value: {}", value))),
         }
     }
 }
@@ -561,16 +557,12 @@ impl TryFrom<u32> for PlanarConfiguration {
         match value {
             1 => Ok(Self::Chunky),
             2 => Ok(Self::Planar),
-            _ => Err(VexelError::Custom(format!(
-                "Invalid planar configuration value: {}",
-                value
-            ))),
+            _ => Err(VexelError::Custom(format!("Invalid planar configuration value: {}", value))),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify, Default)]
 pub enum Predictor {
     #[default]
     None = 1,
@@ -579,7 +571,6 @@ pub enum Predictor {
     FloatingPointX2 = 34894,
     FloatingPointX4 = 34895,
 }
-
 
 impl TryFrom<u32> for Predictor {
     type Error = VexelError;

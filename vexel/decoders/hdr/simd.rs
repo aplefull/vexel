@@ -65,18 +65,9 @@ unsafe fn xyz_to_rgb_avx2(src: &[f32], dst: &mut [f32]) {
         let zp2 = _mm256_permutevar8x32_ps(r2, _mm256_set_epi32(7, 4, 1, 0, 0, 0, 0, 0));
         let z = _mm256_blend_ps(_mm256_blend_ps(zp0, zp1, 0x1C), zp2, 0xE0);
 
-        let r_out = _mm256_add_ps(
-            _mm256_add_ps(_mm256_mul_ps(m00, x), _mm256_mul_ps(m01, y)),
-            _mm256_mul_ps(m02, z),
-        );
-        let g_out = _mm256_add_ps(
-            _mm256_add_ps(_mm256_mul_ps(m10, x), _mm256_mul_ps(m11, y)),
-            _mm256_mul_ps(m12, z),
-        );
-        let b_out = _mm256_add_ps(
-            _mm256_add_ps(_mm256_mul_ps(m20, x), _mm256_mul_ps(m21, y)),
-            _mm256_mul_ps(m22, z),
-        );
+        let r_out = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(m00, x), _mm256_mul_ps(m01, y)), _mm256_mul_ps(m02, z));
+        let g_out = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(m10, x), _mm256_mul_ps(m11, y)), _mm256_mul_ps(m12, z));
+        let b_out = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(m20, x), _mm256_mul_ps(m21, y)), _mm256_mul_ps(m22, z));
 
         let r_c = _mm256_max_ps(r_out, zero);
         let g_c = _mm256_max_ps(g_out, zero);

@@ -1,15 +1,19 @@
+use std::io::{Cursor, Read, Seek, SeekFrom};
+
 use crate::bitreader::BitReader;
 use crate::decoders::bmp::compression::RleDecoder;
 use crate::decoders::bmp::headers::HeaderReader;
 use crate::decoders::bmp::pixels::PixelDecoder;
-use crate::decoders::bmp::types::{BitmapCompression, BitmapFileHeader, BitmapInfoHeader, BmpExtraMasks, BmpPixelDataInfo, BmpSectionData, BmpSectionInfo, ColorEntry, DibHeader};
+use crate::decoders::bmp::types::{
+    BitmapCompression, BitmapFileHeader, BitmapInfoHeader, BmpExtraMasks, BmpPixelDataInfo, BmpSectionData,
+    BmpSectionInfo, ColorEntry, DibHeader,
+};
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::BmpInfo;
-use crate::{Image, Limits, log_error, log_warn};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use crate::{log_error, log_warn, Image, Limits};
 
 pub struct BmpDecoder<R: Read + Seek> {
     width: u32,
@@ -32,12 +36,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             width: 0,
             height: 0,
             limits: Limits::default(),
-            file_header: BitmapFileHeader {
-                file_size: 0,
-                reserved1: 0,
-                reserved2: 0,
-                pixel_offset: 0,
-            },
+            file_header: BitmapFileHeader { file_size: 0, reserved1: 0, reserved2: 0, pixel_offset: 0 },
             dib_header: DibHeader::Info(BitmapInfoHeader {
                 width: 0,
                 height: 0,
@@ -64,11 +63,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.limits = limits;
     }
 
-
     pub fn get_info(&self) -> BmpInfo {
-        BmpInfo {
-            sections: self.sections.clone(),
-        }
+        BmpInfo { sections: self.sections.clone() }
     }
 
     fn read_file_header(&mut self) -> VexelResult<()> {
@@ -76,15 +72,9 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let (file_header, ba_header) = HeaderReader::read_file_header(&mut self.reader)?;
         self.file_header = file_header;
         if let Some(ba) = ba_header {
-            self.sections.push(BmpSectionInfo {
-                start_offset,
-                data: BmpSectionData::BitmapArrayHeader(ba),
-            });
+            self.sections.push(BmpSectionInfo { start_offset, data: BmpSectionData::BitmapArrayHeader(ba) });
         }
-        self.sections.push(BmpSectionInfo {
-            start_offset,
-            data: BmpSectionData::FileHeader(self.file_header.clone()),
-        });
+        self.sections.push(BmpSectionInfo { start_offset, data: BmpSectionData::FileHeader(self.file_header.clone()) });
         Ok(())
     }
 
@@ -95,10 +85,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.width = width;
         self.height = height;
         self.limits.reserve_buffer(self.width, self.height, 4)?;
-        self.sections.push(BmpSectionInfo {
-            start_offset,
-            data: BmpSectionData::DibHeader(self.dib_header.clone()),
-        });
+        self.sections.push(BmpSectionInfo { start_offset, data: BmpSectionData::DibHeader(self.dib_header.clone()) });
         Ok(())
     }
 
@@ -151,18 +138,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 let red = self.reader.read_u8()?;
                 let reserved = if is_core { 0 } else { self.reader.read_u8()? };
 
-                self.color_table.push(ColorEntry {
-                    blue,
-                    green,
-                    red,
-                    reserved,
-                });
+                self.color_table.push(ColorEntry { blue, green, red, reserved });
             }
 
-            self.sections.push(BmpSectionInfo {
-                start_offset,
-                data: BmpSectionData::ColorTable(self.color_table.clone()),
-            });
+            self.sections
+                .push(BmpSectionInfo { start_offset, data: BmpSectionData::ColorTable(self.color_table.clone()) });
         }
 
         Ok(())
@@ -181,10 +161,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let data = self.reader.read_bytes(profile_size as usize)?;
 
         if let Ok(profile) = ICCProfile::new(&data) {
-            self.sections.push(BmpSectionInfo {
-                start_offset: file_offset,
-                data: BmpSectionData::IccProfile(profile.clone()),
-            });
+            self.sections
+                .push(BmpSectionInfo { start_offset: file_offset, data: BmpSectionData::IccProfile(profile.clone()) });
             self.icc_profile = Some(profile);
         }
 
@@ -195,10 +173,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let pixel_offset = self.file_header.pixel_offset as u64;
         self.reader.seek(SeekFrom::Start(pixel_offset))?;
 
-        let is_rle = matches!(
-            self.dib_header.compression(),
-            BitmapCompression::BiRle4 | BitmapCompression::BiRle8
-        );
+        let is_rle = matches!(self.dib_header.compression(), BitmapCompression::BiRle4 | BitmapCompression::BiRle8);
 
         let bytes_until_eof = self.reader.bytes_left()?;
         let bytes_to_read = if is_rle {
@@ -213,10 +188,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
         self.sections.push(BmpSectionInfo {
             start_offset: pixel_offset,
-            data: BmpSectionData::PixelData(BmpPixelDataInfo {
-                offset: pixel_offset,
-                length: bytes_to_read,
-            }),
+            data: BmpSectionData::PixelData(BmpPixelDataInfo { offset: pixel_offset, length: bytes_to_read }),
         });
 
         self.data = self.reader.read_bytes(bytes_to_read as usize)?;
@@ -275,7 +247,11 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
         let bytes_per_color = if is_core { 3 } else { 4 };
         let num_colors = if bpp <= 8 {
-            if colors_used > 0 { colors_used } else { 1u32 << bpp }
+            if colors_used > 0 {
+                colors_used
+            } else {
+                1u32 << bpp
+            }
         } else {
             0
         };
@@ -309,7 +285,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let pre_pixel_data = &data[..pixel_offset - 14];
         let pixel_data = &data[pixel_offset - 14..xor_end];
 
-        let total_size = (14 + pre_pixel_data.len() + if inject_alpha_masks { 16 } else { 0 } + pixel_data.len()) as u32;
+        let total_size =
+            (14 + pre_pixel_data.len() + if inject_alpha_masks { 16 } else { 0 } + pixel_data.len()) as u32;
         let mut full_bmp = Vec::with_capacity(total_size as usize);
         full_bmp.extend_from_slice(b"BM");
         full_bmp.extend_from_slice(&total_size.to_le_bytes());
@@ -391,10 +368,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             BitmapCompression::BiRgb => (),
             BitmapCompression::BiRle8 => {
                 if self.dib_header.bits_per_pixel() != 8 {
-                    log_warn!(
-                        "Invalid bit depth for RLE8 compression: {}",
-                        self.dib_header.bits_per_pixel()
-                    );
+                    log_warn!("Invalid bit depth for RLE8 compression: {}", self.dib_header.bits_per_pixel());
                 }
 
                 let raw_size = self.data.len();
@@ -406,10 +380,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }
             BitmapCompression::BiRle4 => {
                 if self.dib_header.bits_per_pixel() != 4 {
-                    log_warn!(
-                        "Invalid bit depth for RLE4 compression: {}",
-                        self.dib_header.bits_per_pixel()
-                    );
+                    log_warn!("Invalid bit depth for RLE4 compression: {}", self.dib_header.bits_per_pixel());
                 }
 
                 let raw_size = self.data.len();
@@ -500,10 +471,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }
             64 => PixelDecoder::decode_64bit_image(&self.data, self.width, self.height, bottom_up),
             _ => {
-                log_warn!(
-                    "Invalid bit depth: {}. Attempting to decode as 24bit.",
-                    self.dib_header.bits_per_pixel()
-                );
+                log_warn!("Invalid bit depth: {}. Attempting to decode as 24bit.", self.dib_header.bits_per_pixel());
                 PixelDecoder::decode_24bit_image(&self.data, self.width, self.height, bottom_up)
             }
         };

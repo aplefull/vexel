@@ -1,10 +1,11 @@
+use std::io::{Read, Seek};
+
 use crate::bitreader::BitReader;
 use crate::decoders::jbig1::arithmetic::ArithDecoder;
 use crate::decoders::jbig1::types::{self, *};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::Jbig1Info;
-use crate::{Image, Limits, PixelData, log_warn};
-use std::io::{Read, Seek};
+use crate::{log_warn, Image, Limits, PixelData};
 
 fn ceil_half(x: u32, n: u32) -> u32 {
     (x + (1 << n) - 1) >> n
@@ -100,9 +101,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
     }
 
     pub fn get_info(&self) -> Jbig1Info {
-        Jbig1Info {
-            sections: self.sections.clone(),
-        }
+        Jbig1Info { sections: self.sections.clone() }
     }
 
     fn read_bih(&mut self) -> VexelResult<()> {
@@ -330,7 +329,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                         log_warn!("JBIG1: truncated COMMENT marker");
                         break;
                     }
-                    let comment_len = u32::from_be_bytes([data[pos + 2], data[pos + 3], data[pos + 4], data[pos + 5]]) as usize;
+                    let comment_len =
+                        u32::from_be_bytes([data[pos + 2], data[pos + 3], data[pos + 4], data[pos + 5]]) as usize;
                     let comment_offset = self.data_stream_offset + pos as u64;
                     let text_end = (pos + 6 + comment_len).min(data.len());
                     let text_bytes = &data[pos + 6..text_end];
@@ -514,11 +514,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             let lo_line_next = lo_line + 1;
 
             let lp2_off = lo_line * lbpl;
-            let lp1_off = if (i >> 1) >= ll - 1 || lo_line_next >= ly as usize {
-                lp2_off
-            } else {
-                lo_line_next * lbpl
-            };
+            let lp1_off = if (i >> 1) >= ll - 1 || lo_line_next >= ly as usize { lp2_off } else { lo_line_next * lbpl };
 
             if use_tpdon && self.pseudo {
                 let raw = self.ar_decoders[plane][layer_idx].decode(TPDCX, data, &mut pos).unwrap_or(0);
@@ -588,25 +584,22 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 }
 
                 'pixel_pair: {
-                    if (x & 7) == 0 && x + 8 < hx as usize
-                        && (i > 0 || (y > 0 && !is_reset)) {
-                            let next_byte_off = (y - 1) * hbpl + byte_idx + 1;
-                            if next_byte_off < self.lhp[lhp_hi][plane].len() {
-                                line_h2 |= self.lhp[lhp_hi][plane][next_byte_off] as u32;
-                                if i > 1 || (y > 1 && !is_reset) {
-                                    let prev2_off = (y.saturating_sub(2)) * hbpl + byte_idx + 1;
-                                    if prev2_off < self.lhp[lhp_hi][plane].len() {
-                                        line_h3 |= self.lhp[lhp_hi][plane][prev2_off] as u32;
-                                    }
+                    if (x & 7) == 0 && x + 8 < hx as usize && (i > 0 || (y > 0 && !is_reset)) {
+                        let next_byte_off = (y - 1) * hbpl + byte_idx + 1;
+                        if next_byte_off < self.lhp[lhp_hi][plane].len() {
+                            line_h2 |= self.lhp[lhp_hi][plane][next_byte_off] as u32;
+                            if i > 1 || (y > 1 && !is_reset) {
+                                let prev2_off = (y.saturating_sub(2)) * hbpl + byte_idx + 1;
+                                if prev2_off < self.lhp[lhp_hi][plane].len() {
+                                    line_h3 |= self.lhp[lhp_hi][plane][prev2_off] as u32;
                                 }
                             }
                         }
+                    }
 
                     let tp_cx = if !lntp {
                         Some(
-                            (((line_l3 >> 14) & 0x007) |
-                             ((line_l2 >> 11) & 0x038) |
-                             ((line_l1 >> 8)  & 0x1c0)) as usize
+                            (((line_l3 >> 14) & 0x007) | ((line_l2 >> 11) & 0x038) | ((line_l1 >> 8) & 0x1c0)) as usize,
                         )
                     } else {
                         None
@@ -658,11 +651,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
 
                     let pix = self.decode_diff_pixel(
-                        plane, layer_idx, data, &mut pos,
-                        x, y, tx,
-                        row_off, byte_idx, hbpl, lhp_hi,
-                        line_h1, line_h2, line_h3, line_l1, line_l2, line_l3,
-                        use_dpon, dppriv,
+                        plane, layer_idx, data, &mut pos, x, y, tx, row_off, byte_idx, hbpl, lhp_hi, line_h1, line_h2,
+                        line_h3, line_l1, line_l2, line_l3, use_dpon, dppriv,
                     );
 
                     line_h1 = (line_h1 << 1) | pix as u32;
@@ -689,11 +679,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
 
                     let pix2 = self.decode_diff_pixel(
-                        plane, layer_idx, data, &mut pos,
-                        x, y, tx,
-                        row_off, byte_idx, hbpl, lhp_hi,
-                        line_h1, line_h2, line_h3, line_l1, line_l2, line_l3,
-                        use_dpon, dppriv,
+                        plane, layer_idx, data, &mut pos, x, y, tx, row_off, byte_idx, hbpl, lhp_hi, line_h1, line_h2,
+                        line_h3, line_l1, line_l2, line_l3, use_dpon, dppriv,
                     );
 
                     line_h1 = (line_h1 << 1) | pix2 as u32;
@@ -940,20 +927,18 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             let mut current_byte = 0u8;
 
             while x < hx as usize {
-                if x & 7 == 0
-                    && x < (hbpl * 8).saturating_sub(8)
-                        && (i > 0 || (y > 0 && !is_reset)) {
-                            let off = (y - 1) * hbpl + (x / 8) + 1;
-                            if off < self.lhp[lhp_idx][plane].len() {
-                                line_h2 |= self.lhp[lhp_idx][plane][off] as u32;
-                                if i > 1 || (y > 1 && !is_reset) {
-                                    let off3 = (y.saturating_sub(2)) * hbpl + (x / 8) + 1;
-                                    if off3 < self.lhp[lhp_idx][plane].len() {
-                                        line_h3 |= self.lhp[lhp_idx][plane][off3] as u32;
-                                    }
-                                }
+                if x & 7 == 0 && x < (hbpl * 8).saturating_sub(8) && (i > 0 || (y > 0 && !is_reset)) {
+                    let off = (y - 1) * hbpl + (x / 8) + 1;
+                    if off < self.lhp[lhp_idx][plane].len() {
+                        line_h2 |= self.lhp[lhp_idx][plane][off] as u32;
+                        if i > 1 || (y > 1 && !is_reset) {
+                            let off3 = (y.saturating_sub(2)) * hbpl + (x / 8) + 1;
+                            if off3 < self.lhp[lhp_idx][plane].len() {
+                                line_h3 |= self.lhp[lhp_idx][plane][off3] as u32;
                             }
                         }
+                    }
+                }
 
                 let cx = if use_two_line {
                     if tx != 0 {
@@ -1102,7 +1087,14 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         }
     }
 
-    fn build_single_plane_image(&self, plane: usize, layer: usize, hx: u32, hy: u32, hbpl: usize) -> VexelResult<Image> {
+    fn build_single_plane_image(
+        &self,
+        plane: usize,
+        layer: usize,
+        hx: u32,
+        hy: u32,
+        hbpl: usize,
+    ) -> VexelResult<Image> {
         let lhp_idx = layer & 1;
         let plane_data = if plane_data_available(&self.lhp[lhp_idx], plane) {
             self.lhp[lhp_idx][plane].clone()
@@ -1136,10 +1128,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 Ok(_) => {
                     self.sections.push(Jbig1SectionInfo {
                         start_offset: dptable_offset,
-                        data: Jbig1SectionData::Dptable(Jbig1DptableData {
-                            length: 1728,
-                            table: dptable.clone(),
-                        }),
+                        data: Jbig1SectionData::Dptable(Jbig1DptableData { length: 1728, table: dptable.clone() }),
                     });
                     let internal = dppriv_to_internal(&dptable);
                     self.dppriv = Some(internal);

@@ -1,4 +1,4 @@
-use crate::harness::{Comparison, TestCase, get_pixel};
+use crate::harness::{get_pixel, Comparison, TestCase};
 
 pub fn test_cases() -> Vec<TestCase> {
     vec![
@@ -6,57 +6,43 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "GIF gray frames u1",
             path: "gif/gray_frames_u1.gif",
             validation: None,
-            comparison: Comparison::ExactFrames {
-                reference_path: "gif/gray_frames_u1.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "gif/gray_frames_u1.avif" },
         },
         TestCase {
             name: "GIF totoro",
             path: "gif/totoro.gif",
             validation: None,
-            comparison: Comparison::ExactFrames {
-                reference_path: "gif/totoro.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "gif/totoro.avif" },
         },
         TestCase {
             name: "GIF totoro interlaced",
             path: "gif/totoro_interlaced.gif",
             validation: None,
-            comparison: Comparison::ExactFrames {
-                reference_path: "gif/totoro_interlaced.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "gif/totoro_interlaced.avif" },
         },
         TestCase {
             name: "GIF totoro still",
             path: "gif/totoro_still.gif",
             validation: None,
-            comparison: Comparison::ExactFrames {
-                reference_path: "gif/totoro_still.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "gif/totoro_still.avif" },
         },
         TestCase {
             name: "GIF Australia history",
             path: "gif/Australia_history.gif",
             validation: None,
-            comparison: Comparison::ExactFrames {
-                reference_path: "gif/Australia_history.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "gif/Australia_history.avif" },
         },
         TestCase {
             name: "GIF 0646caeb9b9161c777f117007921a687",
             path: "gif/0646caeb9b9161c777f117007921a687.gif",
             validation: None,
-            comparison: Comparison::ExactFrames {
-                reference_path: "gif/0646caeb9b9161c777f117007921a687.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "gif/0646caeb9b9161c777f117007921a687.avif" },
         },
         TestCase {
             name: "GIF jazz-chromecast-ultra",
             path: "gif/jazz-chromecast-ultra.gif",
             validation: None,
-            comparison: Comparison::ExactFrames {
-                reference_path: "gif/jazz-chromecast-ultra.avif",
-            },
+            comparison: Comparison::ExactFrames { reference_path: "gif/jazz-chromecast-ultra.avif" },
         },
         TestCase {
             name: "GIF 139770827-18e25c4e-eb0a-4058-ba48-ddc3849090ee",

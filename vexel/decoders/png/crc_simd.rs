@@ -1,9 +1,8 @@
 pub fn update_crc(crc: u32, buf: &[u8]) -> u32 {
     #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("pclmulqdq") && is_x86_feature_detected!("sse4.1")
-        && buf.len() >= 16 {
-            return !unsafe { update_crc_pclmul(!crc, buf) };
-        }
+    if is_x86_feature_detected!("pclmulqdq") && is_x86_feature_detected!("sse4.1") && buf.len() >= 16 {
+        return !unsafe { update_crc_pclmul(!crc, buf) };
+    }
 
     update_crc_scalar(crc, buf)
 }
@@ -15,7 +14,8 @@ pub fn update_crc(crc: u32, buf: &[u8]) -> u32 {
 unsafe fn update_crc_pclmul(crc: u32, buf: &[u8]) -> u32 {
     use std::arch::x86_64::*;
 
-    let xmm_fold4 = _mm_set_epi32(0x00000001u32 as i32, 0x54442bd4u32 as i32, 0x00000001u32 as i32, 0xc6e41596u32 as i32);
+    let xmm_fold4 =
+        _mm_set_epi32(0x00000001u32 as i32, 0x54442bd4u32 as i32, 0x00000001u32 as i32, 0xc6e41596u32 as i32);
 
     let mut src = buf.as_ptr();
     let mut len = buf.len();
@@ -30,7 +30,7 @@ unsafe fn update_crc_pclmul(crc: u32, buf: &[u8]) -> u32 {
         let xmm_t0 = _mm_loadu_si128(src as *const __m128i);
         src = src.add(16);
 
-        let x_low  = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
+        let x_low = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
         let x_high = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x10);
         xmm_crc0 = xmm_crc1;
         xmm_crc1 = xmm_crc2;
@@ -48,13 +48,13 @@ unsafe fn update_crc_pclmul(crc: u32, buf: &[u8]) -> u32 {
         let xmm_t3 = _mm_loadu_si128(src.add(48) as *const __m128i);
         src = src.add(64);
 
-        let x_low0  = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
+        let x_low0 = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
         let x_high0 = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x10);
-        let x_low1  = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x01);
+        let x_low1 = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x01);
         let x_high1 = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x10);
-        let x_low2  = _mm_clmulepi64_si128(xmm_crc2, xmm_fold4, 0x01);
+        let x_low2 = _mm_clmulepi64_si128(xmm_crc2, xmm_fold4, 0x01);
         let x_high2 = _mm_clmulepi64_si128(xmm_crc2, xmm_fold4, 0x10);
-        let x_low3  = _mm_clmulepi64_si128(xmm_crc3, xmm_fold4, 0x01);
+        let x_low3 = _mm_clmulepi64_si128(xmm_crc3, xmm_fold4, 0x01);
         let x_high3 = _mm_clmulepi64_si128(xmm_crc3, xmm_fold4, 0x10);
 
         xmm_crc0 = _mm_xor_si128(_mm_xor_si128(x_low0, x_high0), xmm_t0);
@@ -70,11 +70,11 @@ unsafe fn update_crc_pclmul(crc: u32, buf: &[u8]) -> u32 {
         let xmm_t2 = _mm_loadu_si128(src.add(32) as *const __m128i);
         src = src.add(48);
 
-        let x_low0  = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
+        let x_low0 = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
         let x_high0 = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x10);
-        let x_low1  = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x01);
+        let x_low1 = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x01);
         let x_high1 = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x10);
-        let x_low2  = _mm_clmulepi64_si128(xmm_crc2, xmm_fold4, 0x01);
+        let x_low2 = _mm_clmulepi64_si128(xmm_crc2, xmm_fold4, 0x01);
         let x_high2 = _mm_clmulepi64_si128(xmm_crc2, xmm_fold4, 0x10);
 
         xmm_crc0 = xmm_crc3;
@@ -87,9 +87,9 @@ unsafe fn update_crc_pclmul(crc: u32, buf: &[u8]) -> u32 {
         let xmm_t1 = _mm_loadu_si128(src.add(16) as *const __m128i);
         src = src.add(32);
 
-        let x_low0  = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
+        let x_low0 = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
         let x_high0 = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x10);
-        let x_low1  = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x01);
+        let x_low1 = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x01);
         let x_high1 = _mm_clmulepi64_si128(xmm_crc1, xmm_fold4, 0x10);
 
         xmm_crc0 = xmm_crc2;
@@ -101,7 +101,7 @@ unsafe fn update_crc_pclmul(crc: u32, buf: &[u8]) -> u32 {
         let xmm_t0 = _mm_loadu_si128(src as *const __m128i);
         src = src.add(16);
 
-        let x_low  = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
+        let x_low = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x01);
         let x_high = _mm_clmulepi64_si128(xmm_crc0, xmm_fold4, 0x10);
 
         xmm_crc0 = xmm_crc1;
@@ -111,17 +111,18 @@ unsafe fn update_crc_pclmul(crc: u32, buf: &[u8]) -> u32 {
     }
 
     let k12 = _mm_set_epi32(0x00000001u32 as i32, 0x751997d0u32 as i32, 0x00000000u32 as i32, 0xccaa009eu32 as i32);
-    let barrett_k = _mm_set_epi32(0x00000001u32 as i32, 0xdb710640u32 as i32, 0xb4e5b025u32 as i32, 0xf7011641u32 as i32);
+    let barrett_k =
+        _mm_set_epi32(0x00000001u32 as i32, 0xdb710640u32 as i32, 0xb4e5b025u32 as i32, 0xf7011641u32 as i32);
 
-    let x_low0  = _mm_clmulepi64_si128(xmm_crc0, k12, 0x01);
+    let x_low0 = _mm_clmulepi64_si128(xmm_crc0, k12, 0x01);
     let x_high0 = _mm_clmulepi64_si128(xmm_crc0, k12, 0x10);
     xmm_crc1 = _mm_xor_si128(_mm_xor_si128(xmm_crc1, x_low0), x_high0);
 
-    let x_low1  = _mm_clmulepi64_si128(xmm_crc1, k12, 0x01);
+    let x_low1 = _mm_clmulepi64_si128(xmm_crc1, k12, 0x01);
     let x_high1 = _mm_clmulepi64_si128(xmm_crc1, k12, 0x10);
     xmm_crc2 = _mm_xor_si128(_mm_xor_si128(xmm_crc2, x_low1), x_high1);
 
-    let x_low2  = _mm_clmulepi64_si128(xmm_crc2, k12, 0x01);
+    let x_low2 = _mm_clmulepi64_si128(xmm_crc2, k12, 0x01);
     let x_high2 = _mm_clmulepi64_si128(xmm_crc2, k12, 0x10);
     xmm_crc3 = _mm_xor_si128(_mm_xor_si128(xmm_crc3, x_low2), x_high2);
 
@@ -142,7 +143,7 @@ unsafe fn update_crc_pclmul(crc: u32, buf: &[u8]) -> u32 {
         let part_aligned = _mm_shuffle_epi8(xmm_crc_part, xmm_shl);
         xmm_crc3 = _mm_xor_si128(xmm_crc3, part_aligned);
 
-        let ovf_low  = _mm_clmulepi64_si128(xmm_overflow, k12, 0x01);
+        let ovf_low = _mm_clmulepi64_si128(xmm_overflow, k12, 0x01);
         let ovf_high = _mm_clmulepi64_si128(xmm_overflow, k12, 0x10);
         xmm_crc3 = _mm_xor_si128(_mm_xor_si128(xmm_crc3, ovf_low), ovf_high);
     }

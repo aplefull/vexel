@@ -1,8 +1,9 @@
-mod harness;
 mod corpus;
 mod formats;
+mod harness;
 
 use std::path::Path;
+
 use harness::*;
 use vexel::{Vexel, VexelError};
 
@@ -48,10 +49,12 @@ fn run_test_cases(test_cases: Vec<TestCase>) -> Result<(), Box<dyn std::error::E
             Ok(harness::TestResult::Ok { mse, ssim, psnr }) => {
                 let mse_str = mse.map(|v| format!("MSE={:.5}", v)).unwrap_or_default();
                 let ssim_str = ssim.map(|v| format!("SSIM={:.6}", v)).unwrap_or_default();
-                let psnr_str = psnr.map(|v| match v.is_infinite() {
-                    true => "PSNR=∞ dB".to_string(),
-                    false => format!("PSNR={:.2} dB", v),
-                }).unwrap_or_default();
+                let psnr_str = psnr
+                    .map(|v| match v.is_infinite() {
+                        true => "PSNR=∞ dB".to_string(),
+                        false => format!("PSNR={:.2} dB", v),
+                    })
+                    .unwrap_or_default();
                 println!("  {:<width$}  OK    {} {} {}", name, mse_str, ssim_str, psnr_str, width = name_width);
                 passed += 1;
             }
@@ -158,7 +161,7 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
 pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
     let in_path = r"/home/aplefull/Repos/vexel/vexel/tests/images/jpeg";
     let out_path = Path::new(in_path).with_extension("avif");
-    let save = true; 
+    let save = true;
 
     let mut decoder = Vexel::open(in_path)?;
 
@@ -245,7 +248,6 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
 #[ignore = "corpus bench"]
 pub fn corpus_bench() -> Result<(), Box<dyn std::error::Error>> {
     load_env_file();
-    let corpus_path = std::env::var("VEXEL_CORPUS")
-        .map_err(|_| "VEXEL_CORPUS is not set. Add it to .env")?;
+    let corpus_path = std::env::var("VEXEL_CORPUS").map_err(|_| "VEXEL_CORPUS is not set. Add it to .env")?;
     corpus::run(&corpus_path)
 }

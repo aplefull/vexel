@@ -1,7 +1,10 @@
-use crate::{Limits, bitreader::BitReader};
-use serde::Serialize;
 use std::io::{Read, Seek};
+
+use serde::Serialize;
 use tsify::Tsify;
+
+use crate::bitreader::BitReader;
+use crate::Limits;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 pub struct GifHeaderData {

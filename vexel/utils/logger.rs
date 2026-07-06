@@ -1,13 +1,12 @@
 use std::fmt::Display;
 use std::sync::atomic::{AtomicU8, Ordering};
-
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
 #[cfg(target_arch = "wasm32")]
-use web_sys::console;
-#[cfg(target_arch = "wasm32")]
 use js_sys::Date;
+#[cfg(target_arch = "wasm32")]
+use web_sys::console;
 
 const RESET: &str = "\x1b[0m";
 const BLUE: &str = "\x1b[34m";
@@ -82,9 +81,7 @@ macro_rules! log_error {
     };
 }
 
-pub(crate) use log_debug;
-pub(crate) use log_warn;
-pub(crate) use log_error;
+pub(crate) use {log_debug, log_error, log_warn};
 
 #[repr(u8)]
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
@@ -107,9 +104,7 @@ impl Logger {
 
         #[cfg(not(target_arch = "wasm32"))]
         let (secs, millis) = {
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default();
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
             (now.as_secs(), now.subsec_millis())
         };
 
@@ -139,13 +134,6 @@ impl Logger {
         #[cfg(target_arch = "wasm32")]
         console::log_1(&format!("{} [{}] {}", Self::get_timestamp(), level_str, message).into());
 
-        println!(
-            "{} [{}{}{}] {}",
-            Self::get_timestamp(),
-            color,
-            level_str,
-            RESET,
-            message
-        );
+        println!("{} [{}{}{}] {}", Self::get_timestamp(), color, level_str, RESET, message);
     }
 }

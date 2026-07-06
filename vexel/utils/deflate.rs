@@ -46,24 +46,35 @@ const CODE_LENGTH_ORDER: [usize; 19] = [
 const FIXED_LITLEN_LENGTHS: [u8; 288] = {
     let mut lengths = [0u8; 288];
     let mut i = 0;
-    while i < 144 { lengths[i] = 8; i += 1; }
-    while i < 256 { lengths[i] = 9; i += 1; }
-    while i < 280 { lengths[i] = 7; i += 1; }
-    while i < 288 { lengths[i] = 8; i += 1; }
+    while i < 144 {
+        lengths[i] = 8;
+        i += 1;
+    }
+    while i < 256 {
+        lengths[i] = 9;
+        i += 1;
+    }
+    while i < 280 {
+        lengths[i] = 7;
+        i += 1;
+    }
+    while i < 288 {
+        lengths[i] = 8;
+        i += 1;
+    }
     lengths
 };
 
 const FIXED_DIST_LENGTHS: [u8; 32] = [5u8; 32];
 
-
-const TAG_INVALID:  u32 = 0;
-const TAG_LITERAL:  u32 = 1;
+const TAG_INVALID: u32 = 0;
+const TAG_LITERAL: u32 = 1;
 const TAG_LIT_PAIR: u32 = 2;
-const TAG_LENGTH:   u32 = 3;
-const TAG_DIST:     u32 = 4;
-const TAG_EOB:      u32 = 5;
+const TAG_LENGTH: u32 = 3;
+const TAG_DIST: u32 = 4;
+const TAG_EOB: u32 = 5;
 const TAG_REDIRECT: u32 = 6;
-const TAG_CL_SYM:   u32 = 7;
+const TAG_CL_SYM: u32 = 7;
 
 #[derive(Clone, Copy, Debug)]
 struct Entry(u32);
@@ -72,43 +83,75 @@ impl Entry {
     const INVALID: Entry = Entry(TAG_INVALID << 28);
 
     #[inline(always)]
-    fn tag(self) -> u32 { self.0 >> 28 }
+    fn tag(self) -> u32 {
+        self.0 >> 28
+    }
 
     #[inline(always)]
-    fn is_invalid(self) -> bool { self.tag() == TAG_INVALID }
+    fn is_invalid(self) -> bool {
+        self.tag() == TAG_INVALID
+    }
     #[inline(always)]
-    fn is_literal(self) -> bool { self.tag() == TAG_LITERAL }
+    fn is_literal(self) -> bool {
+        self.tag() == TAG_LITERAL
+    }
     #[inline(always)]
-    fn is_lit_pair(self) -> bool { self.tag() == TAG_LIT_PAIR }
+    fn is_lit_pair(self) -> bool {
+        self.tag() == TAG_LIT_PAIR
+    }
     #[inline(always)]
-    fn is_length(self) -> bool { self.tag() == TAG_LENGTH }
+    fn is_length(self) -> bool {
+        self.tag() == TAG_LENGTH
+    }
     #[inline(always)]
-    fn is_dist(self) -> bool { self.tag() == TAG_DIST }
+    fn is_dist(self) -> bool {
+        self.tag() == TAG_DIST
+    }
     #[inline(always)]
-    fn is_eob(self) -> bool { self.tag() == TAG_EOB }
+    fn is_eob(self) -> bool {
+        self.tag() == TAG_EOB
+    }
     #[inline(always)]
-    fn is_redirect(self) -> bool { self.tag() == TAG_REDIRECT }
+    fn is_redirect(self) -> bool {
+        self.tag() == TAG_REDIRECT
+    }
 
     #[inline(always)]
-    fn full_len(self) -> u32 { (self.0 >> 6) & 0x3F }
+    fn full_len(self) -> u32 {
+        (self.0 >> 6) & 0x3F
+    }
     #[inline(always)]
-    fn base_len(self) -> u32 { self.0 & 0x3F }
+    fn base_len(self) -> u32 {
+        self.0 & 0x3F
+    }
 
     #[inline(always)]
-    fn lit_a(self) -> u8 { (self.0 >> 20) as u8 }
+    fn lit_a(self) -> u8 {
+        (self.0 >> 20) as u8
+    }
     #[inline(always)]
-    fn lit_b(self) -> u8 { (self.0 >> 12) as u8 }
+    fn lit_b(self) -> u8 {
+        (self.0 >> 12) as u8
+    }
 
     #[inline(always)]
-    fn base_value(self) -> u32 { (self.0 >> 12) & 0xFFFF }
+    fn base_value(self) -> u32 {
+        (self.0 >> 12) & 0xFFFF
+    }
 
     #[inline(always)]
-    fn redirect_base(self) -> usize { ((self.0 >> 12) & 0xFFFF) as usize }
+    fn redirect_base(self) -> usize {
+        ((self.0 >> 12) & 0xFFFF) as usize
+    }
     #[inline(always)]
-    fn redirect_sub_bits(self) -> u32 { self.full_len() - self.base_len() }
+    fn redirect_sub_bits(self) -> u32 {
+        self.full_len() - self.base_len()
+    }
 
     #[inline(always)]
-    fn cl_sym(self) -> u8 { (self.0 >> 20) as u8 }
+    fn cl_sym(self) -> u8 {
+        (self.0 >> 20) as u8
+    }
 
     fn make_literal(byte: u8, code_len: u32) -> Self {
         Entry((TAG_LITERAL << 28) | ((byte as u32) << 20) | (code_len << 6) | code_len)
@@ -116,13 +159,7 @@ impl Entry {
 
     fn make_lit_pair(a: u8, b: u8, len_a: u32, len_b: u32) -> Self {
         let total = len_a + len_b;
-        Entry(
-            (TAG_LIT_PAIR << 28)
-                | ((a as u32) << 20)
-                | ((b as u32) << 12)
-                | (total << 6)
-                | total,
-        )
+        Entry((TAG_LIT_PAIR << 28) | ((a as u32) << 20) | ((b as u32) << 12) | (total << 6) | total)
     }
 
     fn make_length(base_val: u32, code_len: u32, extra_bits: u32) -> Self {
@@ -138,12 +175,7 @@ impl Entry {
     }
 
     fn make_redirect(sub_base: u32, sub_bits: u32, primary_bits: u32) -> Self {
-        Entry(
-            (TAG_REDIRECT << 28)
-                | (sub_base << 12)
-                | ((primary_bits + sub_bits) << 6)
-                | primary_bits,
-        )
+        Entry((TAG_REDIRECT << 28) | (sub_base << 12) | ((primary_bits + sub_bits) << 6) | primary_bits)
     }
 
     fn make_cl_sym(sym: u8, code_len: u32) -> Self {
@@ -153,7 +185,9 @@ impl Entry {
 
 #[inline(always)]
 fn reverse_bits(code: u32, len: u32) -> u32 {
-    if len == 0 { return 0; }
+    if len == 0 {
+        return 0;
+    }
     (code << (32 - len)).reverse_bits()
 }
 
@@ -163,15 +197,15 @@ struct HuffTable {
     primary_bits: u32,
 }
 
-enum SymbolKind { Literal, Dist, CodeLen }
+enum SymbolKind {
+    Literal,
+    Dist,
+    CodeLen,
+}
 
 impl HuffTable {
     fn new(primary_bits: u32, primary_size: usize) -> Box<Self> {
-        Box::new(HuffTable {
-            primary: vec![Entry::INVALID; primary_size],
-            secondary: Vec::new(),
-            primary_bits,
-        })
+        Box::new(HuffTable { primary: vec![Entry::INVALID; primary_size], secondary: Vec::new(), primary_bits })
     }
 
     fn build(&mut self, lengths: &[u8], kind: SymbolKind) -> Result<(), io::Error> {
@@ -181,7 +215,9 @@ impl HuffTable {
             if l as usize > MAX_BITS {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "code length > 15"));
             }
-            if l > 0 { bl_count[l as usize] += 1; }
+            if l > 0 {
+                bl_count[l as usize] += 1;
+            }
         }
 
         let mut next_code = [0u32; MAX_BITS + 1];
@@ -193,7 +229,9 @@ impl HuffTable {
 
         for i in 0..n {
             let len = lengths[i] as u32;
-            if len == 0 { continue; }
+            if len == 0 {
+                continue;
+            }
             let sym_code = next_code[len as usize];
             next_code[len as usize] += 1;
 
@@ -292,15 +330,23 @@ fn build_fast_table(table: &mut HuffTable) {
 
     for i in 0..size {
         let e = table.primary[i];
-        if !e.is_literal() { continue; }
+        if !e.is_literal() {
+            continue;
+        }
         let len_a = e.base_len();
-        if len_a == 0 || len_a >= primary_bits { continue; }
+        if len_a == 0 || len_a >= primary_bits {
+            continue;
+        }
 
         let next_idx = (i >> len_a) & (size - 1);
         let e2 = table.primary[next_idx];
-        if !e2.is_literal() { continue; }
+        if !e2.is_literal() {
+            continue;
+        }
         let len_b = e2.base_len();
-        if len_a + len_b > primary_bits { continue; }
+        if len_a + len_b > primary_bits {
+            continue;
+        }
 
         table.primary[i] = Entry::make_lit_pair(e.lit_a(), e2.lit_a(), len_a, len_b);
     }
@@ -323,7 +369,9 @@ fn build_dynamic_tables(bits: &mut BitBuffer) -> Result<(Box<HuffTable>, Box<Huf
     let mut lengths = vec![0u8; total];
     let mut i = 0;
     while i < total {
-        if bits.count < 7 { bits.fill(); }
+        if bits.count < 7 {
+            bits.fill();
+        }
         let (entry, consumed) = cl_table.lookup(bits.buf);
         if consumed == 0 || entry.is_invalid() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad cl code"));
@@ -332,9 +380,14 @@ fn build_dynamic_tables(bits: &mut BitBuffer) -> Result<(Box<HuffTable>, Box<Huf
 
         let sym = entry.cl_sym();
         match sym {
-            0..=15 => { lengths[i] = sym; i += 1; }
+            0..=15 => {
+                lengths[i] = sym;
+                i += 1;
+            }
             16 => {
-                if i == 0 { return Err(io::Error::new(io::ErrorKind::InvalidData, "Repeat w/o prior")); }
+                if i == 0 {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Repeat w/o prior"));
+                }
                 let rep = bits.read_bits(2)? as usize + 3;
                 let prev = lengths[i - 1];
                 let end = (i + rep).min(total);
@@ -442,8 +495,12 @@ impl BitBuffer {
     }
 
     fn read_bits(&mut self, n: u32) -> Result<u32, io::Error> {
-        if n == 0 { return Ok(0); }
-        if self.count < n { self.fill(); }
+        if n == 0 {
+            return Ok(0);
+        }
+        if self.count < n {
+            self.fill();
+        }
         if self.count < n {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Not enough bits"));
         }
@@ -454,7 +511,9 @@ impl BitBuffer {
 
     #[inline(always)]
     fn decode_litlen(&mut self, table: &HuffTable) -> Result<Entry, io::Error> {
-        if self.count < 15 { self.fill(); }
+        if self.count < 15 {
+            self.fill();
+        }
         let (entry, consumed) = table.lookup(self.buf);
         if entry.is_invalid() || consumed == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad litlen code"));
@@ -465,7 +524,9 @@ impl BitBuffer {
 
     #[inline(always)]
     fn decode_dist(&mut self, table: &HuffTable) -> Result<Entry, io::Error> {
-        if self.count < 15 { self.fill(); }
+        if self.count < 15 {
+            self.fill();
+        }
         let (entry, consumed) = table.lookup(self.buf);
         if entry.is_invalid() || consumed == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad dist code"));
@@ -475,7 +536,13 @@ impl BitBuffer {
     }
 }
 
-fn decode_block(bits: &mut BitBuffer, litlen: &HuffTable, dist: &HuffTable, output: &mut Vec<u8>, max_output: usize) -> bool {
+fn decode_block(
+    bits: &mut BitBuffer,
+    litlen: &HuffTable,
+    dist: &HuffTable,
+    output: &mut Vec<u8>,
+    max_output: usize,
+) -> bool {
     loop {
         if output.len() >= max_output {
             return true;
@@ -521,7 +588,9 @@ fn decode_block(bits: &mut BitBuffer, litlen: &HuffTable, dist: &HuffTable, outp
             let base_len_bits = entry.base_len();
             let extra_bits = entry.full_len() - base_len_bits;
             let extra = if extra_bits > 0 {
-                if bits.count < extra_bits { bits.fill(); }
+                if bits.count < extra_bits {
+                    bits.fill();
+                }
                 let v = bits.peek(extra_bits);
                 bits.consume(extra_bits);
                 v as usize
@@ -534,13 +603,17 @@ fn decode_block(bits: &mut BitBuffer, litlen: &HuffTable, dist: &HuffTable, outp
                 Ok(e) => e,
                 Err(_) => return false,
             };
-            if !dist_entry.is_dist() { return false; }
+            if !dist_entry.is_dist() {
+                return false;
+            }
 
             let dist_base = dist_entry.base_value() as usize;
             let dist_base_bits = dist_entry.base_len();
             let dist_extra_bits = dist_entry.full_len() - dist_base_bits;
             let dist_extra = if dist_extra_bits > 0 {
-                if bits.count < dist_extra_bits { bits.fill(); }
+                if bits.count < dist_extra_bits {
+                    bits.fill();
+                }
                 let v = bits.peek(dist_extra_bits);
                 bits.consume(dist_extra_bits);
                 v as usize
@@ -609,25 +682,30 @@ impl DeflateDecoder {
                         Ok(v) => v,
                         Err(_) => break,
                     };
-                    if len != !nlen { break; }
+                    if len != !nlen {
+                        break;
+                    }
                     output.reserve(len as usize);
                     let mut ok = true;
                     for _ in 0..len {
-                        if output.len() >= max_output { break; }
+                        if output.len() >= max_output {
+                            break;
+                        }
                         match bits.read_byte_aligned() {
                             Ok(b) => output.push(b),
-                            Err(_) => { ok = false; break; }
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
                         }
                     }
                     ok
                 }
                 1 => decode_block(&mut bits, &fixed_litlen, &fixed_dist, &mut output, max_output),
-                2 => {
-                    match build_dynamic_tables(&mut bits) {
-                        Ok((litlen, dist)) => decode_block(&mut bits, &litlen, &dist, &mut output, max_output),
-                        Err(_) => false,
-                    }
-                }
+                2 => match build_dynamic_tables(&mut bits) {
+                    Ok((litlen, dist)) => decode_block(&mut bits, &litlen, &dist, &mut output, max_output),
+                    Err(_) => false,
+                },
                 _ => break,
             };
 
@@ -670,13 +748,19 @@ impl ZlibDecoder {
     }
 
     fn inner(&self) -> Option<DeflateDecoder> {
-        if self.data.len() < 2 { return None; }
+        if self.data.len() < 2 {
+            return None;
+        }
         let cmf = self.data[0];
         let flg = self.data[1];
-        if cmf & 0x0F != 8 { return None; }
+        if cmf & 0x0F != 8 {
+            return None;
+        }
         let fdict = (flg >> 5) & 1;
         let offset = if fdict != 0 && self.data.len() >= 6 { 6 } else { 2 };
-        if offset >= self.data.len() { return None; }
+        if offset >= self.data.len() {
+            return None;
+        }
         Some(DeflateDecoder::from_bytes(self.data[offset..].to_vec()))
     }
 }

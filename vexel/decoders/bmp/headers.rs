@@ -1,17 +1,19 @@
-use crate::decoders::bmp::types::{
-    BitmapArrayHeader, BitmapCoreHeader, BitmapFileHeader, BitmapInfoHeader, BitmapV2InfoHeader,
-    BitmapV3InfoHeader, BitmapV4Header, BitmapV5Header, BitmapCompression, CIEXYZ, ColorSpace,
-    DibHeader, OS22XBitmapHeader,
-};
-use crate::utils::error::{VexelError, VexelResult};
-use crate::{log_warn};
-use crate::bitreader::BitReader;
 use std::io::{Read, Seek};
+
+use crate::bitreader::BitReader;
+use crate::decoders::bmp::types::{
+    BitmapArrayHeader, BitmapCompression, BitmapCoreHeader, BitmapFileHeader, BitmapInfoHeader, BitmapV2InfoHeader,
+    BitmapV3InfoHeader, BitmapV4Header, BitmapV5Header, ColorSpace, DibHeader, OS22XBitmapHeader, CIEXYZ,
+};
+use crate::log_warn;
+use crate::utils::error::{VexelError, VexelResult};
 
 pub struct HeaderReader;
 
 impl HeaderReader {
-    pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(BitmapFileHeader, Option<BitmapArrayHeader>)> {
+    pub fn read_file_header<R: Read + Seek>(
+        reader: &mut BitReader<R>,
+    ) -> VexelResult<(BitmapFileHeader, Option<BitmapArrayHeader>)> {
         let signature = reader.read_u16()?;
 
         if signature == 0x4142 {
@@ -36,12 +38,15 @@ impl HeaderReader {
             }
         }
 
-        Ok((BitmapFileHeader {
-            file_size: reader.read_u32()?,
-            reserved1: reader.read_u16()?,
-            reserved2: reader.read_u16()?,
-            pixel_offset: reader.read_u32()?,
-        }, None))
+        Ok((
+            BitmapFileHeader {
+                file_size: reader.read_u32()?,
+                reserved1: reader.read_u16()?,
+                reserved2: reader.read_u16()?,
+                pixel_offset: reader.read_u32()?,
+            },
+            None,
+        ))
     }
 
     pub fn read_info_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(DibHeader, u32, u32)> {
@@ -57,10 +62,7 @@ impl HeaderReader {
             108 => DibHeader::V4(Self::read_v4_header(reader)?),
             124 => DibHeader::V5(Self::read_v5_header(reader)?),
             _ => {
-                log_warn!(
-                    "Invalid DIB header size: {}, assuming 40 bytes. This may cause issues.",
-                    header_size
-                );
+                log_warn!("Invalid DIB header size: {}, assuming 40 bytes. This may cause issues.", header_size);
                 DibHeader::Info(Self::read_bitmap_info_header(reader)?)
             }
         };
@@ -162,10 +164,7 @@ impl HeaderReader {
     }
 
     fn read_v3_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapV3InfoHeader> {
-        Ok(BitmapV3InfoHeader {
-            v2: Self::read_v2_header(reader)?,
-            alpha_mask: reader.read_u32()?,
-        })
+        Ok(BitmapV3InfoHeader { v2: Self::read_v2_header(reader)?, alpha_mask: reader.read_u32()? })
     }
 
     fn read_v4_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapV4Header> {
@@ -198,10 +197,6 @@ impl HeaderReader {
     }
 
     fn read_ciexyz<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<CIEXYZ> {
-        Ok(CIEXYZ {
-            x: reader.read_u32()? as i32,
-            y: reader.read_u32()? as i32,
-            z: reader.read_u32()? as i32,
-        })
+        Ok(CIEXYZ { x: reader.read_u32()? as i32, y: reader.read_u32()? as i32, z: reader.read_u32()? as i32 })
     }
 }

@@ -1,12 +1,14 @@
+use std::io::{Cursor, Read, Seek};
+
+use super::simd;
+use super::types::{
+    NetpbmFormat, NetpbmHeaderData, NetpbmPixelDataInfo, NetpbmSectionData, NetpbmSectionInfo, TupleType,
+};
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{ImageFrame, PixelFormat};
 use crate::utils::info::NetpbmInfo;
-use crate::{Image, Limits, PixelData, log_warn};
-use std::io::{Cursor, Read, Seek};
-
-use super::simd;
-use super::types::{NetpbmFormat, NetpbmHeaderData, NetpbmPixelDataInfo, NetpbmSectionData, NetpbmSectionInfo, TupleType};
+use crate::{log_warn, Image, Limits, PixelData};
 
 pub struct NetPbmDecoder<R: Read + Seek> {
     width: u32,
@@ -43,11 +45,8 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         self.limits = limits;
     }
 
-
     pub fn get_info(&self) -> NetpbmInfo {
-        NetpbmInfo {
-            sections: self.sections.clone(),
-        }
+        NetpbmInfo { sections: self.sections.clone() }
     }
 
     fn scale_to_8bit(value: u32, max_value: u32) -> u8 {
@@ -282,10 +281,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         }
 
         if self.width == 0 || self.height == 0 {
-            return Err(VexelError::InvalidDimensions {
-                width: self.width,
-                height: self.height,
-            });
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         };
 
         self.tuple_type = self.tuple_type_raw.as_deref().and_then(|s| match s {

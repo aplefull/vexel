@@ -1,7 +1,8 @@
-use crate::decoders::jpeg::types::{APP14AdobeData, JFIFData};
-use crate::utils::exif::ExifData;
 use serde::Serialize;
 use tsify::Tsify;
+
+use crate::decoders::jpeg::types::{APP14AdobeData, JFIFData};
+use crate::utils::exif::ExifData;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
@@ -73,28 +74,10 @@ pub struct JpegLsSosComponentInfo {
 #[derive(Debug, Clone, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub enum JpegLsLseData {
-    PresetParameters {
-        length: u16,
-        maxval: u16,
-        t1: u16,
-        t2: u16,
-        t3: u16,
-        reset: u16,
-    },
-    MappingTable {
-        length: u16,
-        table_id: u8,
-        entry_count: u16,
-        entries: Vec<u16>,
-    },
-    ExtendedTemplate {
-        length: u16,
-        entries: Vec<u8>,
-    },
-    Other {
-        length: u16,
-        id_type: u8,
-    },
+    PresetParameters { length: u16, maxval: u16, t1: u16, t2: u16, t3: u16, reset: u16 },
+    MappingTable { length: u16, table_id: u8, entry_count: u16, entries: Vec<u16> },
+    ExtendedTemplate { length: u16, entries: Vec<u8> },
+    Other { length: u16, id_type: u8 },
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -147,10 +130,8 @@ pub const MIN_C: i32 = -128;
 
 pub const MELC_STATES: usize = 32;
 
-pub static J_TABLE: [i32; MELC_STATES] = [
-    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12,
-    13, 14, 15,
-];
+pub static J_TABLE: [i32; MELC_STATES] =
+    [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 pub const LUTMAX8: usize = 256;
 pub const LUTMAX16: usize = 4501;
@@ -298,7 +279,11 @@ pub fn compute_thresholds(alpha: i32, near: i32, t1_in: i32, t2_in: i32, t3_in: 
         } else {
             let ilambda = 256 / alpha;
             let v = BASIC_T1 / ilambda;
-            if v < 2 { 2 } else { v }
+            if v < 2 {
+                2
+            } else {
+                v
+            }
         };
         t1 += 3 * near;
         if t1 < near + 1 || t1 > alpha - 1 {
@@ -312,7 +297,11 @@ pub fn compute_thresholds(alpha: i32, near: i32, t1_in: i32, t2_in: i32, t3_in: 
         } else {
             let ilambda = 256 / alpha;
             let v = BASIC_T2 / ilambda;
-            if v < 3 { 3 } else { v }
+            if v < 3 {
+                3
+            } else {
+                v
+            }
         };
         t2 += 5 * near;
         if t2 < t1 || t2 > alpha - 1 {
@@ -326,7 +315,11 @@ pub fn compute_thresholds(alpha: i32, near: i32, t1_in: i32, t2_in: i32, t3_in: 
         } else {
             let ilambda = 256 / alpha;
             let v = BASIC_T3 / ilambda;
-            if v < 4 { 4 } else { v }
+            if v < 4 {
+                4
+            } else {
+                v
+            }
         };
         t3 += 7 * near;
         if t3 < t2 || t3 > alpha - 1 {
@@ -341,7 +334,11 @@ pub fn init_stats(state: &mut DecoderState, alpha: i32) {
     let slack = 1 << INITABSLACK;
     let initabstat = {
         let v = (alpha + slack / 2) / slack;
-        if v < MIN_INITABSTAT { MIN_INITABSTAT } else { v }
+        if v < MIN_INITABSTAT {
+            MIN_INITABSTAT
+        } else {
+            v
+        }
     };
 
     for i in 0..TOT_CONTEXTS {
@@ -393,15 +390,42 @@ pub fn prepare_luts(state: &mut DecoderState, t1: i32, t2: i32, t3: i32, near: i
         let q2 = (i / CREGIONS) % CREGIONS;
         let q3 = i % CREGIONS;
 
-        let sgn = if !q1.is_multiple_of(2) || (q1 == 0 && !q2.is_multiple_of(2)) || (q1 == 0 && q2 == 0 && !q3.is_multiple_of(2)) {
+        let sgn = if !q1.is_multiple_of(2)
+            || (q1 == 0 && !q2.is_multiple_of(2))
+            || (q1 == 0 && q2 == 0 && !q3.is_multiple_of(2))
+        {
             -1i32
         } else {
             1i32
         };
 
-        let n1 = if q1 != 0 { if !q1.is_multiple_of(2) { q1 + 1 } else { q1 - 1 } } else { 0 };
-        let n2 = if q2 != 0 { if !q2.is_multiple_of(2) { q2 + 1 } else { q2 - 1 } } else { 0 };
-        let n3 = if q3 != 0 { if !q3.is_multiple_of(2) { q3 + 1 } else { q3 - 1 } } else { 0 };
+        let n1 = if q1 != 0 {
+            if !q1.is_multiple_of(2) {
+                q1 + 1
+            } else {
+                q1 - 1
+            }
+        } else {
+            0
+        };
+        let n2 = if q2 != 0 {
+            if !q2.is_multiple_of(2) {
+                q2 + 1
+            } else {
+                q2 - 1
+            }
+        } else {
+            0
+        };
+        let n3 = if q3 != 0 {
+            if !q3.is_multiple_of(2) {
+                q3 + 1
+            } else {
+                q3 - 1
+            }
+        } else {
+            0
+        };
 
         let ineg = (n1 * CREGIONS + n2) * CREGIONS + n3;
         j += 1;

@@ -1,15 +1,16 @@
 mod writer;
 
-use clap::Parser;
-#[cfg(unix)]
-use libc::{rlimit, setrlimit, RLIMIT_AS};
-use egui::ViewportBuilder;
-use glob::glob;
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use clap::Parser;
+use egui::ViewportBuilder;
+use glob::glob;
+#[cfg(unix)]
+use libc::{rlimit, setrlimit, RLIMIT_AS};
 use vexel::{Image, LogLevel, PixelData, Vexel};
 use writer::Writer;
 
@@ -59,7 +60,11 @@ struct Cli {
     #[arg(long, value_parser = ["error", "warn", "debug", "none"], default_value = "error", help = "Minimum log level to display")]
     log_level: String,
 
-    #[arg(long, default_value = "4096", help = "Maximum memory usage in MiB (0 = unlimited). Decoder will abort if this limit is exceeded.")]
+    #[arg(
+        long,
+        default_value = "4096",
+        help = "Maximum memory usage in MiB (0 = unlimited). Decoder will abort if this limit is exceeded."
+    )]
     memory_limit: u64,
 }
 
@@ -128,11 +133,7 @@ fn collect_gui_files(path: &str) -> (Vec<PathBuf>, usize) {
 }
 
 fn get_output_path(file: &Path, output_dir: Option<&str>, format: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let file_stem = file
-        .file_stem()
-        .ok_or("Invalid file name")?
-        .to_str()
-        .ok_or("Invalid file stem")?;
+    let file_stem = file.file_stem().ok_or("Invalid file name")?.to_str().ok_or("Invalid file stem")?;
 
     let output_path = if let Some(dir) = output_dir {
         let output_dir = Path::new(dir);
@@ -143,23 +144,17 @@ fn get_output_path(file: &Path, output_dir: Option<&str>, format: &str) -> Resul
         }
 
         // If output_dir is relative, make it relative to current directory
-        let output_dir = if output_dir.is_relative() {
-            std::env::current_dir()?.join(output_dir)
-        } else {
-            output_dir.to_path_buf()
-        };
+        let output_dir =
+            if output_dir.is_relative() { std::env::current_dir()?.join(output_dir) } else { output_dir.to_path_buf() };
 
         output_dir.join(format!("{}.{}", file_stem, format))
     } else {
         // If no output directory specified, use the input file's directory
-        file.parent()
-            .unwrap_or_else(|| Path::new(".."))
-            .join(format!("{}.{}", file_stem, format))
+        file.parent().unwrap_or_else(|| Path::new("..")).join(format!("{}.{}", file_stem, format))
     };
 
     Ok(output_path)
 }
-
 
 fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("File: {}", file.display());
@@ -210,19 +205,28 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
 
 fn normalize_pixels(pixels: PixelData) -> PixelData {
     fn color_channels(step: usize) -> usize {
-        if step == 4 || step == 2 { step - 1 } else { step }
+        if step == 4 || step == 2 {
+            step - 1
+        } else {
+            step
+        }
     }
 
     fn norm_u8(mut p: Vec<u8>, step: usize) -> Vec<u8> {
         let n = color_channels(step);
         let (mut lo, mut hi) = (u8::MAX, u8::MIN);
         for c in p.chunks_exact(step) {
-            for &v in &c[..n] { lo = lo.min(v); hi = hi.max(v); }
+            for &v in &c[..n] {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
         }
         if hi > lo {
             let r = (hi - lo) as f32;
             for c in p.chunks_exact_mut(step) {
-                for v in &mut c[..n] { *v = ((*v - lo) as f32 / r * 255.0).round() as u8; }
+                for v in &mut c[..n] {
+                    *v = ((*v - lo) as f32 / r * 255.0).round() as u8;
+                }
             }
         }
         p
@@ -232,12 +236,17 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
         let n = color_channels(step);
         let (mut lo, mut hi) = (u16::MAX, u16::MIN);
         for c in p.chunks_exact(step) {
-            for &v in &c[..n] { lo = lo.min(v); hi = hi.max(v); }
+            for &v in &c[..n] {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
         }
         if hi > lo {
             let r = (hi - lo) as f32;
             for c in p.chunks_exact_mut(step) {
-                for v in &mut c[..n] { *v = ((*v - lo) as f32 / r * 65535.0).round() as u16; }
+                for v in &mut c[..n] {
+                    *v = ((*v - lo) as f32 / r * 65535.0).round() as u16;
+                }
             }
         }
         p
@@ -248,14 +257,20 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for c in p.chunks_exact(step) {
             for &v in &c[..n] {
-                if v < lo { lo = v; }
-                if v > hi { hi = v; }
+                if v < lo {
+                    lo = v;
+                }
+                if v > hi {
+                    hi = v;
+                }
             }
         }
         if hi > lo {
             let r = hi - lo;
             for c in p.chunks_exact_mut(step) {
-                for v in &mut c[..n] { *v = (*v - lo) / r; }
+                for v in &mut c[..n] {
+                    *v = (*v - lo) / r;
+                }
             }
         }
         p
@@ -266,36 +281,42 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
         let (mut lo, mut hi) = (f64::MAX, f64::MIN);
         for c in p.chunks_exact(step) {
             for &v in &c[..n] {
-                if v < lo { lo = v; }
-                if v > hi { hi = v; }
+                if v < lo {
+                    lo = v;
+                }
+                if v > hi {
+                    hi = v;
+                }
             }
         }
         if hi > lo {
             let r = hi - lo;
             for c in p.chunks_exact_mut(step) {
-                for v in &mut c[..n] { *v = (*v - lo) / r; }
+                for v in &mut c[..n] {
+                    *v = (*v - lo) / r;
+                }
             }
         }
         p
     }
-    
+
     match pixels {
-        PixelData::RGB8(p)    => PixelData::RGB8(norm_u8(p, 3)),
-        PixelData::RGBA8(p)   => PixelData::RGBA8(norm_u8(p, 4)),
-        PixelData::RGB16(p)   => PixelData::RGB16(norm_u16(p, 3)),
-        PixelData::RGBA16(p)  => PixelData::RGBA16(norm_u16(p, 4)),
-        PixelData::RGB32F(p)  => PixelData::RGB32F(norm_f32(p, 3)),
+        PixelData::RGB8(p) => PixelData::RGB8(norm_u8(p, 3)),
+        PixelData::RGBA8(p) => PixelData::RGBA8(norm_u8(p, 4)),
+        PixelData::RGB16(p) => PixelData::RGB16(norm_u16(p, 3)),
+        PixelData::RGBA16(p) => PixelData::RGBA16(norm_u16(p, 4)),
+        PixelData::RGB32F(p) => PixelData::RGB32F(norm_f32(p, 3)),
         PixelData::RGBA32F(p) => PixelData::RGBA32F(norm_f32(p, 4)),
-        PixelData::RGB64F(p)  => PixelData::RGB64F(norm_f64(p, 3)),
+        PixelData::RGB64F(p) => PixelData::RGB64F(norm_f64(p, 3)),
         PixelData::RGBA64F(p) => PixelData::RGBA64F(norm_f64(p, 4)),
-        PixelData::L8(p)      => PixelData::L8(norm_u8(p, 1)),
-        PixelData::LA8(p)     => PixelData::LA8(norm_u8(p, 2)),
-        PixelData::L16(p)     => PixelData::L16(norm_u16(p, 1)),
-        PixelData::LA16(p)    => PixelData::LA16(norm_u16(p, 2)),
-        PixelData::L32F(p)    => PixelData::L32F(norm_f32(p, 1)),
-        PixelData::LA32F(p)   => PixelData::LA32F(norm_f32(p, 2)),
-        PixelData::L64F(p)    => PixelData::L64F(norm_f64(p, 1)),
-        PixelData::LA64F(p)   => PixelData::LA64F(norm_f64(p, 2)),
+        PixelData::L8(p) => PixelData::L8(norm_u8(p, 1)),
+        PixelData::LA8(p) => PixelData::LA8(norm_u8(p, 2)),
+        PixelData::L16(p) => PixelData::L16(norm_u16(p, 1)),
+        PixelData::LA16(p) => PixelData::LA16(norm_u16(p, 2)),
+        PixelData::L32F(p) => PixelData::L32F(norm_f32(p, 1)),
+        PixelData::LA32F(p) => PixelData::LA32F(norm_f32(p, 2)),
+        PixelData::L64F(p) => PixelData::L64F(norm_f64(p, 1)),
+        PixelData::LA64F(p) => PixelData::LA64F(norm_f64(p, 2)),
         other => other,
     }
 }
@@ -470,14 +491,8 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
         }
 
         fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-            let dropped_paths: Vec<PathBuf> = ctx.input(|input| {
-                input
-                    .raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|file| file.path.clone())
-                    .collect()
-            });
+            let dropped_paths: Vec<PathBuf> =
+                ctx.input(|input| input.raw.dropped_files.iter().filter_map(|file| file.path.clone()).collect());
 
             if dropped_paths.is_empty() {
                 return;
@@ -493,16 +508,14 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
         }
 
         fn handle_keyboard_navigation(&mut self, ctx: &egui::Context) {
-            let next = ctx.input(|input| {
-                input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowDown)
-            });
+            let next =
+                ctx.input(|input| input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowDown));
             if next {
                 self.try_move_file_index(1);
             }
 
-            let previous = ctx.input(|input| {
-                input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::ArrowUp)
-            });
+            let previous =
+                ctx.input(|input| input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::ArrowUp));
             if previous {
                 self.try_move_file_index(-1);
             }
@@ -578,11 +591,9 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                     ..Default::default()
                 };
 
-                egui::SidePanel::right("info_panel")
-                    .resizable(false)
-                    .exact_width(220.0)
-                    .frame(panel_frame)
-                    .show(ctx, |ui| {
+                egui::SidePanel::right("info_panel").resizable(false).exact_width(220.0).frame(panel_frame).show(
+                    ctx,
+                    |ui| {
                         let add_row = |ui: &mut egui::Ui, label: &str, value: &str| {
                             ui.label(egui::RichText::new(label).color(label_color).size(11.0));
                             ui.add_space(2.0);
@@ -665,26 +676,21 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                         if handle_resp.hovered() {
                             ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
-                    });
+                    },
+                );
             } else {
                 egui::SidePanel::right("handle_panel")
                     .resizable(false)
                     .exact_width(12.0)
-                    .frame(egui::Frame {
-                        fill: panel_bg,
-                        inner_margin: egui::Margin::ZERO,
-                        ..Default::default()
-                    })
+                    .frame(egui::Frame { fill: panel_bg, inner_margin: egui::Margin::ZERO, ..Default::default() })
                     .show(ctx, |ui| {
                         let rect = ui.available_rect_before_wrap();
                         let handle_width = 4.0;
                         let handle_x = rect.left() + (rect.width() - handle_width) / 2.0;
                         let grip_h = 32.0;
                         let grip_y = rect.center().y - grip_h / 2.0;
-                        let bar_rect = egui::Rect::from_min_size(
-                            egui::pos2(handle_x, grip_y),
-                            egui::vec2(handle_width, grip_h),
-                        );
+                        let bar_rect =
+                            egui::Rect::from_min_size(egui::pos2(handle_x, grip_y), egui::vec2(handle_width, grip_h));
                         let handle_id = ui.id().with("collapsed_handle");
                         let handle_resp = ui.interact(rect, handle_id, egui::Sense::click());
                         let bar_color = if handle_resp.hovered() { handle_hover_color } else { handle_color };
@@ -750,17 +756,11 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                         ui.painter().image(checker.id(), image_rect, uv, egui::Color32::WHITE);
                     }
 
-                    ui.with_layout(
-                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                        |ui| {
-                            ui.image((texture.id(), display_size));
-                        },
-                    );
+                    ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                        ui.image((texture.id(), display_size));
+                    });
                 } else {
-                    let error = self
-                        .error_message
-                        .as_deref()
-                        .unwrap_or("failed to decode image");
+                    let error = self.error_message.as_deref().unwrap_or("failed to decode image");
 
                     let available = ui.available_rect_before_wrap();
                     let max_width = (available.width() * 0.8).min(520.0);
@@ -771,35 +771,35 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                     let content_height = 13.0 + 6.0 + 15.0 + 20.0;
                     let top = center.y - content_height / 2.0;
 
-                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
-                        egui::pos2(center.x - max_width / 2.0, top),
-                        egui::vec2(max_width, available.height()),
-                    )), |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new(&file_name)
-                                    .color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b))
-                                    .size(13.0)
-                                    .monospace(),
-                            );
-                            ui.add_space(6.0);
-                            ui.label(
-                                egui::RichText::new(error)
-                                    .color(egui::Color32::from_rgb(0xff, 0xa0, 0xa0))
-                                    .size(15.0),
-                            );
-                        });
-                    });
+                    ui.allocate_new_ui(
+                        egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                            egui::pos2(center.x - max_width / 2.0, top),
+                            egui::vec2(max_width, available.height()),
+                        )),
+                        |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&file_name)
+                                        .color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b))
+                                        .size(13.0)
+                                        .monospace(),
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new(error)
+                                        .color(egui::Color32::from_rgb(0xff, 0xa0, 0xa0))
+                                        .size(15.0),
+                                );
+                            });
+                        },
+                    );
                 }
             });
         }
     }
 
     let options = eframe::NativeOptions {
-        viewport: ViewportBuilder {
-            min_inner_size: Some(egui::vec2(300.0, 300.0)),
-            ..Default::default()
-        },
+        viewport: ViewportBuilder { min_inner_size: Some(egui::vec2(300.0, 300.0)), ..Default::default() },
         ..Default::default()
     };
 
@@ -828,10 +828,7 @@ fn apply_memory_limit(limit_mib: u64) {
         }
 
         let limit_bytes = limit_mib.saturating_mul(1024 * 1024);
-        let rl = rlimit {
-            rlim_cur: limit_bytes,
-            rlim_max: limit_bytes,
-        };
+        let rl = rlimit { rlim_cur: limit_bytes, rlim_max: limit_bytes };
 
         unsafe {
             if setrlimit(RLIMIT_AS, &rl) != 0 {

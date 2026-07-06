@@ -1,4 +1,3 @@
-
 pub struct JlsBitReader {
     data: Vec<u8>,
     pos: usize,
@@ -9,13 +8,7 @@ pub struct JlsBitReader {
 
 impl JlsBitReader {
     pub fn new(data: Vec<u8>) -> Self {
-        let mut reader = Self {
-            data,
-            pos: 0,
-            reg: 0,
-            bits: 24,
-            zero_lut: [0u8; 256],
-        };
+        let mut reader = Self { data, pos: 0, reg: 0, bits: 24, zero_lut: [0u8; 256] };
         reader.build_zero_lut();
         reader.init();
         reader
@@ -117,7 +110,10 @@ impl JlsBitReader {
 
         if found == self.pos {
             while found < self.data.len() {
-                if self.data[found] == 0xFF && found + 1 < self.data.len() && (0xD0..=0xD7).contains(&self.data[found + 1]) {
+                if self.data[found] == 0xFF
+                    && found + 1 < self.data.len()
+                    && (0xD0..=0xD7).contains(&self.data[found + 1])
+                {
                     found += 2;
                     break;
                 }

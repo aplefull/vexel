@@ -1,11 +1,11 @@
-use crate::bitreader::BitReader;
-use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::HdrInfo;
-use crate::{Image, Limits, log_warn};
 use std::io::{Read, Seek};
 
 use super::pixels::PixelDecoder;
 use super::types::{HdrFormat, HdrHeaderData, HdrPixelDataInfo, HdrSectionData, HdrSectionInfo};
+use crate::bitreader::BitReader;
+use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::HdrInfo;
+use crate::{log_warn, Image, Limits};
 
 pub struct HdrDecoder<R: Read + Seek> {
     width: u32,
@@ -31,7 +31,6 @@ impl<R: Read + Seek> HdrDecoder<R> {
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
     }
-
 
     fn read_until_newline(&mut self) -> VexelResult<Vec<u8>> {
         let mut buffer = Vec::new();
@@ -181,10 +180,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
             self.height = dim2.parse::<u32>().map_err(|_| "Failed to parse height")?;
 
             if self.width == 0 || self.height == 0 {
-                return Err(VexelError::InvalidDimensions {
-                    width: self.width,
-                    height: self.height,
-                });
+                return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
             }
 
             self.limits.reserve_buffer(self.width, self.height, 4)?;
@@ -246,12 +242,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
             }
         };
 
-        let mut channel_buf = [
-            vec![0u8; width],
-            vec![0u8; width],
-            vec![0u8; width],
-            vec![0u8; width],
-        ];
+        let mut channel_buf = [vec![0u8; width], vec![0u8; width], vec![0u8; width], vec![0u8; width]];
 
         for y in 0..height {
             let b0 = match read_byte(&mut cursor) {
@@ -354,9 +345,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
     }
 
     pub fn get_info(&self) -> HdrInfo {
-        HdrInfo {
-            sections: self.sections.clone(),
-        }
+        HdrInfo { sections: self.sections.clone() }
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -368,9 +357,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
 
         self.sections.push(HdrSectionInfo {
             start_offset: pixel_data_start,
-            data: HdrSectionData::PixelData(HdrPixelDataInfo {
-                length: pixel_data_length,
-            }),
+            data: HdrSectionData::PixelData(HdrPixelDataInfo { length: pixel_data_length }),
         });
 
         let pixel_decoder = PixelDecoder::new(self.width, self.height, self.format);

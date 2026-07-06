@@ -1,6 +1,7 @@
-use crate::utils::types::ByteOrder;
 use serde::Serialize;
 use tsify::Tsify;
+
+use crate::utils::types::ByteOrder;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 pub enum ExifValue {
@@ -76,24 +77,27 @@ impl<'a> ExifReader<'a> {
         let ifd0_offset = reader.read_u32_at(4)? as usize;
         let (ifd0, next_ifd_offset) = reader.read_ifd(ifd0_offset, IfdType::Ifd0);
 
-        let exif_ifd = ifd0.entries.iter()
+        let exif_ifd = ifd0
+            .entries
+            .iter()
             .find(|e| e.tag == 0x8769)
             .and_then(|e| ifd_pointer_offset(&e.value))
             .map(|offset| reader.read_ifd(offset, IfdType::ExifIfd).0);
 
-        let gps_ifd = ifd0.entries.iter()
+        let gps_ifd = ifd0
+            .entries
+            .iter()
             .find(|e| e.tag == 0x8825)
             .and_then(|e| ifd_pointer_offset(&e.value))
             .map(|offset| reader.read_ifd(offset, IfdType::GpsIfd).0);
 
-        let interop_ifd = exif_ifd.as_ref()
+        let interop_ifd = exif_ifd
+            .as_ref()
             .and_then(|ifd| ifd.entries.iter().find(|e| e.tag == 0xA005))
             .and_then(|e| ifd_pointer_offset(&e.value))
             .map(|offset| reader.read_ifd(offset, IfdType::InteropIfd).0);
 
-        let ifd1 = next_ifd_offset
-            .filter(|&o| o != 0)
-            .map(|offset| reader.read_ifd(offset, IfdType::Ifd1).0);
+        let ifd1 = next_ifd_offset.filter(|&o| o != 0).map(|offset| reader.read_ifd(offset, IfdType::Ifd1).0);
 
         Some(ExifData { byte_order, ifd0, exif_ifd, gps_ifd, interop_ifd, ifd1 })
     }
@@ -279,8 +283,12 @@ impl<'a> ExifReader<'a> {
                     .filter_map(|i| {
                         let b = bytes.get(i * 8..i * 8 + 8)?;
                         let bits = match self.byte_order {
-                            ByteOrder::LittleEndian => u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
-                            ByteOrder::BigEndian => u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+                            ByteOrder::LittleEndian => {
+                                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+                            }
+                            ByteOrder::BigEndian => {
+                                u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+                            }
                         };
                         Some(f64::from_bits(bits))
                     })

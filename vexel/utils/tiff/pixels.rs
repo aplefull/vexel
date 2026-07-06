@@ -1,13 +1,12 @@
+use super::color::{
+    cielab_to_rgb, cmyk_to_rgb, cmyk_to_rgb_f32, f32_from_bytes, f64_from_bytes, float24_to_f32, half_to_f32,
+    icclab_to_rgb, itulab_to_rgb, lab_to_xyz, logluv32_to_rgb, u16_from_bytes, u32_from_bytes, xyz_to_srgb_f32,
+    YCbCrTables, D50_WHITE, D65_WHITE,
+};
+use super::types::{ExtraSampleType, PhotometricInterpretation, PlanarConfiguration, SampleFormat, TiffHeader};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::types::ByteOrder;
 use crate::PixelData;
-
-use super::color::{
-    cielab_to_rgb, cmyk_to_rgb, cmyk_to_rgb_f32, f32_from_bytes, f64_from_bytes, float24_to_f32, half_to_f32,
-    icclab_to_rgb, itulab_to_rgb, lab_to_xyz, logluv32_to_rgb, u16_from_bytes, u32_from_bytes,
-    xyz_to_srgb_f32, D50_WHITE, D65_WHITE, YCbCrTables,
-};
-use super::types::{ExtraSampleType, PhotometricInterpretation, PlanarConfiguration, SampleFormat, TiffHeader};
 
 pub struct PixelReader {
     pub byte_order: ByteOrder,
@@ -17,17 +16,14 @@ pub struct PixelReader {
 
 impl PixelReader {
     pub fn has_alpha(header: &TiffHeader) -> bool {
-        header.extra_samples.iter().any(|&s| {
-            s == ExtraSampleType::AssociatedAlpha as u16 || s == ExtraSampleType::UnassociatedAlpha as u16
-        })
+        header
+            .extra_samples
+            .iter()
+            .any(|&s| s == ExtraSampleType::AssociatedAlpha as u16 || s == ExtraSampleType::UnassociatedAlpha as u16)
     }
 
-pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
-        header
-            .sample_format
-            .get(channel)
-            .copied()
-            .unwrap_or(SampleFormat::UnsignedInt)
+    pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
+        header.sample_format.get(channel).copied().unwrap_or(SampleFormat::UnsignedInt)
     }
 
     pub fn bits_for(header: &TiffHeader, channel: usize) -> u16 {
@@ -43,11 +39,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
         match (bps, fmt, has_alpha) {
             (1, SampleFormat::UnsignedInt, false) => {
                 let width = self.width as usize;
-                let row_bytes = if spp > 1 {
-                    (width * spp).div_ceil(8)
-                } else {
-                    width.div_ceil(8)
-                };
+                let row_bytes = if spp > 1 { (width * spp).div_ceil(8) } else { width.div_ceil(8) };
                 let mut pixels = Vec::with_capacity(width * self.height as usize);
                 if spp > 1 {
                     for row in data.chunks(row_bytes) {
@@ -77,7 +69,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         (0..4).map(move |i| {
                             let val = (byte >> (6 - i * 2)) & 0x3;
                             let expanded = val * 85;
-                            if invert { 255 - expanded } else { expanded }
+                            if invert {
+                                255 - expanded
+                            } else {
+                                expanded
+                            }
                         })
                     })
                     .collect();
@@ -91,7 +87,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .map(|chunk| {
                         let val = (chunk[0] >> 6) & 0x3;
                         let expanded = val * 85;
-                        if invert { 255 - expanded } else { expanded }
+                        if invert {
+                            255 - expanded
+                        } else {
+                            expanded
+                        }
                     })
                     .collect();
                 Ok(PixelData::L8(pixels))
@@ -117,8 +117,12 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let hi = (chunk[0] >> 4) & 0xF;
-                        
-                        if invert { 255 - hi * 17 } else { hi * 17 }
+
+                        if invert {
+                            255 - hi * 17
+                        } else {
+                            hi * 17
+                        }
                     })
                     .collect();
                 Ok(PixelData::L8(pixels))
@@ -129,7 +133,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(spp)
                     .map(|chunk| {
                         let b = chunk[0];
-                        if invert { 255 - b } else { b }
+                        if invert {
+                            255 - b
+                        } else {
+                            b
+                        }
                     })
                     .collect();
                 Ok(PixelData::L8(pixels))
@@ -141,7 +149,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = u16_from_bytes(&chunk[0..2], self.byte_order);
-                        if invert { u16::MAX - v } else { v }
+                        if invert {
+                            u16::MAX - v
+                        } else {
+                            v
+                        }
                     })
                     .collect();
                 Ok(PixelData::L16(pixels))
@@ -165,7 +177,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(spp)
                     .map(|chunk| {
                         let b = chunk[0];
-                        if invert { 255 - b } else { b }
+                        if invert {
+                            255 - b
+                        } else {
+                            b
+                        }
                     })
                     .collect();
                 Ok(PixelData::L8(pixels))
@@ -177,7 +193,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = u16_from_bytes(&chunk[0..2], self.byte_order);
-                        if invert { u16::MAX - v } else { v }
+                        if invert {
+                            u16::MAX - v
+                        } else {
+                            v
+                        }
                     })
                     .collect();
                 Ok(PixelData::L16(pixels))
@@ -208,7 +228,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                             ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
                         };
                         let normalized = v as f64 / u64::MAX as f64;
-                        if invert { 1.0 - normalized } else { normalized }
+                        if invert {
+                            1.0 - normalized
+                        } else {
+                            normalized
+                        }
                     })
                     .collect();
                 Ok(PixelData::L64F(pixels))
@@ -224,7 +248,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                             ByteOrder::BigEndian => i64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
                         };
                         let normalized = (v as f64 - i64::MIN as f64) / u64::MAX as f64;
-                        if invert { 1.0 - normalized } else { normalized }
+                        if invert {
+                            1.0 - normalized
+                        } else {
+                            normalized
+                        }
                     })
                     .collect();
                 Ok(PixelData::L64F(pixels))
@@ -236,7 +264,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order));
-                        if invert { 1.0 - v } else { v }
+                        if invert {
+                            1.0 - v
+                        } else {
+                            v
+                        }
                     })
                     .collect();
                 Ok(PixelData::L32F(pixels))
@@ -248,7 +280,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = float24_to_f32(&chunk[0..3], self.byte_order);
-                        if invert { 1.0 - v } else { v }
+                        if invert {
+                            1.0 - v
+                        } else {
+                            v
+                        }
                     })
                     .collect();
                 Ok(PixelData::L32F(pixels))
@@ -260,7 +296,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = f32_from_bytes(&chunk[0..4], self.byte_order);
-                        if invert { 1.0 - v } else { v }
+                        if invert {
+                            1.0 - v
+                        } else {
+                            v
+                        }
                     })
                     .collect();
                 Ok(PixelData::L32F(pixels))
@@ -272,7 +312,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .chunks(bytes_per_pixel)
                     .map(|chunk| {
                         let v = f64_from_bytes(&chunk[0..8], self.byte_order);
-                        if invert { 1.0 - v } else { v }
+                        if invert {
+                            1.0 - v
+                        } else {
+                            v
+                        }
                     })
                     .collect();
                 Ok(PixelData::L64F(pixels))
@@ -348,7 +392,8 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         let raw_g = u32_from_bytes(&chunk[0..4], self.byte_order);
                         let raw_a = u32_from_bytes(&chunk[4..8], self.byte_order);
                         let gray = (i32::from_ne_bytes(raw_g.to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
-                        let alpha = (i32::from_ne_bytes(raw_a.to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                        let alpha =
+                            (i32::from_ne_bytes(raw_a.to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
                         let gray_out = if invert { 1.0 - gray } else { gray };
                         [gray_out as f32, alpha as f32]
                     })
@@ -376,11 +421,13 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         let gray = match self.byte_order {
                             ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
                             ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
-                        } as f64 / u64::MAX as f64;
+                        } as f64
+                            / u64::MAX as f64;
                         let alpha = match self.byte_order {
                             ByteOrder::LittleEndian => u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
                             ByteOrder::BigEndian => u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
-                        } as f64 / u64::MAX as f64;
+                        } as f64
+                            / u64::MAX as f64;
                         let gray_out = if invert { 1.0 - gray } else { gray };
                         [gray_out, alpha]
                     })
@@ -422,9 +469,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 Ok(PixelData::LA64F(pixels))
             }
 
-            _ => Ok(PixelData::L8(
-                data.iter().map(|&b| if invert { 255 - b } else { b }).collect(),
-            )),
+            _ => Ok(PixelData::L8(data.iter().map(|&b| if invert { 255 - b } else { b }).collect())),
         }
     }
 
@@ -446,10 +491,8 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         .collect();
                     Ok(PixelData::RGBA8(pixels))
                 } else {
-                    let pixels: Vec<u8> = data
-                        .chunks_exact(bytes_per_pixel)
-                        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
-                        .collect();
+                    let pixels: Vec<u8> =
+                        data.chunks_exact(bytes_per_pixel).flat_map(|chunk| [chunk[0], chunk[1], chunk[2]]).collect();
                     Ok(PixelData::RGB8(pixels))
                 }
             }
@@ -522,10 +565,8 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         .collect();
                     Ok(PixelData::RGBA8(pixels))
                 } else {
-                    let pixels: Vec<u8> = data
-                        .chunks_exact(bytes_per_pixel)
-                        .flat_map(|chunk| [chunk[0], chunk[1], chunk[2]])
-                        .collect();
+                    let pixels: Vec<u8> =
+                        data.chunks_exact(bytes_per_pixel).flat_map(|chunk| [chunk[0], chunk[1], chunk[2]]).collect();
                     Ok(PixelData::RGB8(pixels))
                 }
             }
@@ -564,11 +605,23 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     let pixels: Vec<f32> = data
                         .chunks_exact(bytes_per_pixel)
                         .flat_map(|chunk| {
-                            let r = (i32::from_ne_bytes(u32_from_bytes(&chunk[0..4], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
-                            let g = (i32::from_ne_bytes(u32_from_bytes(&chunk[4..8], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
-                            let b = (i32::from_ne_bytes(u32_from_bytes(&chunk[8..12], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                            let r = (i32::from_ne_bytes(u32_from_bytes(&chunk[0..4], self.byte_order).to_ne_bytes())
+                                as f64
+                                - i32::MIN as f64)
+                                / u32::MAX as f64;
+                            let g = (i32::from_ne_bytes(u32_from_bytes(&chunk[4..8], self.byte_order).to_ne_bytes())
+                                as f64
+                                - i32::MIN as f64)
+                                / u32::MAX as f64;
+                            let b = (i32::from_ne_bytes(u32_from_bytes(&chunk[8..12], self.byte_order).to_ne_bytes())
+                                as f64
+                                - i32::MIN as f64)
+                                / u32::MAX as f64;
                             let a = if chunk.len() >= 16 {
-                                (i32::from_ne_bytes(u32_from_bytes(&chunk[12..16], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64
+                                (i32::from_ne_bytes(u32_from_bytes(&chunk[12..16], self.byte_order).to_ne_bytes())
+                                    as f64
+                                    - i32::MIN as f64)
+                                    / u32::MAX as f64
                             } else {
                                 1.0
                             };
@@ -580,9 +633,18 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     let pixels: Vec<f32> = data
                         .chunks_exact(bytes_per_pixel)
                         .flat_map(|chunk| {
-                            let r = (i32::from_ne_bytes(u32_from_bytes(&chunk[0..4], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
-                            let g = (i32::from_ne_bytes(u32_from_bytes(&chunk[4..8], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
-                            let b = (i32::from_ne_bytes(u32_from_bytes(&chunk[8..12], self.byte_order).to_ne_bytes()) as f64 - i32::MIN as f64) / u32::MAX as f64;
+                            let r = (i32::from_ne_bytes(u32_from_bytes(&chunk[0..4], self.byte_order).to_ne_bytes())
+                                as f64
+                                - i32::MIN as f64)
+                                / u32::MAX as f64;
+                            let g = (i32::from_ne_bytes(u32_from_bytes(&chunk[4..8], self.byte_order).to_ne_bytes())
+                                as f64
+                                - i32::MIN as f64)
+                                / u32::MAX as f64;
+                            let b = (i32::from_ne_bytes(u32_from_bytes(&chunk[8..12], self.byte_order).to_ne_bytes())
+                                as f64
+                                - i32::MIN as f64)
+                                / u32::MAX as f64;
                             [r as f32, g as f32, b as f32]
                         })
                         .collect();
@@ -596,22 +658,38 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         .chunks_exact(bytes_per_pixel)
                         .flat_map(|chunk| {
                             let r = match self.byte_order {
-                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                                ByteOrder::LittleEndian => {
+                                    u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default())
+                                }
                                 ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
-                            } as f64 / u64::MAX as f64;
+                            } as f64
+                                / u64::MAX as f64;
                             let g = match self.byte_order {
-                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                                ByteOrder::LittleEndian => {
+                                    u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default())
+                                }
                                 ByteOrder::BigEndian => u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
-                            } as f64 / u64::MAX as f64;
+                            } as f64
+                                / u64::MAX as f64;
                             let b = match self.byte_order {
-                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[16..24].try_into().unwrap_or_default()),
-                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[16..24].try_into().unwrap_or_default()),
-                            } as f64 / u64::MAX as f64;
+                                ByteOrder::LittleEndian => {
+                                    u64::from_le_bytes(chunk[16..24].try_into().unwrap_or_default())
+                                }
+                                ByteOrder::BigEndian => {
+                                    u64::from_be_bytes(chunk[16..24].try_into().unwrap_or_default())
+                                }
+                            } as f64
+                                / u64::MAX as f64;
                             let a = if chunk.len() >= 32 {
                                 (match self.byte_order {
-                                    ByteOrder::LittleEndian => u64::from_le_bytes(chunk[24..32].try_into().unwrap_or_default()),
-                                    ByteOrder::BigEndian => u64::from_be_bytes(chunk[24..32].try_into().unwrap_or_default()),
-                                }) as f64 / u64::MAX as f64
+                                    ByteOrder::LittleEndian => {
+                                        u64::from_le_bytes(chunk[24..32].try_into().unwrap_or_default())
+                                    }
+                                    ByteOrder::BigEndian => {
+                                        u64::from_be_bytes(chunk[24..32].try_into().unwrap_or_default())
+                                    }
+                                }) as f64
+                                    / u64::MAX as f64
                             } else {
                                 1.0
                             };
@@ -624,17 +702,28 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         .chunks_exact(bytes_per_pixel)
                         .flat_map(|chunk| {
                             let r = match self.byte_order {
-                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default()),
+                                ByteOrder::LittleEndian => {
+                                    u64::from_le_bytes(chunk[0..8].try_into().unwrap_or_default())
+                                }
                                 ByteOrder::BigEndian => u64::from_be_bytes(chunk[0..8].try_into().unwrap_or_default()),
-                            } as f64 / u64::MAX as f64;
+                            } as f64
+                                / u64::MAX as f64;
                             let g = match self.byte_order {
-                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default()),
+                                ByteOrder::LittleEndian => {
+                                    u64::from_le_bytes(chunk[8..16].try_into().unwrap_or_default())
+                                }
                                 ByteOrder::BigEndian => u64::from_be_bytes(chunk[8..16].try_into().unwrap_or_default()),
-                            } as f64 / u64::MAX as f64;
+                            } as f64
+                                / u64::MAX as f64;
                             let b = match self.byte_order {
-                                ByteOrder::LittleEndian => u64::from_le_bytes(chunk[16..24].try_into().unwrap_or_default()),
-                                ByteOrder::BigEndian => u64::from_be_bytes(chunk[16..24].try_into().unwrap_or_default()),
-                            } as f64 / u64::MAX as f64;
+                                ByteOrder::LittleEndian => {
+                                    u64::from_le_bytes(chunk[16..24].try_into().unwrap_or_default())
+                                }
+                                ByteOrder::BigEndian => {
+                                    u64::from_be_bytes(chunk[16..24].try_into().unwrap_or_default())
+                                }
+                            } as f64
+                                / u64::MAX as f64;
                             [r, g, b]
                         })
                         .collect();
@@ -685,7 +774,11 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                             let r = half_to_f32(u16_from_bytes(&chunk[0..2], self.byte_order));
                             let g = half_to_f32(u16_from_bytes(&chunk[2..4], self.byte_order));
                             let b = half_to_f32(u16_from_bytes(&chunk[4..6], self.byte_order));
-                            let a = if chunk.len() >= 8 { half_to_f32(u16_from_bytes(&chunk[6..8], self.byte_order)) } else { 1.0 };
+                            let a = if chunk.len() >= 8 {
+                                half_to_f32(u16_from_bytes(&chunk[6..8], self.byte_order))
+                            } else {
+                                1.0
+                            };
                             [r, g, b, a]
                         })
                         .collect();
@@ -712,7 +805,8 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                             let r = f32_from_bytes(&chunk[0..4], self.byte_order);
                             let g = f32_from_bytes(&chunk[4..8], self.byte_order);
                             let b = f32_from_bytes(&chunk[8..12], self.byte_order);
-                            let a = if chunk.len() >= 16 { f32_from_bytes(&chunk[12..16], self.byte_order) } else { 1.0 };
+                            let a =
+                                if chunk.len() >= 16 { f32_from_bytes(&chunk[12..16], self.byte_order) } else { 1.0 };
                             [r, g, b, a]
                         })
                         .collect();
@@ -739,7 +833,8 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                             let r = f64_from_bytes(&chunk[0..8], self.byte_order);
                             let g = f64_from_bytes(&chunk[8..16], self.byte_order);
                             let b = f64_from_bytes(&chunk[16..24], self.byte_order);
-                            let a = if chunk.len() >= 32 { f64_from_bytes(&chunk[24..32], self.byte_order) } else { 1.0 };
+                            let a =
+                                if chunk.len() >= 32 { f64_from_bytes(&chunk[24..32], self.byte_order) } else { 1.0 };
                             [r, g, b, a]
                         })
                         .collect();
@@ -758,10 +853,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                 }
             }
 
-            _ => Err(VexelError::Custom(format!(
-                "Unsupported RGB format: {} bps, {:?} format",
-                bps, fmt
-            ))),
+            _ => Err(VexelError::Custom(format!("Unsupported RGB format: {} bps, {:?} format", bps, fmt))),
         }
     }
 
@@ -836,12 +928,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         [r, g, b]
                     })
                     .collect(),
-                _ => {
-                    return Err(VexelError::Custom(format!(
-                        "Unsupported bit depth for Palette: {}",
-                        bps
-                    )))
-                }
+                _ => return Err(VexelError::Custom(format!("Unsupported bit depth for Palette: {}", bps))),
             };
             return Ok(PixelData::RGB16(pixels));
         }
@@ -884,12 +971,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     [r, g, b]
                 })
                 .collect(),
-            _ => {
-                return Err(VexelError::Custom(format!(
-                    "Unsupported bit depth for Palette: {}",
-                    bps
-                )))
-            }
+            _ => return Err(VexelError::Custom(format!("Unsupported bit depth for Palette: {}", bps))),
         };
 
         Ok(PixelData::RGB8(pixels))
@@ -940,7 +1022,12 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                             } else {
                                 1.0
                             };
-                            [(r * 65535.0).round() as u16, (g * 65535.0).round() as u16, (b * 65535.0).round() as u16, (a * 65535.0).round() as u16]
+                            [
+                                (r * 65535.0).round() as u16,
+                                (g * 65535.0).round() as u16,
+                                (b * 65535.0).round() as u16,
+                                (a * 65535.0).round() as u16,
+                            ]
                         })
                         .collect();
                     Ok(PixelData::RGBA16(pixels))
@@ -959,20 +1046,14 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     Ok(PixelData::RGB16(pixels))
                 }
             }
-            _ => Err(VexelError::Custom(format!(
-                "Unsupported CMYK bit depth: {}",
-                bps
-            ))),
+            _ => Err(VexelError::Custom(format!("Unsupported CMYK bit depth: {}", bps))),
         }
     }
 
     pub fn read_ycbcr(&self, data: &[u8], header: &TiffHeader) -> VexelResult<PixelData> {
         let bps = Self::bits_for(header, 0);
         if bps != 8 {
-            return Err(VexelError::Custom(format!(
-                "Unsupported YCbCr bit depth: {} (only 8-bit supported)",
-                bps
-            )));
+            return Err(VexelError::Custom(format!("Unsupported YCbCr bit depth: {} (only 8-bit supported)", bps)));
         }
 
         let tables = YCbCrTables::new(header.ycbcr_coefficients, header.reference_black_white);
@@ -1077,10 +1158,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .collect();
                 Ok(PixelData::RGB16(pixels))
             }
-            _ => Err(VexelError::Custom(format!(
-                "Unsupported CIELab bit depth: {}",
-                bps
-            ))),
+            _ => Err(VexelError::Custom(format!("Unsupported CIELab bit depth: {}", bps))),
         }
     }
 
@@ -1120,10 +1198,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .collect();
                 Ok(PixelData::RGB16(pixels))
             }
-            _ => Err(VexelError::Custom(format!(
-                "Unsupported ICCLab bit depth: {}",
-                bps
-            ))),
+            _ => Err(VexelError::Custom(format!("Unsupported ICCLab bit depth: {}", bps))),
         }
     }
 
@@ -1163,10 +1238,7 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                     .collect();
                 Ok(PixelData::RGB16(pixels))
             }
-            _ => Err(VexelError::Custom(format!(
-                "Unsupported ITULab bit depth: {}",
-                bps
-            ))),
+            _ => Err(VexelError::Custom(format!("Unsupported ITULab bit depth: {}", bps))),
         }
     }
 
@@ -1232,10 +1304,15 @@ pub fn sample_format_for(header: &TiffHeader, channel: usize) -> SampleFormat {
                         if le == 0 {
                             return 0u8;
                         }
-                        let y = (std::f64::consts::LN_2 / 256.0 * (le as f64 + 0.5)
-                            - std::f64::consts::LN_2 * 64.0)
-                            .exp();
-                        if y <= 0.0 { 0 } else if y >= 1.0 { 255 } else { (256.0 * y.sqrt()) as u8 }
+                        let y =
+                            (std::f64::consts::LN_2 / 256.0 * (le as f64 + 0.5) - std::f64::consts::LN_2 * 64.0).exp();
+                        if y <= 0.0 {
+                            0
+                        } else if y >= 1.0 {
+                            255
+                        } else {
+                            (256.0 * y.sqrt()) as u8
+                        }
                     })
                     .collect();
                 Ok(PixelData::L8(pixels))

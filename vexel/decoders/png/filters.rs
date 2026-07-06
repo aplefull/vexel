@@ -1,7 +1,7 @@
+use super::filter_simd;
+use super::types::{ColorType, FilterType};
 use crate::log_warn;
 use crate::utils::error::VexelResult;
-use super::filter_simd;
-use super::types::{FilterType, ColorType};
 
 pub struct FilterDecoder {
     bit_depth: u8,
@@ -90,11 +90,7 @@ impl FilterDecoder {
 
         for (row_idx, scanline) in data.chunks(scanline_bytes).enumerate() {
             if scanline.len() < scanline_bytes {
-                log_warn!(
-                    "Invalid scanline length: {}, expected: {}",
-                    scanline.len(),
-                    scanline_bytes
-                );
+                log_warn!("Invalid scanline length: {}, expected: {}", scanline.len(), scanline_bytes);
                 unfiltered.truncate(row_idx * bytes_per_row);
                 break;
             }

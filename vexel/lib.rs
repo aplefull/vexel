@@ -1,7 +1,25 @@
 mod decoders;
 mod utils;
 
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
+
+use serde::Serialize;
+use tsify::Tsify;
+pub(crate) use utils::bitreader;
+pub use utils::error::{VexelError, VexelResult};
+pub use utils::image::{Image, ImageFormat, ImageFrame, PixelData, PixelFormat};
+pub use utils::info::ImageInfo;
+pub use utils::limits::Limits;
+pub(crate) use utils::logger::{log_debug, log_error, log_warn};
+pub use utils::logger::{set_log_level, LogLevel};
+use wasm_bindgen::prelude::wasm_bindgen;
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 use crate::decoders::bmp::BmpDecoder;
+use crate::decoders::dng::DngDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
 use crate::decoders::ico::IcoDecoder;
@@ -11,30 +29,7 @@ use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::tga::TgaDecoder;
-use crate::decoders::dng::DngDecoder;
 use crate::decoders::tiff::TiffDecoder;
-
-pub(crate) use utils::bitreader;
-pub(crate) use utils::logger::{log_debug, log_warn, log_error};
-pub use utils::error::{VexelError, VexelResult};
-pub use utils::limits::Limits;
-pub use utils::image::Image;
-pub use utils::image::ImageFormat;
-pub use utils::image::ImageFrame;
-pub use utils::image::PixelData;
-pub use utils::image::PixelFormat;
-pub use utils::info::ImageInfo;
-pub use utils::logger::{LogLevel, set_log_level};
-
-use serde::Serialize;
-use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
-use std::panic::{self, AssertUnwindSafe};
-use std::path::Path;
-use tsify::Tsify;
-use wasm_bindgen::prelude::wasm_bindgen;
-
-pub use wasm_bindgen_rayon::init_thread_pool;
 
 macro_rules! impl_decode {
     ($decoder:expr) => {
@@ -380,7 +375,13 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         let palette_consistent = !is_paletted_type || color_map_type == 1;
         let valid_palette_bpp = color_map_type != 1 || matches!(palette_bpp, 15 | 16 | 24 | 32);
 
-        if valid_image_type && valid_color_map && valid_depth && valid_descriptor && palette_consistent && valid_palette_bpp {
+        if valid_image_type
+            && valid_color_map
+            && valid_depth
+            && valid_descriptor
+            && palette_consistent
+            && valid_palette_bpp
+        {
             return Ok(ImageFormat::Tga);
         }
 
@@ -393,9 +394,12 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         if header[3] == 0
             && (1..=8).contains(&header[2])
             && header[0] <= header[1]
-            && xd > 0 && xd <= 65535
-            && yd > 0 && yd <= 65535
-            && l0 > 0 && l0 <= 65535
+            && xd > 0
+            && xd <= 65535
+            && yd > 0
+            && yd <= 65535
+            && l0 > 0
+            && l0 <= 65535
         {
             return Ok(ImageFormat::Jbig1);
         }
@@ -410,7 +414,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         const MAX_ENTRIES: usize = 4096;
 
         let read_u16 = |b: &[u8]| {
-            if is_le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) }
+            if is_le {
+                u16::from_le_bytes([b[0], b[1]])
+            } else {
+                u16::from_be_bytes([b[0], b[1]])
+            }
         };
         let read_u32 = |b: &[u8]| {
             if is_le {
@@ -483,11 +491,12 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                             }
                             buf
                         };
-                        let text = String::from_utf8_lossy(&bytes)
-                            .trim_end_matches('\0')
-                            .trim()
-                            .to_uppercase();
-                        if tag == 271 { make = text } else { model = text }
+                        let text = String::from_utf8_lossy(&bytes).trim_end_matches('\0').trim().to_uppercase();
+                        if tag == 271 {
+                            make = text
+                        } else {
+                            model = text
+                        }
                     }
                     // SubIFDs
                     330 => {
@@ -510,7 +519,8 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             }
         }
 
-        make.starts_with("KODAK") && (model.starts_with("DCS") || model.starts_with("EOSDCS") || model.starts_with("NC2000"))
+        make.starts_with("KODAK")
+            && (model.starts_with("DCS") || model.starts_with("EOSDCS") || model.starts_with("NC2000"))
     }
 
     fn try_guess_format_harder(reader: &mut R) -> VexelResult<ImageFormat> {
@@ -681,4 +691,3 @@ pub fn wasm_set_log_level(level: &str) -> Result<(), String> {
     set_log_level(level);
     Ok(())
 }
-

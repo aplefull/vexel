@@ -38,7 +38,9 @@ pub fn expand_rgb16_masked_row(
     a_bits: u32,
     has_alpha: bool,
 ) {
-    expand_rgb16_masked_row_scalar(src, dst, width, r_shift, r_bits, g_shift, g_bits, b_shift, b_bits, a_shift, a_bits, has_alpha);
+    expand_rgb16_masked_row_scalar(
+        src, dst, width, r_shift, r_bits, g_shift, g_bits, b_shift, b_bits, a_shift, a_bits, has_alpha,
+    );
 }
 
 pub fn expand_rgb555_row(src: &[u8], dst: &mut [u8], width: usize) {
@@ -96,9 +98,7 @@ pub fn extract_channels_rgba_row(
 
     #[cfg(target_arch = "x86_64")]
     if byte_aligned && is_x86_feature_detected!("avx2") {
-        return unsafe {
-            extract_channels_rgba_row_avx2(src, dst, width, r_shift, g_shift, b_shift, a_shift)
-        };
+        return unsafe { extract_channels_rgba_row_avx2(src, dst, width, r_shift, g_shift, b_shift, a_shift) };
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -164,11 +164,7 @@ fn expand_rgb16_masked_row_scalar(
     let channels = if has_alpha { 4 } else { 3 };
     for x in 0..width {
         let s = x * 2;
-        let pixel = if s + 1 < src.len() {
-            u16::from_le_bytes([src[s], src[s + 1]]) as u32
-        } else {
-            0
-        };
+        let pixel = if s + 1 < src.len() { u16::from_le_bytes([src[s], src[s + 1]]) as u32 } else { 0 };
         let r = extract_channel_scalar(pixel, r_shift, r_bits);
         let g = extract_channel_scalar(pixel, g_shift, g_bits);
         let b = extract_channel_scalar(pixel, b_shift, b_bits);
@@ -184,11 +180,7 @@ fn expand_rgb16_masked_row_scalar(
 fn expand_rgb555_row_scalar(src: &[u8], dst: &mut [u8], width: usize) {
     for x in 0..width {
         let s = x * 2;
-        let pixel = if s + 1 < src.len() {
-            u16::from_le_bytes([src[s], src[s + 1]])
-        } else {
-            0
-        };
+        let pixel = if s + 1 < src.len() { u16::from_le_bytes([src[s], src[s + 1]]) } else { 0 };
         let r = ((pixel >> 10) & 0x1F) as u8;
         let g = ((pixel >> 5) & 0x1F) as u8;
         let b = (pixel & 0x1F) as u8;
@@ -266,9 +258,7 @@ fn extract_channels_rgba_row_scalar(
 unsafe fn bgr_to_rgb_row_avx2(src: &[u8], dst: &mut [u8], width: usize) {
     use std::arch::x86_64::*;
 
-    let shuf = _mm_set_epi8(
-        -1, 12, 13, 14, 9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2,
-    );
+    let shuf = _mm_set_epi8(-1, 12, 13, 14, 9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2);
 
     let mut x = 0usize;
     while x + 5 <= width {
@@ -531,7 +521,14 @@ unsafe fn extract_channels_rgba_row_avx2(
         &src[x * 4..],
         &mut dst[x * 4..],
         width - x,
-        r_shift, 8, g_shift, 8, b_shift, 8, a_shift, 8,
+        r_shift,
+        8,
+        g_shift,
+        8,
+        b_shift,
+        8,
+        a_shift,
+        8,
     );
 }
 
@@ -656,14 +653,7 @@ fn expand_rgb555_row_wasm(src: &[u8], dst: &mut [u8], width: usize) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn extract_channels_rgb_row_wasm(
-    src: &[u8],
-    dst: &mut [u8],
-    width: usize,
-    r_shift: u32,
-    g_shift: u32,
-    b_shift: u32,
-) {
+fn extract_channels_rgb_row_wasm(src: &[u8], dst: &mut [u8], width: usize, r_shift: u32, g_shift: u32, b_shift: u32) {
     use std::arch::wasm32::*;
 
     let mask8 = u32x4_splat(0xFF);
@@ -684,10 +674,26 @@ fn extract_channels_rgb_row_wasm(
         let d = &mut dst[x * 3..];
         for i in 0..4usize {
             let (rv, gv, bv) = match i {
-                0 => (u32x4_extract_lane::<0>(r) as u8, u32x4_extract_lane::<0>(g) as u8, u32x4_extract_lane::<0>(b) as u8),
-                1 => (u32x4_extract_lane::<1>(r) as u8, u32x4_extract_lane::<1>(g) as u8, u32x4_extract_lane::<1>(b) as u8),
-                2 => (u32x4_extract_lane::<2>(r) as u8, u32x4_extract_lane::<2>(g) as u8, u32x4_extract_lane::<2>(b) as u8),
-                _ => (u32x4_extract_lane::<3>(r) as u8, u32x4_extract_lane::<3>(g) as u8, u32x4_extract_lane::<3>(b) as u8),
+                0 => (
+                    u32x4_extract_lane::<0>(r) as u8,
+                    u32x4_extract_lane::<0>(g) as u8,
+                    u32x4_extract_lane::<0>(b) as u8,
+                ),
+                1 => (
+                    u32x4_extract_lane::<1>(r) as u8,
+                    u32x4_extract_lane::<1>(g) as u8,
+                    u32x4_extract_lane::<1>(b) as u8,
+                ),
+                2 => (
+                    u32x4_extract_lane::<2>(r) as u8,
+                    u32x4_extract_lane::<2>(g) as u8,
+                    u32x4_extract_lane::<2>(b) as u8,
+                ),
+                _ => (
+                    u32x4_extract_lane::<3>(r) as u8,
+                    u32x4_extract_lane::<3>(g) as u8,
+                    u32x4_extract_lane::<3>(b) as u8,
+                ),
             };
             d[i * 3] = rv;
             d[i * 3 + 1] = gv;
@@ -769,7 +775,14 @@ fn extract_channels_rgba_row_wasm(
         &src[x * 4..],
         &mut dst[x * 4..],
         width - x,
-        r_shift, 8, g_shift, 8, b_shift, 8, a_shift, 8,
+        r_shift,
+        8,
+        g_shift,
+        8,
+        b_shift,
+        8,
+        a_shift,
+        8,
     );
 }
 

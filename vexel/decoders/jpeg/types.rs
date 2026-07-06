@@ -1,6 +1,7 @@
-use crate::utils::exif::ExifData;
 use serde::Serialize;
 use tsify::Tsify;
+
+use crate::utils::exif::ExifData;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 pub struct JpegSegmentInfo {
@@ -247,7 +248,6 @@ pub struct JFIFHeader {
     pub thumbnail_height: u8,
     pub thumbnail_data: Vec<u8>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ScanData {

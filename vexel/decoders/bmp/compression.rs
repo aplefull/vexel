@@ -1,8 +1,8 @@
-use crate::decoders::bmp::simd as simd;
+use crate::bitreader::BitReader;
+use crate::decoders::bmp::simd;
 use crate::decoders::bmp::types::ColorEntry;
 use crate::utils::error::VexelResult;
 use crate::{Image, PixelData};
-use crate::bitreader::BitReader;
 
 pub struct RleDecoder;
 
@@ -171,7 +171,12 @@ impl RleDecoder {
             let dst_offset = dst_row * width_usize * 3;
             let src_end = (src_offset + width_usize).min(data.len());
             let indices = if src_offset < data.len() { &data[src_offset..src_end] } else { &[] };
-            simd::apply_palette_row(indices, color_table, &mut image_data[dst_offset..dst_offset + width_usize * 3], width_usize);
+            simd::apply_palette_row(
+                indices,
+                color_table,
+                &mut image_data[dst_offset..dst_offset + width_usize * 3],
+                width_usize,
+            );
         }
 
         Image::from_pixels(width, height, PixelData::RGB8(image_data))
@@ -189,7 +194,12 @@ impl RleDecoder {
             let dst_offset = dst_row * width_usize * 3;
             let src_end = (src_offset + width_usize).min(data.len());
             let indices = if src_offset < data.len() { &data[src_offset..src_end] } else { &[] };
-            simd::apply_palette_row(indices, color_table, &mut image_data[dst_offset..dst_offset + width_usize * 3], width_usize);
+            simd::apply_palette_row(
+                indices,
+                color_table,
+                &mut image_data[dst_offset..dst_offset + width_usize * 3],
+                width_usize,
+            );
         }
 
         Image::from_pixels(width, height, PixelData::RGB8(image_data))

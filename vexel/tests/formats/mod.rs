@@ -1,4 +1,5 @@
 pub mod bmp;
+pub mod dng;
 pub mod gif;
 pub mod hdr;
 pub mod ico;
@@ -9,4 +10,3 @@ pub mod netpbm;
 pub mod png;
 pub mod tga;
 pub mod tiff;
-pub mod dng;

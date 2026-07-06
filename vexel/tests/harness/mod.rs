@@ -1,15 +1,15 @@
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
-use libavif_sys as avif_sys;
-use jpegxl_sys::common::types::{JxlBitDepthType, JxlBitDepth, JxlDataType, JxlEndianness, JxlPixelFormat};
+
+use jpegxl_sys::common::types::{JxlBitDepth, JxlBitDepthType, JxlDataType, JxlEndianness, JxlPixelFormat};
 use jpegxl_sys::decode::{
-    JxlDecoderCreate, JxlDecoderDestroy, JxlDecoderSubscribeEvents, JxlDecoderSetInput,
-    JxlDecoderCloseInput, JxlDecoderProcessInput, JxlDecoderGetBasicInfo,
-    JxlDecoderImageOutBufferSize, JxlDecoderSetImageOutBuffer, JxlDecoderSetImageOutBitDepth,
-    JxlDecoderStatus,
+    JxlDecoderCloseInput, JxlDecoderCreate, JxlDecoderDestroy, JxlDecoderGetBasicInfo, JxlDecoderImageOutBufferSize,
+    JxlDecoderProcessInput, JxlDecoderSetImageOutBitDepth, JxlDecoderSetImageOutBuffer, JxlDecoderSetInput,
+    JxlDecoderStatus, JxlDecoderSubscribeEvents,
 };
 use jpegxl_sys::metadata::codestream_header::JxlBasicInfo;
+use libavif_sys as avif_sys;
 use vexel::{Image, PixelData, Vexel};
 
 pub const BASE_PATH: &str = "./tests/images/";
@@ -20,13 +20,17 @@ pub const DEFAULT_SSIM_THRESHOLD: f64 = 0.99990;
 
 pub enum Comparison {
     None,
-    Exact { reference_path: &'static str },
+    Exact {
+        reference_path: &'static str,
+    },
     Fuzzy {
         reference_path: &'static str,
         mse_threshold: f64,
         ssim_threshold: f64,
     },
-    ExactFrames { reference_path: &'static str },
+    ExactFrames {
+        reference_path: &'static str,
+    },
     #[allow(dead_code)]
     FuzzyFrames {
         reference_path: &'static str,
@@ -85,9 +89,7 @@ impl ReferencePixels {
             ReferencePixels::F32(v) => Box::new(v.iter().map(|&x| x as f64)),
         }
     }
-
 }
-
 
 pub fn get_pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let idx = (y * width + x) * 4;
@@ -129,11 +131,7 @@ pub fn image_to_reference_native(image: &Image) -> ReferenceImage {
 }
 
 pub fn image_to_reference_rgba8(image: &Image) -> ReferenceImage {
-    ReferenceImage {
-        width: image.width(),
-        height: image.height(),
-        pixels: ReferencePixels::U8(image.to_rgba8()),
-    }
+    ReferenceImage { width: image.width(), height: image.height(), pixels: ReferencePixels::U8(image.to_rgba8()) }
 }
 
 pub fn frame_to_reference_native(image: &Image, frame_idx: usize) -> ReferenceImage {
@@ -165,11 +163,7 @@ pub fn frame_to_reference_native(image: &Image, frame_idx: usize) -> ReferenceIm
 
 pub fn frame_to_reference_rgba8(image: &Image, frame_idx: usize) -> ReferenceImage {
     let frame = &image.frames()[frame_idx];
-    ReferenceImage {
-        width: frame.width(),
-        height: frame.height(),
-        pixels: ReferencePixels::U8(frame.to_rgba8()),
-    }
+    ReferenceImage { width: frame.width(), height: frame.height(), pixels: ReferencePixels::U8(frame.to_rgba8()) }
 }
 
 fn pixel_format_for_jxl(info: &JxlBasicInfo) -> (JxlPixelFormat, JxlBitDepth, bool) {
@@ -184,12 +178,7 @@ fn pixel_format_for_jxl(info: &JxlBasicInfo) -> (JxlPixelFormat, JxlBitDepth, bo
         (JxlDataType::Uint16, JxlBitDepthType::FromCodestream)
     };
 
-    let pixel_format = JxlPixelFormat {
-        num_channels,
-        data_type,
-        endianness: JxlEndianness::Native,
-        align: 0,
-    };
+    let pixel_format = JxlPixelFormat { num_channels, data_type, endianness: JxlEndianness::Native, align: 0 };
 
     let bit_depth = JxlBitDepth {
         r#type: bit_depth_type,
@@ -234,11 +223,8 @@ pub fn read_reference_jxl_all_frames(path: &Path) -> Result<Vec<ReferenceImage>,
             endianness: JxlEndianness::Native,
             align: 0,
         };
-        let mut bit_depth = JxlBitDepth {
-            r#type: JxlBitDepthType::FromPixelFormat,
-            bits_per_sample: 8,
-            exponent_bits_per_sample: 0,
-        };
+        let mut bit_depth =
+            JxlBitDepth { r#type: JxlBitDepthType::FromPixelFormat, bits_per_sample: 8, exponent_bits_per_sample: 0 };
         let mut is_float = false;
         let mut width = 0u32;
         let mut height = 0u32;
@@ -275,10 +261,12 @@ pub fn read_reference_jxl_all_frames(path: &Path) -> Result<Vec<ReferenceImage>,
                     macro_rules! decode_frame {
                         ($buf:expr, $variant:expr) => {{
                             if JxlDecoderSetImageOutBuffer(
-                                dec, &pixel_format,
+                                dec,
+                                &pixel_format,
                                 $buf.as_mut_ptr() as *mut c_void,
                                 buf_size,
-                            ) != JxlDecoderStatus::Success {
+                            ) != JxlDecoderStatus::Success
+                            {
                                 JxlDecoderDestroy(dec);
                                 return Err("JxlDecoderSetImageOutBuffer failed".into());
                             }
@@ -518,16 +506,13 @@ pub fn compute_ssim(a: &ReferencePixels, b: &ReferencePixels) -> f64 {
     let var_a: f64 = a.as_f64_iter().map(|v| (v - mean_a).powi(2)).sum::<f64>() / n;
     let var_b: f64 = b.as_f64_iter().map(|v| (v - mean_b).powi(2)).sum::<f64>() / n;
 
-    let cov: f64 = a.as_f64_iter().zip(b.as_f64_iter())
-        .map(|(x, y)| (x - mean_a) * (y - mean_b))
-        .sum::<f64>() / n;
+    let cov: f64 = a.as_f64_iter().zip(b.as_f64_iter()).map(|(x, y)| (x - mean_a) * (y - mean_b)).sum::<f64>() / n;
 
     let max_val = a.max_value();
     let c1 = (0.01 * max_val).powi(2);
     let c2 = (0.03 * max_val).powi(2);
 
-    (2.0 * mean_a * mean_b + c1) * (2.0 * cov + c2)
-        / ((mean_a.powi(2) + mean_b.powi(2) + c1) * (var_a + var_b + c2))
+    (2.0 * mean_a * mean_b + c1) * (2.0 * cov + c2) / ((mean_a.powi(2) + mean_b.powi(2) + c1) * (var_a + var_b + c2))
 }
 
 pub fn compare_fuzzy(
@@ -553,11 +538,7 @@ pub fn compare_fuzzy(
     let mse = compute_mse(&actual.pixels, &reference.pixels);
     let ssim = compute_ssim(&actual.pixels, &reference.pixels);
     let max_val = actual.pixels.max_value();
-    let psnr = if mse > 0.0 {
-        10.0 * (max_val.powi(2) / mse).log10()
-    } else {
-        f64::INFINITY
-    };
+    let psnr = if mse > 0.0 { 10.0 * (max_val.powi(2) / mse).log10() } else { f64::INFINITY };
 
     if mse > mse_threshold || ssim < ssim_threshold {
         return Err(format!(
@@ -605,7 +586,8 @@ pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResu
                 )));
             }
             for (i, ref_frame) in ref_frames.iter().enumerate() {
-                let actual = if is_jxl { frame_to_reference_native(image, i) } else { frame_to_reference_rgba8(image, i) };
+                let actual =
+                    if is_jxl { frame_to_reference_native(image, i) } else { frame_to_reference_rgba8(image, i) };
                 if let Err(msg) = compare_exact(&actual, ref_frame) {
                     return Ok(TestResult::Fail(format!("frame {}: {}", i, msg)));
                 }
@@ -629,7 +611,8 @@ pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResu
             let mut total_psnr = 0.0f64;
             let n = dec_frames.len();
             for (i, ref_frame) in ref_frames.iter().enumerate() {
-                let actual = if is_jxl { frame_to_reference_native(image, i) } else { frame_to_reference_rgba8(image, i) };
+                let actual =
+                    if is_jxl { frame_to_reference_native(image, i) } else { frame_to_reference_rgba8(image, i) };
                 match compare_fuzzy(&actual, ref_frame, *mse_threshold, *ssim_threshold) {
                     Ok((mse, ssim, psnr)) => {
                         total_mse += mse;

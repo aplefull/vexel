@@ -1,3 +1,9 @@
+use std::fmt;
+
+use serde::Serialize;
+use tsify::Tsify;
+use wasm_bindgen::prelude::wasm_bindgen;
+
 use crate::decoders::bmp::BmpSectionInfo;
 use crate::decoders::gif::GifSectionInfo;
 use crate::decoders::hdr::HdrSectionInfo;
@@ -8,12 +14,8 @@ use crate::decoders::jpeg_ls::types::JpegLsSectionInfo;
 use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::png::PngChunkInfo;
 use crate::decoders::tga::types::TgaSectionInfo;
-use crate::utils::tiff::types::TiffSectionInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
-use serde::Serialize;
-use std::fmt;
-use tsify::Tsify;
-use wasm_bindgen::prelude::wasm_bindgen;
+use crate::utils::tiff::types::TiffSectionInfo;
 
 #[derive(Debug, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
@@ -125,8 +127,14 @@ impl fmt::Display for PngInfo {
         writeln!(f)?;
 
         for (idx, chunk) in self.sections.iter().enumerate() {
-            writeln!(f, "Chunk #{}: {} (offset: 0x{:08X}, length: {} bytes)",
-                idx + 1, chunk.chunk_type, chunk.start_offset, chunk.length)?;
+            writeln!(
+                f,
+                "Chunk #{}: {} (offset: 0x{:08X}, length: {} bytes)",
+                idx + 1,
+                chunk.chunk_type,
+                chunk.start_offset,
+                chunk.length
+            )?;
 
             match &chunk.data {
                 crate::decoders::png::PngChunkData::IHDR(data) => {
@@ -140,7 +148,8 @@ impl fmt::Display for PngInfo {
                 }
                 crate::decoders::png::PngChunkData::PLTE(data) => {
                     writeln!(f, "  Palette entries: {}", data.entries.len())?;
-                    let hex: Vec<String> = data.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
+                    let hex: Vec<String> =
+                        data.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
                     writeln!(f, "  Colors: {}", hex.join(", "))?;
                 }
                 crate::decoders::png::PngChunkData::IDAT(data) => {
@@ -150,37 +159,37 @@ impl fmt::Display for PngInfo {
                     writeln!(f, "  Gamma: {} (raw: {})", data.gamma, data.gamma_raw)?;
                 }
                 crate::decoders::png::PngChunkData::CHRM(data) => {
-                    writeln!(f, "  White point: ({}, {})", data.chromaticities.white_point_x, data.chromaticities.white_point_y)?;
+                    writeln!(
+                        f,
+                        "  White point: ({}, {})",
+                        data.chromaticities.white_point_x, data.chromaticities.white_point_y
+                    )?;
                     writeln!(f, "  Red: ({}, {})", data.chromaticities.red_x, data.chromaticities.red_y)?;
                     writeln!(f, "  Green: ({}, {})", data.chromaticities.green_x, data.chromaticities.green_y)?;
                     writeln!(f, "  Blue: ({}, {})", data.chromaticities.blue_x, data.chromaticities.blue_y)?;
                 }
-                crate::decoders::png::PngChunkData::TRNS(data) => {
-                    match &data.transparency {
-                        crate::decoders::png::TransparencyData::Grayscale(v) => {
-                            writeln!(f, "  Transparent value: {}", v)?;
-                        }
-                        crate::decoders::png::TransparencyData::RGB(r, g, b) => {
-                            writeln!(f, "  Transparent color: RGB({}, {}, {})", r, g, b)?;
-                        }
-                        crate::decoders::png::TransparencyData::Palette(vals) => {
-                            writeln!(f, "  Palette alpha values: {} entries", vals.len())?;
-                        }
+                crate::decoders::png::PngChunkData::TRNS(data) => match &data.transparency {
+                    crate::decoders::png::TransparencyData::Grayscale(v) => {
+                        writeln!(f, "  Transparent value: {}", v)?;
                     }
-                }
-                crate::decoders::png::PngChunkData::BKGD(data) => {
-                    match &data.background {
-                        crate::decoders::png::BackgroundData::Grayscale(v) => {
-                            writeln!(f, "  Background value: {}", v)?;
-                        }
-                        crate::decoders::png::BackgroundData::RGB(r, g, b) => {
-                            writeln!(f, "  Background color: RGB({}, {}, {})", r, g, b)?;
-                        }
-                        crate::decoders::png::BackgroundData::PaletteIndex(idx) => {
-                            writeln!(f, "  Background palette index: {}", idx)?;
-                        }
+                    crate::decoders::png::TransparencyData::RGB(r, g, b) => {
+                        writeln!(f, "  Transparent color: RGB({}, {}, {})", r, g, b)?;
                     }
-                }
+                    crate::decoders::png::TransparencyData::Palette(vals) => {
+                        writeln!(f, "  Palette alpha values: {} entries", vals.len())?;
+                    }
+                },
+                crate::decoders::png::PngChunkData::BKGD(data) => match &data.background {
+                    crate::decoders::png::BackgroundData::Grayscale(v) => {
+                        writeln!(f, "  Background value: {}", v)?;
+                    }
+                    crate::decoders::png::BackgroundData::RGB(r, g, b) => {
+                        writeln!(f, "  Background color: RGB({}, {}, {})", r, g, b)?;
+                    }
+                    crate::decoders::png::BackgroundData::PaletteIndex(idx) => {
+                        writeln!(f, "  Background palette index: {}", idx)?;
+                    }
+                },
                 crate::decoders::png::PngChunkData::PHYS(data) => {
                     writeln!(f, "  Pixels per unit X: {}", data.physical_dimensions.pixels_per_unit_x)?;
                     writeln!(f, "  Pixels per unit Y: {}", data.physical_dimensions.pixels_per_unit_y)?;
@@ -190,48 +199,58 @@ impl fmt::Display for PngInfo {
                     writeln!(f, "  Significant bits: {:?}", data.significant_bits)?;
                 }
                 crate::decoders::png::PngChunkData::TIME(data) => {
-                    writeln!(f, "  Last modified: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                        data.time.year, data.time.month, data.time.day,
-                        data.time.hour, data.time.minute, data.time.second)?;
+                    writeln!(
+                        f,
+                        "  Last modified: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                        data.time.year,
+                        data.time.month,
+                        data.time.day,
+                        data.time.hour,
+                        data.time.minute,
+                        data.time.second
+                    )?;
                 }
-                crate::decoders::png::PngChunkData::TEXT(data) |
-                crate::decoders::png::PngChunkData::ZTXT(data) |
-                crate::decoders::png::PngChunkData::ITXT(data) => {
-                    match &data.text {
-                        crate::decoders::png::PngText::Basic { keyword, text } => {
-                            writeln!(f, "  Keyword: {}", keyword)?;
-                            let char_count = text.chars().count();
-                            if char_count > 60 {
-                                let preview: String = text.chars().take(60).collect();
-                                writeln!(f, "  Text: {}... ({} chars)", preview, char_count)?;
-                            } else {
-                                writeln!(f, "  Text: {}", text)?;
-                            }
-                        }
-                        crate::decoders::png::PngText::Compressed { keyword, text } => {
-                            writeln!(f, "  Keyword: {}", keyword)?;
-                            let char_count = text.chars().count();
-                            if char_count > 60 {
-                                let preview: String = text.chars().take(60).collect();
-                                writeln!(f, "  Text (compressed): {}... ({} chars)", preview, char_count)?;
-                            } else {
-                                writeln!(f, "  Text (compressed): {}", text)?;
-                            }
-                        }
-                        crate::decoders::png::PngText::International { keyword, language_tag, translated_keyword, text } => {
-                            writeln!(f, "  Keyword: {}", keyword)?;
-                            writeln!(f, "  Language: {}", language_tag)?;
-                            writeln!(f, "  Translated keyword: {}", translated_keyword)?;
-                            let char_count = text.chars().count();
-                            if char_count > 60 {
-                                let preview: String = text.chars().take(60).collect();
-                                writeln!(f, "  Text: {}... ({} chars)", preview, char_count)?;
-                            } else {
-                                writeln!(f, "  Text: {}", text)?;
-                            }
+                crate::decoders::png::PngChunkData::TEXT(data)
+                | crate::decoders::png::PngChunkData::ZTXT(data)
+                | crate::decoders::png::PngChunkData::ITXT(data) => match &data.text {
+                    crate::decoders::png::PngText::Basic { keyword, text } => {
+                        writeln!(f, "  Keyword: {}", keyword)?;
+                        let char_count = text.chars().count();
+                        if char_count > 60 {
+                            let preview: String = text.chars().take(60).collect();
+                            writeln!(f, "  Text: {}... ({} chars)", preview, char_count)?;
+                        } else {
+                            writeln!(f, "  Text: {}", text)?;
                         }
                     }
-                }
+                    crate::decoders::png::PngText::Compressed { keyword, text } => {
+                        writeln!(f, "  Keyword: {}", keyword)?;
+                        let char_count = text.chars().count();
+                        if char_count > 60 {
+                            let preview: String = text.chars().take(60).collect();
+                            writeln!(f, "  Text (compressed): {}... ({} chars)", preview, char_count)?;
+                        } else {
+                            writeln!(f, "  Text (compressed): {}", text)?;
+                        }
+                    }
+                    crate::decoders::png::PngText::International {
+                        keyword,
+                        language_tag,
+                        translated_keyword,
+                        text,
+                    } => {
+                        writeln!(f, "  Keyword: {}", keyword)?;
+                        writeln!(f, "  Language: {}", language_tag)?;
+                        writeln!(f, "  Translated keyword: {}", translated_keyword)?;
+                        let char_count = text.chars().count();
+                        if char_count > 60 {
+                            let preview: String = text.chars().take(60).collect();
+                            writeln!(f, "  Text: {}... ({} chars)", preview, char_count)?;
+                        } else {
+                            writeln!(f, "  Text: {}", text)?;
+                        }
+                    }
+                },
                 crate::decoders::png::PngChunkData::SRGB(data) => {
                     writeln!(f, "  Rendering intent: {:?}", data.rendering_intent)?;
                 }
@@ -243,8 +262,13 @@ impl fmt::Display for PngInfo {
                     writeln!(f, "  Palette name: {}", data.palette.name)?;
                     writeln!(f, "  Sample depth: {} bits", data.palette.sample_depth)?;
                     writeln!(f, "  Samples: {}", data.palette.samples.len())?;
-                    let entries: Vec<String> = data.palette.samples.iter()
-                        .map(|s| format!("#{:04X}{:04X}{:04X}{:04X}(f={})", s.red, s.green, s.blue, s.alpha, s.frequency))
+                    let entries: Vec<String> = data
+                        .palette
+                        .samples
+                        .iter()
+                        .map(|s| {
+                            format!("#{:04X}{:04X}{:04X}{:04X}(f={})", s.red, s.green, s.blue, s.alpha, s.frequency)
+                        })
                         .collect();
                     writeln!(f, "  Colors: {}", entries.join(", "))?;
                 }
@@ -312,9 +336,7 @@ fn fmt_exif_value(value: &ExifValue) -> String {
 fn fmt_exif_ifd(f: &mut fmt::Formatter<'_>, name: &str, ifd: &ExifIfd) -> fmt::Result {
     writeln!(f, "  {} ({} entries):", name, ifd.entries.len())?;
     for entry in &ifd.entries {
-        let label = entry.tag_name.as_deref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("0x{:04X}", entry.tag));
+        let label = entry.tag_name.as_deref().map(|s| s.to_string()).unwrap_or_else(|| format!("0x{:04X}", entry.tag));
         writeln!(f, "    {}: {}", label, fmt_exif_value(&entry.value))?;
     }
     Ok(())
@@ -402,7 +424,14 @@ impl fmt::Display for JpegInfo {
                     writeln!(f, "  Height: {} pixels", sof.height)?;
                     writeln!(f, "  Components: {}", sof.component_count)?;
                     for comp in &sof.components {
-                        writeln!(f, "    Component {}: sampling {}x{}, quant table {}", comp.id, comp.horizontal_sampling_factor, comp.vertical_sampling_factor, comp.quantization_table_id)?;
+                        writeln!(
+                            f,
+                            "    Component {}: sampling {}x{}, quant table {}",
+                            comp.id,
+                            comp.horizontal_sampling_factor,
+                            comp.vertical_sampling_factor,
+                            comp.quantization_table_id
+                        )?;
                     }
                 }
                 JpegSegmentData::DHT(dht) => {
@@ -418,7 +447,11 @@ impl fmt::Display for JpegInfo {
                 JpegSegmentData::DAC(dac) => {
                     writeln!(f, "  Length: {} bytes", dac.length)?;
                     for table in &dac.dc_tables {
-                        writeln!(f, "    DC table id={}, Kx={}, U/L={}", table.identifier, table.values[0].value, table.values[0].length)?;
+                        writeln!(
+                            f,
+                            "    DC table id={}, Kx={}, U/L={}",
+                            table.identifier, table.values[0].value, table.values[0].length
+                        )?;
                     }
                     for table in &dac.ac_tables {
                         writeln!(f, "    AC table id={}, Kx={}", table.identifier, table.values[0].value)?;
@@ -431,7 +464,8 @@ impl fmt::Display for JpegInfo {
                         let bits = if table.precision == 0 { 8u8 } else { 16u8 };
                         writeln!(f, "    Table id={}, precision={} bits", table.id, bits)?;
                         for row in 0..8 {
-                            let row_vals: Vec<u16> = (0..8).map(|col| table.table.get(row * 8 + col).copied().unwrap_or(0)).collect();
+                            let row_vals: Vec<u16> =
+                                (0..8).map(|col| table.table.get(row * 8 + col).copied().unwrap_or(0)).collect();
                             writeln!(f, "      {:?}", row_vals)?;
                         }
                     }
@@ -446,7 +480,11 @@ impl fmt::Display for JpegInfo {
                     writeln!(f, "  Length: {} bytes", sos.length)?;
                     writeln!(f, "  Components: {}", sos.component_count)?;
                     for comp in &sos.components {
-                        writeln!(f, "    Component {}: DC table {}, AC table {}", comp.component_id, comp.dc_table_selector, comp.ac_table_selector)?;
+                        writeln!(
+                            f,
+                            "    Component {}: DC table {}, AC table {}",
+                            comp.component_id, comp.dc_table_selector, comp.ac_table_selector
+                        )?;
                     }
                     writeln!(f, "  Spectral selection: {}-{}", sos.start_spectral, sos.end_spectral)?;
                     writeln!(f, "  Successive approximation: {}/{}", sos.successive_high, sos.successive_low)?;
@@ -617,7 +655,8 @@ impl fmt::Display for BmpInfo {
                 }
                 BmpSectionData::ColorTable(entries) => {
                     writeln!(f, "Offset 0x{:08X}  Color Table ({} entries)", section.start_offset, entries.len())?;
-                    let hex: Vec<String> = entries.iter().map(|e| format!("#{:02X}{:02X}{:02X}", e.red, e.green, e.blue)).collect();
+                    let hex: Vec<String> =
+                        entries.iter().map(|e| format!("#{:02X}{:02X}{:02X}", e.red, e.green, e.blue)).collect();
                     writeln!(f, "  Colors: {}", hex.join(", "))?;
                 }
                 BmpSectionData::PixelData(pd) => {
@@ -667,7 +706,8 @@ impl fmt::Display for GifInfo {
                     writeln!(f, "Offset 0x{:08X}  Global Color Table", section.start_offset)?;
                     writeln!(f, "  Entries: {}", ct.entry_count)?;
                     writeln!(f, "  Length: {} bytes", ct.length)?;
-                    let hex: Vec<String> = ct.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
+                    let hex: Vec<String> =
+                        ct.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
                     writeln!(f, "  Colors: {}", hex.join(", "))?;
                 }
                 GifSectionData::GraphicsControlExtension(gce) => {
@@ -690,7 +730,8 @@ impl fmt::Display for GifInfo {
                     writeln!(f, "Offset 0x{:08X}  Local Color Table", section.start_offset)?;
                     writeln!(f, "  Entries: {}", ct.entry_count)?;
                     writeln!(f, "  Length: {} bytes", ct.length)?;
-                    let hex: Vec<String> = ct.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
+                    let hex: Vec<String> =
+                        ct.entries.iter().map(|[r, g, b]| format!("#{:02X}{:02X}{:02X}", r, g, b)).collect();
                     writeln!(f, "  Colors: {}", hex.join(", "))?;
                 }
                 GifSectionData::ImageData(id) => {
@@ -744,7 +785,7 @@ impl fmt::Display for GifInfo {
 
 impl fmt::Display for NetpbmInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use crate::decoders::netpbm::{NetpbmSectionData};
+        use crate::decoders::netpbm::NetpbmSectionData;
 
         writeln!(f, "Netpbm Image Information")?;
         writeln!(f, "=====================")?;
@@ -925,7 +966,11 @@ impl fmt::Display for JpegLsInfo {
                     writeln!(f, "  Height: {}", sof.height)?;
                     writeln!(f, "  Components: {}", sof.component_count)?;
                     for comp in &sof.components {
-                        writeln!(f, "    Component {}: sampling {}x{}", comp.id, comp.horizontal_sampling, comp.vertical_sampling)?;
+                        writeln!(
+                            f,
+                            "    Component {}: sampling {}x{}",
+                            comp.id, comp.horizontal_sampling, comp.vertical_sampling
+                        )?;
                     }
                 }
                 JpegLsSectionData::Sos(sos) => {
@@ -933,7 +978,11 @@ impl fmt::Display for JpegLsInfo {
                     writeln!(f, "  Length: {} bytes", sos.length)?;
                     writeln!(f, "  Components: {}", sos.component_count)?;
                     for comp in &sos.components {
-                        writeln!(f, "    Component {}: mapping table selector {}", comp.id, comp.mapping_table_selector)?;
+                        writeln!(
+                            f,
+                            "    Component {}: mapping table selector {}",
+                            comp.id, comp.mapping_table_selector
+                        )?;
                     }
                     writeln!(f, "  NEAR (loss): {}", sos.near)?;
                     writeln!(f, "  Interleave mode: {}", sos.interleave_mode)?;
@@ -943,7 +992,14 @@ impl fmt::Display for JpegLsInfo {
                 JpegLsSectionData::Lse(lse) => {
                     writeln!(f, "Offset 0x{:08X}  LSE (JPEG-LS Preset Parameters)", section.start_offset)?;
                     match lse {
-                        crate::decoders::jpeg_ls::types::JpegLsLseData::PresetParameters { length, maxval, t1, t2, t3, reset } => {
+                        crate::decoders::jpeg_ls::types::JpegLsLseData::PresetParameters {
+                            length,
+                            maxval,
+                            t1,
+                            t2,
+                            t3,
+                            reset,
+                        } => {
                             writeln!(f, "  Length: {} bytes", length)?;
                             writeln!(f, "  MaxVal: {}", maxval)?;
                             writeln!(f, "  T1: {}", t1)?;
@@ -951,7 +1007,12 @@ impl fmt::Display for JpegLsInfo {
                             writeln!(f, "  T3: {}", t3)?;
                             writeln!(f, "  Reset: {}", reset)?;
                         }
-                        crate::decoders::jpeg_ls::types::JpegLsLseData::MappingTable { length, table_id, entry_count, entries } => {
+                        crate::decoders::jpeg_ls::types::JpegLsLseData::MappingTable {
+                            length,
+                            table_id,
+                            entry_count,
+                            entries,
+                        } => {
                             writeln!(f, "  Length: {} bytes", length)?;
                             writeln!(f, "  Table ID: {}", table_id)?;
                             writeln!(f, "  Entries: {}", entry_count)?;
@@ -1172,11 +1233,25 @@ impl fmt::Display for TgaInfo {
                     }
                     if !ext.software_id.is_empty() {
                         writeln!(f, "  Software ID: {}", ext.software_id)?;
-                        writeln!(f, "  Software version: {}.{} '{}'", ext.software_version_number / 100, ext.software_version_number % 100, ext.software_version_letter as char)?;
+                        writeln!(
+                            f,
+                            "  Software version: {}.{} '{}'",
+                            ext.software_version_number / 100,
+                            ext.software_version_number % 100,
+                            ext.software_version_letter as char
+                        )?;
                     }
-                    writeln!(f, "  Key color: A={} R={} G={} B={}", ext.key_color_a, ext.key_color_r, ext.key_color_g, ext.key_color_b)?;
+                    writeln!(
+                        f,
+                        "  Key color: A={} R={} G={} B={}",
+                        ext.key_color_a, ext.key_color_r, ext.key_color_g, ext.key_color_b
+                    )?;
                     if ext.pixel_aspect_ratio_denominator != 0 {
-                        writeln!(f, "  Pixel aspect ratio: {}/{}", ext.pixel_aspect_ratio_numerator, ext.pixel_aspect_ratio_denominator)?;
+                        writeln!(
+                            f,
+                            "  Pixel aspect ratio: {}/{}",
+                            ext.pixel_aspect_ratio_numerator, ext.pixel_aspect_ratio_denominator
+                        )?;
                     }
                     if ext.gamma_value_denominator != 0 {
                         writeln!(f, "  Gamma: {}/{}", ext.gamma_value_numerator, ext.gamma_value_denominator)?;
@@ -1227,12 +1302,14 @@ impl fmt::Display for TiffInfo {
                         writeln!(f, "  Extra samples: {:?}", ifd.extra_samples)?;
                     }
                     if ifd.x_resolution != 0.0 || ifd.y_resolution != 0.0 {
-                        writeln!(f, "  Resolution: {}x{} ({:?})", ifd.x_resolution, ifd.y_resolution, ifd.resolution_unit)?;
+                        writeln!(
+                            f,
+                            "  Resolution: {}x{} ({:?})",
+                            ifd.x_resolution, ifd.y_resolution, ifd.resolution_unit
+                        )?;
                     }
                     if ifd.is_tiled {
-                        writeln!(f, "  Tile size: {}x{}",
-                            ifd.tile_width.unwrap_or(0),
-                            ifd.tile_length.unwrap_or(0))?;
+                        writeln!(f, "  Tile size: {}x{}", ifd.tile_width.unwrap_or(0), ifd.tile_length.unwrap_or(0))?;
                         writeln!(f, "  Tile count: {}", ifd.tile_count)?;
                         if ifd.is_volumetric {
                             writeln!(f, "  Tile depth: {}", ifd.tile_depth)?;

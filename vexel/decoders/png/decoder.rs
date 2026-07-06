@@ -1,15 +1,15 @@
-use crate::bitreader::BitReader;
-use crate::utils::deflate::ZlibDecoder;
-use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::icc::ICCProfile;
-use crate::utils::info::PngInfo;
-use crate::{Image, Limits, PixelData, PixelFormat, log_debug, log_warn};
 use std::io::{Read, Seek, SeekFrom};
 
 use super::animation::AnimationDecoder;
 use super::chunks::{self, ChunkReader};
 use super::pixels::PixelDecoder;
 use super::types::*;
+use crate::bitreader::BitReader;
+use crate::utils::deflate::ZlibDecoder;
+use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::icc::ICCProfile;
+use crate::utils::info::PngInfo;
+use crate::{log_debug, log_warn, Image, Limits, PixelData, PixelFormat};
 
 pub struct PngDecoder<R: Read + Seek> {
     width: u32,
@@ -76,11 +76,8 @@ impl<R: Read + Seek> PngDecoder<R> {
         self.limits = limits;
     }
 
-
     pub fn get_info(&self) -> PngInfo {
-        PngInfo {
-            sections: self.chunks.clone(),
-        }
+        PngInfo { sections: self.chunks.clone() }
     }
 
     fn decode_pixels(&mut self) -> VexelResult<PixelData> {
@@ -95,8 +92,8 @@ impl<R: Read + Seek> PngDecoder<R> {
             let bytes_per_row = ((bits_per_pixel * self.width).div_ceil(8) + 1) as usize;
             let capacity = bytes_per_row * self.height as usize;
             let compressed_len = self.idat_data.len();
-            self.idat_data = ZlibDecoder::from_bytes(std::mem::take(&mut self.idat_data))
-                .decode_with_capacity(capacity);
+            self.idat_data =
+                ZlibDecoder::from_bytes(std::mem::take(&mut self.idat_data)).decode_with_capacity(capacity);
             self.limits.free_usize(compressed_len);
         }
 
@@ -122,11 +119,7 @@ impl<R: Read + Seek> PngDecoder<R> {
         }
 
         if self.idat_data.is_empty() {
-            log_warn!(
-                "No decompressed pixel data for {}x{} image, filling with zeros",
-                self.width,
-                self.height
-            );
+            log_warn!("No decompressed pixel data for {}x{} image, filling with zeros", self.width, self.height);
             return Ok(PixelData::RGBA8(vec![0u8; (self.width * self.height * 4) as usize]));
         }
 
@@ -189,146 +182,192 @@ impl<R: Read + Seek> PngDecoder<R> {
                     let next_chunk_start = chunk_data_start + chunk_length as u64 + 4;
 
                     let result = match chunk {
-                        PngChunk::IHDR => {
-                            match ChunkReader::read_ihdr(&mut self.reader, &mut self.chunks) {
-                                Ok((width, height, bit_depth, color_type, compression_method, has_filters, interlace)) => {
-                                    self.width = width;
-                                    self.height = height;
-                                    self.bit_depth = bit_depth;
-                                    self.color_type = color_type;
-                                    self.compression_method = compression_method;
-                                    self.has_filters = has_filters;
-                                    self.interlace = interlace;
+                        PngChunk::IHDR => match ChunkReader::read_ihdr(&mut self.reader, &mut self.chunks) {
+                            Ok((width, height, bit_depth, color_type, compression_method, has_filters, interlace)) => {
+                                self.width = width;
+                                self.height = height;
+                                self.bit_depth = bit_depth;
+                                self.color_type = color_type;
+                                self.compression_method = compression_method;
+                                self.has_filters = has_filters;
+                                self.interlace = interlace;
 
-                                    if self.width == 0 || self.height == 0 {
-                                        return Err(VexelError::InvalidDimensions {
-                                            width: self.width,
-                                            height: self.height,
-                                        });
-                                    }
-
-                                    self.limits.reserve_buffer(self.width, self.height, 4)?;
-
-                                    Ok(())
+                                if self.width == 0 || self.height == 0 {
+                                    return Err(VexelError::InvalidDimensions {
+                                        width: self.width,
+                                        height: self.height,
+                                    });
                                 }
-                                Err(e) => Err(e),
+
+                                self.limits.reserve_buffer(self.width, self.height, 4)?;
+
+                                Ok(())
                             }
-                        }
-                        PngChunk::PLTE => {
-                            match ChunkReader::read_plte(&mut self.reader, &mut self.chunks) {
-                                Ok(palette) => { self.palette = Some(palette); Ok(()) }
-                                Err(e) => Err(e),
+                            Err(e) => Err(e),
+                        },
+                        PngChunk::PLTE => match ChunkReader::read_plte(&mut self.reader, &mut self.chunks) {
+                            Ok(palette) => {
+                                self.palette = Some(palette);
+                                Ok(())
                             }
-                        }
-                        PngChunk::IDAT => {
-                            ChunkReader::read_idat(
-                                &mut self.reader,
-                                &mut self.chunks,
-                                &mut self.idat_data,
-                                &mut self.frames,
-                                &mut self.limits,
-                            )
-                        }
-                        PngChunk::GAMA => {
-                            match ChunkReader::read_gama(&mut self.reader, &mut self.chunks) {
-                                Ok(gamma) => { self.gamma = Some(gamma); Ok(()) }
-                                Err(e) => Err(e),
+                            Err(e) => Err(e),
+                        },
+                        PngChunk::IDAT => ChunkReader::read_idat(
+                            &mut self.reader,
+                            &mut self.chunks,
+                            &mut self.idat_data,
+                            &mut self.frames,
+                            &mut self.limits,
+                        ),
+                        PngChunk::GAMA => match ChunkReader::read_gama(&mut self.reader, &mut self.chunks) {
+                            Ok(gamma) => {
+                                self.gamma = Some(gamma);
+                                Ok(())
                             }
-                        }
-                        PngChunk::CHRM => {
-                            match ChunkReader::read_chrm(&mut self.reader, &mut self.chunks) {
-                                Ok(chrm) => { self.chromaticities = Some(chrm); Ok(()) }
-                                Err(e) => Err(e),
+                            Err(e) => Err(e),
+                        },
+                        PngChunk::CHRM => match ChunkReader::read_chrm(&mut self.reader, &mut self.chunks) {
+                            Ok(chrm) => {
+                                self.chromaticities = Some(chrm);
+                                Ok(())
                             }
-                        }
+                            Err(e) => Err(e),
+                        },
                         PngChunk::TEXT => {
                             match ChunkReader::read_text(&mut self.reader, &mut self.chunks, &mut self.limits) {
-                                Ok(text) => { self.text_chunks.push(text); Ok(()) }
+                                Ok(text) => {
+                                    self.text_chunks.push(text);
+                                    Ok(())
+                                }
                                 Err(e) => Err(e),
                             }
                         }
                         PngChunk::ZTXT => {
                             match ChunkReader::read_ztxt(&mut self.reader, &mut self.chunks, &mut self.limits) {
-                                Ok(text) => { self.text_chunks.push(text); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::ITXT => {
-                            match ChunkReader::read_itxt(&mut self.reader, &mut self.chunks, &mut self.limits) {
-                                Ok(text) => { self.text_chunks.push(text); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::SRGB => {
-                            match ChunkReader::read_srgb(&mut self.reader, &mut self.chunks) {
-                                Ok(intent) => { self.rendering_intent = Some(intent); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::TRNS => {
-                            match ChunkReader::read_trns(&mut self.reader, &mut self.chunks, self.color_type, self.palette.as_ref()) {
-                                Ok(trns) => { self.transparency = Some(trns); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::BKGD => {
-                            match ChunkReader::read_bkgd(&mut self.reader, &mut self.chunks, self.color_type, self.palette.as_ref()) {
-                                Ok(bkgd) => { self.background = Some(bkgd); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::PHYS => {
-                            match ChunkReader::read_phys(&mut self.reader, &mut self.chunks) {
-                                Ok(phys) => { self.physical_dimensions = Some(phys); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::SBIT => {
-                            match ChunkReader::read_sbit(&mut self.reader, &mut self.chunks, self.color_type) {
-                                Ok(sbit) => { self.significant_bits = Some(sbit); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::HIST => {
-                            match ChunkReader::read_hist(&mut self.reader, &mut self.chunks, self.palette.as_ref()) {
-                                Ok(hist) => { self.histogram = Some(hist); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::TIME => {
-                            match ChunkReader::read_time(&mut self.reader, &mut self.chunks) {
-                                Ok(time) => { self.modification_time = Some(time); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::SPLT => {
-                            match ChunkReader::read_splt(&mut self.reader, &mut self.chunks) {
-                                Ok(splt) => { self.suggested_palettes.push(splt); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::ACTL => {
-                            match ChunkReader::read_actl(&mut self.reader, &mut self.chunks) {
-                                Ok(actl) => { self.actl_info = Some(actl); Ok(()) }
-                                Err(e) => Err(e),
-                            }
-                        }
-                        PngChunk::FCTL => {
-                            match ChunkReader::read_fctl(&mut self.reader, &mut self.chunks, self.width, self.height, &mut self.limits) {
-                                Ok(fctl) => {
-                                    self.frames.push(PngFrame {
-                                        fctl_info: fctl,
-                                        fdat: Vec::new(),
-                                    });
+                                Ok(text) => {
+                                    self.text_chunks.push(text);
                                     Ok(())
                                 }
                                 Err(e) => Err(e),
                             }
                         }
-                        PngChunk::FDAT => ChunkReader::read_fdat(&mut self.reader, &mut self.chunks, &mut self.frames, &mut self.limits),
+                        PngChunk::ITXT => {
+                            match ChunkReader::read_itxt(&mut self.reader, &mut self.chunks, &mut self.limits) {
+                                Ok(text) => {
+                                    self.text_chunks.push(text);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        PngChunk::SRGB => match ChunkReader::read_srgb(&mut self.reader, &mut self.chunks) {
+                            Ok(intent) => {
+                                self.rendering_intent = Some(intent);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        },
+                        PngChunk::TRNS => {
+                            match ChunkReader::read_trns(
+                                &mut self.reader,
+                                &mut self.chunks,
+                                self.color_type,
+                                self.palette.as_ref(),
+                            ) {
+                                Ok(trns) => {
+                                    self.transparency = Some(trns);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        PngChunk::BKGD => {
+                            match ChunkReader::read_bkgd(
+                                &mut self.reader,
+                                &mut self.chunks,
+                                self.color_type,
+                                self.palette.as_ref(),
+                            ) {
+                                Ok(bkgd) => {
+                                    self.background = Some(bkgd);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        PngChunk::PHYS => match ChunkReader::read_phys(&mut self.reader, &mut self.chunks) {
+                            Ok(phys) => {
+                                self.physical_dimensions = Some(phys);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        },
+                        PngChunk::SBIT => {
+                            match ChunkReader::read_sbit(&mut self.reader, &mut self.chunks, self.color_type) {
+                                Ok(sbit) => {
+                                    self.significant_bits = Some(sbit);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        PngChunk::HIST => {
+                            match ChunkReader::read_hist(&mut self.reader, &mut self.chunks, self.palette.as_ref()) {
+                                Ok(hist) => {
+                                    self.histogram = Some(hist);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        PngChunk::TIME => match ChunkReader::read_time(&mut self.reader, &mut self.chunks) {
+                            Ok(time) => {
+                                self.modification_time = Some(time);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        },
+                        PngChunk::SPLT => match ChunkReader::read_splt(&mut self.reader, &mut self.chunks) {
+                            Ok(splt) => {
+                                self.suggested_palettes.push(splt);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        },
+                        PngChunk::ACTL => match ChunkReader::read_actl(&mut self.reader, &mut self.chunks) {
+                            Ok(actl) => {
+                                self.actl_info = Some(actl);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        },
+                        PngChunk::FCTL => {
+                            match ChunkReader::read_fctl(
+                                &mut self.reader,
+                                &mut self.chunks,
+                                self.width,
+                                self.height,
+                                &mut self.limits,
+                            ) {
+                                Ok(fctl) => {
+                                    self.frames.push(PngFrame { fctl_info: fctl, fdat: Vec::new() });
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        PngChunk::FDAT => ChunkReader::read_fdat(
+                            &mut self.reader,
+                            &mut self.chunks,
+                            &mut self.frames,
+                            &mut self.limits,
+                        ),
                         PngChunk::ICCP => {
                             match ChunkReader::read_iccp(&mut self.reader, &mut self.chunks, &mut self.limits) {
-                                Ok(icc) => { self.icc_profile = Some(icc); Ok(()) }
+                                Ok(icc) => {
+                                    self.icc_profile = Some(icc);
+                                    Ok(())
+                                }
                                 Err(e) => Err(e),
                             }
                         }
@@ -367,22 +406,18 @@ impl<R: Read + Seek> PngDecoder<R> {
                             start_offset,
                             chunk_type: chunk_type_str.clone(),
                             length: length_u32,
-                            data: PngChunkData::Unknown {
-                                chunk_type: chunk_type_str,
-                                length: length_u32,
-                                crc,
-                            },
+                            data: PngChunkData::Unknown { chunk_type: chunk_type_str, length: length_u32, crc },
                         });
-                        
+
                         let current_pos = self.reader.stream_position()?;
-                        
+
                         self.reader.seek(SeekFrom::Start(current_pos + length_u32 as u64 + 4))?;
-                        
+
                         let _next_length = match self.reader.read_u32() {
                             Ok(len) => len,
                             Err(_) => break,
                         };
-                        
+
                         for byte in window.iter_mut() {
                             *byte = match self.reader.read_u8() {
                                 Ok(b) => b,

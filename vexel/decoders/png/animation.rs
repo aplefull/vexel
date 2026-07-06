@@ -1,8 +1,8 @@
+use super::pixels::PixelDecoder;
+use super::types::{ColorType, FctlChunk, PngFrame, TransparencyData};
 use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::{ImageFrame, PixelData};
-use super::types::{ColorType, FctlChunk, PngFrame, TransparencyData};
-use super::pixels::PixelDecoder;
 
 pub struct AnimationDecoder {
     width: u32,
@@ -14,12 +14,7 @@ impl AnimationDecoder {
         Self { width, height }
     }
 
-    fn compose_frame(
-        &self,
-        pixels: PixelData,
-        fctl: &FctlChunk,
-        canvas: PixelData,
-    ) -> VexelResult<PixelData> {
+    fn compose_frame(&self, pixels: PixelData, fctl: &FctlChunk, canvas: PixelData) -> VexelResult<PixelData> {
         let frame_pixels = pixels.into_rgba8();
         let mut output = canvas;
 
@@ -84,11 +79,7 @@ impl AnimationDecoder {
         palette: Option<Vec<[u8; 3]>>,
         transparency: Option<TransparencyData>,
     ) -> VexelResult<Vec<ImageFrame>> {
-        if frames
-            .iter()
-            .filter(|f| f.fctl_info.width > 0 && f.fctl_info.height > 0 && !f.fdat.is_empty())
-            .count()
-            == 0
+        if frames.iter().filter(|f| f.fctl_info.width > 0 && f.fctl_info.height > 0 && !f.fdat.is_empty()).count() == 0
         {
             return Err(VexelError::Custom("No valid frames found".into()));
         }
@@ -225,14 +216,7 @@ fn decode_frame_pixels(
     palette: &Option<Vec<[u8; 3]>>,
     transparency: &Option<TransparencyData>,
 ) -> Option<PixelData> {
-    let decoder = PixelDecoder::new(
-        bit_depth,
-        color_type,
-        width,
-        interlace,
-        palette.clone(),
-        transparency.clone(),
-    );
+    let decoder = PixelDecoder::new(bit_depth, color_type, width, interlace, palette.clone(), transparency.clone());
 
     let decompressed = ZlibDecoder::from_bytes(fdat.to_vec()).decode();
     let frame_pixels = decoder.deinterlace_scan_lines(&decompressed, width, height).ok()?;

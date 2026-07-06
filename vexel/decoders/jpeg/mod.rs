@@ -1,6 +1,6 @@
-pub mod markers;
+pub mod bitreader;
 pub mod decoder;
+pub mod idct;
+pub mod markers;
 pub mod types;
 pub mod upsample;
-pub mod idct;
-pub mod bitreader;

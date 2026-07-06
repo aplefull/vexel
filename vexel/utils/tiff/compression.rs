@@ -33,13 +33,7 @@ impl LzwTable {
         }
         prefix[LZW_CLEAR_CODE as usize] = 0;
         prefix[LZW_EOI_CODE as usize] = 0;
-        LzwTable {
-            prefix,
-            suffix,
-            free: LZW_FIRST_CODE,
-            nbits: LZW_MIN_BITS,
-            max_code: (1u16 << LZW_MIN_BITS) - 2,
-        }
+        LzwTable { prefix, suffix, free: LZW_FIRST_CODE, nbits: LZW_MIN_BITS, max_code: (1u16 << LZW_MIN_BITS) - 2 }
     }
 
     fn reset(&mut self) {
@@ -438,7 +432,12 @@ pub fn apply_predictor_horizontal(data: &mut [u8], width: u32, samples_per_pixel
                 let prev_idx = idx - spp * bytes_per_sample;
                 if idx + 3 < data.len() && prev_idx + 3 < data.len() {
                     let val = u32::from_ne_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]);
-                    let prev = u32::from_ne_bytes([data[prev_idx], data[prev_idx + 1], data[prev_idx + 2], data[prev_idx + 3]]);
+                    let prev = u32::from_ne_bytes([
+                        data[prev_idx],
+                        data[prev_idx + 1],
+                        data[prev_idx + 2],
+                        data[prev_idx + 3],
+                    ]);
                     let result = val.wrapping_add(prev).to_ne_bytes();
                     data[idx] = result[0];
                     data[idx + 1] = result[1];
@@ -463,12 +462,24 @@ pub fn apply_predictor_horizontal(data: &mut [u8], width: u32, samples_per_pixel
                 let prev_idx = idx - spp * bytes_per_sample;
                 if idx + 7 < data.len() && prev_idx + 7 < data.len() {
                     let val = u64::from_ne_bytes([
-                        data[idx], data[idx + 1], data[idx + 2], data[idx + 3],
-                        data[idx + 4], data[idx + 5], data[idx + 6], data[idx + 7],
+                        data[idx],
+                        data[idx + 1],
+                        data[idx + 2],
+                        data[idx + 3],
+                        data[idx + 4],
+                        data[idx + 5],
+                        data[idx + 6],
+                        data[idx + 7],
                     ]);
                     let prev = u64::from_ne_bytes([
-                        data[prev_idx], data[prev_idx + 1], data[prev_idx + 2], data[prev_idx + 3],
-                        data[prev_idx + 4], data[prev_idx + 5], data[prev_idx + 6], data[prev_idx + 7],
+                        data[prev_idx],
+                        data[prev_idx + 1],
+                        data[prev_idx + 2],
+                        data[prev_idx + 3],
+                        data[prev_idx + 4],
+                        data[prev_idx + 5],
+                        data[prev_idx + 6],
+                        data[prev_idx + 7],
                     ]);
                     let result = val.wrapping_add(prev).to_ne_bytes();
                     data[idx..idx + 8].copy_from_slice(&result);
@@ -523,7 +534,12 @@ pub fn apply_predictor_horizontal_be(data: &mut [u8], width: u32, samples_per_pi
                 let prev_idx = idx - spp * bytes_per_sample;
                 if idx + 3 < data.len() && prev_idx + 3 < data.len() {
                     let val = u32::from_be_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]);
-                    let prev = u32::from_be_bytes([data[prev_idx], data[prev_idx + 1], data[prev_idx + 2], data[prev_idx + 3]]);
+                    let prev = u32::from_be_bytes([
+                        data[prev_idx],
+                        data[prev_idx + 1],
+                        data[prev_idx + 2],
+                        data[prev_idx + 3],
+                    ]);
                     let result = val.wrapping_add(prev).to_be_bytes();
                     data[idx] = result[0];
                     data[idx + 1] = result[1];
@@ -548,12 +564,24 @@ pub fn apply_predictor_horizontal_be(data: &mut [u8], width: u32, samples_per_pi
                 let prev_idx = idx - spp * bytes_per_sample;
                 if idx + 7 < data.len() && prev_idx + 7 < data.len() {
                     let val = u64::from_be_bytes([
-                        data[idx], data[idx + 1], data[idx + 2], data[idx + 3],
-                        data[idx + 4], data[idx + 5], data[idx + 6], data[idx + 7],
+                        data[idx],
+                        data[idx + 1],
+                        data[idx + 2],
+                        data[idx + 3],
+                        data[idx + 4],
+                        data[idx + 5],
+                        data[idx + 6],
+                        data[idx + 7],
                     ]);
                     let prev = u64::from_be_bytes([
-                        data[prev_idx], data[prev_idx + 1], data[prev_idx + 2], data[prev_idx + 3],
-                        data[prev_idx + 4], data[prev_idx + 5], data[prev_idx + 6], data[prev_idx + 7],
+                        data[prev_idx],
+                        data[prev_idx + 1],
+                        data[prev_idx + 2],
+                        data[prev_idx + 3],
+                        data[prev_idx + 4],
+                        data[prev_idx + 5],
+                        data[prev_idx + 6],
+                        data[prev_idx + 7],
                     ]);
                     let result = val.wrapping_add(prev).to_be_bytes();
                     data[idx..idx + 8].copy_from_slice(&result);
@@ -563,7 +591,13 @@ pub fn apply_predictor_horizontal_be(data: &mut [u8], width: u32, samples_per_pi
     }
 }
 
-pub fn apply_predictor_float(data: &mut [u8], width: u32, samples_per_pixel: u16, bits_per_sample: u16, big_endian: bool) {
+pub fn apply_predictor_float(
+    data: &mut [u8],
+    width: u32,
+    samples_per_pixel: u16,
+    bits_per_sample: u16,
+    big_endian: bool,
+) {
     let bps = (bits_per_sample as usize) / 8;
     let spp = samples_per_pixel as usize;
     let row_stride = width as usize * spp * bps;

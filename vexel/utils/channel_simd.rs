@@ -103,12 +103,8 @@ unsafe fn rgb_to_rgba_avx2(src: &[u8], dst: &mut [u8]) {
     let mut si = 0usize;
     let mut di = 0usize;
 
-    let shuf = _mm_set_epi8(
-        0x80u8 as i8, 11, 10, 9,
-        0x80u8 as i8, 8, 7, 6,
-        0x80u8 as i8, 5, 4, 3,
-        0x80u8 as i8, 2, 1, 0,
-    );
+    let shuf =
+        _mm_set_epi8(0x80u8 as i8, 11, 10, 9, 0x80u8 as i8, 8, 7, 6, 0x80u8 as i8, 5, 4, 3, 0x80u8 as i8, 2, 1, 0);
     let alpha = _mm_set1_epi32(0xFF000000u32 as i32);
 
     while si + 52 <= src.len() {
@@ -153,13 +149,8 @@ unsafe fn rgba_to_rgb_avx2(src: &[u8], dst: &mut [u8]) {
     let mut si = 0usize;
     let mut di = 0usize;
 
-    let shuf = _mm_set_epi8(
-        0x80u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 0x80u8 as i8,
-        14, 13, 12,
-        10, 9, 8,
-        6, 5, 4,
-        2, 1, 0,
-    );
+    let shuf =
+        _mm_set_epi8(0x80u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 14, 13, 12, 10, 9, 8, 6, 5, 4, 2, 1, 0);
 
     while i + 16 <= n {
         let in0 = _mm_loadu_si128(src.as_ptr().add(si) as *const __m128i);
@@ -226,10 +217,7 @@ unsafe fn scale_u16_to_u8_avx2(src: &[u16], dst: &mut [u8]) {
         let packed16 = _mm256_permute4x64_epi64(_mm256_packus_epi32(lo, hi), 0xD8);
         let packed8 = _mm256_permute4x64_epi64(_mm256_packus_epi16(packed16, zero), 0xD8);
 
-        _mm_storeu_si128(
-            dst.as_mut_ptr().add(i) as *mut __m128i,
-            _mm256_castsi256_si128(packed8),
-        );
+        _mm_storeu_si128(dst.as_mut_ptr().add(i) as *mut __m128i, _mm256_castsi256_si128(packed8));
 
         i += 16;
     }
@@ -275,14 +263,8 @@ unsafe fn scale_f32_to_u8_avx2(src: &[f32], dst: &mut [u8]) {
         let v = _mm256_loadu_ps(src.as_ptr().add(i));
         let g = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_min_ps(_mm256_max_ps(v, zero), one), scale));
         let p16 = _mm256_permute4x64_epi64(_mm256_packus_epi32(g, g), 0xD8);
-        let p8 = _mm256_permute4x64_epi64(
-            _mm256_packus_epi16(p16, _mm256_setzero_si256()),
-            0xD8,
-        );
-        _mm_storel_epi64(
-            dst.as_mut_ptr().add(i) as *mut __m128i,
-            _mm256_castsi256_si128(p8),
-        );
+        let p8 = _mm256_permute4x64_epi64(_mm256_packus_epi16(p16, _mm256_setzero_si256()), 0xD8);
+        _mm_storel_epi64(dst.as_mut_ptr().add(i) as *mut __m128i, _mm256_castsi256_si128(p8));
         i += 8;
     }
 

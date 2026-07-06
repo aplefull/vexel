@@ -1,22 +1,23 @@
+use std::borrow::Cow;
+use std::collections::HashSet;
+use std::io::{Cursor, Read, Seek, SeekFrom};
+
 use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
+use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::image::{ImageFrame, PixelData};
+use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, half_to_f32, u16_from_bytes};
 use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
     decompress_lzw, decompress_packbits, predictor_x_factor,
 };
 use crate::utils::tiff::ifd::{self, Ifd};
-use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, half_to_f32, u16_from_bytes};
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
 use crate::utils::tiff::types::{
     Compression, PhotometricInterpretation, Predictor, SampleFormat, TiffHeader, TiffTags,
 };
-use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::image::{ImageFrame, PixelData};
 use crate::utils::types::ByteOrder;
-use crate::{Image, Limits, log_warn};
-use std::borrow::Cow;
-use std::collections::HashSet;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use crate::{log_warn, Image, Limits};
 
 const DNG_PHOTOMETRIC_CFA: u32 = 32803;
 const DNG_PHOTOMETRIC_LINEAR_RAW: u32 = 34892;
@@ -34,11 +35,7 @@ pub enum CfaPattern {
 pub enum BlackLevel {
     Uniform(f32),
     PerChannel(Vec<f32>),
-    Spatial {
-        values: Vec<f32>,
-        repeat_rows: u32,
-        repeat_cols: u32,
-    },
+    Spatial { values: Vec<f32>, repeat_rows: u32, repeat_cols: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -231,7 +228,9 @@ impl<R: Read + Seek> DngDecoder<R> {
         if is_raw_ifd || self.dng.gray_response_curve.is_none() {
             if let Some(entry) = ifd.entry(TiffTags::GrayResponseCurve) {
                 if entry.count >= 2 {
-                    if let Some(table) = ifd.values::<u16, _>(TiffTags::GrayResponseCurve, &mut self.reader, &mut self.limits) {
+                    if let Some(table) =
+                        ifd.values::<u16, _>(TiffTags::GrayResponseCurve, &mut self.reader, &mut self.limits)
+                    {
                         if !table.is_empty() {
                             self.dng.gray_response_curve = Some(table);
                         }
@@ -247,20 +246,14 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
         if let Some(vals) = ifd.signed_rationals(TiffTags::ColorMatrix1, &mut self.reader, &mut self.limits) {
             if self.dng.color_matrix1.is_none() && vals.len() >= 9 {
-                self.dng.color_matrix1 = Some([
-                    [vals[0], vals[1], vals[2]],
-                    [vals[3], vals[4], vals[5]],
-                    [vals[6], vals[7], vals[8]],
-                ]);
+                self.dng.color_matrix1 =
+                    Some([[vals[0], vals[1], vals[2]], [vals[3], vals[4], vals[5]], [vals[6], vals[7], vals[8]]]);
             }
         }
         if let Some(vals) = ifd.signed_rationals(TiffTags::ColorMatrix2, &mut self.reader, &mut self.limits) {
             if self.dng.color_matrix2.is_none() && vals.len() >= 9 {
-                self.dng.color_matrix2 = Some([
-                    [vals[0], vals[1], vals[2]],
-                    [vals[3], vals[4], vals[5]],
-                    [vals[6], vals[7], vals[8]],
-                ]);
+                self.dng.color_matrix2 =
+                    Some([[vals[0], vals[1], vals[2]], [vals[3], vals[4], vals[5]], [vals[6], vals[7], vals[8]]]);
             }
         }
         if self.dng.as_shot_neutral.is_empty() {
@@ -277,10 +270,8 @@ impl<R: Read + Seek> DngDecoder<R> {
     fn read_raster_calibration_tags(&mut self, ifd: &Ifd) {
         if let Some(v) = ifd.values::<u32, _>(TiffTags::SampleFormat, &mut self.reader, &mut self.limits) {
             if !v.is_empty() {
-                self.header.sample_format = v
-                    .into_iter()
-                    .map(|f| SampleFormat::try_from(f).unwrap_or(SampleFormat::UnsignedInt))
-                    .collect();
+                self.header.sample_format =
+                    v.into_iter().map(|f| SampleFormat::try_from(f).unwrap_or(SampleFormat::UnsignedInt)).collect();
             }
         }
         if let Some(v) = ifd.values::<u32, _>(TiffTags::CFAPlaneColor, &mut self.reader, &mut self.limits) {
@@ -292,7 +283,8 @@ impl<R: Read + Seek> DngDecoder<R> {
             }
         }
         if self.dng.linearization_table.is_none() {
-            if let Some(table) = ifd.values::<u16, _>(TiffTags::LinearizationTable, &mut self.reader, &mut self.limits) {
+            if let Some(table) = ifd.values::<u16, _>(TiffTags::LinearizationTable, &mut self.reader, &mut self.limits)
+            {
                 if !table.is_empty() {
                     self.dng.linearization_table = Some(table);
                 }
@@ -309,8 +301,7 @@ impl<R: Read + Seek> DngDecoder<R> {
                 let spatial_count = repeat_rows * repeat_cols;
 
                 let values: Vec<f32> = if entry.field_type == 5 {
-                    ifd.rationals(TiffTags::BlackLevel, &mut self.reader, &mut self.limits)
-                        .unwrap_or_default()
+                    ifd.rationals(TiffTags::BlackLevel, &mut self.reader, &mut self.limits).unwrap_or_default()
                 } else {
                     ifd.values::<u32, _>(TiffTags::BlackLevel, &mut self.reader, &mut self.limits)
                         .unwrap_or_default()
@@ -432,11 +423,9 @@ impl<R: Read + Seek> DngDecoder<R> {
                 continue;
             }
 
-            let (Some(plane), Some(planes), Some(degree)) = (
-                u32_at(params_start + 16),
-                u32_at(params_start + 20),
-                u32_at(params_start + 32),
-            ) else {
+            let (Some(plane), Some(planes), Some(degree)) =
+                (u32_at(params_start + 16), u32_at(params_start + 20), u32_at(params_start + 32))
+            else {
                 continue;
             };
             if degree > 8 {
@@ -447,9 +436,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             for i in 0..=degree as usize {
                 let coeff_pos = params_start + 36 + i * 8;
                 match data.get(coeff_pos..coeff_pos + 8) {
-                    Some(b) => coefficients.push(f64::from_be_bytes([
-                        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                    ])),
+                    Some(b) => coefficients.push(f64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])),
                     None => return,
                 }
             }
@@ -464,9 +451,8 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
 
         if ifd.has(TiffTags::CFAPattern) {
-            let vals = ifd
-                .values::<u32, _>(TiffTags::CFAPattern, &mut self.reader, &mut self.limits)
-                .unwrap_or_default();
+            let vals =
+                ifd.values::<u32, _>(TiffTags::CFAPattern, &mut self.reader, &mut self.limits).unwrap_or_default();
             if vals.len() >= 4 {
                 self.dng.cfa_pattern = Some(match (vals[0], vals[1], vals[2], vals[3]) {
                     (0, 1, 1, 2) => CfaPattern::Rggb,
@@ -578,16 +564,10 @@ impl<R: Read + Seek> DngDecoder<R> {
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
-            pieces
-                .into_par_iter()
-                .map(|(data, rows)| ctx.decompress_strip(data, rows, width, bps))
-                .collect()
+            pieces.into_par_iter().map(|(data, rows)| ctx.decompress_strip(data, rows, width, bps)).collect()
         }
         #[cfg(not(feature = "rayon"))]
-        pieces
-            .into_iter()
-            .map(|(data, rows)| ctx.decompress_strip(data, rows, width, bps))
-            .collect()
+        pieces.into_iter().map(|(data, rows)| ctx.decompress_strip(data, rows, width, bps)).collect()
     }
 
     fn read_raw_strip_data(&mut self) -> VexelResult<Vec<u16>> {
@@ -609,10 +589,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             rows_per_strip = image_height.div_ceil(num_strips).max(1);
         }
 
-        let used_strips = offsets
-            .len()
-            .min(byte_counts.len())
-            .min(image_height.div_ceil(rows_per_strip));
+        let used_strips = offsets.len().min(byte_counts.len()).min(image_height.div_ceil(rows_per_strip));
 
         let batch = batch_len(rows_per_strip * image_width * spp * 2);
         let mut strip_idx = 0;
@@ -694,9 +671,7 @@ impl<R: Read + Seek> DngDecoder<R> {
                     }
                     let src = row * tile_width * spp;
                     let dst = (py * image_width + img_x) * spp;
-                    let len = (cols * spp)
-                        .min(tile.len().saturating_sub(src))
-                        .min(raw.len() - dst);
+                    let len = (cols * spp).min(tile.len().saturating_sub(src)).min(raw.len() - dst);
                     raw[dst..dst + len].copy_from_slice(&tile[src..src + len]);
                 }
             }
@@ -827,7 +802,11 @@ impl<R: Read + Seek> DngDecoder<R> {
             } else if self.width == 6112 && model.contains("KP") {
                 let top = 28;
                 self.crop_raw(raw, spp, top, 54, self.height, 54 + 6028);
-            } else if self.width == 6080 && model.contains("K-3") && !model.contains("K-3 II") && !model.contains("K-3 III") {
+            } else if self.width == 6080
+                && model.contains("K-3")
+                && !model.contains("K-3 II")
+                && !model.contains("K-3 III")
+            {
                 self.crop_raw(raw, spp, 0, 4, self.height, 4 + 6040);
             } else if self.width == 7424 && model.contains("645D") {
                 self.crop_raw(raw, spp, 29, 48, 29 + 5502, 48 + 7328);
@@ -907,7 +886,9 @@ impl<R: Read + Seek> DngDecoder<R> {
                 count += 1;
             }
         }
-        if count == 0 { return 0; }
+        if count == 0 {
+            return 0;
+        }
         (sum / count) as u16
     }
 
@@ -923,34 +904,37 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let (r, g, b) = match pattern {
             CfaPattern::Rggb => match (row_parity, col_parity) {
-                (0, 0) => (s(0,0), a(&[(-1,0),(1,0),(0,-1),(0,1)]), a(&[(-1,-1),(1,-1),(-1,1),(1,1)])),
-                (0, 1) => (a(&[(-1,0),(1,0)]), s(0,0), a(&[(0,-1),(0,1)])),
-                (1, 0) => (a(&[(0,-1),(0,1)]), s(0,0), a(&[(-1,0),(1,0)])),
-                (1, 1) => (a(&[(-1,-1),(1,-1),(-1,1),(1,1)]), a(&[(-1,0),(1,0),(0,-1),(0,1)]), s(0,0)),
-                _ => (s(0,0), s(0,0), s(0,0)),
+                (0, 0) => (s(0, 0), a(&[(-1, 0), (1, 0), (0, -1), (0, 1)]), a(&[(-1, -1), (1, -1), (-1, 1), (1, 1)])),
+                (0, 1) => (a(&[(-1, 0), (1, 0)]), s(0, 0), a(&[(0, -1), (0, 1)])),
+                (1, 0) => (a(&[(0, -1), (0, 1)]), s(0, 0), a(&[(-1, 0), (1, 0)])),
+                (1, 1) => (a(&[(-1, -1), (1, -1), (-1, 1), (1, 1)]), a(&[(-1, 0), (1, 0), (0, -1), (0, 1)]), s(0, 0)),
+                _ => (s(0, 0), s(0, 0), s(0, 0)),
             },
             CfaPattern::Bggr => match (row_parity, col_parity) {
-                (0, 0) => (a(&[(-1,-1),(1,-1),(-1,1),(1,1)]), a(&[(-1,0),(1,0),(0,-1),(0,1)]), s(0,0)),
-                (0, 1) => (a(&[(0,-1),(0,1)]), s(0,0), a(&[(-1,0),(1,0)])),
-                (1, 0) => (a(&[(-1,0),(1,0)]), s(0,0), a(&[(0,-1),(0,1)])),
-                (1, 1) => (s(0,0), a(&[(-1,0),(1,0),(0,-1),(0,1)]), a(&[(-1,-1),(1,-1),(-1,1),(1,1)])),
-                _ => (s(0,0), s(0,0), s(0,0)),
+                (0, 0) => (a(&[(-1, -1), (1, -1), (-1, 1), (1, 1)]), a(&[(-1, 0), (1, 0), (0, -1), (0, 1)]), s(0, 0)),
+                (0, 1) => (a(&[(0, -1), (0, 1)]), s(0, 0), a(&[(-1, 0), (1, 0)])),
+                (1, 0) => (a(&[(-1, 0), (1, 0)]), s(0, 0), a(&[(0, -1), (0, 1)])),
+                (1, 1) => (s(0, 0), a(&[(-1, 0), (1, 0), (0, -1), (0, 1)]), a(&[(-1, -1), (1, -1), (-1, 1), (1, 1)])),
+                _ => (s(0, 0), s(0, 0), s(0, 0)),
             },
             CfaPattern::Grbg => match (row_parity, col_parity) {
-                (0, 0) => (a(&[(-1,0),(1,0)]), s(0,0), a(&[(0,-1),(0,1)])),
-                (0, 1) => (s(0,0), a(&[(-1,0),(1,0),(0,-1),(0,1)]), a(&[(-1,-1),(1,-1),(-1,1),(1,1)])),
-                (1, 0) => (a(&[(-1,-1),(1,-1),(-1,1),(1,1)]), a(&[(-1,0),(1,0),(0,-1),(0,1)]), s(0,0)),
-                (1, 1) => (a(&[(0,-1),(0,1)]), s(0,0), a(&[(-1,0),(1,0)])),
-                _ => (s(0,0), s(0,0), s(0,0)),
+                (0, 0) => (a(&[(-1, 0), (1, 0)]), s(0, 0), a(&[(0, -1), (0, 1)])),
+                (0, 1) => (s(0, 0), a(&[(-1, 0), (1, 0), (0, -1), (0, 1)]), a(&[(-1, -1), (1, -1), (-1, 1), (1, 1)])),
+                (1, 0) => (a(&[(-1, -1), (1, -1), (-1, 1), (1, 1)]), a(&[(-1, 0), (1, 0), (0, -1), (0, 1)]), s(0, 0)),
+                (1, 1) => (a(&[(0, -1), (0, 1)]), s(0, 0), a(&[(-1, 0), (1, 0)])),
+                _ => (s(0, 0), s(0, 0), s(0, 0)),
             },
             CfaPattern::Gbrg => match (row_parity, col_parity) {
-                (0, 0) => (a(&[(0,-1),(0,1)]), s(0,0), a(&[(-1,0),(1,0)])),
-                (0, 1) => (a(&[(-1,-1),(1,-1),(-1,1),(1,1)]), a(&[(-1,0),(1,0),(0,-1),(0,1)]), s(0,0)),
-                (1, 0) => (s(0,0), a(&[(-1,0),(1,0),(0,-1),(0,1)]), a(&[(-1,-1),(1,-1),(-1,1),(1,1)])),
-                (1, 1) => (a(&[(-1,0),(1,0)]), s(0,0), a(&[(0,-1),(0,1)])),
-                _ => (s(0,0), s(0,0), s(0,0)),
+                (0, 0) => (a(&[(0, -1), (0, 1)]), s(0, 0), a(&[(-1, 0), (1, 0)])),
+                (0, 1) => (a(&[(-1, -1), (1, -1), (-1, 1), (1, 1)]), a(&[(-1, 0), (1, 0), (0, -1), (0, 1)]), s(0, 0)),
+                (1, 0) => (s(0, 0), a(&[(-1, 0), (1, 0), (0, -1), (0, 1)]), a(&[(-1, -1), (1, -1), (-1, 1), (1, 1)])),
+                (1, 1) => (a(&[(-1, 0), (1, 0)]), s(0, 0), a(&[(0, -1), (0, 1)])),
+                _ => (s(0, 0), s(0, 0), s(0, 0)),
             },
-            CfaPattern::Unknown => { let v = s(0,0); (v, v, v) }
+            CfaPattern::Unknown => {
+                let v = s(0, 0);
+                (v, v, v)
+            }
         };
         (r, g, b)
     }
@@ -992,15 +976,9 @@ impl<R: Read + Seek> DngDecoder<R> {
                 }
             }
 
-            ColorTransform {
-                rgb_cam: Some(invert_3x3(&cam_rgb)),
-                pre_mul: cam_mul.unwrap_or(matrix_pre_mul),
-            }
+            ColorTransform { rgb_cam: Some(invert_3x3(&cam_rgb)), pre_mul: cam_mul.unwrap_or(matrix_pre_mul) }
         } else {
-            ColorTransform {
-                rgb_cam: None,
-                pre_mul: cam_mul.unwrap_or([1.0; 3]),
-            }
+            ColorTransform { rgb_cam: None, pre_mul: cam_mul.unwrap_or([1.0; 3]) }
         }
     }
 
@@ -1013,9 +991,7 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
 
         let channel_rows: Vec<Vec<usize>> = if is_cfa {
-            (0..2)
-                .map(|y| (0..row_samples).map(|x| self.cfa_color(x as u32, y)).collect())
-                .collect()
+            (0..2).map(|y| (0..row_samples).map(|x| self.cfa_color(x as u32, y)).collect()).collect()
         } else {
             vec![(0..row_samples).map(|i| (i % spp).min(2)).collect()]
         };
@@ -1069,10 +1045,8 @@ impl<R: Read + Seek> DngDecoder<R> {
             }
         }
 
-        let scale_rows: Vec<Vec<f32>> = channel_rows
-            .iter()
-            .map(|row| row.iter().map(|&ch| scale_mul[ch]).collect())
-            .collect();
+        let scale_rows: Vec<Vec<f32>> =
+            channel_rows.iter().map(|row| row.iter().map(|&ch| scale_mul[ch]).collect()).collect();
 
         let mut out = vec![0u16; raw.len()];
         for (y, (val_row, out_row)) in vals.chunks(row_samples).zip(out.chunks_mut(row_samples)).enumerate() {
@@ -1119,12 +1093,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             .iter()
             .filter(|s| s.is_raw && s.has_data)
             .max_by_key(|s| s.width as u64 * s.height as u64)
-            .or_else(|| {
-                all_ifds
-                    .iter()
-                    .filter(|s| s.has_data)
-                    .max_by_key(|s| s.width as u64 * s.height as u64)
-            })
+            .or_else(|| all_ifds.iter().filter(|s| s.has_data).max_by_key(|s| s.width as u64 * s.height as u64))
             .or_else(|| all_ifds.iter().max_by_key(|s| s.width as u64 * s.height as u64));
 
         let best_offset = best.map(|s| s.ifd.offset).unwrap_or(first_ifd_offset);
@@ -1175,11 +1144,7 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let is_tiled = self.header.tile_width.is_some() && !self.header.tile_offsets.is_empty();
 
-        let mut raw_pixels = if is_tiled {
-            self.read_raw_tile_data()?
-        } else {
-            self.read_raw_strip_data()?
-        };
+        let mut raw_pixels = if is_tiled { self.read_raw_tile_data()? } else { self.read_raw_strip_data()? };
 
         let spp = (self.header.samples_per_pixel as usize).max(1);
         self.crop_to_active_area(&mut raw_pixels, spp);
@@ -1469,7 +1434,9 @@ impl StripContext<'_> {
                         ByteOrder::BigEndian => u16::from_be_bytes([chunk[0], chunk[1]]),
                     };
                     out.push(v);
-                    if out.len() >= count { break; }
+                    if out.len() >= count {
+                        break;
+                    }
                 }
             }
             14 | 12 | 10 => {
@@ -1499,7 +1466,9 @@ impl StripContext<'_> {
                 }
             }
         }
-        while out.len() < count { out.push(0); }
+        while out.len() < count {
+            out.push(0);
+        }
         out
     }
 }
@@ -1524,11 +1493,8 @@ const KODAK_DCS_COLOR_TABLE: &[(&str, u16, [i16; 9])] = &[
     ("EOSDCS3", 0, [9898, -2700, -940, -2478, 12219, 206, 1985, 634, 1031]),
 ];
 
-const XYZ_RGB: [[f32; 3]; 3] = [
-    [0.4124564, 0.3575761, 0.1804375],
-    [0.2126729, 0.7151522, 0.0721750],
-    [0.0193339, 0.119192, 0.9503041],
-];
+const XYZ_RGB: [[f32; 3]; 3] =
+    [[0.4124564, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750], [0.0193339, 0.119192, 0.9503041]];
 
 const HISTOGRAM_SIZE: usize = 0x2000;
 const AUTO_BRIGHT_THRESHOLD: f64 = 0.01;
@@ -1598,19 +1564,17 @@ fn build_rgb_histogram(rgb: &[u16]) -> Vec<[u32; HISTOGRAM_SIZE]> {
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
-        rgb.par_chunks(PARALLEL_CHUNK * 3)
-            .fold(|| vec![[0u32; HISTOGRAM_SIZE]; 3], accumulate)
-            .reduce(
-                || vec![[0u32; HISTOGRAM_SIZE]; 3],
-                |mut a, b| {
-                    for (ha, hb) in a.iter_mut().zip(&b) {
-                        for (va, &vb) in ha.iter_mut().zip(hb.iter()) {
-                            *va += vb;
-                        }
+        rgb.par_chunks(PARALLEL_CHUNK * 3).fold(|| vec![[0u32; HISTOGRAM_SIZE]; 3], accumulate).reduce(
+            || vec![[0u32; HISTOGRAM_SIZE]; 3],
+            |mut a, b| {
+                for (ha, hb) in a.iter_mut().zip(&b) {
+                    for (va, &vb) in ha.iter_mut().zip(hb.iter()) {
+                        *va += vb;
                     }
-                    a
-                },
-            )
+                }
+                a
+            },
+        )
     }
     #[cfg(not(feature = "rayon"))]
     accumulate(vec![[0u32; HISTOGRAM_SIZE]; 3], rgb)
@@ -1678,8 +1642,7 @@ fn gamma_curve_bt709(imax: i32) -> Vec<u16> {
 }
 
 fn invert_3x3(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
 
     if det.abs() < 1e-9 {

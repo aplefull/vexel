@@ -1,18 +1,15 @@
-use crate::utils::bitreader::BitReader;
-use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::TgaInfo;
-use crate::{Image, Limits, PixelData, log_warn};
 use std::io::{Read, Seek, SeekFrom};
 
 use super::types::{
-    ATTR_TYPE_ALPHA, ATTR_TYPE_PREMULTIPLIED_ALPHA, EXT_AREA_ATTR_TYPE_OFFSET, FLAG_ALPHA_SIZE_MASK,
-    FLAG_ORIGIN_RIGHT, FLAG_ORIGIN_TOP, IMAGE_TYPE_FLAG_RLE, IMAGE_TYPE_MASK, IMAGE_TYPE_MONOCHROME,
-    IMAGE_TYPE_PALETTED, TGA_FOOTER_SIZE, TGA_SIGNATURE,
+    ExtAlphaType, TgaColorMapData, TgaExtensionAreaData, TgaFooterData, TgaHeader, TgaHeaderData, TgaImageIdData,
+    TgaPixelData, TgaSectionData, TgaSectionInfo, ATTR_TYPE_ALPHA, ATTR_TYPE_PREMULTIPLIED_ALPHA,
+    EXT_AREA_ATTR_TYPE_OFFSET, FLAG_ALPHA_SIZE_MASK, FLAG_ORIGIN_RIGHT, FLAG_ORIGIN_TOP, IMAGE_TYPE_FLAG_RLE,
+    IMAGE_TYPE_MASK, IMAGE_TYPE_MONOCHROME, IMAGE_TYPE_PALETTED, TGA_FOOTER_SIZE, TGA_SIGNATURE,
 };
-use super::types::{
-    ExtAlphaType, TgaColorMapData, TgaExtensionAreaData, TgaFooterData, TgaHeader, TgaHeaderData,
-    TgaImageIdData, TgaPixelData, TgaSectionData, TgaSectionInfo,
-};
+use crate::utils::bitreader::BitReader;
+use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::info::TgaInfo;
+use crate::{log_warn, Image, Limits, PixelData};
 
 pub struct TgaDecoder<R: Read + Seek> {
     reader: BitReader<R>,
@@ -22,11 +19,7 @@ pub struct TgaDecoder<R: Read + Seek> {
 
 impl<R: Read + Seek> TgaDecoder<R> {
     pub fn new(reader: R) -> Self {
-        Self {
-            reader: BitReader::with_le(reader),
-            limits: Limits::default(),
-            sections: Vec::new(),
-        }
+        Self { reader: BitReader::with_le(reader), limits: Limits::default(), sections: Vec::new() }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
@@ -34,9 +27,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
     }
 
     pub fn get_info(&self) -> TgaInfo {
-        TgaInfo {
-            sections: self.sections.clone(),
-        }
+        TgaInfo { sections: self.sections.clone() }
     }
 
     fn read_header(&mut self) -> VexelResult<TgaHeader> {
@@ -171,9 +162,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
             let _ = self.reader.seek(SeekFrom::Current((skip_count * bytes_per_entry) as i64));
         }
 
-        (0..read_count)
-            .map(|_| self.read_palette_entry(header.palette_bpp, has_alpha))
-            .collect()
+        (0..read_count).map(|_| self.read_palette_entry(header.palette_bpp, has_alpha)).collect()
     }
 
     fn skip_palette(&mut self, header: &TgaHeader) {
@@ -231,13 +220,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
         }
     }
 
-    fn decode_image_data(
-        &mut self,
-        header: &TgaHeader,
-        palette: &[[u8; 4]],
-        has_alpha: bool,
-        is_rle: bool,
-    ) -> Vec<u8> {
+    fn decode_image_data(&mut self, header: &TgaHeader, palette: &[[u8; 4]], has_alpha: bool, is_rle: bool) -> Vec<u8> {
         let width = header.width as usize;
         let height = header.height as usize;
         let total_pixels = width * height;
@@ -377,10 +360,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
             let text = String::from_utf8_lossy(&id_bytes).into_owned();
             self.sections.push(TgaSectionInfo {
                 start_offset: id_offset,
-                data: TgaSectionData::ImageId(TgaImageIdData {
-                    length: header.id_length,
-                    text,
-                }),
+                data: TgaSectionData::ImageId(TgaImageIdData { length: header.id_length, text }),
             });
         }
 
@@ -403,10 +383,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
         self.reader.seek(SeekFrom::Start(18 + header.id_length as u64))?;
 
         if header.width == 0 || header.height == 0 {
-            return Err(VexelError::InvalidDimensions {
-                width: header.width as u32,
-                height: header.height as u32,
-            });
+            return Err(VexelError::InvalidDimensions { width: header.width as u32, height: header.height as u32 });
         }
 
         self.limits.reserve_buffer(header.width as u32, header.height as u32, 4)?;
@@ -454,9 +431,7 @@ impl<R: Read + Seek> TgaDecoder<R> {
 
         self.sections.push(TgaSectionInfo {
             start_offset: pixel_data_offset,
-            data: TgaSectionData::PixelData(TgaPixelData {
-                length: (pixel_data_end - pixel_data_offset) as usize,
-            }),
+            data: TgaSectionData::PixelData(TgaPixelData { length: (pixel_data_end - pixel_data_offset) as usize }),
         });
 
         if let Some((footer_data, footer_offset)) = footer_info {
@@ -469,10 +444,8 @@ impl<R: Read + Seek> TgaDecoder<R> {
                     });
                 }
             }
-            self.sections.push(TgaSectionInfo {
-                start_offset: footer_offset,
-                data: TgaSectionData::Footer(footer_data),
-            });
+            self.sections
+                .push(TgaSectionInfo { start_offset: footer_offset, data: TgaSectionData::Footer(footer_data) });
         }
 
         Self::apply_orientation(&mut pixels, header.width as usize, header.height as usize, header.flags);

@@ -1,5 +1,4 @@
 pub mod bitreader;
-pub mod limits;
 pub mod channel_simd;
 pub mod deflate;
 pub mod error;
@@ -7,6 +6,7 @@ pub mod exif;
 pub mod icc;
 pub mod image;
 pub mod info;
+pub mod limits;
 pub mod logger;
 pub mod marker;
 pub mod tiff;

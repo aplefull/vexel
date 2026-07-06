@@ -1,7 +1,8 @@
-use crate::utils::marker::Marker;
-use crate::utils::types::ByteOrder;
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
+
+use crate::utils::marker::Marker;
+use crate::utils::types::ByteOrder;
 
 pub struct BitReader<R: Read + Seek> {
     reader: R,
@@ -13,24 +14,12 @@ pub struct BitReader<R: Read + Seek> {
 
 impl<R: Read + Seek> BitReader<R> {
     pub fn new(reader: R) -> Self {
-        BitReader {
-            reader,
-            buffer: 0,
-            bits_in_buffer: 0,
-            little_endian: false,
-            total_bits_consumed: 0,
-        }
+        BitReader { reader, buffer: 0, bits_in_buffer: 0, little_endian: false, total_bits_consumed: 0 }
     }
 
     /// Creates a new BitReader with little-endian byte order.
     pub fn with_le(reader: R) -> Self {
-        BitReader {
-            reader,
-            buffer: 0,
-            bits_in_buffer: 0,
-            little_endian: true,
-            total_bits_consumed: 0,
-        }
+        BitReader { reader, buffer: 0, bits_in_buffer: 0, little_endian: true, total_bits_consumed: 0 }
     }
 
     /// Sets the endianness of the BitReader.

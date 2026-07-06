@@ -1,9 +1,10 @@
+use std::io::{Read, Seek, SeekFrom};
+
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::limits::Limits;
 use crate::utils::tiff::types::TiffTags;
 use crate::utils::types::ByteOrder;
-use std::io::{Read, Seek, SeekFrom};
 
 pub struct TiffFileHeader {
     pub byte_order: ByteOrder,
@@ -30,11 +31,7 @@ pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResul
 
     let first_ifd_offset = reader.read_u32()?;
 
-    Ok(TiffFileHeader {
-        byte_order,
-        magic,
-        first_ifd_offset,
-    })
+    Ok(TiffFileHeader { byte_order, magic, first_ifd_offset })
 }
 
 #[derive(Debug, Clone)]
@@ -86,12 +83,7 @@ impl Ifd {
 
         let next_ifd_offset = reader.read_u32().unwrap_or(0);
 
-        Ok(Ifd {
-            offset,
-            byte_order,
-            entries,
-            next_ifd_offset,
-        })
+        Ok(Ifd { offset, byte_order, entries, next_ifd_offset })
     }
 
     pub fn entry(&self, tag: TiffTags) -> Option<&IfdEntry> {
@@ -154,7 +146,8 @@ impl Ifd {
             self.inline_bytes(entry)[..count].to_vec()
         } else {
             let mut buf = vec![0u8; count];
-            if reader.seek(SeekFrom::Start(entry.value_offset as u64)).is_err() || reader.read_exact(&mut buf).is_err() {
+            if reader.seek(SeekFrom::Start(entry.value_offset as u64)).is_err() || reader.read_exact(&mut buf).is_err()
+            {
                 return None;
             }
             buf
@@ -178,10 +171,15 @@ impl Ifd {
 
         limits.reserve_usize(len).ok()?;
         let mut data = vec![0u8; len];
-        let failed = reader.seek(SeekFrom::Start(entry.value_offset as u64)).is_err() || reader.read_exact(&mut data).is_err();
+        let failed =
+            reader.seek(SeekFrom::Start(entry.value_offset as u64)).is_err() || reader.read_exact(&mut data).is_err();
         limits.free_usize(len);
 
-        if failed { None } else { Some(data) }
+        if failed {
+            None
+        } else {
+            Some(data)
+        }
     }
 
     fn inline_bytes(&self, entry: &IfdEntry) -> [u8; 4] {

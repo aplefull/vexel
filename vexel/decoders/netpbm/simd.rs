@@ -100,11 +100,7 @@ fn scale_u16_be_scalar(src: &[u8], dst: &mut [u16], max_value: u16) {
     let max = max_value as f32;
     for (chunk, d) in src.chunks_exact(2).zip(dst.iter_mut()) {
         let raw = u16::from_be_bytes([chunk[0], chunk[1]]);
-        *d = if max_value == 65535 {
-            raw
-        } else {
-            (raw as f32 * 65535.0 / max).round().min(65535.0) as u16
-        };
+        *d = if max_value == 65535 { raw } else { (raw as f32 * 65535.0 / max).round().min(65535.0) as u16 };
     }
 }
 
@@ -143,10 +139,22 @@ unsafe fn scale_u8_avx2(src: &[u8], dst: &mut [u8], max_value: u8) {
         let b2 = _mm256_cvtepu8_epi32(_mm256_extracti128_si256(v, 1));
         let b3 = _mm256_cvtepu8_epi32(_mm_srli_si128(_mm256_extracti128_si256(v, 1), 8));
 
-        let s0 = _mm256_cvtps_epi32(_mm256_round_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(b0), scale), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-        let s1 = _mm256_cvtps_epi32(_mm256_round_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(b1), scale), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-        let s2 = _mm256_cvtps_epi32(_mm256_round_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(b2), scale), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-        let s3 = _mm256_cvtps_epi32(_mm256_round_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(b3), scale), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        let s0 = _mm256_cvtps_epi32(_mm256_round_ps(
+            _mm256_mul_ps(_mm256_cvtepi32_ps(b0), scale),
+            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+        ));
+        let s1 = _mm256_cvtps_epi32(_mm256_round_ps(
+            _mm256_mul_ps(_mm256_cvtepi32_ps(b1), scale),
+            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+        ));
+        let s2 = _mm256_cvtps_epi32(_mm256_round_ps(
+            _mm256_mul_ps(_mm256_cvtepi32_ps(b2), scale),
+            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+        ));
+        let s3 = _mm256_cvtps_epi32(_mm256_round_ps(
+            _mm256_mul_ps(_mm256_cvtepi32_ps(b3), scale),
+            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+        ));
 
         let p01 = _mm256_permute4x64_epi64(_mm256_packus_epi32(s0, s1), 0xD8);
         let p23 = _mm256_permute4x64_epi64(_mm256_packus_epi32(s2, s3), 0xD8);
@@ -168,10 +176,7 @@ unsafe fn scale_u16_be_avx2(src: &[u8], dst: &mut [u16], max_value: u16) {
     let scale = _mm256_set1_ps(65535.0 / max_value as f32);
 
     let bswap16 = _mm256_set_epi8(
-        14, 15, 12, 13, 10, 11, 8, 9,
-        6, 7, 4, 5, 2, 3, 0, 1,
-        14, 15, 12, 13, 10, 11, 8, 9,
-        6, 7, 4, 5, 2, 3, 0, 1,
+        14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1, 14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1,
     );
 
     let mut i = 0usize;
@@ -186,8 +191,14 @@ unsafe fn scale_u16_be_avx2(src: &[u8], dst: &mut [u16], max_value: u16) {
         if max_value == 65535 {
             _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, swapped);
         } else {
-            let s0 = _mm256_cvtps_epi32(_mm256_round_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(lo), scale), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-            let s1 = _mm256_cvtps_epi32(_mm256_round_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(hi), scale), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+            let s0 = _mm256_cvtps_epi32(_mm256_round_ps(
+                _mm256_mul_ps(_mm256_cvtepi32_ps(lo), scale),
+                _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+            ));
+            let s1 = _mm256_cvtps_epi32(_mm256_round_ps(
+                _mm256_mul_ps(_mm256_cvtepi32_ps(hi), scale),
+                _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+            ));
             let packed = _mm256_permute4x64_epi64(_mm256_packus_epi32(s0, s1), 0xD8);
             _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, packed);
         }
@@ -262,10 +273,7 @@ unsafe fn scale_u32_to_u8_avx2(src: &[u32], dst: &mut [u8], max_value: u32) {
         let packed16 = _mm256_permute4x64_epi64(_mm256_packus_epi32(s, zero), 0xD8);
         let packed8 = _mm256_permute4x64_epi64(_mm256_packus_epi16(packed16, zero), 0xD8);
 
-        _mm_storel_epi64(
-            dst.as_mut_ptr().add(i) as *mut __m128i,
-            _mm256_castsi256_si128(packed8),
-        );
+        _mm_storel_epi64(dst.as_mut_ptr().add(i) as *mut __m128i, _mm256_castsi256_si128(packed8));
 
         i += 8;
     }
@@ -291,10 +299,7 @@ unsafe fn scale_u32_to_u16_avx2(src: &[u32], dst: &mut [u16], max_value: u32) {
         let zero = _mm256_setzero_si256();
         let packed16 = _mm256_permute4x64_epi64(_mm256_packus_epi32(s, zero), 0xD8);
 
-        _mm_storeu_si128(
-            dst.as_mut_ptr().add(i) as *mut __m128i,
-            _mm256_castsi256_si128(packed16),
-        );
+        _mm_storeu_si128(dst.as_mut_ptr().add(i) as *mut __m128i, _mm256_castsi256_si128(packed16));
 
         i += 8;
     }
@@ -427,10 +432,7 @@ fn unpack_bits_wasm(src: &[u8], dst: &mut [u8], width: u32, height: u32) {
     let bytes_per_row = ((width + 7) / 8) as usize;
     let width = width as usize;
 
-    let bit_mask = i8x16(
-        -128i8, 64, 32, 16, 8, 4, 2, 1,
-        -128i8, 64, 32, 16, 8, 4, 2, 1,
-    );
+    let bit_mask = i8x16(-128i8, 64, 32, 16, 8, 4, 2, 1, -128i8, 64, 32, 16, 8, 4, 2, 1);
     let one = i8x16_splat(1i8);
     let zero = i8x16_splat(0i8);
 
