@@ -347,16 +347,16 @@ fn rgba_to_rgb_wasm(src: &[u8], dst: &mut [u8]) {
             let p2 = dst.as_mut_ptr().add(di + 24);
             let p3 = dst.as_mut_ptr().add(di + 36);
 
-            v128_store64_lane::<0>(p0 as *mut v128, out0);
+            v128_store64_lane::<0>(out0, p0 as *mut u64);
             (p0.add(8) as *mut u32).write_unaligned(u32x4_extract_lane::<2>(out0));
 
-            v128_store64_lane::<0>(p1 as *mut v128, out1);
+            v128_store64_lane::<0>(out1, p1 as *mut u64);
             (p1.add(8) as *mut u32).write_unaligned(u32x4_extract_lane::<2>(out1));
 
-            v128_store64_lane::<0>(p2 as *mut v128, out2);
+            v128_store64_lane::<0>(out2, p2 as *mut u64);
             (p2.add(8) as *mut u32).write_unaligned(u32x4_extract_lane::<2>(out2));
 
-            v128_store64_lane::<0>(p3 as *mut v128, out3);
+            v128_store64_lane::<0>(out3, p3 as *mut u64);
             (p3.add(8) as *mut u32).write_unaligned(u32x4_extract_lane::<2>(out3));
         }
 

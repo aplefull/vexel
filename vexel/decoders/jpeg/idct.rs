@@ -6,7 +6,7 @@ const M3: f32 = std::f32::consts::SQRT_2;
 const M4: f32 = 2.613126;
 const M5: f32 = 0.76536685;
 
-pub fn dequantize_and_idct(blocks: &mut [i32], quant: &[u16], level_shift: i32) {
+pub fn dequantize_and_idct(blocks: &mut [i16], quant: &[u16], level_shift: i32) {
     let scaled = precompute_scaled_quant(quant);
 
     #[cfg(target_arch = "x86_64")]
@@ -18,6 +18,19 @@ pub fn dequantize_and_idct(blocks: &mut [i32], quant: &[u16], level_shift: i32) 
     return dequantize_and_idct_wasm(blocks, &scaled, level_shift);
 
     dequantize_and_idct_scalar(blocks, &scaled, level_shift);
+}
+
+#[inline(always)]
+pub fn nonzero_mask(block: &[i16; 64]) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        return unsafe { nonzero_mask_avx2(block) };
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    return nonzero_mask_wasm(block);
+
+    nonzero_mask_scalar(block)
 }
 
 fn precompute_scaled_quant(quant: &[u16]) -> [f32; 64] {
@@ -73,14 +86,22 @@ fn aan_butterfly(
     (b0 + e7, b1 + b6, b2 + c8, b3 + b4, b3 - b4, b2 - c8, b1 - b6, b0 - e7)
 }
 
-fn dequantize_and_idct_scalar(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: i32) {
+fn dequantize_and_idct_scalar(blocks: &mut [i16], scaled_quant: &[f32; 64], level_shift: i32) {
     let n = blocks.len() / 64;
     for i in 0..n {
         idct_block_precomputed(&mut blocks[i * 64..(i + 1) * 64], scaled_quant, level_shift);
     }
 }
 
-fn idct_block_precomputed(block: &mut [i32], scaled_quant: &[f32; 64], level_shift: i32) {
+fn nonzero_mask_scalar(block: &[i16; 64]) -> u64 {
+    let mut mask = 0u64;
+    for (i, &coef) in block.iter().enumerate() {
+        mask |= ((coef != 0) as u64) << i;
+    }
+    mask
+}
+
+fn idct_block_precomputed(block: &mut [i16], scaled_quant: &[f32; 64], level_shift: i32) {
     let mut temp = [0.0f32; 64];
 
     for col in 0..8 {
@@ -113,21 +134,21 @@ fn idct_block_precomputed(block: &mut [i32], scaled_quant: &[f32; 64], level_shi
         let g6 = temp[row * 8 + 7] * S[7];
         let g7 = temp[row * 8 + 3] * S[3];
         let (r0, r1, r2, r3, r4, r5, r6, r7) = aan_butterfly(g0, g1, g2, g3, g4, g5, g6, g7);
-        block[row * 8] = (r0.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-        block[row * 8 + 1] = (r1.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-        block[row * 8 + 2] = (r2.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-        block[row * 8 + 3] = (r3.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-        block[row * 8 + 4] = (r4.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-        block[row * 8 + 5] = (r5.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-        block[row * 8 + 6] = (r6.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
-        block[row * 8 + 7] = (r7.round() as i32).clamp(-level_shift, level_shift * 2 - 1);
+        block[row * 8] = (r0.round() as i32).clamp(-level_shift, level_shift * 2 - 1) as i16;
+        block[row * 8 + 1] = (r1.round() as i32).clamp(-level_shift, level_shift * 2 - 1) as i16;
+        block[row * 8 + 2] = (r2.round() as i32).clamp(-level_shift, level_shift * 2 - 1) as i16;
+        block[row * 8 + 3] = (r3.round() as i32).clamp(-level_shift, level_shift * 2 - 1) as i16;
+        block[row * 8 + 4] = (r4.round() as i32).clamp(-level_shift, level_shift * 2 - 1) as i16;
+        block[row * 8 + 5] = (r5.round() as i32).clamp(-level_shift, level_shift * 2 - 1) as i16;
+        block[row * 8 + 6] = (r6.round() as i32).clamp(-level_shift, level_shift * 2 - 1) as i16;
+        block[row * 8 + 7] = (r7.round() as i32).clamp(-level_shift, level_shift * 2 - 1) as i16;
     }
 }
 
 // ─── AVX2 ─────────────────────────────────────────────────────
 
 #[cfg(target_arch = "x86_64")]
-fn dequantize_and_idct_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: i32) {
+fn dequantize_and_idct_avx2(blocks: &mut [i16], scaled_quant: &[f32; 64], level_shift: i32) {
     let n = blocks.len() / 64;
     let mut i = 0;
     while i + 8 <= n {
@@ -143,7 +164,7 @@ fn dequantize_and_idct_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[allow(clippy::needless_range_loop)]
-unsafe fn idct_8blocks_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: i32) {
+unsafe fn idct_8blocks_avx2(blocks: &mut [i16], scaled_quant: &[f32; 64], level_shift: i32) {
     use std::arch::x86_64::*;
 
     let mut staging = [0.0f32; 512];
@@ -153,8 +174,8 @@ unsafe fn idct_8blocks_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
         let vsq = _mm256_loadu_ps(scaled_quant.as_ptr().add(row * 8));
 
         for b in 0..8usize {
-            let vi32 = _mm256_loadu_si256(blocks.as_ptr().add(b * 64 + row * 8) as *const __m256i);
-            rows[b] = _mm256_mul_ps(_mm256_cvtepi32_ps(vi32), vsq);
+            let vi16 = _mm_loadu_si128(blocks.as_ptr().add(b * 64 + row * 8) as *const __m128i);
+            rows[b] = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(vi16)), vsq);
         }
 
         let t = transpose8x8_ps(rows);
@@ -253,7 +274,8 @@ unsafe fn idct_8blocks_avx2(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
 
         let t = transpose8x8_epi32(out);
         for b in 0..8usize {
-            _mm256_storeu_si256(blocks.as_mut_ptr().add(b * 64 + row * 8) as *mut __m256i, t[b]);
+            let packed = _mm_packs_epi32(_mm256_castsi256_si128(t[b]), _mm256_extracti128_si256::<1>(t[b]));
+            _mm_storeu_si128(blocks.as_mut_ptr().add(b * 64 + row * 8) as *mut __m128i, packed);
         }
     }
 }
@@ -374,10 +396,34 @@ unsafe fn aan_butterfly_avx2(
     )
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn nonzero_mask_avx2(block: &[i16; 64]) -> u64 {
+    use std::arch::x86_64::*;
+
+    let ptr = block.as_ptr();
+    let zero = _mm256_setzero_si256();
+    let mut mask = 0u64;
+
+    for group in 0..2 {
+        let base = ptr.add(group * 32);
+        let a = _mm256_loadu_si256(base as *const __m256i);
+        let b = _mm256_loadu_si256(base.add(16) as *const __m256i);
+        let eq_a = _mm256_cmpeq_epi16(a, zero);
+        let eq_b = _mm256_cmpeq_epi16(b, zero);
+        let packed = _mm256_packs_epi16(eq_a, eq_b);
+        let packed = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
+        let zeros = _mm256_movemask_epi8(packed) as u32 as u64;
+        mask |= (!zeros & 0xFFFF_FFFF) << (group * 32);
+    }
+
+    mask
+}
+
 // ─── WASM SIMD128 ─────────────────────────────────────────────
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn dequantize_and_idct_wasm(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: i32) {
+fn dequantize_and_idct_wasm(blocks: &mut [i16], scaled_quant: &[f32; 64], level_shift: i32) {
     let n = blocks.len() / 64;
     let mut i = 0;
     while i + 4 <= n {
@@ -391,23 +437,23 @@ fn dequantize_and_idct_wasm(blocks: &mut [i32], scaled_quant: &[f32; 64], level_
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn idct_4blocks_wasm(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: i32) {
+fn idct_4blocks_wasm(blocks: &mut [i16], scaled_quant: &[f32; 64], level_shift: i32) {
     use std::arch::wasm32::*;
 
     let mut staging = [0.0f32; 256];
 
     for row in 0..8usize {
-        let sq_ptr = scaled_quant.as_ptr().add(row * 8);
-        let vsq0 = v128_load(sq_ptr as *const v128);
-        let vsq1 = v128_load(sq_ptr.add(4) as *const v128);
+        let (vsq0, vsq1) = unsafe {
+            let sq_ptr = scaled_quant.as_ptr().add(row * 8);
+            (v128_load(sq_ptr as *const v128), v128_load(sq_ptr.add(4) as *const v128))
+        };
 
         for b in 0..4usize {
             unsafe {
                 let src_ptr = blocks.as_ptr().add(b * 64 + row * 8);
-                let vi0 = v128_load(src_ptr as *const v128);
-                let vi1 = v128_load(src_ptr.add(4) as *const v128);
-                let vf0 = f32x4_mul(f32x4_convert_i32x4(vi0), vsq0);
-                let vf1 = f32x4_mul(f32x4_convert_i32x4(vi1), vsq1);
+                let vi = v128_load(src_ptr as *const v128);
+                let vf0 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_low_i16x8(vi)), vsq0);
+                let vf1 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(vi)), vsq1);
                 let dst_ptr = staging.as_mut_ptr().add((row * 4 + b) * 8);
                 v128_store(dst_ptr as *mut v128, vf0);
                 v128_store(dst_ptr.add(4) as *mut v128, vf1);
@@ -537,7 +583,7 @@ fn idct_4blocks_wasm(blocks: &mut [i32], scaled_quant: &[f32; 64], level_shift: 
                     };
                 }
                 for c in 0..8usize {
-                    *blocks.get_unchecked_mut(b * 64 + row * 8 + c) = extract!(out[c]);
+                    *blocks.get_unchecked_mut(b * 64 + row * 8 + c) = extract!(out[c]) as i16;
                 }
             }
         }
@@ -610,4 +656,28 @@ fn aan_butterfly_wasm(
         f32x4_sub(b1, b6),
         f32x4_sub(b0, e7),
     )
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn nonzero_mask_wasm(block: &[i16; 64]) -> u64 {
+    use std::arch::wasm32::*;
+
+    let ptr = block.as_ptr();
+    let zero = i16x8_splat(0);
+    let mut mask = 0u64;
+
+    for group in 0..4 {
+        unsafe {
+            let base = ptr.add(group * 16);
+            let a = v128_load(base as *const v128);
+            let b = v128_load(base.add(8) as *const v128);
+            let eq_a = i16x8_eq(a, zero);
+            let eq_b = i16x8_eq(b, zero);
+            let packed = i8x16_narrow_i16x8(eq_a, eq_b);
+            let zeros = i8x16_bitmask(packed) as u64;
+            mask |= (!zeros & 0xFFFF) << (group * 16);
+        }
+    }
+
+    mask
 }

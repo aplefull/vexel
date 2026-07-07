@@ -3,7 +3,7 @@ use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
 use crate::decoders::jpeg::bitreader::JpegBitReader;
-use crate::decoders::jpeg::idct::dequantize_and_idct;
+use crate::decoders::jpeg::idct::{dequantize_and_idct, nonzero_mask};
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
 use crate::decoders::jpeg::types::{
     APP14AdobeData, APP2Data, ArithmeticCodingTable, ArithmeticCodingValue, ColorComponentInfo, DACData, DHTData,
@@ -19,7 +19,7 @@ use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData, PixelForm
 
 #[derive(Debug, Clone)]
 struct ComponentPlane {
-    data: Vec<i32>,
+    data: Vec<i16>,
     blocks_per_line: u32,
 }
 
@@ -28,17 +28,17 @@ impl ComponentPlane {
         let blocks_per_line = width.div_ceil(8);
         let block_lines = height.div_ceil(8);
         let elem_count = (blocks_per_line as usize).saturating_mul(block_lines as usize).saturating_mul(64);
-        let byte_count = elem_count.saturating_mul(4);
+        let byte_count = elem_count.saturating_mul(2);
         limits.reserve_usize(byte_count)?;
         Ok(Self { blocks_per_line, data: vec![0; elem_count] })
     }
 
     fn free(&self, limits: &mut Limits) {
-        let byte_count = self.data.len().saturating_mul(4);
+        let byte_count = self.data.len().saturating_mul(2);
         limits.free_usize(byte_count);
     }
 
-    fn get_block_mut(&mut self, block_x: u32, block_y: u32) -> Option<&mut [i32; 64]> {
+    fn get_block_mut(&mut self, block_x: u32, block_y: u32) -> Option<&mut [i16; 64]> {
         let block_idx = block_y * self.blocks_per_line + block_x;
         let start = (block_idx * 64) as usize;
         if start + 64 <= self.data.len() {
@@ -47,12 +47,371 @@ impl ComponentPlane {
             None
         }
     }
+}
 
-    fn deinterleave(&self, sw: u32, sh: u32) -> Vec<i32> {
-        use crate::decoders::jpeg::upsample as up;
-        let mut out = vec![0i32; (sw * sh) as usize];
-        up::deinterleave_blocks(&self.data, self.blocks_per_line, sw, sh, &mut out);
-        out
+struct RasterPlane {
+    data: Vec<i16>,
+    width: usize,
+    height: usize,
+}
+
+#[inline(always)]
+fn get_next_symbol(reader: &mut JpegBitReader<'_>, table: &HuffmanTable) -> u8 {
+    if let Some(peek) = reader.peek9() {
+        let entry = unsafe { *table.fast_lookup.get_unchecked(peek as usize) };
+        if entry >> 16 != 0 {
+            reader.consume(entry & 0xFF);
+            return ((entry >> 8) & 0xFF) as u8;
+        }
+        reader.consume(9);
+        let mut code = peek;
+        for i in 9..16 {
+            code = (code << 1) | reader.read_bits(1);
+            let first = unsafe { *table.first_code.get_unchecked(i) };
+            if first != u32::MAX {
+                let count = unsafe { table.offsets.get_unchecked(i + 1).wrapping_sub(*table.offsets.get_unchecked(i)) }
+                    as usize;
+                if code >= first && (code - first) < count as u32 {
+                    let idx = unsafe { *table.offsets.get_unchecked(i) } as usize + (code - first) as usize;
+                    return unsafe { *table.symbols.get_unchecked(idx) };
+                }
+            }
+        }
+        log_warn!("Invalid Huffman code: {}, replacing with 0", code);
+        return 0;
+    }
+
+    let mut code = 0u32;
+    for i in 0..16 {
+        code = (code << 1) | reader.read_bits(1);
+        let first = table.first_code[i];
+        if first != u32::MAX {
+            let count = (table.offsets[i + 1] - table.offsets[i]) as usize;
+            if code >= first && (code - first) < count as u32 {
+                let idx = table.offsets[i] as usize + (code - first) as usize;
+                return table.symbols[idx];
+            }
+        }
+    }
+
+    log_warn!("Invalid Huffman code: {}, replacing with 0", code);
+    0
+}
+
+struct ProgressiveScanComp<'a> {
+    plane_index: usize,
+    h_blocks: u8,
+    v_blocks: u8,
+    dc_table: Option<&'a HuffmanTable>,
+    ac_table: Option<&'a HuffmanTable>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_progressive_blocks<'a, 'b, F>(
+    planes: &mut [ComponentPlane],
+    infos: &[ProgressiveScanComp<'b>],
+    mcu_width: u32,
+    mcu_height: u32,
+    restart_interval: u16,
+    reader: &mut JpegBitReader<'a>,
+    previous_dc: &mut [i32],
+    mut body: F,
+) where
+    F: FnMut(&mut JpegBitReader<'a>, &mut [i16; 64], &ProgressiveScanComp<'b>, &mut [i32]),
+{
+    let mut restart_counter = restart_interval;
+
+    for mcu_y in 0..mcu_height {
+        for mcu_x in 0..mcu_width {
+            if restart_interval > 0 {
+                if restart_counter == 0 {
+                    previous_dc.fill(0);
+                    reader.clear_buffer();
+                    restart_counter = restart_interval;
+                }
+                restart_counter = restart_counter.saturating_sub(1);
+            }
+
+            for info in infos {
+                let h_blocks = info.h_blocks as u32;
+                let v_blocks = info.v_blocks as u32;
+                let plane = &mut planes[info.plane_index];
+                let blocks_per_line = plane.blocks_per_line;
+
+                for v in 0..v_blocks {
+                    for h in 0..h_blocks {
+                        let block_x = mcu_x * h_blocks + h;
+                        let block_y = mcu_y * v_blocks + v;
+
+                        if block_x >= blocks_per_line {
+                            continue;
+                        }
+
+                        if let Some(block) = plane.get_block_mut(block_x, block_y) {
+                            body(reader, block, info, previous_dc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn dezigzag_blocks(blocks: &mut [i16]) {
+    let mut natural = [0i16; 64];
+    for block in blocks.chunks_exact_mut(64) {
+        for zz in 0..64 {
+            unsafe {
+                *natural.get_unchecked_mut(*ZIGZAG_MAP.get_unchecked(zz) as usize) = *block.get_unchecked(zz);
+            }
+        }
+        block.copy_from_slice(&natural);
+    }
+}
+
+#[inline(always)]
+fn prog_dc_first(
+    reader: &mut JpegBitReader<'_>,
+    block: &mut [i16; 64],
+    dc_table: Option<&HuffmanTable>,
+    prev_dc: &mut i32,
+    successive_low: u8,
+    is_differential: bool,
+) -> bool {
+    let dc_table = match dc_table {
+        Some(table) => table,
+        None => {
+            log_warn!("DC table missing for block, skipping");
+            return false;
+        }
+    };
+
+    let length = get_next_symbol(reader, dc_table);
+
+    if length > 15 {
+        log_warn!("Invalid DC coefficient length (>15): {}", length);
+        return false;
+    }
+
+    let bits = reader.read_bits(length as u32);
+    let mut value = bits as i32;
+
+    if length != 0 && value < (1 << (length - 1)) {
+        value -= (1 << length) - 1;
+    }
+
+    if is_differential {
+        *prev_dc = value;
+    } else {
+        value += *prev_dc;
+        *prev_dc = value;
+    }
+
+    block[0] = (value << successive_low) as i16;
+    true
+}
+
+#[inline(always)]
+fn prog_dc_refine(reader: &mut JpegBitReader<'_>, block: &mut [i16; 64], successive_low: u8) {
+    let bit = reader.read_bits(1);
+    block[0] = (block[0] as i32 | ((bit as i32) << successive_low)) as i16;
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn prog_ac_first(
+    reader: &mut JpegBitReader<'_>,
+    block: &mut [i16; 64],
+    ac_table: Option<&HuffmanTable>,
+    skips: &mut u32,
+    start_spectral: usize,
+    end_spectral: usize,
+    successive_low: u8,
+    max_ac_len: u8,
+) {
+    if *skips > 0 {
+        *skips -= 1;
+        return;
+    }
+
+    let ac_table = match ac_table {
+        Some(table) => table,
+        None => {
+            log_warn!("AC table missing for block, skipping");
+            return;
+        }
+    };
+
+    let mut k = start_spectral;
+    while k <= end_spectral {
+        let symbol = get_next_symbol(reader, ac_table);
+
+        let num_zeros = (symbol >> 4) as usize;
+        let length = symbol & 0xF;
+
+        if length != 0 {
+            if k + num_zeros > 63 {
+                log_warn!("Zero run-length exceeded spectral selection: {}", k + num_zeros);
+                break;
+            }
+
+            block[k..k + num_zeros].fill(0);
+            k += num_zeros;
+
+            if length > max_ac_len {
+                log_warn!("Invalid AC coefficient length (>{}): {}", max_ac_len, length);
+                break;
+            }
+
+            let bits = reader.read_bits(length as u32);
+            let mut value = bits as i32;
+
+            if value < (1 << (length - 1)) {
+                value -= (1 << length) - 1;
+            }
+
+            block[k] = (value << successive_low) as i16;
+            k += 1;
+        } else if num_zeros == 15 {
+            if k + num_zeros > end_spectral {
+                log_warn!("Zero run-length exceeded spectral selection: {}", k + num_zeros);
+                break;
+            }
+
+            block[k..k + num_zeros].fill(0);
+            k += num_zeros + 1;
+        } else {
+            *skips = (1u32 << num_zeros) - 1;
+            *skips += reader.read_bits(num_zeros as u32);
+            break;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn prog_ac_refine(
+    reader: &mut JpegBitReader<'_>,
+    block: &mut [i16; 64],
+    ac_table: Option<&HuffmanTable>,
+    skips: &mut u32,
+    start_spectral: usize,
+    end_spectral: usize,
+    positive: i32,
+    negative: i32,
+) {
+    let mut k = start_spectral;
+
+    if start_spectral > end_spectral {
+        if *skips > 0 {
+            *skips -= 1;
+        }
+        return;
+    }
+
+    let mask = nonzero_mask(block) & (!0u64 >> (63 - end_spectral)) & (!0u64 << start_spectral);
+
+    if *skips == 0 {
+        let ac_table = match ac_table {
+            Some(table) => table,
+            None => {
+                log_warn!("AC table missing for block (refining), skipping");
+                return;
+            }
+        };
+
+        while k <= end_spectral {
+            let symbol = get_next_symbol(reader, ac_table);
+
+            let num_zeros = (symbol >> 4) as u32;
+            let length = symbol & 0xF;
+            let mut coefficient = 0;
+
+            if length != 0 {
+                if length != 1 {
+                    log_warn!("Invalid AC coefficient length (refining): {}", length);
+                    break;
+                }
+
+                coefficient = if reader.read_bits(1) != 0 { positive } else { negative };
+            } else if num_zeros != 15 {
+                *skips = 1 << num_zeros;
+                *skips += reader.read_bits(num_zeros);
+                break;
+            }
+
+            let mut zeros_left = num_zeros as usize;
+            loop {
+                let m = mask >> k;
+                let ones = m.trailing_ones() as usize;
+                if ones > 0 {
+                    for pos in k..k + ones {
+                        let val = unsafe { block.get_unchecked_mut(pos) };
+                        let v = *val as i32;
+                        if reader.read_bits(1) == 1 && v & positive == 0 {
+                            if v >= 0 {
+                                *val = (v + positive) as i16;
+                            } else {
+                                *val = (v + negative) as i16;
+                            }
+                        }
+                    }
+                    k += ones;
+                    if k > end_spectral {
+                        break;
+                    }
+                    continue;
+                }
+
+                if zeros_left == 0 {
+                    break;
+                }
+
+                let zero_run = m.trailing_zeros() as usize;
+                let skip = zeros_left.min(zero_run).min(end_spectral + 1 - k);
+                zeros_left -= skip;
+                k += skip;
+
+                if k > end_spectral {
+                    break;
+                }
+            }
+
+            if coefficient != 0 && k <= end_spectral {
+                unsafe {
+                    *block.get_unchecked_mut(k) = coefficient as i16;
+                }
+            }
+
+            k += 1;
+        }
+    }
+
+    if *skips > 0 {
+        if k <= end_spectral {
+            let mut m = mask >> k;
+            let mut pos = k;
+            while m != 0 {
+                let step = m.trailing_zeros() as usize;
+                pos += step;
+                m >>= step;
+
+                let val = unsafe { block.get_unchecked_mut(pos) };
+                let v = *val as i32;
+                if reader.read_bits(1) == 1 && v & positive == 0 {
+                    if v >= 0 {
+                        *val = (v + positive) as i16;
+                    } else {
+                        *val = (v + negative) as i16;
+                    }
+                }
+
+                pos += 1;
+                m >>= 1;
+            }
+        }
+
+        *skips -= 1;
     }
 }
 
@@ -273,7 +632,7 @@ impl<'a> ArithmeticDecoder<'a> {
 
     fn decode_dc_first(
         &mut self,
-        block: &mut [i32],
+        block: &mut [i16],
         comp_idx: usize,
         dc_tbl: usize,
         dc_l: u8,
@@ -286,24 +645,24 @@ impl<'a> ArithmeticDecoder<'a> {
     ) {
         let val =
             self.decode_dc_coeff(comp_idx, dc_tbl, dc_l, dc_u, dc_context, last_dc_val, dc_stats, is_differential);
-        block[0] = val << (successive_low as i32);
+        block[0] = (val << (successive_low as i32)) as i16;
     }
 
-    fn decode_dc_refine(&mut self, block: &mut [i32], successive_low: u8) {
+    fn decode_dc_refine(&mut self, block: &mut [i16], successive_low: u8) {
         if self.error {
             return;
         }
         let p1 = 1i32 << successive_low;
         let mut st = self.fixed_bin;
         if self.arith_decode(&mut st) != 0 {
-            block[0] |= p1;
+            block[0] = (block[0] as i32 | p1) as i16;
         }
         self.fixed_bin = st;
     }
 
     fn decode_ac_first(
         &mut self,
-        block: &mut [i32],
+        block: &mut [i16],
         ac_tbl: usize,
         ac_k: u8,
         ss: usize,
@@ -391,7 +750,7 @@ impl<'a> ArithmeticDecoder<'a> {
             }
 
             if k < 64 {
-                block[ZIGZAG_MAP[k] as usize] = v << (successive_low as i32);
+                block[k] = (v << (successive_low as i32)) as i16;
             }
             k += 1;
         }
@@ -399,7 +758,7 @@ impl<'a> ArithmeticDecoder<'a> {
 
     fn decode_ac_refine(
         &mut self,
-        block: &mut [i32],
+        block: &mut [i16],
         ac_tbl: usize,
         ss: usize,
         se: usize,
@@ -416,7 +775,7 @@ impl<'a> ArithmeticDecoder<'a> {
 
         let mut kex = se;
         while kex > 0 && kex < 64 {
-            if block[ZIGZAG_MAP[kex] as usize] != 0 {
+            if block[kex] != 0 {
                 break;
             }
             kex -= 1;
@@ -437,8 +796,8 @@ impl<'a> ArithmeticDecoder<'a> {
                 if k >= 64 {
                     break 'outer;
                 }
-                let coef_idx = ZIGZAG_MAP[k] as usize;
-                let coef = block[coef_idx];
+                let coef_idx = k;
+                let coef = block[coef_idx] as i32;
                 let st_base = 3 * (k.saturating_sub(1));
                 if st_base + 2 >= tbl_len {
                     break 'outer;
@@ -447,9 +806,9 @@ impl<'a> ArithmeticDecoder<'a> {
                 if coef != 0 {
                     if self.arith_decode(&mut ac_stats[ac_tbl][st_base + 2]) != 0 {
                         if coef < 0 {
-                            block[coef_idx] += m1;
+                            block[coef_idx] = (coef + m1) as i16;
                         } else {
-                            block[coef_idx] += p1;
+                            block[coef_idx] = (coef + p1) as i16;
                         }
                     }
                     break;
@@ -458,7 +817,7 @@ impl<'a> ArithmeticDecoder<'a> {
                         let mut fixed_st = self.fixed_bin;
                         let sign = self.arith_decode(&mut fixed_st);
                         self.fixed_bin = fixed_st;
-                        block[coef_idx] = if sign != 0 { m1 } else { p1 };
+                        block[coef_idx] = if sign != 0 { m1 as i16 } else { p1 as i16 };
                         break;
                     }
                     k += 1;
@@ -474,7 +833,7 @@ impl<'a> ArithmeticDecoder<'a> {
 
     fn decode_mcu_sequential(
         &mut self,
-        block: &mut [i32],
+        block: &mut [i16],
         comp_idx: usize,
         dc_tbl: usize,
         ac_tbl: usize,
@@ -493,7 +852,7 @@ impl<'a> ArithmeticDecoder<'a> {
 
         let val =
             self.decode_dc_coeff(comp_idx, dc_tbl, dc_l, dc_u, dc_context, last_dc_val, dc_stats, is_differential);
-        block[0] = val;
+        block[0] = val as i16;
 
         if self.error {
             return;
@@ -579,7 +938,7 @@ impl<'a> ArithmeticDecoder<'a> {
             }
 
             if k < 64 {
-                block[ZIGZAG_MAP[k] as usize] = v;
+                block[ZIGZAG_MAP[k] as usize] = v as i16;
             }
             k += 1;
         }
@@ -1706,59 +2065,16 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     #[inline(always)]
-    fn get_next_symbol(reader: &mut JpegBitReader<'_>, table: &HuffmanTable) -> u8 {
-        if let Some(peek) = reader.peek9() {
-            let entry = unsafe { *table.fast_lookup.get_unchecked(peek as usize) };
-            if entry >> 16 != 0 {
-                reader.consume(entry & 0xFF);
-                return ((entry >> 8) & 0xFF) as u8;
-            }
-            reader.consume(9);
-            let mut code = peek;
-            for i in 9..16 {
-                code = (code << 1) | reader.read_bits(1);
-                let first = unsafe { *table.first_code.get_unchecked(i) };
-                if first != u32::MAX {
-                    let count =
-                        unsafe { table.offsets.get_unchecked(i + 1).wrapping_sub(*table.offsets.get_unchecked(i)) }
-                            as usize;
-                    if code >= first && (code - first) < count as u32 {
-                        let idx = unsafe { *table.offsets.get_unchecked(i) } as usize + (code - first) as usize;
-                        return unsafe { *table.symbols.get_unchecked(idx) };
-                    }
-                }
-            }
-            log_warn!("Invalid Huffman code: {}, replacing with 0", code);
-            return 0;
-        }
-
-        let mut code = 0u32;
-        for i in 0..16 {
-            code = (code << 1) | reader.read_bits(1);
-            let first = table.first_code[i];
-            if first != u32::MAX {
-                let count = (table.offsets[i + 1] - table.offsets[i]) as usize;
-                if code >= first && (code - first) < count as u32 {
-                    let idx = table.offsets[i] as usize + (code - first) as usize;
-                    return table.symbols[idx];
-                }
-            }
-        }
-
-        log_warn!("Invalid Huffman code: {}, replacing with 0", code);
-        0
-    }
-
     fn decode_mcu(
         &self,
         reader: &mut JpegBitReader<'_>,
-        mcu_component: &mut [i32; 64],
+        mcu_component: &mut [i16; 64],
         dc_table: &HuffmanTable,
         ac_table: &HuffmanTable,
         previous_dc: &mut i32,
         is_differential: bool,
     ) -> VexelResult<()> {
-        let length = Self::get_next_symbol(reader, dc_table);
+        let length = get_next_symbol(reader, dc_table);
 
         if length > 15 {
             log_warn!("Invalid DC coefficient length (>15): {}", length);
@@ -1780,12 +2096,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
             v
         };
         unsafe {
-            *mcu_component.get_unchecked_mut(0) = dc_value;
+            *mcu_component.get_unchecked_mut(0) = dc_value as i16;
         }
 
         let mut i = 1usize;
         while i < 64 {
-            let symbol = Self::get_next_symbol(reader, ac_table);
+            let symbol = get_next_symbol(reader, ac_table);
 
             if symbol == 0 {
                 return Ok(());
@@ -1820,7 +2136,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 }
 
                 unsafe {
-                    *mcu_component.get_unchecked_mut(*ZIGZAG_MAP.get_unchecked(i) as usize) = coefficient;
+                    *mcu_component.get_unchecked_mut(*ZIGZAG_MAP.get_unchecked(i) as usize) = coefficient as i16;
                 }
                 i += 1;
             }
@@ -1849,12 +2165,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
             JpegCodingMethod::Huffman => self.decode_progressive_scans(&mut component_planes)?,
             JpegCodingMethod::Arithmetic => self.decode_progressive_scans_arithmetic(&mut component_planes)?,
         }
-        self.dequantize_and_idct_planes(&mut component_planes)?;
-
-        let mut pixel_data = self.upsample_and_convert(&component_planes)?;
+        let raster_planes = self.dequantize_and_idct_planes(&component_planes, true);
         for plane in &component_planes {
             plane.free(&mut self.limits);
         }
+        drop(component_planes);
+
+        let mut pixel_data = self.upsample_and_convert(&raster_planes)?;
         pixel_data.correct_pixels(self.width, self.height);
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
@@ -1862,10 +2179,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn decode_progressive_scans(&mut self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
         let mut previous_dc = vec![0i32; planes.len()];
+        let is_differential = matches!(self.mode, JpegMode::DifferentialProgressive | JpegMode::DifferentialSequential);
+        let max_ac_len: u8 = if self.precision > 8 { 15 } else { 10 };
 
         for scan in &self.scans {
             let mut reader = JpegBitReader::new(scan.data.as_slice());
-            let mut skips = 0;
+            let mut skips: u32 = 0;
             let restart_interval = self.restart_interval;
 
             let mut max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
@@ -1881,15 +2200,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let mcu_width = self.width.div_ceil(8 * max_h_samp as u32);
             let mcu_height = self.height.div_ceil(8 * max_v_samp as u32);
 
-            struct ScanCompInfo {
-                plane_index: usize,
-                h_blocks: u8,
-                v_blocks: u8,
-                dc_table_index: Option<usize>,
-                ac_table_index: Option<usize>,
-            }
-
-            let scan_comp_infos: Vec<ScanCompInfo> = scan
+            let scan_comp_infos: Vec<ProgressiveScanComp<'_>> = scan
                 .components
                 .iter()
                 .filter_map(|scan_comp| {
@@ -1910,281 +2221,117 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let h_blocks = if is_non_interleaved { 1 } else { comp.horizontal_sampling_factor };
                     let v_blocks = if is_non_interleaved { 1 } else { comp.vertical_sampling_factor };
 
-                    let dc_table_index = scan.dc_tables.iter().position(|t| t.id == scan_comp.dc_table_selector);
-                    let ac_table_index = scan.ac_tables.iter().position(|t| t.id == scan_comp.ac_table_selector);
+                    let dc_table = scan.dc_tables.iter().find(|t| t.id == scan_comp.dc_table_selector);
+                    let ac_table = scan.ac_tables.iter().find(|t| t.id == scan_comp.ac_table_selector);
 
-                    if scan.start_spectral == 0 && scan.successive_high == 0 && dc_table_index.is_none() {
+                    if scan.start_spectral == 0 && scan.successive_high == 0 && dc_table.is_none() {
                         log_warn!("DC table not found: {}", scan_comp.dc_table_selector);
                     }
-                    if scan.end_spectral > 0 && ac_table_index.is_none() {
+                    if scan.end_spectral > 0 && ac_table.is_none() {
                         log_warn!("AC table not found: {}", scan_comp.ac_table_selector);
                     }
 
-                    Some(ScanCompInfo { plane_index, h_blocks, v_blocks, dc_table_index, ac_table_index })
+                    Some(ProgressiveScanComp { plane_index, h_blocks, v_blocks, dc_table, ac_table })
                 })
                 .collect();
 
-            let mut restart_counter = restart_interval;
+            let start_spectral = scan.start_spectral as usize;
+            let end_spectral = (scan.end_spectral as usize).min(63);
+            let successive_low = scan.successive_low;
+            let is_first_pass = scan.successive_high == 0;
+            let has_dc = scan.start_spectral == 0;
+            let has_ac = scan.end_spectral > 0;
+            let positive = 1 << successive_low;
+            let negative = -1 << successive_low;
 
-            for mcu_y in 0..mcu_height {
-                for mcu_x in 0..mcu_width {
-                    if restart_interval > 0 {
-                        if restart_counter == 0 {
-                            previous_dc.fill(0);
-                            reader.clear_buffer();
-                            restart_counter = restart_interval;
-                        }
-                        restart_counter = restart_counter.saturating_sub(1);
+            macro_rules! run_scan {
+                ($body:expr) => {
+                    run_progressive_blocks(
+                        planes,
+                        &scan_comp_infos,
+                        mcu_width,
+                        mcu_height,
+                        restart_interval,
+                        &mut reader,
+                        &mut previous_dc,
+                        $body,
+                    )
+                };
+            }
+
+            match (has_dc, has_ac, is_first_pass) {
+                (true, false, true) => run_scan!(|reader, block, info, previous_dc| {
+                    prog_dc_first(
+                        reader,
+                        block,
+                        info.dc_table,
+                        &mut previous_dc[info.plane_index],
+                        successive_low,
+                        is_differential,
+                    );
+                }),
+                (true, false, false) => run_scan!(|reader, block, _info, _previous_dc| {
+                    prog_dc_refine(reader, block, successive_low);
+                }),
+                (false, true, true) => run_scan!(|reader, block, info, _previous_dc| {
+                    prog_ac_first(
+                        reader,
+                        block,
+                        info.ac_table,
+                        &mut skips,
+                        start_spectral,
+                        end_spectral,
+                        successive_low,
+                        max_ac_len,
+                    );
+                }),
+                (false, true, false) => run_scan!(|reader, block, info, _previous_dc| {
+                    prog_ac_refine(
+                        reader,
+                        block,
+                        info.ac_table,
+                        &mut skips,
+                        start_spectral,
+                        end_spectral,
+                        positive,
+                        negative,
+                    );
+                }),
+                (true, true, true) => run_scan!(|reader, block, info, previous_dc| {
+                    if prog_dc_first(
+                        reader,
+                        block,
+                        info.dc_table,
+                        &mut previous_dc[info.plane_index],
+                        successive_low,
+                        is_differential,
+                    ) {
+                        prog_ac_first(
+                            reader,
+                            block,
+                            info.ac_table,
+                            &mut skips,
+                            start_spectral,
+                            end_spectral,
+                            successive_low,
+                            max_ac_len,
+                        );
                     }
-
-                    for info in &scan_comp_infos {
-                        let plane_index = info.plane_index;
-                        let h_blocks = info.h_blocks;
-                        let v_blocks = info.v_blocks;
-                        let plane_blocks_per_line = planes[plane_index].blocks_per_line;
-
-                        for v in 0..v_blocks {
-                            for h in 0..h_blocks {
-                                let block_x = mcu_x * h_blocks as u32 + h as u32;
-                                let block_y = mcu_y * v_blocks as u32 + v as u32;
-
-                                if block_x >= plane_blocks_per_line {
-                                    continue;
-                                }
-
-                                if let Some(component_data) = planes[plane_index].get_block_mut(block_x, block_y) {
-                                    assert_eq!(component_data.len(), 64);
-                                    if scan.start_spectral == 0 {
-                                        if scan.successive_high == 0 {
-                                            // First DC scan
-                                            let dc_table = match info.dc_table_index.and_then(|i| scan.dc_tables.get(i))
-                                            {
-                                                Some(table) => table,
-                                                None => {
-                                                    log_warn!("DC table missing for block, skipping");
-                                                    continue;
-                                                }
-                                            };
-
-                                            let length = Self::get_next_symbol(&mut reader, dc_table);
-
-                                            if length > 15 {
-                                                log_warn!("Invalid DC coefficient length (>15): {}", length);
-                                                continue;
-                                            }
-
-                                            let bits = reader.read_bits(length as u32);
-
-                                            let mut value = bits as i32;
-
-                                            if length != 0 && value < (1 << (length - 1)) {
-                                                value -= (1 << length) - 1;
-                                            }
-
-                                            let is_differential = matches!(
-                                                self.mode,
-                                                JpegMode::DifferentialProgressive | JpegMode::DifferentialSequential
-                                            );
-                                            if is_differential {
-                                                previous_dc[plane_index] = value;
-                                            } else {
-                                                value += previous_dc[plane_index];
-                                                previous_dc[plane_index] = value;
-                                            }
-                                            component_data[0] = value << scan.successive_low;
-                                        } else {
-                                            // Refining DC scan
-                                            let bit = reader.read_bits(1);
-
-                                            component_data[0] |= (bit as i32) << scan.successive_low;
-                                        }
-                                    }
-
-                                    if scan.end_spectral > 0 {
-                                        if scan.successive_high == 0 {
-                                            // First AC scan
-                                            if skips > 0 {
-                                                skips -= 1;
-                                                continue;
-                                            }
-
-                                            let ac_table = match info.ac_table_index.and_then(|i| scan.ac_tables.get(i))
-                                            {
-                                                Some(table) => table,
-                                                None => {
-                                                    log_warn!("AC table missing for block, skipping");
-                                                    continue;
-                                                }
-                                            };
-
-                                            let mut k = scan.start_spectral as usize;
-                                            while k <= scan.end_spectral as usize {
-                                                let symbol = Self::get_next_symbol(&mut reader, ac_table);
-
-                                                let num_zeros = symbol >> 4;
-                                                let length = symbol & 0xF;
-
-                                                if length != 0 {
-                                                    if k + num_zeros as usize > 63 {
-                                                        log_warn!(
-                                                            "Zero run-length exceeded spectral selection: {}",
-                                                            k + num_zeros as usize
-                                                        );
-                                                        break;
-                                                    }
-
-                                                    for _ in 0..num_zeros {
-                                                        component_data[ZIGZAG_MAP[k] as usize] = 0;
-                                                        k += 1;
-                                                    }
-
-                                                    let max_ac_len = if self.precision > 8 { 15 } else { 10 };
-                                                    if length > max_ac_len {
-                                                        log_warn!(
-                                                            "Invalid AC coefficient length (>{}): {}",
-                                                            max_ac_len,
-                                                            length
-                                                        );
-                                                        break;
-                                                    }
-
-                                                    let bits = reader.read_bits(length as u32);
-                                                    let mut value = bits as i32;
-
-                                                    if value < (1 << (length - 1)) {
-                                                        value -= (1 << length) - 1;
-                                                    }
-
-                                                    let zigzag_idx = ZIGZAG_MAP[k] as usize;
-                                                    component_data[zigzag_idx] = value << scan.successive_low;
-                                                    k += 1;
-                                                } else {
-                                                    if num_zeros == 15 {
-                                                        if k + num_zeros as usize > scan.end_spectral as usize {
-                                                            log_warn!(
-                                                                "Zero run-length exceeded spectral selection: {}",
-                                                                k + num_zeros as usize
-                                                            );
-                                                            break;
-                                                        }
-
-                                                        for _ in 0..num_zeros {
-                                                            component_data[ZIGZAG_MAP[k] as usize] = 0;
-                                                            k += 1;
-                                                        }
-                                                    } else {
-                                                        skips = (1 << num_zeros) - 1;
-                                                        skips += reader.read_bits(num_zeros as u32);
-                                                        break;
-                                                    }
-
-                                                    k += 1;
-                                                }
-                                            }
-                                        } else {
-                                            // Refining AC scan
-                                            let positive = 1 << scan.successive_low;
-                                            let negative = -1 << scan.successive_low;
-                                            let mut k = scan.start_spectral as usize;
-
-                                            if skips == 0 {
-                                                let ac_table = match info
-                                                    .ac_table_index
-                                                    .and_then(|i| scan.ac_tables.get(i))
-                                                {
-                                                    Some(table) => table,
-                                                    None => {
-                                                        log_warn!("AC table missing for block (refining), skipping");
-                                                        continue;
-                                                    }
-                                                };
-
-                                                while k <= scan.end_spectral as usize {
-                                                    let symbol = Self::get_next_symbol(&mut reader, ac_table);
-
-                                                    let mut num_zeros = symbol >> 4;
-                                                    let length = symbol & 0xF;
-                                                    let mut coefficient = 0;
-
-                                                    if length != 0 {
-                                                        if length != 1 {
-                                                            log_warn!(
-                                                                "Invalid AC coefficient length (refining): {}",
-                                                                length
-                                                            );
-                                                            break;
-                                                        }
-
-                                                        coefficient =
-                                                            if reader.read_bits(1) != 0 { positive } else { negative };
-                                                    } else if num_zeros != 15 {
-                                                        skips = 1 << num_zeros;
-                                                        skips += reader.read_bits(num_zeros as u32);
-                                                        break;
-                                                    }
-
-                                                    loop {
-                                                        let val = unsafe {
-                                                            component_data.get_unchecked_mut(ZIGZAG_MAP[k] as usize)
-                                                        };
-                                                        if *val != 0 {
-                                                            if reader.read_bits(1) == 1 && *val & positive == 0 {
-                                                                if *val >= 0 {
-                                                                    *val += positive;
-                                                                } else {
-                                                                    *val += negative;
-                                                                }
-                                                            }
-                                                        } else {
-                                                            if num_zeros == 0 {
-                                                                break;
-                                                            }
-                                                            num_zeros -= 1;
-                                                        }
-
-                                                        k += 1;
-
-                                                        if k > scan.end_spectral as usize {
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    if coefficient != 0 && k <= scan.end_spectral as usize {
-                                                        unsafe {
-                                                            *component_data.get_unchecked_mut(ZIGZAG_MAP[k] as usize) =
-                                                                coefficient;
-                                                        }
-                                                    }
-
-                                                    k += 1;
-                                                }
-                                            }
-
-                                            if skips > 0 {
-                                                while k <= scan.end_spectral as usize {
-                                                    let val = unsafe {
-                                                        component_data.get_unchecked_mut(ZIGZAG_MAP[k] as usize)
-                                                    };
-                                                    if *val != 0 && reader.read_bits(1) == 1 && *val & positive == 0 {
-                                                        if *val >= 0 {
-                                                            *val += positive;
-                                                        } else {
-                                                            *val += negative;
-                                                        }
-                                                    }
-
-                                                    k += 1;
-                                                }
-
-                                                skips -= 1;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                }),
+                (true, true, false) => run_scan!(|reader, block, info, _previous_dc| {
+                    prog_dc_refine(reader, block, successive_low);
+                    prog_ac_refine(
+                        reader,
+                        block,
+                        info.ac_table,
+                        &mut skips,
+                        start_spectral,
+                        end_spectral,
+                        positive,
+                        negative,
+                    );
+                }),
+                (false, false, _) => {}
             }
         }
         Ok(())
@@ -2227,7 +2374,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         }
                     };
 
-                    let bits_to_read = Self::get_next_symbol(&mut reader, dc_table);
+                    let bits_to_read = get_next_symbol(&mut reader, dc_table);
 
                     let diff = match bits_to_read {
                         0 => 0,
@@ -2853,7 +3000,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     #[cold]
     fn decode_lossless_diff_tail(reader: &mut JpegBitReader<'_>, table: &HuffmanTable, ssss16_is_min: bool) -> i32 {
-        let ssss = Self::get_next_symbol(reader, table);
+        let ssss = get_next_symbol(reader, table);
         match ssss {
             0 => 0,
             1..=15 => {
@@ -3327,6 +3474,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
+    // TODO: Use same optimization as progressive mode
     fn decode_huffman_to_planes(&mut self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
         if self.scans.is_empty() {
             // Well, nothing to do here, how did this even happen?
@@ -3464,7 +3612,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(())
     }
 
-    fn dequantize_and_idct_planes(&self, planes: &mut [ComponentPlane]) -> VexelResult<()> {
+    fn dequantize_and_idct_planes(&self, planes: &[ComponentPlane], zigzag_order: bool) -> Vec<RasterPlane> {
         let level_shift = if self.precision <= 8 { 128i32 } else { 2048i32 };
 
         let default_table = QuantizationTable {
@@ -3474,53 +3622,103 @@ impl<R: Read + Seek> JpegDecoder<R> {
             table_natural: DEFAULT_QUANTIZATION_TABLE.to_vec(),
         };
 
-        for (comp_idx, plane) in planes.iter_mut().enumerate() {
-            let quant_data: &[u16] = self
-                .components
-                .get(comp_idx)
-                .and_then(|comp| self.quantization_tables.iter().find(|q| q.id == comp.quantization_table_id))
-                .map(|t| t.table_natural.as_slice())
-                .unwrap_or_else(|| {
-                    log_warn!("Quantization table not found for component, substituting default one.");
-                    default_table.table_natural.as_slice()
-                });
+        let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
+        let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
 
-            #[cfg(feature = "rayon")]
-            {
-                use rayon::prelude::*;
-                plane.data.par_chunks_mut(64 * 8).for_each(|chunk| {
-                    dequantize_and_idct(chunk, quant_data, level_shift);
-                });
-            }
+        planes
+            .iter()
+            .enumerate()
+            .map(|(comp_idx, plane)| {
+                let comp = self.components.get(comp_idx);
+                let quant_data: &[u16] = comp
+                    .and_then(|comp| self.quantization_tables.iter().find(|q| q.id == comp.quantization_table_id))
+                    .map(|t| t.table_natural.as_slice())
+                    .unwrap_or_else(|| {
+                        log_warn!("Quantization table not found for component, substituting default one.");
+                        default_table.table_natural.as_slice()
+                    });
 
-            #[cfg(not(feature = "rayon"))]
-            {
-                dequantize_and_idct(&mut plane.data, quant_data, level_shift);
-            }
-        }
+                let (sw, sh) = comp
+                    .map(|c| {
+                        (
+                            (self.width * c.horizontal_sampling_factor as u32).div_ceil(max_h_samp as u32) as usize,
+                            (self.height * c.vertical_sampling_factor as u32).div_ceil(max_v_samp as u32) as usize,
+                        )
+                    })
+                    .unwrap_or((self.width as usize, self.height as usize));
 
-        Ok(())
+                let mut data = vec![0i16; sw * sh];
+                if sw == 0 || sh == 0 {
+                    return RasterPlane { data, width: sw, height: sh };
+                }
+
+                let bpl = plane.blocks_per_line as usize;
+                let nbx = sw.div_ceil(8);
+                let scratch_len = nbx * 64;
+                let row_len = scratch_len.min(bpl * 64);
+
+                let process_band = |scratch: &mut [i16], by: usize, band: &mut [i16]| {
+                    let row_start = by * bpl * 64;
+                    let avail = plane.data.len().saturating_sub(row_start).min(row_len);
+                    scratch[..avail].copy_from_slice(&plane.data[row_start..row_start + avail]);
+                    scratch[avail..].fill(0);
+
+                    if zigzag_order {
+                        dezigzag_blocks(scratch);
+                    }
+                    dequantize_and_idct(scratch, quant_data, level_shift);
+
+                    let band_h = band.len() / sw;
+                    for bx in 0..nbx {
+                        let bw = (sw - bx * 8).min(8);
+                        for py in 0..band_h {
+                            let src_off = bx * 64 + py * 8;
+                            let dst_off = py * sw + bx * 8;
+                            band[dst_off..dst_off + bw].copy_from_slice(&scratch[src_off..src_off + bw]);
+                        }
+                    }
+                };
+
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    data.par_chunks_mut(sw * 8).enumerate().for_each_init(
+                        || vec![0i16; scratch_len],
+                        |scratch, (by, band)| process_band(scratch, by, band),
+                    );
+                }
+
+                #[cfg(not(feature = "rayon"))]
+                {
+                    let mut scratch = vec![0i16; scratch_len];
+                    for (by, band) in data.chunks_mut(sw * 8).enumerate() {
+                        process_band(&mut scratch, by, band);
+                    }
+                }
+
+                RasterPlane { data, width: sw, height: sh }
+            })
+            .collect()
     }
 
     fn convert_4component_to_rgba(
         &self,
-        deinterleaved: &[Vec<i32>],
+        planes: &[RasterPlane],
         source_dims: &[(usize, usize)],
         tw: usize,
         th: usize,
         npixels: usize,
     ) -> VexelResult<PixelData> {
-        let empty: Vec<i32> = vec![];
-        let ch = [0, 1, 2, 3].map(|i| deinterleaved.get(i).map(|v| v.as_slice()).unwrap_or(&empty));
+        let ch: [&[i16]; 4] = [0, 1, 2, 3].map(|i| planes.get(i).map(|p| p.data.as_slice()).unwrap_or(&[]));
 
-        let upsample = |plane: &[i32], dims: (usize, usize), dx: usize, dy: usize| -> i32 {
+        let upsample = |plane: &[i16], dims: (usize, usize), dx: usize, dy: usize| -> i32 {
             let (sw, sh) = dims;
             if sw == tw && sh == th {
-                return plane.get(dy * tw + dx).copied().unwrap_or(0);
+                return plane.get(dy * tw + dx).copied().unwrap_or(0) as i32;
             }
             let sx = (dx * sw / tw).min(sw.saturating_sub(1));
             let sy = (dy * sh / th).min(sh.saturating_sub(1));
-            plane.get(sy * sw + sx).copied().unwrap_or(0)
+            plane.get(sy * sw + sx).copied().unwrap_or(0) as i32
         };
 
         if self.precision <= 8 {
@@ -3555,42 +3753,41 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     fn convert_4component_to_rgb(
         &self,
-        deinterleaved: &[Vec<i32>],
+        planes: &[RasterPlane],
         source_dims: &[(usize, usize)],
         tw: usize,
         th: usize,
         npixels: usize,
         colorspace: JpegColorspace,
     ) -> VexelResult<PixelData> {
-        let empty: Vec<i32> = vec![];
-        let ch0 = deinterleaved.first().map(|v| v.as_slice()).unwrap_or(&empty);
-        let ch1 = deinterleaved.get(1).map(|v| v.as_slice()).unwrap_or(&empty);
-        let ch2 = deinterleaved.get(2).map(|v| v.as_slice()).unwrap_or(&empty);
-        let ch3 = deinterleaved.get(3).map(|v| v.as_slice()).unwrap_or(&empty);
+        let ch0: &[i16] = planes.first().map(|p| p.data.as_slice()).unwrap_or(&[]);
+        let ch1: &[i16] = planes.get(1).map(|p| p.data.as_slice()).unwrap_or(&[]);
+        let ch2: &[i16] = planes.get(2).map(|p| p.data.as_slice()).unwrap_or(&[]);
+        let ch3: &[i16] = planes.get(3).map(|p| p.data.as_slice()).unwrap_or(&[]);
 
         let (y0_sw, y0_sh) = source_dims.first().copied().unwrap_or((tw, th));
 
-        let upsample_chroma = |plane: &[i32], dims: (usize, usize), dx: usize, dy: usize| -> i32 {
+        let upsample_chroma = |plane: &[i16], dims: (usize, usize), dx: usize, dy: usize| -> i32 {
             let (sw, sh) = dims;
             if sw == tw && sh == th {
-                return plane.get(dy * tw + dx).copied().unwrap_or(0);
+                return plane.get(dy * tw + dx).copied().unwrap_or(0) as i32;
             }
             let h2x = tw == sw * 2 || tw == sw * 2 - 1;
             let v2x = th == sh * 2 || th == sh * 2 - 1;
             if h2x && v2x {
                 let sy = (dy / 2).min(sh.saturating_sub(1));
                 let sx = dx / 2;
-                plane.get(sy * sw + sx.min(sw.saturating_sub(1))).copied().unwrap_or(0)
+                plane.get(sy * sw + sx.min(sw.saturating_sub(1))).copied().unwrap_or(0) as i32
             } else if h2x {
                 let sx = dx / 2;
-                plane.get(dy * sw + sx.min(sw.saturating_sub(1))).copied().unwrap_or(0)
+                plane.get(dy * sw + sx.min(sw.saturating_sub(1))).copied().unwrap_or(0) as i32
             } else if v2x {
                 let sy = (dy / 2).min(sh.saturating_sub(1));
-                plane.get(sy * sw + dx.min(sw.saturating_sub(1))).copied().unwrap_or(0)
+                plane.get(sy * sw + dx.min(sw.saturating_sub(1))).copied().unwrap_or(0) as i32
             } else {
                 let sx = (dx * sw / tw).min(sw.saturating_sub(1));
                 let sy = (dy * sh / th).min(sh.saturating_sub(1));
-                plane.get(sy * sw + sx).copied().unwrap_or(0)
+                plane.get(sy * sw + sx).copied().unwrap_or(0) as i32
             }
         };
 
@@ -3599,11 +3796,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
         for dy in 0..th {
             for dx in 0..tw {
                 let y0_val = if y0_sw == tw && y0_sh == th {
-                    ch0.get(dy * tw + dx).copied().unwrap_or(0)
+                    ch0.get(dy * tw + dx).copied().unwrap_or(0) as i32
                 } else {
                     let sx = (dx * y0_sw / tw).min(y0_sw.saturating_sub(1));
                     let sy = (dy * y0_sh / th).min(y0_sh.saturating_sub(1));
-                    ch0.get(sy * y0_sw + sx).copied().unwrap_or(0)
+                    ch0.get(sy * y0_sw + sx).copied().unwrap_or(0) as i32
                 };
                 let c1_val = upsample_chroma(ch1, source_dims.get(1).copied().unwrap_or((tw, th)), dx, dy);
                 let c2_val = upsample_chroma(ch2, source_dims.get(2).copied().unwrap_or((tw, th)), dx, dy);
@@ -3641,56 +3838,28 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(PixelData::RGB8(pixels))
     }
 
-    fn upsample_and_convert(&self, planes: &[ComponentPlane]) -> VexelResult<PixelData> {
+    fn upsample_and_convert(&self, planes: &[RasterPlane]) -> VexelResult<PixelData> {
         use crate::decoders::jpeg::upsample as up;
-
-        let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
-        let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
 
         let tw = self.width as usize;
         let th = self.height as usize;
         let npixels = tw * th;
 
-        let source_dims: Vec<(usize, usize)> = self
-            .components
-            .iter()
-            .map(|comp| {
-                let sw = (self.width * comp.horizontal_sampling_factor as u32).div_ceil(max_h_samp as u32) as usize;
-                let sh = (self.height * comp.vertical_sampling_factor as u32).div_ceil(max_v_samp as u32) as usize;
-                (sw, sh)
-            })
-            .collect();
+        let source_dims: Vec<(usize, usize)> = planes.iter().map(|p| (p.width, p.height)).collect();
 
-        #[cfg(feature = "rayon")]
-        let deinterleaved: Vec<Vec<i32>> = {
-            use rayon::prelude::*;
-            planes
-                .par_iter()
-                .zip(source_dims.par_iter())
-                .map(|(plane, &(sw, sh))| plane.deinterleave(sw as u32, sh as u32))
-                .collect()
-        };
-
-        #[cfg(not(feature = "rayon"))]
-        let deinterleaved: Vec<Vec<i32>> = planes
-            .iter()
-            .zip(source_dims.iter())
-            .map(|(plane, &(sw, sh))| plane.deinterleave(sw as u32, sh as u32))
-            .collect();
-
-        if deinterleaved.len() == 1 {
-            let src = &deinterleaved[0];
+        if planes.len() == 1 {
+            let src = &planes[0].data;
             return if self.precision <= 8 {
                 let mut pixels = Vec::with_capacity(npixels);
                 for &s in src.iter().take(npixels) {
-                    pixels.push((s + 128).clamp(0, 255) as u8);
+                    pixels.push((s as i32 + 128).clamp(0, 255) as u8);
                 }
                 pixels.resize(npixels, 0);
                 Ok(PixelData::L8(pixels))
             } else {
                 let mut pixels16 = Vec::with_capacity(npixels);
                 for &s in src.iter().take(npixels) {
-                    pixels16.push(((s + 2048).clamp(0, 4095) as u16) << 4);
+                    pixels16.push(((s as i32 + 2048).clamp(0, 4095) as u16) << 4);
                 }
                 pixels16.resize(npixels, 0);
                 Ok(PixelData::L16(pixels16))
@@ -3700,44 +3869,41 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let colorspace = self.detect_colorspace();
 
         if colorspace == JpegColorspace::CMYK || colorspace == JpegColorspace::YCCK {
-            return self.convert_4component_to_rgb(&deinterleaved, &source_dims, tw, th, npixels, colorspace);
+            return self.convert_4component_to_rgb(planes, &source_dims, tw, th, npixels, colorspace);
         }
 
         if colorspace == JpegColorspace::RGBA {
-            return self.convert_4component_to_rgba(&deinterleaved, &source_dims, tw, th, npixels);
+            return self.convert_4component_to_rgba(planes, &source_dims, tw, th, npixels);
         }
 
-        if deinterleaved.len() < 3 {
-            log_warn!("Invalid number of planes for RGB conversion: {}.", deinterleaved.len());
+        if planes.len() < 3 {
+            log_warn!("Invalid number of planes for RGB conversion: {}.", planes.len());
         }
 
         let (y_sw, y_sh) = source_dims[0];
-        let (cb_sw, cb_sh) = if deinterleaved.len() >= 2 { source_dims[1] } else { (tw, th) };
-        let (cr_sw, cr_sh) = if deinterleaved.len() >= 3 { source_dims[2] } else { (cb_sw, cb_sh) };
+        let (cb_sw, cb_sh) = if planes.len() >= 2 { source_dims[1] } else { (tw, th) };
+        let (cr_sw, cr_sh) = if planes.len() >= 3 { source_dims[2] } else { (cb_sw, cb_sh) };
 
-        let y_plane = &deinterleaved[0];
-        let cb_plane = if deinterleaved.len() > 1 { deinterleaved[1].as_slice() } else { &[] };
-        let cr_plane = if deinterleaved.len() > 2 { deinterleaved[2].as_slice() } else { &[] };
+        let y_plane: &[i16] = &planes[0].data;
+        let cb_plane: &[i16] = if planes.len() > 1 { &planes[1].data } else { &[] };
+        let cr_plane: &[i16] = if planes.len() > 2 { &planes[2].data } else { &[] };
+
+        let max_sw = y_sw.max(cb_sw).max(cr_sw).max(1);
 
         #[cfg(not(feature = "rayon"))]
-        let upsample_y_row = |dy: usize, tmp: &mut Vec<i32>| {
+        let upsample_y_row = |dy: usize, tmp: &mut Vec<i32>, col_sums: &mut Vec<i32>, prev_col_sums: &mut Vec<i32>| {
+            tmp.resize(tw, 0);
             if y_sw == tw && y_sh == th {
                 let base = dy * tw;
-                tmp.clear();
-                if tmp.capacity() < tw {
-                    tmp.reserve(tw);
-                }
-                tmp.extend_from_slice(&y_plane[base..base + tw.min(y_plane.len().saturating_sub(base))]);
-                tmp.resize(tw, 0);
+                let copy_len = tw.min(y_plane.len().saturating_sub(base));
+                up::widen_i16_row(&y_plane[base..base + copy_len], &mut tmp[..copy_len]);
+                tmp[copy_len..].fill(0);
             } else {
-                tmp.resize(tw, 0);
                 let sy = (dy * y_sh / th).min(y_sh.saturating_sub(1));
                 let sy_above = sy.saturating_sub(1);
                 let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
                 let v = dy % 2;
                 let sy_near = if v == 0 { sy_above } else { sy_below };
-                let mut col_sums = vec![0i32; y_sw];
-                let mut prev_col_sums = vec![0i32; y_sw];
                 let prev_near = if v == 0 { sy_above } else { sy };
                 let ylen = y_plane.len();
                 let src_start = (sy * y_sw).min(ylen);
@@ -3746,19 +3912,21 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let src_row = &y_plane[src_start..(src_start + y_sw).min(ylen)];
                 let near_row = &y_plane[near_start..(near_start + y_sw).min(ylen)];
                 let prev_near_row = &y_plane[prev_start..(prev_start + y_sw).min(ylen)];
-                up::compute_col_sums(src_row, near_row, &mut col_sums, y_sw.min(src_row.len()).min(near_row.len()));
+                col_sums[..y_sw].fill(0);
+                prev_col_sums[..y_sw].fill(0);
+                up::compute_col_sums(src_row, near_row, &mut col_sums[..], y_sw.min(src_row.len()).min(near_row.len()));
                 up::compute_col_sums(
                     src_row,
                     prev_near_row,
-                    &mut prev_col_sums,
+                    &mut prev_col_sums[..],
                     y_sw.min(src_row.len()).min(prev_near_row.len()),
                 );
-                up::upsample_h2v2_row(&col_sums, &prev_col_sums, tmp, y_sw, tw);
+                up::upsample_h2v2_row(&col_sums[..], &prev_col_sums[..], tmp, y_sw, tw);
             }
         };
 
         macro_rules! upsample_chroma_row {
-            ($plane:expr, $p_sw:expr, $p_sh:expr, $dy:expr, $tmp:expr) => {{
+            ($plane:expr, $p_sw:expr, $p_sh:expr, $dy:expr, $tmp:expr, $col_sums:expr, $prev_col_sums:expr) => {{
                 let p_sw = $p_sw;
                 let p_sh = $p_sh;
                 let p_h_2x = tw == p_sw * 2 || tw == (p_sw * 2).saturating_sub(1);
@@ -3773,7 +3941,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let base = $dy * tw;
                     let avail = $plane.len().saturating_sub(base);
                     let copy_len = tw.min(avail);
-                    $tmp[..copy_len].copy_from_slice(&$plane[base..base + copy_len]);
+                    up::widen_i16_row(&$plane[base..base + copy_len], &mut $tmp[..copy_len]);
                     $tmp[copy_len..].fill(0);
                 } else if p_is_h2v2 {
                     let sy = ($dy / 2).min(p_sh.saturating_sub(1));
@@ -3790,17 +3958,22 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let near_row = &$plane[near_start..(near_start + p_sw).min(plen)];
                     let prev_near_row = &$plane[prev_start..(prev_start + p_sw).min(plen)];
                     let sw_eff = p_sw.min(src_row.len()).min(near_row.len());
-                    let mut col_sums = vec![0i32; p_sw];
-                    let mut prev_col_sums = vec![0i32; p_sw];
-                    up::compute_col_sums(src_row, near_row, &mut col_sums, sw_eff);
-                    up::compute_col_sums(src_row, prev_near_row, &mut prev_col_sums, sw_eff.min(prev_near_row.len()));
-                    up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut $tmp, p_sw, tw);
+                    $col_sums[..p_sw].fill(0);
+                    $prev_col_sums[..p_sw].fill(0);
+                    up::compute_col_sums(src_row, near_row, &mut $col_sums[..], sw_eff);
+                    up::compute_col_sums(
+                        src_row,
+                        prev_near_row,
+                        &mut $prev_col_sums[..],
+                        sw_eff.min(prev_near_row.len()),
+                    );
+                    up::upsample_h2v2_row(&$col_sums[..], &$prev_col_sums[..], &mut $tmp[..], p_sw, tw);
                 } else if p_is_h2v1 {
                     let sy = $dy.min(p_sh.saturating_sub(1));
                     let plen = $plane.len();
                     let src_start = (sy * p_sw).min(plen);
                     let src_row = &$plane[src_start..(src_start + p_sw).min(plen)];
-                    up::upsample_h2v1_row(src_row, &mut $tmp, p_sw.min(src_row.len()), tw);
+                    up::upsample_h2v1_row(src_row, &mut $tmp[..], p_sw.min(src_row.len()), tw);
                 } else if p_is_h1v2 {
                     let sy = ($dy / 2).min(p_sh.saturating_sub(1));
                     let v = $dy % 2;
@@ -3830,7 +4003,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         let get = |px: usize, py: usize| -> i32 {
                             let idx = py * p_sw + px;
                             if idx < $plane.len() {
-                                $plane[idx]
+                                $plane[idx] as i32
                             } else {
                                 0
                             }
@@ -3846,9 +4019,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let convert_ycbcr = colorspace == JpegColorspace::YCbCr;
 
         macro_rules! fill_row_8 {
-            ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr) => {{
-                upsample_chroma_row!(cb_plane, cb_sw, cb_sh, $dy, $cb_row);
-                upsample_chroma_row!(cr_plane, cr_sw, cr_sh, $dy, $cr_row);
+            ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr, $col_sums:expr, $prev_col_sums:expr) => {{
+                upsample_chroma_row!(cb_plane, cb_sw, cb_sh, $dy, $cb_row, $col_sums, $prev_col_sums);
+                upsample_chroma_row!(cr_plane, cr_sw, cr_sh, $dy, $cr_row, $col_sums, $prev_col_sums);
                 for col in 0..tw {
                     let c0 = $y_row.get(col).copied().unwrap_or(0);
                     let c1 = $cb_row.get(col).copied().unwrap_or(0);
@@ -3868,9 +4041,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         macro_rules! fill_row_16 {
-            ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr) => {{
-                upsample_chroma_row!(cb_plane, cb_sw, cb_sh, $dy, $cb_row);
-                upsample_chroma_row!(cr_plane, cr_sw, cr_sh, $dy, $cr_row);
+            ($dy:expr, $y_row:expr, $cb_row:expr, $cr_row:expr, $dst:expr, $col_sums:expr, $prev_col_sums:expr) => {{
+                upsample_chroma_row!(cb_plane, cb_sw, cb_sh, $dy, $cb_row, $col_sums, $prev_col_sums);
+                upsample_chroma_row!(cr_plane, cr_sw, cr_sh, $dy, $cr_row, $col_sums, $prev_col_sums);
                 for col in 0..tw {
                     let c0 = $y_row.get(col).copied().unwrap_or(0);
                     let c1 = $cb_row.get(col).copied().unwrap_or(0);
@@ -3896,44 +4069,44 @@ impl<R: Read + Seek> JpegDecoder<R> {
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
-                pixels.par_chunks_mut(tw * 3).enumerate().for_each(|(dy, dst)| {
-                    let mut y_row = vec![0i32; tw];
-                    let mut cb_row = vec![0i32; tw];
-                    let mut cr_row = vec![0i32; tw];
+                pixels.par_chunks_mut(tw * 3).enumerate().for_each_init(
+                    || (vec![0i32; tw], vec![0i32; tw], vec![0i32; tw], vec![0i32; max_sw], vec![0i32; max_sw]),
+                    |(y_row, cb_row, cr_row, col_sums, prev_col_sums), (dy, dst)| {
+                        if y_sw == tw && y_sh == th {
+                            let base = dy * tw;
+                            let copy_len = tw.min(y_plane.len().saturating_sub(base));
+                            up::widen_i16_row(&y_plane[base..base + copy_len], &mut y_row[..copy_len]);
+                            y_row[copy_len..].fill(0);
+                        } else {
+                            let sy = (dy * y_sh / th).min(y_sh.saturating_sub(1));
+                            let v = dy % 2;
+                            let sy_above = sy.saturating_sub(1);
+                            let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
+                            let sy_near = if v == 0 { sy_above } else { sy_below };
+                            let prev_near = if v == 0 { sy_above } else { sy };
+                            let ylen = y_plane.len();
+                            let src_start = (sy * y_sw).min(ylen);
+                            let near_start = (sy_near * y_sw).min(ylen);
+                            let prev_start = (prev_near * y_sw).min(ylen);
+                            let src_row = &y_plane[src_start..(src_start + y_sw).min(ylen)];
+                            let near_row = &y_plane[near_start..(near_start + y_sw).min(ylen)];
+                            let prev_near_row = &y_plane[prev_start..(prev_start + y_sw).min(ylen)];
+                            let sw_eff = y_sw.min(src_row.len()).min(near_row.len());
+                            col_sums[..y_sw].fill(0);
+                            prev_col_sums[..y_sw].fill(0);
+                            up::compute_col_sums(src_row, near_row, &mut col_sums[..], sw_eff);
+                            up::compute_col_sums(
+                                src_row,
+                                prev_near_row,
+                                &mut prev_col_sums[..],
+                                sw_eff.min(prev_near_row.len()),
+                            );
+                            up::upsample_h2v2_row(&col_sums[..], &prev_col_sums[..], &mut y_row[..], y_sw, tw);
+                        }
 
-                    if y_sw == tw && y_sh == th {
-                        let base = dy * tw;
-                        let copy_len = tw.min(y_plane.len().saturating_sub(base));
-                        y_row[..copy_len].copy_from_slice(&y_plane[base..base + copy_len]);
-                    } else {
-                        let sy = (dy * y_sh / th).min(y_sh.saturating_sub(1));
-                        let v = dy % 2;
-                        let sy_above = sy.saturating_sub(1);
-                        let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
-                        let sy_near = if v == 0 { sy_above } else { sy_below };
-                        let prev_near = if v == 0 { sy_above } else { sy };
-                        let ylen = y_plane.len();
-                        let src_start = (sy * y_sw).min(ylen);
-                        let near_start = (sy_near * y_sw).min(ylen);
-                        let prev_start = (prev_near * y_sw).min(ylen);
-                        let src_row = &y_plane[src_start..(src_start + y_sw).min(ylen)];
-                        let near_row = &y_plane[near_start..(near_start + y_sw).min(ylen)];
-                        let prev_near_row = &y_plane[prev_start..(prev_start + y_sw).min(ylen)];
-                        let sw_eff = y_sw.min(src_row.len()).min(near_row.len());
-                        let mut col_sums = vec![0i32; y_sw];
-                        let mut prev_col_sums = vec![0i32; y_sw];
-                        up::compute_col_sums(src_row, near_row, &mut col_sums, sw_eff);
-                        up::compute_col_sums(
-                            src_row,
-                            prev_near_row,
-                            &mut prev_col_sums,
-                            sw_eff.min(prev_near_row.len()),
-                        );
-                        up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut y_row, y_sw, tw);
-                    }
-
-                    fill_row_8!(dy, y_row, cb_row, cr_row, dst);
-                });
+                        fill_row_8!(dy, y_row, cb_row, cr_row, dst, col_sums, prev_col_sums);
+                    },
+                );
             }
 
             #[cfg(not(feature = "rayon"))]
@@ -3941,10 +4114,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let mut y_row = vec![0i32; tw];
                 let mut cb_row = vec![0i32; tw];
                 let mut cr_row = vec![0i32; tw];
+                let mut col_sums = vec![0i32; max_sw];
+                let mut prev_col_sums = vec![0i32; max_sw];
                 for dy in 0..th {
-                    upsample_y_row(dy, &mut y_row);
+                    upsample_y_row(dy, &mut y_row, &mut col_sums, &mut prev_col_sums);
                     let base = dy * tw * 3;
-                    fill_row_8!(dy, y_row, cb_row, cr_row, pixels[base..base + tw * 3]);
+                    fill_row_8!(dy, y_row, cb_row, cr_row, pixels[base..base + tw * 3], col_sums, prev_col_sums);
                 }
             }
 
@@ -3955,44 +4130,44 @@ impl<R: Read + Seek> JpegDecoder<R> {
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
-                pixels16.par_chunks_mut(tw * 3).enumerate().for_each(|(dy, dst)| {
-                    let mut y_row = vec![0i32; tw];
-                    let mut cb_row = vec![0i32; tw];
-                    let mut cr_row = vec![0i32; tw];
+                pixels16.par_chunks_mut(tw * 3).enumerate().for_each_init(
+                    || (vec![0i32; tw], vec![0i32; tw], vec![0i32; tw], vec![0i32; max_sw], vec![0i32; max_sw]),
+                    |(y_row, cb_row, cr_row, col_sums, prev_col_sums), (dy, dst)| {
+                        if y_sw == tw && y_sh == th {
+                            let base = dy * tw;
+                            let copy_len = tw.min(y_plane.len().saturating_sub(base));
+                            up::widen_i16_row(&y_plane[base..base + copy_len], &mut y_row[..copy_len]);
+                            y_row[copy_len..].fill(0);
+                        } else {
+                            let sy = (dy * y_sh / th).min(y_sh.saturating_sub(1));
+                            let v = dy % 2;
+                            let sy_above = sy.saturating_sub(1);
+                            let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
+                            let sy_near = if v == 0 { sy_above } else { sy_below };
+                            let prev_near = if v == 0 { sy_above } else { sy };
+                            let ylen = y_plane.len();
+                            let src_start = (sy * y_sw).min(ylen);
+                            let near_start = (sy_near * y_sw).min(ylen);
+                            let prev_start = (prev_near * y_sw).min(ylen);
+                            let src_row = &y_plane[src_start..(src_start + y_sw).min(ylen)];
+                            let near_row = &y_plane[near_start..(near_start + y_sw).min(ylen)];
+                            let prev_near_row = &y_plane[prev_start..(prev_start + y_sw).min(ylen)];
+                            let sw_eff = y_sw.min(src_row.len()).min(near_row.len());
+                            col_sums[..y_sw].fill(0);
+                            prev_col_sums[..y_sw].fill(0);
+                            up::compute_col_sums(src_row, near_row, &mut col_sums[..], sw_eff);
+                            up::compute_col_sums(
+                                src_row,
+                                prev_near_row,
+                                &mut prev_col_sums[..],
+                                sw_eff.min(prev_near_row.len()),
+                            );
+                            up::upsample_h2v2_row(&col_sums[..], &prev_col_sums[..], &mut y_row[..], y_sw, tw);
+                        }
 
-                    if y_sw == tw && y_sh == th {
-                        let base = dy * tw;
-                        let copy_len = tw.min(y_plane.len().saturating_sub(base));
-                        y_row[..copy_len].copy_from_slice(&y_plane[base..base + copy_len]);
-                    } else {
-                        let sy = (dy * y_sh / th).min(y_sh.saturating_sub(1));
-                        let v = dy % 2;
-                        let sy_above = sy.saturating_sub(1);
-                        let sy_below = (sy + 1).min(y_sh.saturating_sub(1));
-                        let sy_near = if v == 0 { sy_above } else { sy_below };
-                        let prev_near = if v == 0 { sy_above } else { sy };
-                        let ylen = y_plane.len();
-                        let src_start = (sy * y_sw).min(ylen);
-                        let near_start = (sy_near * y_sw).min(ylen);
-                        let prev_start = (prev_near * y_sw).min(ylen);
-                        let src_row = &y_plane[src_start..(src_start + y_sw).min(ylen)];
-                        let near_row = &y_plane[near_start..(near_start + y_sw).min(ylen)];
-                        let prev_near_row = &y_plane[prev_start..(prev_start + y_sw).min(ylen)];
-                        let sw_eff = y_sw.min(src_row.len()).min(near_row.len());
-                        let mut col_sums = vec![0i32; y_sw];
-                        let mut prev_col_sums = vec![0i32; y_sw];
-                        up::compute_col_sums(src_row, near_row, &mut col_sums, sw_eff);
-                        up::compute_col_sums(
-                            src_row,
-                            prev_near_row,
-                            &mut prev_col_sums,
-                            sw_eff.min(prev_near_row.len()),
-                        );
-                        up::upsample_h2v2_row(&col_sums, &prev_col_sums, &mut y_row, y_sw, tw);
-                    }
-
-                    fill_row_16!(dy, y_row, cb_row, cr_row, dst);
-                });
+                        fill_row_16!(dy, y_row, cb_row, cr_row, dst, col_sums, prev_col_sums);
+                    },
+                );
             }
 
             #[cfg(not(feature = "rayon"))]
@@ -4000,10 +4175,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 let mut y_row = vec![0i32; tw];
                 let mut cb_row = vec![0i32; tw];
                 let mut cr_row = vec![0i32; tw];
+                let mut col_sums = vec![0i32; max_sw];
+                let mut prev_col_sums = vec![0i32; max_sw];
                 for dy in 0..th {
-                    upsample_y_row(dy, &mut y_row);
+                    upsample_y_row(dy, &mut y_row, &mut col_sums, &mut prev_col_sums);
                     let base = dy * tw * 3;
-                    fill_row_16!(dy, y_row, cb_row, cr_row, pixels16[base..base + tw * 3]);
+                    fill_row_16!(dy, y_row, cb_row, cr_row, pixels16[base..base + tw * 3], col_sums, prev_col_sums);
                 }
             }
 
@@ -4032,12 +4209,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
             JpegCodingMethod::Arithmetic => self.decode_arithmetic_to_planes(&mut component_planes)?,
         }
 
-        self.dequantize_and_idct_planes(&mut component_planes)?;
-
-        let mut pixel_data = self.upsample_and_convert(&component_planes)?;
+        let raster_planes = self.dequantize_and_idct_planes(&component_planes, false);
         for plane in &component_planes {
             plane.free(&mut self.limits);
         }
+        drop(component_planes);
+
+        let mut pixel_data = self.upsample_and_convert(&raster_planes)?;
         pixel_data.correct_pixels(self.width, self.height);
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
@@ -4158,12 +4336,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     JpegCodingMethod::Arithmetic => self.decode_progressive_scans_arithmetic(&mut planes)?,
                 }
 
-                self.dequantize_and_idct_planes(&mut planes)?;
-                let result = self.planes_to_component_pixels(&planes);
+                let raster_planes = self.dequantize_and_idct_planes(&planes, true);
                 for plane in &planes {
                     plane.free(&mut self.limits);
                 }
-                Ok(result)
+                drop(planes);
+                Ok(self.planes_to_component_pixels(&raster_planes))
             }
 
             _ => {
@@ -4191,39 +4369,34 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     JpegCodingMethod::Arithmetic => self.decode_arithmetic_to_planes(&mut planes)?,
                 }
 
-                self.dequantize_and_idct_planes(&mut planes)?;
-                let result = self.planes_to_component_pixels(&planes);
+                let raster_planes = self.dequantize_and_idct_planes(&planes, false);
                 for plane in &planes {
                     plane.free(&mut self.limits);
                 }
-                Ok(result)
+                drop(planes);
+                Ok(self.planes_to_component_pixels(&raster_planes))
             }
         }
     }
 
-    fn planes_to_component_pixels(&self, planes: &[ComponentPlane]) -> Vec<Vec<i32>> {
-        let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
-        let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
+    fn planes_to_component_pixels(&self, planes: &[RasterPlane]) -> Vec<Vec<i32>> {
         let tw = self.width as usize;
         let th = self.height as usize;
 
         planes
             .iter()
-            .zip(self.components.iter())
-            .map(|(plane, comp)| {
-                let sw = (self.width * comp.horizontal_sampling_factor as u32).div_ceil(max_h_samp as u32) as usize;
-                let sh = (self.height * comp.vertical_sampling_factor as u32).div_ceil(max_v_samp as u32) as usize;
-                let raw = plane.deinterleave(sw as u32, sh as u32);
+            .map(|plane| {
+                let (sw, sh) = (plane.width, plane.height);
 
                 if sw == tw && sh == th {
-                    raw
+                    plane.data.iter().map(|&v| v as i32).collect()
                 } else {
                     let mut out = vec![0i32; tw * th];
                     for dy in 0..th {
                         for dx in 0..tw {
                             let sx = (dx * sw / tw).min(sw.saturating_sub(1));
                             let sy = (dy * sh / th).min(sh.saturating_sub(1));
-                            out[dy * tw + dx] = raw[sy * sw + sx];
+                            out[dy * tw + dx] = plane.data.get(sy * sw + sx).copied().unwrap_or(0) as i32;
                         }
                     }
                     out
