@@ -1450,6 +1450,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         self.limits.reserve_buffer(self.width, self.height, 4)?;
+        self.limits.free(u64::from(self.width).saturating_mul(u64::from(self.height)).saturating_mul(4));
 
         // TODO rename them, they are not MCU dimensions, but dimensions of the image in MCUs
         self.mcu_width = self.width.div_ceil(8);
@@ -2645,7 +2646,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let height = self.height as usize;
         let num_components = self.components.len().max(1);
 
-        self.limits.free_usize(width.saturating_mul(height).saturating_mul(4));
         let output_bytes = width.saturating_mul(height).saturating_mul(num_components).saturating_mul(2);
         self.limits.reserve_usize(output_bytes)?;
         let mut output = vec![0u16; width * height * num_components];

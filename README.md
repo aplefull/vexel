@@ -88,7 +88,7 @@ let image = decoder.decode()?;
 
 ### Resource limits
 
-By default, allocations for pixel data are capped at 512 MiB. Image dimensions are unconstrained. You can override this before decoding:
+By default, allocations for pixel data are capped at 1 GiB and total pixel count at 150 Mpx. Image dimensions are otherwise unconstrained. You can override this before decoding:
 
 ```rust
 use vexel::{Vexel, Limits};

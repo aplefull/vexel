@@ -1,3 +1,11 @@
+# Format the whole workspace
+fmt:
+    cargo fmt --all
+
+# Lint the whole workspace with clippy
+clippy:
+    cargo clippy --workspace --all-targets
+
 # Build native release
 build:
     cargo build --release

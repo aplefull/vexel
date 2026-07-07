@@ -66,6 +66,17 @@ struct Cli {
         help = "Maximum memory usage in MiB (0 = unlimited). Decoder will abort if this limit is exceeded."
     )]
     memory_limit: u64,
+
+    #[arg(long, help = "Disable all decode limits (pixel-data allocation cap and pixel-count cap)")]
+    no_limits: bool,
+}
+
+fn build_limits(cli: &Cli) -> vexel::Limits {
+    if cli.no_limits {
+        vexel::Limits::no_limits()
+    } else {
+        vexel::Limits::default()
+    }
 }
 
 fn get_files(path: &str) -> Vec<PathBuf> {
@@ -160,6 +171,7 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     println!("File: {}", file.display());
 
     let mut decoder = Vexel::open(file)?;
+    decoder.set_limits(build_limits(cli));
 
     if cli.void {
         let _ = decoder.decode();
@@ -321,7 +333,11 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
     }
 }
 
-fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn display_image(
+    files: Vec<PathBuf>,
+    start_index: usize,
+    limits: vexel::Limits,
+) -> Result<(), Box<dyn std::error::Error>> {
     type ImageFrames = (Vec<Arc<egui::ColorImage>>, Vec<u32>, [usize; 2]);
 
     struct App {
@@ -339,6 +355,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
         pixelated: bool,
         checkered_bg: bool,
         normalize: bool,
+        limits: vexel::Limits,
     }
 
     impl App {
@@ -406,7 +423,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
             size[0] < 64 || size[1] < 64
         }
 
-        fn new(files: Vec<PathBuf>, start_index: usize) -> Self {
+        fn new(files: Vec<PathBuf>, start_index: usize, limits: vexel::Limits) -> Self {
             let mut app = Self {
                 texture: None,
                 checker_texture: None,
@@ -422,6 +439,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                 pixelated: false,
                 checkered_bg: true,
                 normalize: false,
+                limits,
             };
 
             let _ = app.load_current_file();
@@ -429,8 +447,9 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
             app
         }
 
-        fn load_image_from_path(path: &Path, normalize: bool) -> Result<ImageFrames, String> {
+        fn load_image_from_path(path: &Path, normalize: bool, limits: vexel::Limits) -> Result<ImageFrames, String> {
             let mut decoder = Vexel::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+            decoder.set_limits(limits);
             let image = decoder.decode().map_err(|e| format!("{}: {}", path.display(), e))?;
             let result = Self::image_to_frames(image, normalize);
             if result.0.is_empty() {
@@ -444,7 +463,8 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                 return false;
             }
 
-            match Self::load_image_from_path(&self.files[self.current_file_index], self.normalize) {
+            match Self::load_image_from_path(&self.files[self.current_file_index], self.normalize, self.limits.clone())
+            {
                 Ok((frames, frame_delays, original_size)) => {
                     self.frames = frames;
                     self.frame_delays = frame_delays;
@@ -818,7 +838,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
             visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x4a, 0x50, 0x5e);
             visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x52, 0x58, 0x68);
             cc.egui_ctx.set_visuals(visuals);
-            Ok(Box::new(App::new(files, start_index)))
+            Ok(Box::new(App::new(files, start_index, limits)))
         }),
     )?;
 
@@ -866,7 +886,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        display_image(files, start_index)?;
+        display_image(files, start_index, build_limits(&cli))?;
 
         return Ok(());
     }

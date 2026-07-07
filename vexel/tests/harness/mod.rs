@@ -81,14 +81,6 @@ impl ReferencePixels {
             ReferencePixels::F32(v) => v.len(),
         }
     }
-
-    pub fn as_f64_iter<'a>(&'a self) -> Box<dyn Iterator<Item = f64> + 'a> {
-        match self {
-            ReferencePixels::U8(v) => Box::new(v.iter().map(|&x| x as f64)),
-            ReferencePixels::U16(v) => Box::new(v.iter().map(|&x| x as f64)),
-            ReferencePixels::F32(v) => Box::new(v.iter().map(|&x| x as f64)),
-        }
-    }
 }
 
 pub fn get_pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
@@ -485,30 +477,49 @@ fn pixel_type_name(p: &ReferencePixels) -> &'static str {
     }
 }
 
-pub fn compute_mse(a: &ReferencePixels, b: &ReferencePixels) -> f64 {
-    let n = a.len();
-    if n == 0 {
-        return 0.0;
-    }
-    let sum: f64 = a.as_f64_iter().zip(b.as_f64_iter()).map(|(x, y)| (x - y).powi(2)).sum();
-    sum / n as f64
+struct PixelStats {
+    sum_a: f64,
+    sum_b: f64,
+    sum_a2: f64,
+    sum_b2: f64,
+    sum_ab: f64,
+    sum_sq_diff: f64,
 }
 
-pub fn compute_ssim(a: &ReferencePixels, b: &ReferencePixels) -> f64 {
-    let n = a.len() as f64;
-    if n == 0.0 {
-        return 1.0;
+fn accumulate_stats<T: Copy, F: Fn(T) -> f64>(a: &[T], b: &[T], to_f64: F) -> PixelStats {
+    let (mut sum_a, mut sum_b, mut sum_a2, mut sum_b2, mut sum_ab, mut sum_sq_diff) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    for (&xa, &xb) in a.iter().zip(b.iter()) {
+        let x = to_f64(xa);
+        let y = to_f64(xb);
+        let diff = x - y;
+        sum_a += x;
+        sum_b += y;
+        sum_a2 += x * x;
+        sum_b2 += y * y;
+        sum_ab += x * y;
+        sum_sq_diff += diff * diff;
     }
 
-    let mean_a: f64 = a.as_f64_iter().sum::<f64>() / n;
-    let mean_b: f64 = b.as_f64_iter().sum::<f64>() / n;
+    PixelStats { sum_a, sum_b, sum_a2, sum_b2, sum_ab, sum_sq_diff }
+}
 
-    let var_a: f64 = a.as_f64_iter().map(|v| (v - mean_a).powi(2)).sum::<f64>() / n;
-    let var_b: f64 = b.as_f64_iter().map(|v| (v - mean_b).powi(2)).sum::<f64>() / n;
+fn compute_pixel_stats(a: &ReferencePixels, b: &ReferencePixels) -> PixelStats {
+    match (a, b) {
+        (ReferencePixels::U8(a), ReferencePixels::U8(b)) => accumulate_stats(a, b, |x| x as f64),
+        (ReferencePixels::U16(a), ReferencePixels::U16(b)) => accumulate_stats(a, b, |x| x as f64),
+        (ReferencePixels::F32(a), ReferencePixels::F32(b)) => accumulate_stats(a, b, |x| x as f64),
+        _ => unreachable!(),
+    }
+}
 
-    let cov: f64 = a.as_f64_iter().zip(b.as_f64_iter()).map(|(x, y)| (x - mean_a) * (y - mean_b)).sum::<f64>() / n;
+fn ssim_from_stats(stats: &PixelStats, n: f64, max_val: f64) -> f64 {
+    let mean_a = stats.sum_a / n;
+    let mean_b = stats.sum_b / n;
+    let var_a = stats.sum_a2 / n - mean_a * mean_a;
+    let var_b = stats.sum_b2 / n - mean_b * mean_b;
+    let cov = stats.sum_ab / n - mean_a * mean_b;
 
-    let max_val = a.max_value();
     let c1 = (0.01 * max_val).powi(2);
     let c2 = (0.03 * max_val).powi(2);
 
@@ -535,9 +546,16 @@ pub fn compare_fuzzy(
         ));
     }
 
-    let mse = compute_mse(&actual.pixels, &reference.pixels);
-    let ssim = compute_ssim(&actual.pixels, &reference.pixels);
+    let n = actual.pixels.len();
     let max_val = actual.pixels.max_value();
+    let (mse, ssim) = if n == 0 {
+        (0.0, 1.0)
+    } else {
+        let stats = compute_pixel_stats(&actual.pixels, &reference.pixels);
+        let mse = stats.sum_sq_diff / n as f64;
+        let ssim = ssim_from_stats(&stats, n as f64, max_val);
+        (mse, ssim)
+    };
     let psnr = if mse > 0.0 { 10.0 * (max_val.powi(2) / mse).log10() } else { f64::INFINITY };
 
     if mse > mse_threshold || ssim < ssim_threshold {

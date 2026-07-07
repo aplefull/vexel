@@ -596,7 +596,7 @@ impl WasmDecoder {
     ///
     /// `max_image_width` and `max_image_height` are in pixels; `max_alloc` is in bytes.
     /// Pass `null` for any field to leave that constraint unconstrained. The default
-    /// when `setLimits` is not called caps `max_alloc` at 512 MiB with no dimension limits.
+    /// when `setLimits` is not called caps `max_alloc` at 1 GiB with no dimension limits.
     #[wasm_bindgen(js_name = setLimits)]
     pub fn set_limits(&mut self, max_image_width: Option<u32>, max_image_height: Option<u32>, max_alloc: Option<f64>) {
         self.decoder.set_limits(Limits {

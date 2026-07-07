@@ -3,7 +3,7 @@ use crate::utils::error::{VexelError, VexelResult};
 /// Resource limits enforced during decoding.
 ///
 /// `None` for a field means that dimension or allocation is unconstrained.
-/// The default limits allow any image dimensions but cap total pixel memory at 512 MiB.
+/// The default limits allow any image dimensions but cap total pixel memory at 1 GiB.
 /// Use [`no_limits`](Limits::no_limits) to remove all constraints, or construct
 /// the struct directly to set only the fields you care about.
 #[derive(Clone, Debug, PartialEq)]
@@ -14,9 +14,9 @@ pub struct Limits {
     pub max_image_height: Option<u32>,
     /// Maximum number of bytes that may be allocated for pixel data across
     /// the entire decode operation. Tracked as a decreasing budget: each
-    /// allocation subtracts from it; `None` means no limit. Default is 512 MiB.
+    /// allocation subtracts from it; `None` means no limit. Default is 1 GiB.
     pub max_alloc: Option<u64>,
-    /// Maximum total pixel count (width × height). `None` means no limit. Default is 64 Mpx.
+    /// Maximum total pixel count (width × height). `None` means no limit. Default is 150 Mpx.
     pub max_pixel_count: Option<u64>,
 }
 
@@ -25,8 +25,8 @@ impl Default for Limits {
         Self {
             max_image_width: None,
             max_image_height: None,
-            max_alloc: Some(512 * 1024 * 1024),
-            max_pixel_count: Some(64 * 1024 * 1024),
+            max_alloc: Some(1024 * 1024 * 1024),
+            max_pixel_count: Some(150 * 1024 * 1024),
         }
     }
 }

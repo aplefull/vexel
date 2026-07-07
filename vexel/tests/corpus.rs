@@ -129,7 +129,14 @@ fn compute_mse(a: &[u8], b: &[u8]) -> f64 {
     if a.is_empty() {
         return 0.0;
     }
-    let sum: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64 - y as f64).powi(2)).sum();
+    let sum: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| {
+            let diff = x as f64 - y as f64;
+            diff * diff
+        })
+        .sum();
     sum / a.len() as f64
 }
 
