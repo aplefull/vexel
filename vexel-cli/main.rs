@@ -432,7 +432,11 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
         fn load_image_from_path(path: &Path, normalize: bool) -> Result<ImageFrames, String> {
             let mut decoder = Vexel::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
             let image = decoder.decode().map_err(|e| format!("{}: {}", path.display(), e))?;
-            Ok(Self::image_to_frames(image, normalize))
+            let result = Self::image_to_frames(image, normalize);
+            if result.0.is_empty() {
+                return Err(format!("{}: decoded image has no frames", path.display()));
+            }
+            Ok(result)
         }
 
         fn load_current_file(&mut self) -> bool {
@@ -456,6 +460,7 @@ fn display_image(files: Vec<PathBuf>, start_index: usize) -> Result<(), Box<dyn 
                     true
                 }
                 Err(e) => {
+                    eprintln!("{}", e);
                     self.frames.clear();
                     self.texture = None;
                     self.error_message = Some(e);

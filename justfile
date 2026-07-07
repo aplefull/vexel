@@ -4,7 +4,7 @@ build:
 
 # Build WASM with rayon thread pool support
 build-wasm:
-    CARGO_PROFILE_RELEASE_DEBUG=false wasm-pack build vexel --target web --release -- -Z build-std=panic_abort,std
+    CARGO_PROFILE_RELEASE_DEBUG=false wasm-pack build vexel --target web --release --out-dir ../target/wasm-pkg -- -Z build-std=panic_abort,std
 
 # Set perf_event_paranoid to allow samply without root
 perf-allow:

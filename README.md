@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon/sizes/vexel-256.png" width="128" alt="Vexel logo">
+</p>
+
 # Vexel
 
 An image decoder library written in Rust. The primary goals are broad format support, best-effort decoding of corrupted or malformed files, and memory safety.
