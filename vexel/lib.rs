@@ -10,6 +10,8 @@ use serde::Serialize;
 use tsify::Tsify;
 pub(crate) use utils::bitreader;
 pub use utils::error::{VexelError, VexelResult};
+pub use utils::icc;
+pub use utils::icc::ICCProfile;
 pub use utils::image::{Image, ImageFormat, ImageFrame, PixelData, PixelFormat};
 pub use utils::info::ImageInfo;
 pub use utils::limits::Limits;
@@ -573,6 +575,21 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     }
 }
 
+/// Parses a standalone ICC color profile from raw bytes.
+///
+/// Returns a structured representation of the profile header, tag table, and
+/// all recognized tag data.
+///
+/// ```no_run
+/// let data = std::fs::read("profile.icc")?;
+/// let profile = vexel::parse_icc(&data)?;
+/// println!("{}", profile.header.color_space);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn parse_icc(data: &[u8]) -> VexelResult<ICCProfile> {
+    ICCProfile::new(data)
+}
+
 /// WebAssembly entry point that mirrors the native [`Vexel`] API.
 #[wasm_bindgen(js_name = Decoder)]
 pub struct WasmDecoder {
@@ -673,6 +690,15 @@ pub struct JsImageFrame {
     pub height: u32,
     pub pixels: Vec<u8>,
     pub delay: u32,
+}
+
+/// Parses a standalone ICC color profile from raw bytes.
+///
+/// Returns a structured representation of the profile header, tag table, and
+/// all recognized tag data.
+#[wasm_bindgen(js_name = parseIcc)]
+pub fn wasm_parse_icc(data: &[u8]) -> Result<ICCProfile, String> {
+    parse_icc(data).map_err(|e| e.to_string())
 }
 
 /// Sets the minimum log level for all decoders.

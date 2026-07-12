@@ -13,6 +13,7 @@ use crate::decoders::jpeg::types::{
 };
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::ExifReader;
+use crate::utils::icc::ICCProfile;
 use crate::utils::info::JpegInfo;
 use crate::utils::marker::Marker;
 use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData, PixelFormat};
@@ -1079,6 +1080,7 @@ pub struct JpegDecoder<R: Read + Seek> {
     pending_expand_v: bool,
     hierarchical_frames: Vec<HierarchicalFrame>,
     lossless_ssss16_is_min: bool,
+    icc_chunks: Vec<(u8, Vec<u8>)>,
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
@@ -1117,6 +1119,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             pending_expand_v: false,
             hierarchical_frames: Vec::new(),
             lossless_ssss16_is_min: true,
+            icc_chunks: Vec::new(),
         }
     }
 
@@ -1129,7 +1132,26 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     pub fn get_info(&self) -> JpegInfo {
-        JpegInfo { sections: self.segments.clone() }
+        JpegInfo { sections: self.segments.clone(), icc_profile: self.assemble_icc_profile() }
+    }
+
+    fn assemble_icc_profile(&self) -> Option<ICCProfile> {
+        if self.icc_chunks.is_empty() {
+            return None;
+        }
+
+        let mut chunks: Vec<&(u8, Vec<u8>)> = self.icc_chunks.iter().collect();
+        chunks.sort_by_key(|(sequence, _)| *sequence);
+
+        let profile_data: Vec<u8> = chunks.iter().flat_map(|(_, data)| data.iter().copied()).collect();
+
+        match ICCProfile::new(&profile_data) {
+            Ok(profile) => Some(profile),
+            Err(e) => {
+                log_warn!("Failed to parse ICC profile from APP2 segments: {}", e);
+                None
+            }
+        }
     }
 
     pub fn precision(&self) -> u8 {
@@ -1317,8 +1339,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let icc_sequence = if identifier == "ICC_PROFILE" && payload.len() >= null_pos + 3 {
             let chunk_sequence = payload[null_pos + 1];
             let total_chunks = payload[null_pos + 2];
-            let profile_data_length = (payload.len().saturating_sub(null_pos + 3)) as u32;
-            Some(IccProfileSequenceInfo { chunk_sequence, total_chunks, profile_data_length })
+            let profile_data = &payload[null_pos + 3..];
+            self.icc_chunks.push((chunk_sequence, profile_data.to_vec()));
+            Some(IccProfileSequenceInfo {
+                chunk_sequence,
+                total_chunks,
+                profile_data_length: profile_data.len() as u32,
+            })
         } else {
             None
         };

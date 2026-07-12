@@ -15,6 +15,7 @@ use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::png::PngChunkInfo;
 use crate::decoders::tga::types::TgaSectionInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
+use crate::utils::icc::ICCProfile;
 use crate::utils::tiff::types::TiffSectionInfo;
 
 #[derive(Debug, Serialize, Tsify)]
@@ -38,6 +39,7 @@ pub enum ImageInfo {
 #[tsify(into_wasm_abi)]
 pub struct JpegInfo {
     pub sections: Vec<JpegSegmentInfo>,
+    pub icc_profile: Option<ICCProfile>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -499,6 +501,16 @@ impl fmt::Display for JpegInfo {
                 }
             }
 
+            writeln!(f)?;
+        }
+
+        if let Some(icc) = &self.icc_profile {
+            writeln!(f, "ICC Profile")?;
+            writeln!(f, "  Version: {}", icc.header.version)?;
+            writeln!(f, "  Class: {}", icc.header.profile_class)?;
+            writeln!(f, "  Color space: {}", icc.header.color_space)?;
+            writeln!(f, "  PCS: {}", icc.header.pcs)?;
+            writeln!(f, "  Tags: {}", icc.tag_table.tag_count)?;
             writeln!(f)?;
         }
 
