@@ -44,6 +44,10 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         JpegLsInfo { sections: self.sections.clone() }
     }
 
+    pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
+        crate::decoders::jpeg::decoder::scan_jpeg_thumbnails(&mut self.reader, &self.limits)
+    }
+
     fn read_u8(&mut self) -> std::io::Result<u8> {
         Ok(self.reader.read_bits(8)? as u8)
     }

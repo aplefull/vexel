@@ -53,6 +53,74 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.limits = limits;
     }
 
+    pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
+        let saved_pos = self.reader.stream_position().unwrap_or(0);
+        let saved_sections = std::mem::take(&mut self.sections);
+        let saved_header = std::mem::take(&mut self.header);
+        let saved_byte_order = self.byte_order;
+        let saved_ifd_count = self.ifd_count;
+        let (saved_width, saved_height) = (self.width, self.height);
+
+        let result = self.decode_reduced_resolution_ifds();
+
+        self.sections = saved_sections;
+        self.header = saved_header;
+        self.byte_order = saved_byte_order;
+        self.ifd_count = saved_ifd_count;
+        self.width = saved_width;
+        self.height = saved_height;
+        let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+
+        result
+    }
+
+    fn decode_reduced_resolution_ifds(&mut self) -> VexelResult<Vec<Image>> {
+        self.reader.seek(SeekFrom::Start(0))?;
+        let file_header = ifd::read_file_header(&mut self.reader)?;
+        self.byte_order = file_header.byte_order;
+
+        let mut thumbnails = Vec::new();
+        let mut guard = IfdCycleGuard::default();
+        let mut queue = vec![file_header.first_ifd_offset];
+
+        while let Some(offset) = queue.pop() {
+            if !guard.enter(offset) {
+                continue;
+            }
+
+            let ifd = match Ifd::read(&mut self.reader, offset, self.byte_order, &mut self.limits) {
+                Ok(ifd) => ifd,
+                Err(_) => continue,
+            };
+
+            if ifd.next_ifd_offset != 0 {
+                queue.push(ifd.next_ifd_offset);
+            }
+            if let Some(sub_ifds) = ifd.values::<u32, _>(TiffTags::SubIFDs, &mut self.reader, &mut self.limits) {
+                queue.extend(sub_ifds.into_iter().filter(|&o| o != 0));
+            }
+
+            let subfile_type: u32 = ifd.value(TiffTags::NewSubfileType, &mut self.reader).unwrap_or(0);
+            if subfile_type & 1 == 0 {
+                continue;
+            }
+
+            match self.read_ifd(offset) {
+                Ok(_) => match self.decode_current_ifd() {
+                    Ok(frames) => {
+                        if let Some(frame) = frames.into_iter().next() {
+                            thumbnails.push(Image::from_frame(frame));
+                        }
+                    }
+                    Err(e) => log_warn!("Failed to decode TIFF reduced-resolution IFD: {}", e),
+                },
+                Err(e) => log_warn!("Failed to read TIFF reduced-resolution IFD: {}", e),
+            }
+        }
+
+        Ok(thumbnails)
+    }
+
     fn read_file_header(&mut self) -> VexelResult<u32> {
         let header_start = self.reader.stream_position().unwrap_or(0);
 

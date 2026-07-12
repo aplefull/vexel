@@ -127,6 +127,27 @@ impl ExifReader {
     }
 }
 
+pub(crate) fn exif_thumbnail(tiff_data: &[u8]) -> Option<&[u8]> {
+    const JPEG_INTERCHANGE_FORMAT: u16 = 0x0201;
+    const JPEG_INTERCHANGE_FORMAT_LENGTH: u16 = 0x0202;
+
+    let exif = ExifReader::parse(tiff_data)?;
+    let ifd1 = exif.ifd1?;
+
+    let value_u32 = |tag: u16| {
+        ifd1.entries.iter().find(|e| e.tag == tag).and_then(|e| match &e.value {
+            ExifValue::Long(v) => v.first().copied(),
+            ExifValue::Short(v) => v.first().map(|&v| v as u32),
+            _ => None,
+        })
+    };
+
+    let offset = value_u32(JPEG_INTERCHANGE_FORMAT)? as usize;
+    let length = value_u32(JPEG_INTERCHANGE_FORMAT_LENGTH)? as usize;
+
+    tiff_data.get(offset..offset.checked_add(length)?)
+}
+
 fn read_guarded<R: Read + Seek>(
     reader: &mut BitReader<R>,
     offset: u32,

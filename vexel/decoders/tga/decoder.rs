@@ -30,6 +30,59 @@ impl<R: Read + Seek> TgaDecoder<R> {
         TgaInfo { sections: self.sections.clone() }
     }
 
+    pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
+        let saved_pos = self.reader.stream_position().unwrap_or(0);
+        let result = self.decode_postage_stamp();
+        let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+        Ok(result.into_iter().collect())
+    }
+
+    fn decode_postage_stamp(&mut self) -> Option<Image> {
+        self.reader.seek(SeekFrom::Start(0)).ok()?;
+        let header = self.read_header().ok()?;
+
+        let (footer, _) = self.read_footer()?;
+        if footer.extension_area_offset == 0 {
+            return None;
+        }
+
+        let ext = self.read_extension_area(footer.extension_area_offset as u64)?;
+        if ext.postage_stamp_offset == 0 {
+            return None;
+        }
+
+        let image_type = header.image_type_raw & IMAGE_TYPE_MASK;
+        let has_alpha = matches!(ext.attributes_type, ATTR_TYPE_ALPHA | ATTR_TYPE_PREMULTIPLIED_ALPHA);
+
+        let palette = if image_type == IMAGE_TYPE_PALETTED && header.palette_type == 1 && header.palette_length > 0 {
+            self.reader.seek(SeekFrom::Start(18 + header.id_length as u64)).ok()?;
+            self.read_palette(&header)
+        } else {
+            Vec::new()
+        };
+
+        self.reader.seek(SeekFrom::Start(ext.postage_stamp_offset as u64)).ok()?;
+        let width = self.reader.read_u8().ok()?;
+        let height = self.reader.read_u8().ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        self.limits.reserve_buffer(width as u32, height as u32, 4).ok()?;
+
+        let mut stamp_header = header.clone();
+        stamp_header.width = width as u16;
+        stamp_header.height = height as u16;
+
+        let mut pixels = self.decode_image_data(&stamp_header, &palette, has_alpha, false);
+        Self::apply_orientation(&mut pixels, width as usize, height as usize, header.flags);
+
+        let mut pixel_data = PixelData::RGBA8(pixels);
+        pixel_data.correct_pixels(width as u32, height as u32);
+
+        Some(Image::from_pixels(width as u32, height as u32, pixel_data))
+    }
+
     fn read_header(&mut self) -> VexelResult<TgaHeader> {
         Ok(TgaHeader {
             id_length: self.reader.read_u8()?,

@@ -199,6 +199,43 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         }
     }
 
+    /// Decodes all embedded thumbnails and preview images found in the file.
+    /// Formats without thumbnail support, and files that contain none,
+    /// return an empty vector.
+    pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
+        macro_rules! dispatch_thumbnails {
+            () => {
+                match &mut self.decoder {
+                    Decoders::Jpeg(decoder) => decoder.decode_thumbnails(),
+                    Decoders::JpegLs(decoder) => decoder.decode_thumbnails(),
+                    Decoders::Tiff(decoder) => decoder.decode_thumbnails(),
+                    Decoders::Dng(decoder) => decoder.decode_thumbnails(),
+                    Decoders::Tga(decoder) => decoder.decode_thumbnails(),
+                    _ => Ok(Vec::new()),
+                }
+            };
+        }
+
+        #[cfg(fuzzing)]
+        let result = dispatch_thumbnails!();
+
+        #[cfg(not(fuzzing))]
+        let result = panic::catch_unwind(AssertUnwindSafe(|| dispatch_thumbnails!())).unwrap_or_else(|payload| {
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+
+            Err(VexelError::Panic(msg.to_string()))
+        });
+
+        result.map(|mut thumbnails| {
+            thumbnails.sort_by_key(|t| t.width() as u64 * t.height() as u64);
+            thumbnails
+        })
+    }
+
     /// Returns the detected image format.
     ///
     /// The format is determined during construction and does not change. If the
@@ -648,6 +685,34 @@ impl WasmDecoder {
         })
     }
 
+    /// Decodes all embedded thumbnails and preview images found in the file.
+    #[wasm_bindgen(js_name = decodeThumbnails)]
+    pub fn decode_thumbnails(&mut self) -> Result<JsThumbnails, String> {
+        let format = self.decoder.get_format();
+        let thumbnails = self.decoder.decode_thumbnails().map_err(|e| e.to_string())?;
+
+        Ok(JsThumbnails {
+            thumbnails: thumbnails
+                .into_iter()
+                .map(|image| JsImage {
+                    width: image.width(),
+                    height: image.height(),
+                    image_format: format.clone(),
+                    frames: image
+                        .frames()
+                        .iter()
+                        .map(|frame| JsImageFrame {
+                            width: frame.width(),
+                            height: frame.height(),
+                            pixels: frame.to_rgba8(),
+                            delay: frame.delay(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+    }
+
     /// Returns format-specific metadata collected during the last `decode` call.
     ///
     /// `decode` must be called first; calling `getInfo` before it returns an empty struct.
@@ -690,6 +755,14 @@ pub struct JsImageFrame {
     pub height: u32,
     pub pixels: Vec<u8>,
     pub delay: u32,
+}
+
+/// Embedded thumbnails returned by [`WasmDecoder::decode_thumbnails`], sorted
+/// from smallest to largest by pixel count.
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JsThumbnails {
+    pub thumbnails: Vec<JsImage>,
 }
 
 /// Parses a standalone ICC color profile from raw bytes.

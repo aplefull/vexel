@@ -111,6 +111,155 @@ impl<R: Read + Seek> DngDecoder<R> {
         self.limits = limits;
     }
 
+    pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
+        let saved_pos = self.reader.stream_position().unwrap_or(0);
+        let saved_header = std::mem::take(&mut self.header);
+        let saved_dng = std::mem::take(&mut self.dng);
+        let saved_byte_order = self.byte_order;
+        let (saved_width, saved_height) = (self.width, self.height);
+
+        let result = self.decode_preview_ifds();
+
+        self.header = saved_header;
+        self.dng = saved_dng;
+        self.byte_order = saved_byte_order;
+        self.width = saved_width;
+        self.height = saved_height;
+        let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+
+        result
+    }
+
+    fn decode_preview_ifds(&mut self) -> VexelResult<Vec<Image>> {
+        self.reader.seek(SeekFrom::Start(0))?;
+        let file_header = ifd::read_file_header(&mut self.reader)?;
+        self.byte_order = file_header.byte_order;
+
+        let mut previews = Vec::new();
+        let mut guard = IfdCycleGuard::default();
+        let mut queue = vec![file_header.first_ifd_offset];
+
+        while let Some(offset) = queue.pop() {
+            if !guard.enter(offset) {
+                continue;
+            }
+
+            let Ok(ifd) = Ifd::read(&mut self.reader, offset, self.byte_order, &mut self.limits) else {
+                continue;
+            };
+
+            let summary = self.summarize_ifd(ifd);
+            queue.extend(summary.sub_ifd_offsets.iter().copied());
+            if summary.ifd.next_ifd_offset != 0 {
+                queue.push(summary.ifd.next_ifd_offset);
+            }
+
+            if summary.has_data && !summary.is_raw && summary.width > 0 && summary.height > 0 {
+                if let Some(image) = self.decode_preview_ifd(&summary.ifd, summary.width, summary.height) {
+                    previews.push(image);
+                }
+            }
+        }
+
+        Ok(previews)
+    }
+
+    fn decode_preview_ifd(&mut self, ifd: &Ifd, width: u32, height: u32) -> Option<Image> {
+        const COMPRESSION_NONE: u32 = 1;
+        const COMPRESSION_OLD_JPEG: u32 = 6;
+        const COMPRESSION_JPEG: u32 = 7;
+        const COMPRESSION_LOSSY_JPEG: u32 = 34892;
+
+        let compression = ifd.value::<u32, _>(TiffTags::Compression, &mut self.reader).unwrap_or(COMPRESSION_NONE);
+        let spp = ifd.value::<u32, _>(TiffTags::SamplesPerPixel, &mut self.reader).unwrap_or(3);
+        let bps = ifd
+            .values::<u32, _>(TiffTags::BitsPerSample, &mut self.reader, &mut self.limits)
+            .and_then(|v| v.first().copied())
+            .unwrap_or(8);
+
+        let (offsets, counts) = if ifd.entry(TiffTags::StripOffsets).is_some() {
+            (
+                ifd.values::<u32, _>(TiffTags::StripOffsets, &mut self.reader, &mut self.limits).unwrap_or_default(),
+                ifd.values::<u32, _>(TiffTags::StripByteCounts, &mut self.reader, &mut self.limits).unwrap_or_default(),
+            )
+        } else {
+            (
+                ifd.values::<u32, _>(TiffTags::TileOffsets, &mut self.reader, &mut self.limits).unwrap_or_default(),
+                ifd.values::<u32, _>(TiffTags::TileByteCounts, &mut self.reader, &mut self.limits).unwrap_or_default(),
+            )
+        };
+
+        if offsets.is_empty() {
+            return None;
+        }
+
+        self.limits.reserve_buffer(width, height, 4).ok()?;
+
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        for (i, &offset) in offsets.iter().enumerate() {
+            let count = counts.get(i).copied().unwrap_or(0) as usize;
+            if count == 0 || self.reader.seek(SeekFrom::Start(offset as u64)).is_err() {
+                continue;
+            }
+            if self.limits.reserve_usize(count).is_err() {
+                continue;
+            }
+            let chunk = self.reader.read_bytes(count);
+            self.limits.free_usize(count);
+            if let Ok(chunk) = chunk {
+                chunks.push(chunk);
+            }
+        }
+
+        if chunks.is_empty() {
+            return None;
+        }
+
+        let mut pixel_data = match compression {
+            COMPRESSION_JPEG | COMPRESSION_OLD_JPEG | COMPRESSION_LOSSY_JPEG => {
+                let jpeg_tables =
+                    ifd.byte_data(TiffTags::JPEGTables, &mut self.reader, &mut self.limits).unwrap_or_default();
+
+                let mut rgb = Vec::new();
+                for chunk in chunks {
+                    let data = if jpeg_tables.len() > 4 { splice_jpeg_tables(&jpeg_tables, &chunk) } else { chunk };
+
+                    let mut decoder = JpegDecoder::new(Cursor::new(data));
+                    decoder.set_limits(self.limits.clone());
+                    match decoder.decode() {
+                        Ok(image) => rgb.extend(image.into_pixels().into_rgb8_bytes()),
+                        Err(e) => log_warn!("Failed to decode DNG preview JPEG chunk: {}", e),
+                    }
+                }
+
+                if rgb.is_empty() {
+                    return None;
+                }
+
+                PixelData::RGB8(rgb)
+            }
+            COMPRESSION_NONE if bps == 8 => {
+                let data = chunks.concat();
+                match spp {
+                    1 => PixelData::L8(data),
+                    3 => PixelData::RGB8(data),
+                    4 => PixelData::RGBA8(data),
+                    _ => {
+                        log_warn!("Unsupported DNG preview samples per pixel: {}", spp);
+                        return None;
+                    }
+                }
+            }
+            _ => {
+                log_warn!("Unsupported DNG preview compression {} with {} bits per sample", compression, bps);
+                return None;
+            }
+        };
+
+        pixel_data.correct_pixels(width, height);
+        Some(Image::from_pixels(width, height, pixel_data))
+    }
+
     fn summarize_ifd(&mut self, ifd: Ifd) -> IfdSummary {
         let width = ifd.value(TiffTags::ImageWidth, &mut self.reader).unwrap_or(0);
         let height = ifd.value(TiffTags::ImageLength, &mut self.reader).unwrap_or(0);
