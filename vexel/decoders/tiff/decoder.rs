@@ -10,7 +10,7 @@ use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
     decompress_lzw, decompress_packbits, decompress_sgilog, decompress_sgilog24, predictor_x_factor,
 };
-use crate::utils::tiff::ifd::{self, Ifd};
+use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
 use crate::utils::tiff::pixels::PixelReader;
 use crate::utils::tiff::types::{
@@ -869,8 +869,14 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         let mut frames: Vec<ImageFrame> = Vec::new();
         let mut next_ifd_offset = first_ifd_offset;
+        let mut guard = IfdCycleGuard::default();
 
         while next_ifd_offset != 0 {
+            if !guard.enter(next_ifd_offset) {
+                log_warn!("Cyclic or excessively long IFD chain detected at offset {}, stopping", next_ifd_offset);
+                break;
+            }
+
             next_ifd_offset = self.read_ifd(next_ifd_offset)?;
 
             match self.decode_current_ifd() {

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
@@ -35,6 +36,42 @@ pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResul
 }
 
 #[derive(Debug, Clone)]
+pub struct IfdCycleGuard {
+    visited: HashSet<u32>,
+    remaining: usize,
+}
+
+impl Default for IfdCycleGuard {
+    fn default() -> Self {
+        Self::new(4096)
+    }
+}
+
+impl IfdCycleGuard {
+    pub fn new(max_ifds: usize) -> Self {
+        Self { visited: HashSet::new(), remaining: max_ifds }
+    }
+
+    pub fn enter(&mut self, offset: u32) -> bool {
+        if offset == 0 || self.remaining == 0 || !self.visited.insert(offset) {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
+
+pub fn type_size(field_type: u16) -> Option<usize> {
+    match field_type {
+        1 | 2 | 6 | 7 => Some(1),
+        3 | 8 => Some(2),
+        4 | 9 | 11 | 13 => Some(4),
+        5 | 10 | 12 => Some(8),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct IfdEntry {
     pub tag: u16,
     pub field_type: u16,
@@ -58,12 +95,17 @@ impl Ifd {
         limits: &mut Limits,
     ) -> VexelResult<Ifd> {
         reader.seek(SeekFrom::Start(offset as u64))?;
-        let num_entries = reader.read_u16()?;
+        let num_entries = reader.read_u16()? as u64;
 
-        let table_bytes = (num_entries as usize).saturating_mul(std::mem::size_of::<IfdEntry>());
+        let stream_len = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(offset as u64 + 2))?;
+        let available_entries = stream_len.saturating_sub(offset as u64 + 2) / 12;
+        let num_entries = num_entries.min(available_entries) as usize;
+
+        let table_bytes = num_entries.saturating_mul(std::mem::size_of::<IfdEntry>());
         limits.reserve_usize(table_bytes)?;
 
-        let mut entries = Vec::with_capacity(num_entries as usize);
+        let mut entries = Vec::with_capacity(num_entries);
         for _ in 0..num_entries {
             let entry = (|| {
                 Ok::<IfdEntry, VexelError>(IfdEntry {
@@ -182,7 +224,7 @@ impl Ifd {
         }
     }
 
-    fn inline_bytes(&self, entry: &IfdEntry) -> [u8; 4] {
+    pub(crate) fn inline_bytes(&self, entry: &IfdEntry) -> [u8; 4] {
         match self.byte_order {
             ByteOrder::LittleEndian => entry.value_offset.to_le_bytes(),
             ByteOrder::BigEndian => entry.value_offset.to_be_bytes(),
@@ -240,13 +282,7 @@ where
         return Ok(values);
     }
 
-    let bytes_per_value: u32 = match type_ {
-        1 | 2 | 6 | 7 => 1,
-        3 | 8 => 2,
-        4 | 9 | 11 | 13 => 4,
-        5 | 10 | 12 => 8,
-        _ => 4,
-    };
+    let bytes_per_value = type_size(type_).unwrap_or(4) as u32;
     let total_bytes = bytes_per_value * count;
 
     if total_bytes <= 4 {

@@ -1,6 +1,11 @@
+use std::io::{Cursor, Read, Seek, SeekFrom};
+
 use serde::Serialize;
 use tsify::Tsify;
 
+use crate::bitreader::BitReader;
+use crate::utils::limits::Limits;
+use crate::utils::tiff::ifd::{read_file_header, type_size, Ifd, IfdCycleGuard, IfdEntry};
 use crate::utils::types::ByteOrder;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -50,259 +55,284 @@ enum IfdType {
     Ifd1,
 }
 
-pub struct ExifReader<'a> {
-    data: &'a [u8],
-    byte_order: ByteOrder,
-}
+const EXIF_IFD_POINTER: u16 = 0x8769;
+const GPS_IFD_POINTER: u16 = 0x8825;
+const INTEROP_IFD_POINTER: u16 = 0xA005;
+const MAX_IFDS: usize = 8;
 
-impl<'a> ExifReader<'a> {
-    pub fn parse(tiff_data: &'a [u8]) -> Option<ExifData> {
-        if tiff_data.len() < 8 {
-            return None;
-        }
+pub struct ExifReader;
 
-        let byte_order = match &tiff_data[0..2] {
-            b"II" => ByteOrder::LittleEndian,
-            b"MM" => ByteOrder::BigEndian,
-            _ => return None,
+impl ExifReader {
+    pub fn parse(tiff_data: &[u8]) -> Option<ExifData> {
+        let mut cursor = Cursor::new(tiff_data);
+        let mut reader = BitReader::new(&mut cursor);
+        let header = read_file_header(&mut reader).ok()?;
+        let byte_order = header.byte_order;
+
+        let mut limits = Limits {
+            max_alloc: Some((tiff_data.len() as u64).saturating_mul(2).saturating_add(4096)),
+            ..Limits::no_limits()
         };
+        let mut guard = IfdCycleGuard::new(MAX_IFDS);
 
-        let reader = ExifReader { data: tiff_data, byte_order };
+        let ifd0_raw = read_guarded(&mut reader, header.first_ifd_offset, byte_order, &mut limits, &mut guard)?;
+        let ifd1_raw = read_guarded(&mut reader, ifd0_raw.next_ifd_offset, byte_order, &mut limits, &mut guard);
 
-        let magic = reader.read_u16_at(2)?;
-        if magic != 0x002A {
-            return None;
+        let ifd0 = materialize_ifd(&ifd0_raw, IfdType::Ifd0, &mut reader, &mut limits);
+        let ifd1 = ifd1_raw.map(|raw| materialize_ifd(&raw, IfdType::Ifd1, &mut reader, &mut limits));
+
+        let mut exif_ifd = None;
+        let mut gps_ifd = None;
+        for ifd in [Some(&ifd0), ifd1.as_ref()].into_iter().flatten() {
+            if exif_ifd.is_none() {
+                exif_ifd = load_sub_ifd(
+                    ifd,
+                    EXIF_IFD_POINTER,
+                    IfdType::ExifIfd,
+                    byte_order,
+                    &mut reader,
+                    &mut limits,
+                    &mut guard,
+                );
+            }
+            if gps_ifd.is_none() {
+                gps_ifd = load_sub_ifd(
+                    ifd,
+                    GPS_IFD_POINTER,
+                    IfdType::GpsIfd,
+                    byte_order,
+                    &mut reader,
+                    &mut limits,
+                    &mut guard,
+                );
+            }
         }
 
-        let ifd0_offset = reader.read_u32_at(4)? as usize;
-        let (ifd0, next_ifd_offset) = reader.read_ifd(ifd0_offset, IfdType::Ifd0);
-
-        let exif_ifd = ifd0
-            .entries
-            .iter()
-            .find(|e| e.tag == 0x8769)
-            .and_then(|e| ifd_pointer_offset(&e.value))
-            .map(|offset| reader.read_ifd(offset, IfdType::ExifIfd).0);
-
-        let gps_ifd = ifd0
-            .entries
-            .iter()
-            .find(|e| e.tag == 0x8825)
-            .and_then(|e| ifd_pointer_offset(&e.value))
-            .map(|offset| reader.read_ifd(offset, IfdType::GpsIfd).0);
-
-        let interop_ifd = exif_ifd
-            .as_ref()
-            .and_then(|ifd| ifd.entries.iter().find(|e| e.tag == 0xA005))
-            .and_then(|e| ifd_pointer_offset(&e.value))
-            .map(|offset| reader.read_ifd(offset, IfdType::InteropIfd).0);
-
-        let ifd1 = next_ifd_offset.filter(|&o| o != 0).map(|offset| reader.read_ifd(offset, IfdType::Ifd1).0);
+        let mut interop_ifd = None;
+        for ifd in [exif_ifd.as_ref(), Some(&ifd0), ifd1.as_ref()].into_iter().flatten() {
+            if interop_ifd.is_none() {
+                interop_ifd = load_sub_ifd(
+                    ifd,
+                    INTEROP_IFD_POINTER,
+                    IfdType::InteropIfd,
+                    byte_order,
+                    &mut reader,
+                    &mut limits,
+                    &mut guard,
+                );
+            }
+        }
 
         Some(ExifData { byte_order, ifd0, exif_ifd, gps_ifd, interop_ifd, ifd1 })
     }
+}
 
-    fn read_u16_at(&self, offset: usize) -> Option<u16> {
-        let bytes = self.data.get(offset..offset + 2)?;
-        Some(match self.byte_order {
-            ByteOrder::LittleEndian => u16::from_le_bytes([bytes[0], bytes[1]]),
-            ByteOrder::BigEndian => u16::from_be_bytes([bytes[0], bytes[1]]),
-        })
+fn read_guarded<R: Read + Seek>(
+    reader: &mut BitReader<R>,
+    offset: u32,
+    byte_order: ByteOrder,
+    limits: &mut Limits,
+    guard: &mut IfdCycleGuard,
+) -> Option<Ifd> {
+    if !guard.enter(offset) {
+        return None;
     }
+    Ifd::read(reader, offset, byte_order, limits).ok()
+}
 
-    fn read_u32_at(&self, offset: usize) -> Option<u32> {
-        let bytes = self.data.get(offset..offset + 4)?;
-        Some(match self.byte_order {
-            ByteOrder::LittleEndian => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            ByteOrder::BigEndian => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        })
+fn load_sub_ifd<R: Read + Seek>(
+    parent: &ExifIfd,
+    pointer_tag: u16,
+    ifd_type: IfdType,
+    byte_order: ByteOrder,
+    reader: &mut BitReader<R>,
+    limits: &mut Limits,
+    guard: &mut IfdCycleGuard,
+) -> Option<ExifIfd> {
+    let entry = parent.entries.iter().find(|e| e.tag == pointer_tag)?;
+    let offset = ifd_pointer_offset(&entry.value)?;
+    let raw = read_guarded(reader, offset, byte_order, limits, guard)?;
+    Some(materialize_ifd(&raw, ifd_type, reader, limits))
+}
+
+fn materialize_ifd<R: Read + Seek>(
+    ifd: &Ifd,
+    ifd_type: IfdType,
+    reader: &mut BitReader<R>,
+    limits: &mut Limits,
+) -> ExifIfd {
+    let mut entries = Vec::new();
+    for entry in &ifd.entries {
+        if let Some(e) = materialize_entry(ifd, entry, ifd_type, reader, limits) {
+            entries.push(e);
+        }
     }
+    ExifIfd { entries }
+}
 
-    fn read_ifd(&self, offset: usize, ifd_type: IfdType) -> (ExifIfd, Option<usize>) {
-        let entry_count = match self.read_u16_at(offset) {
-            Some(n) => n as usize,
-            None => return (ExifIfd { entries: Vec::new() }, None),
-        };
+fn materialize_entry<R: Read + Seek>(
+    ifd: &Ifd,
+    entry: &IfdEntry,
+    ifd_type: IfdType,
+    reader: &mut BitReader<R>,
+    limits: &mut Limits,
+) -> Option<ExifEntry> {
+    let size = type_size(entry.field_type)?;
+    let count = entry.count as usize;
+    let total = (entry.count as u64).saturating_mul(size as u64);
 
-        let mut entries = Vec::with_capacity(entry_count);
-
-        for i in 0..entry_count {
-            let entry_base = offset + 2 + i * 12;
-            if let Some(entry) = self.read_entry(entry_base, ifd_type) {
-                entries.push(entry);
+    let bytes = if total <= 4 {
+        ifd.inline_bytes(entry)[..total as usize].to_vec()
+    } else {
+        let total = usize::try_from(total).ok()?;
+        limits.reserve_usize(total).ok()?;
+        let read = reader.seek(SeekFrom::Start(entry.value_offset as u64)).and_then(|_| reader.read_bytes(total));
+        match read {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                limits.free_usize(total);
+                return None;
             }
         }
+    };
 
-        let next_offset_pos = offset + 2 + entry_count * 12;
-        let next_ifd_offset = self.read_u32_at(next_offset_pos).map(|v| v as usize);
+    let value = parse_value(entry.field_type, count, &bytes, ifd.byte_order);
+    let tag_name = tag_name(entry.tag, ifd_type).map(|s| s.to_string());
 
-        (ExifIfd { entries }, next_ifd_offset)
-    }
+    Some(ExifEntry { tag: entry.tag, tag_name, value })
+}
 
-    fn read_entry(&self, base: usize, ifd_type: IfdType) -> Option<ExifEntry> {
-        let tag = self.read_u16_at(base)?;
-        let data_type = self.read_u16_at(base + 2)?;
-        let count = self.read_u32_at(base + 4)? as usize;
-
-        let type_size: usize = match data_type {
-            1 | 2 | 6 | 7 => 1,
-            3 | 8 => 2,
-            4 | 9 | 11 => 4,
-            5 | 10 | 12 => 8,
-            _ => return None,
-        };
-
-        let total_size = count.saturating_mul(type_size);
-
-        let value_bytes: &[u8] = if total_size <= 4 {
-            self.data.get(base + 8..base + 8 + total_size)?
-        } else {
-            let offset = self.read_u32_at(base + 8)? as usize;
-            self.data.get(offset..offset + total_size)?
-        };
-
-        let value = self.parse_value(data_type, count, value_bytes);
-        let tag_name = tag_name(tag, ifd_type).map(|s| s.to_string());
-
-        Some(ExifEntry { tag, tag_name, value })
-    }
-
-    fn parse_value(&self, data_type: u16, count: usize, bytes: &[u8]) -> ExifValue {
-        match data_type {
-            1 => ExifValue::Byte(bytes.iter().take(count).copied().collect()),
-            2 => {
-                let mut strings = Vec::new();
-                let mut current = String::new();
-                for &b in bytes.iter().take(count) {
-                    if b == 0 {
-                        if !current.is_empty() {
-                            strings.push(current.clone());
-                            current.clear();
-                        }
-                    } else {
-                        current.push(b as char);
+fn parse_value(data_type: u16, count: usize, bytes: &[u8], byte_order: ByteOrder) -> ExifValue {
+    match data_type {
+        1 => ExifValue::Byte(bytes.iter().take(count).copied().collect()),
+        2 => {
+            let mut strings = Vec::new();
+            let mut current = String::new();
+            for &b in bytes.iter().take(count) {
+                if b == 0 {
+                    if !current.is_empty() {
+                        strings.push(current.clone());
+                        current.clear();
                     }
+                } else {
+                    current.push(b as char);
                 }
-                if !current.is_empty() {
-                    strings.push(current);
-                }
-                ExifValue::Ascii(strings)
             }
-            3 => ExifValue::Short(
-                (0..count)
-                    .filter_map(|i| {
-                        let b = bytes.get(i * 2..i * 2 + 2)?;
-                        Some(match self.byte_order {
-                            ByteOrder::LittleEndian => u16::from_le_bytes([b[0], b[1]]),
-                            ByteOrder::BigEndian => u16::from_be_bytes([b[0], b[1]]),
-                        })
-                    })
-                    .collect(),
-            ),
-            4 => ExifValue::Long(
-                (0..count)
-                    .filter_map(|i| {
-                        let b = bytes.get(i * 4..i * 4 + 4)?;
-                        Some(match self.byte_order {
-                            ByteOrder::LittleEndian => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-                            ByteOrder::BigEndian => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-                        })
-                    })
-                    .collect(),
-            ),
-            5 => ExifValue::Rational(
-                (0..count)
-                    .filter_map(|i| {
-                        let b = bytes.get(i * 8..i * 8 + 8)?;
-                        let num = match self.byte_order {
-                            ByteOrder::LittleEndian => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-                            ByteOrder::BigEndian => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-                        };
-                        let den = match self.byte_order {
-                            ByteOrder::LittleEndian => u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
-                            ByteOrder::BigEndian => u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
-                        };
-                        Some((num, den))
-                    })
-                    .collect(),
-            ),
-            6 => ExifValue::SByte(bytes.iter().take(count).map(|&b| b as i8).collect()),
-            7 => ExifValue::Undefined(bytes.iter().take(count).copied().collect()),
-            8 => ExifValue::SShort(
-                (0..count)
-                    .filter_map(|i| {
-                        let b = bytes.get(i * 2..i * 2 + 2)?;
-                        Some(match self.byte_order {
-                            ByteOrder::LittleEndian => i16::from_le_bytes([b[0], b[1]]),
-                            ByteOrder::BigEndian => i16::from_be_bytes([b[0], b[1]]),
-                        })
-                    })
-                    .collect(),
-            ),
-            9 => ExifValue::SLong(
-                (0..count)
-                    .filter_map(|i| {
-                        let b = bytes.get(i * 4..i * 4 + 4)?;
-                        Some(match self.byte_order {
-                            ByteOrder::LittleEndian => i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-                            ByteOrder::BigEndian => i32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-                        })
-                    })
-                    .collect(),
-            ),
-            10 => ExifValue::SRational(
-                (0..count)
-                    .filter_map(|i| {
-                        let b = bytes.get(i * 8..i * 8 + 8)?;
-                        let num = match self.byte_order {
-                            ByteOrder::LittleEndian => i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-                            ByteOrder::BigEndian => i32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-                        };
-                        let den = match self.byte_order {
-                            ByteOrder::LittleEndian => i32::from_le_bytes([b[4], b[5], b[6], b[7]]),
-                            ByteOrder::BigEndian => i32::from_be_bytes([b[4], b[5], b[6], b[7]]),
-                        };
-                        Some((num, den))
-                    })
-                    .collect(),
-            ),
-            11 => ExifValue::Float(
-                (0..count)
-                    .filter_map(|i| {
-                        let b = bytes.get(i * 4..i * 4 + 4)?;
-                        let bits = match self.byte_order {
-                            ByteOrder::LittleEndian => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-                            ByteOrder::BigEndian => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-                        };
-                        Some(f32::from_bits(bits))
-                    })
-                    .collect(),
-            ),
-            12 => ExifValue::Double(
-                (0..count)
-                    .filter_map(|i| {
-                        let b = bytes.get(i * 8..i * 8 + 8)?;
-                        let bits = match self.byte_order {
-                            ByteOrder::LittleEndian => {
-                                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-                            }
-                            ByteOrder::BigEndian => {
-                                u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-                            }
-                        };
-                        Some(f64::from_bits(bits))
-                    })
-                    .collect(),
-            ),
-            _ => ExifValue::Undefined(bytes.iter().take(count).copied().collect()),
+            if !current.is_empty() {
+                strings.push(current);
+            }
+            ExifValue::Ascii(strings)
         }
+        3 => ExifValue::Short(
+            (0..count)
+                .filter_map(|i| {
+                    let b = bytes.get(i * 2..i * 2 + 2)?;
+                    Some(match byte_order {
+                        ByteOrder::LittleEndian => u16::from_le_bytes([b[0], b[1]]),
+                        ByteOrder::BigEndian => u16::from_be_bytes([b[0], b[1]]),
+                    })
+                })
+                .collect(),
+        ),
+        4 | 13 => ExifValue::Long(
+            (0..count)
+                .filter_map(|i| {
+                    let b = bytes.get(i * 4..i * 4 + 4)?;
+                    Some(match byte_order {
+                        ByteOrder::LittleEndian => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                        ByteOrder::BigEndian => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                    })
+                })
+                .collect(),
+        ),
+        5 => ExifValue::Rational(
+            (0..count)
+                .filter_map(|i| {
+                    let b = bytes.get(i * 8..i * 8 + 8)?;
+                    let num = match byte_order {
+                        ByteOrder::LittleEndian => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                        ByteOrder::BigEndian => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                    };
+                    let den = match byte_order {
+                        ByteOrder::LittleEndian => u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+                        ByteOrder::BigEndian => u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
+                    };
+                    Some((num, den))
+                })
+                .collect(),
+        ),
+        6 => ExifValue::SByte(bytes.iter().take(count).map(|&b| b as i8).collect()),
+        7 => ExifValue::Undefined(bytes.iter().take(count).copied().collect()),
+        8 => ExifValue::SShort(
+            (0..count)
+                .filter_map(|i| {
+                    let b = bytes.get(i * 2..i * 2 + 2)?;
+                    Some(match byte_order {
+                        ByteOrder::LittleEndian => i16::from_le_bytes([b[0], b[1]]),
+                        ByteOrder::BigEndian => i16::from_be_bytes([b[0], b[1]]),
+                    })
+                })
+                .collect(),
+        ),
+        9 => ExifValue::SLong(
+            (0..count)
+                .filter_map(|i| {
+                    let b = bytes.get(i * 4..i * 4 + 4)?;
+                    Some(match byte_order {
+                        ByteOrder::LittleEndian => i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                        ByteOrder::BigEndian => i32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                    })
+                })
+                .collect(),
+        ),
+        10 => ExifValue::SRational(
+            (0..count)
+                .filter_map(|i| {
+                    let b = bytes.get(i * 8..i * 8 + 8)?;
+                    let num = match byte_order {
+                        ByteOrder::LittleEndian => i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                        ByteOrder::BigEndian => i32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                    };
+                    let den = match byte_order {
+                        ByteOrder::LittleEndian => i32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+                        ByteOrder::BigEndian => i32::from_be_bytes([b[4], b[5], b[6], b[7]]),
+                    };
+                    Some((num, den))
+                })
+                .collect(),
+        ),
+        11 => ExifValue::Float(
+            (0..count)
+                .filter_map(|i| {
+                    let b = bytes.get(i * 4..i * 4 + 4)?;
+                    let bits = match byte_order {
+                        ByteOrder::LittleEndian => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                        ByteOrder::BigEndian => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                    };
+                    Some(f32::from_bits(bits))
+                })
+                .collect(),
+        ),
+        12 => ExifValue::Double(
+            (0..count)
+                .filter_map(|i| {
+                    let b = bytes.get(i * 8..i * 8 + 8)?;
+                    let bits = match byte_order {
+                        ByteOrder::LittleEndian => u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+                        ByteOrder::BigEndian => u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+                    };
+                    Some(f64::from_bits(bits))
+                })
+                .collect(),
+        ),
+        _ => ExifValue::Undefined(bytes.iter().take(count).copied().collect()),
     }
 }
 
-fn ifd_pointer_offset(value: &ExifValue) -> Option<usize> {
+fn ifd_pointer_offset(value: &ExifValue) -> Option<u32> {
     match value {
-        ExifValue::Long(v) => v.first().map(|&x| x as usize),
-        ExifValue::Short(v) => v.first().map(|&x| x as usize),
+        ExifValue::Long(v) => v.first().copied(),
+        ExifValue::Short(v) => v.first().map(|&x| x as u32),
         _ => None,
     }
 }

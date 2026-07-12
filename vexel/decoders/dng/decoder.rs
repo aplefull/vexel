@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
@@ -11,7 +10,7 @@ use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
     decompress_lzw, decompress_packbits, predictor_x_factor,
 };
-use crate::utils::tiff::ifd::{self, Ifd};
+use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
 use crate::utils::tiff::types::{
     Compression, PhotometricInterpretation, Predictor, SampleFormat, TiffHeader, TiffTags,
@@ -1065,12 +1064,12 @@ impl<R: Read + Seek> DngDecoder<R> {
         let first_ifd_offset = file_header.first_ifd_offset;
 
         let mut queue: Vec<u32> = vec![first_ifd_offset];
-        let mut visited: HashSet<u32> = HashSet::new();
+        let mut guard = IfdCycleGuard::default();
         let mut all_ifds: Vec<IfdSummary> = Vec::new();
 
         while let Some(ifd_offset) = queue.first().cloned() {
             queue.remove(0);
-            if ifd_offset == 0 || !visited.insert(ifd_offset) {
+            if !guard.enter(ifd_offset) {
                 continue;
             }
 
