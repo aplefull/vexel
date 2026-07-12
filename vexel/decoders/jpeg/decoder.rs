@@ -2627,8 +2627,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
         Ok(samples)
     }
 
-    fn interleaved_samples_to_image(&mut self, samples: Vec<u16>, components_count: usize) -> VexelResult<Image> {
+    fn interleaved_samples_to_image(&mut self, mut samples: Vec<u16>, components_count: usize) -> VexelResult<Image> {
         let sample_bytes = samples.len().saturating_mul(2);
+
+        let ids: Vec<u8> = self.components.iter().map(|c| c.id).collect();
+        let explicit_ycbcr = self.jfif_header.is_some() || self.adobe_color_transform.is_some_and(|ct| ct != 0);
+        if components_count == 3 && ids != [0x52, 0x47, 0x42] && explicit_ycbcr {
+            Self::lossless_ycbcr_to_rgb(&mut samples, self.precision);
+        }
 
         let (pixel_data, pixel_format) = if self.precision <= 8 {
             let precision_correction = 8 - self.precision;
@@ -2662,6 +2668,25 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let frame = ImageFrame::new(self.width, self.height, pixel_data, 0);
         Ok(Image::new(self.width, self.height, pixel_format, vec![frame]))
+    }
+
+    fn lossless_ycbcr_to_rgb(samples: &mut [u16], precision: u8) {
+        let half = 1i32 << (precision.saturating_sub(1));
+        let maxval = (1i32 << precision) - 1;
+
+        for pixel in samples.chunks_exact_mut(3) {
+            let y = pixel[0] as i32;
+            let cb = pixel[1] as i32 - half;
+            let cr = pixel[2] as i32 - half;
+
+            let r = y as f32 + 1.402 * cr as f32;
+            let g = y as f32 - 0.3441363 * cb as f32 - 0.7141363 * cr as f32;
+            let b = y as f32 + 1.772 * cb as f32;
+
+            pixel[0] = r.round().clamp(0.0, maxval as f32) as u16;
+            pixel[1] = g.round().clamp(0.0, maxval as f32) as u16;
+            pixel[2] = b.round().clamp(0.0, maxval as f32) as u16;
+        }
     }
 
     fn decode_lossless(&mut self) -> VexelResult<Image> {
