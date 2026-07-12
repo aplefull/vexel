@@ -37,6 +37,12 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "jpeg/red_4x4_lossless_ycbcr.jxl" },
         },
         TestCase {
+            name: "JPEG Lossless subsampled interleaved",
+            path: "jpeg/polite_cat_lossless.jpg",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "jpeg/polite_cat_lossless.jxl" },
+        },
+        TestCase {
             name: "JPEG Lossless 10-bit",
             path: "jpeg/jpeg-lossless-XA1.jpg",
             validation: None,

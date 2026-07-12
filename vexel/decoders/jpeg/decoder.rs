@@ -2757,29 +2757,186 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     self.limits.free_usize(plane_bytes);
                 }
             } else {
-                let mixed_sampling = scan.components.iter().any(|sc| {
-                    self.components
-                        .iter()
-                        .find(|c| c.id == sc.component_id)
-                        .map(|c| {
-                            (c.horizontal_sampling_factor.max(1) as usize, c.vertical_sampling_factor.max(1) as usize)
-                                != (h_max, v_max)
-                        })
-                        .unwrap_or(false)
-                });
-                if mixed_sampling {
-                    log_warn!(
-                        "Interleaved lossless scan with mixed sampling factors is not supported, decoding as full resolution"
-                    );
-                }
+                let sampling: Vec<(usize, usize)> = component_indices
+                    .iter()
+                    .map(|&ci| {
+                        self.components
+                            .get(ci)
+                            .map(|c| {
+                                (
+                                    c.horizontal_sampling_factor.max(1) as usize,
+                                    c.vertical_sampling_factor.max(1) as usize,
+                                )
+                            })
+                            .unwrap_or((1, 1))
+                    })
+                    .collect();
+                let mixed_sampling = sampling.iter().any(|&(h, v)| (h, v) != (h_max, v_max));
 
-                let views: Vec<(usize, usize)> = component_indices.iter().map(|&ci| (ci, num_components)).collect();
-                self.decode_lossless_scan(scan, width, height, &views, &mut output);
+                if mixed_sampling {
+                    self.decode_lossless_scan_subsampled(
+                        scan,
+                        width,
+                        height,
+                        h_max,
+                        v_max,
+                        &component_indices,
+                        &sampling,
+                        num_components,
+                        &mut output,
+                    );
+                } else {
+                    let views: Vec<(usize, usize)> = component_indices.iter().map(|&ci| (ci, num_components)).collect();
+                    self.decode_lossless_scan(scan, width, height, &views, &mut output);
+                }
             }
         }
         self.scans = scans;
 
         self.interleaved_samples_to_image(output, num_components)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_lossless_scan_subsampled(
+        &mut self,
+        scan: &ScanData,
+        width: usize,
+        height: usize,
+        h_max: usize,
+        v_max: usize,
+        component_indices: &[usize],
+        sampling: &[(usize, usize)],
+        num_components: usize,
+        output: &mut [u16],
+    ) {
+        let mcu_cols = width.div_ceil(h_max);
+        let mcu_rows = height.div_ceil(v_max);
+
+        let plane_dims: Vec<(usize, usize)> = sampling.iter().map(|&(h, v)| (mcu_cols * h, mcu_rows * v)).collect();
+
+        let total_plane_samples: usize = plane_dims.iter().map(|&(w, h)| w * h).sum();
+        if self.limits.reserve_usize(total_plane_samples * 2).is_err() {
+            log_warn!("Subsampled interleaved lossless scan exceeds limits, skipping");
+            return;
+        }
+
+        let mut planes: Vec<Vec<u16>> = plane_dims.iter().map(|&(w, h)| vec![0u16; w * h]).collect();
+
+        let point_transform = scan.successive_low;
+        let predictor = match scan.start_spectral {
+            0 => Predictor::NoPrediction,
+            1 => Predictor::Ra,
+            2 => Predictor::Rb,
+            3 => Predictor::Rc,
+            4 => Predictor::RaRbRc1,
+            5 => Predictor::RaRbRc2,
+            6 => Predictor::RaRbRc3,
+            7 => Predictor::RaRb,
+            _ => {
+                log_warn!("Invalid predictor selection: {}", scan.start_spectral);
+                Predictor::NoPrediction
+            }
+        };
+
+        let tables: Vec<HuffmanTable> = (0..sampling.len())
+            .map(|i| {
+                scan.components
+                    .get(i)
+                    .and_then(|sc| scan.dc_tables.iter().find(|t| t.id == sc.dc_table_selector).cloned())
+                    .unwrap_or_else(|| {
+                        log_warn!(
+                            "No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.",
+                            i
+                        );
+                        Self::default_lossless_dc_table()
+                    })
+            })
+            .collect();
+
+        let default_prediction =
+            if self.precision > point_transform + 1 { 1i32 << (self.precision - point_transform - 1) } else { 0 };
+        let ssss16_is_min = self.lossless_ssss16_is_min;
+        let restart_interval = self.restart_interval as usize;
+
+        let mut reader = JpegBitReader::new(scan.data.as_slice());
+
+        let total_mcus = mcu_cols * mcu_rows;
+        let interval = if restart_interval > 0 { restart_interval } else { total_mcus };
+        let mut mcu = 0usize;
+        let mut restart_row_start = 0usize;
+
+        while mcu < total_mcus {
+            if mcu > 0 {
+                reader.clear_buffer();
+                restart_row_start = mcu / mcu_cols;
+            }
+            let end = (mcu + interval).min(total_mcus);
+
+            while mcu < end {
+                let mcu_x = mcu % mcu_cols;
+                let mcu_y = mcu / mcu_cols;
+
+                for (ci, &(sh, sv)) in sampling.iter().enumerate() {
+                    let (pw, _) = plane_dims[ci];
+                    let plane = &mut planes[ci];
+                    let base_x = mcu_x * sh;
+                    let base_y = mcu_y * sv;
+
+                    for dy in 0..sv {
+                        let y = base_y + dy;
+                        for dx in 0..sh {
+                            let x = base_x + dx;
+                            let diff = Self::decode_lossless_diff(&mut reader, &tables[ci], ssss16_is_min);
+
+                            let at_restart_start = y == restart_row_start * sv && x == 0;
+                            let on_first_line_of_interval = y == restart_row_start * sv;
+
+                            let predicted = if at_restart_start {
+                                default_prediction
+                            } else if x == 0 {
+                                plane[(y - 1) * pw] as i32
+                            } else if on_first_line_of_interval {
+                                plane[y * pw + x - 1] as i32
+                            } else {
+                                let a = plane[y * pw + x - 1] as i32;
+                                let b = plane[(y - 1) * pw + x] as i32;
+                                let c = plane[(y - 1) * pw + x - 1] as i32;
+                                match predictor {
+                                    Predictor::NoPrediction => 0,
+                                    Predictor::Ra => a,
+                                    Predictor::Rb => b,
+                                    Predictor::Rc => c,
+                                    Predictor::RaRbRc1 => a + b - c,
+                                    Predictor::RaRbRc2 => a + ((b - c) >> 1),
+                                    Predictor::RaRbRc3 => b + ((a - c) >> 1),
+                                    Predictor::RaRb => (a + b) / 2,
+                                }
+                            };
+
+                            let value = (((predicted + diff) & 0xFFFF) as u16) << point_transform;
+                            plane[y * pw + x] = value;
+                        }
+                    }
+                }
+
+                mcu += 1;
+            }
+        }
+
+        for (idx, &ci) in component_indices.iter().enumerate() {
+            let (pw, ph) = plane_dims[idx];
+            let plane = &planes[idx];
+            for y in 0..height {
+                let sy = (y * ph / height.max(1)).min(ph.saturating_sub(1));
+                let row = &plane[sy * pw..sy * pw + pw];
+                for x in 0..width {
+                    let sx = (x * pw / width.max(1)).min(pw.saturating_sub(1));
+                    output[(y * width + x) * num_components + ci] = row[sx];
+                }
+            }
+        }
+
+        self.limits.free_usize(total_plane_samples * 2);
     }
 
     fn decode_lossless_scan(
