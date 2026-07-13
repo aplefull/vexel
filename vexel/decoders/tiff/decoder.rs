@@ -29,6 +29,7 @@ pub struct TiffDecoder<R: Read + Seek> {
     reader: BitReader<R>,
     sections: Vec<TiffSectionInfo>,
     ifd_count: usize,
+    subfile_type: u32,
 }
 
 impl<R: Read + Seek> TiffDecoder<R> {
@@ -42,6 +43,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             reader: BitReader::new(reader),
             sections: Vec::new(),
             ifd_count: 0,
+            subfile_type: 0,
         }
     }
 
@@ -149,6 +151,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         let ifd = Ifd::read(&mut self.reader, ifd_offset, self.byte_order, &mut self.limits)?;
         let ifd_end = self.reader.stream_position()?;
+
+        self.subfile_type = ifd.value(TiffTags::NewSubfileType, &mut self.reader).unwrap_or(0);
 
         if let Some(v) = ifd.value(TiffTags::ImageWidth, &mut self.reader) {
             self.header.image_width = v;
@@ -930,12 +934,24 @@ impl<R: Read + Seek> TiffDecoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
+        let mut pages = self.decode_ifd_chain(true)?;
+        Ok(pages.remove(0))
+    }
+
+    pub fn decode_pages(&mut self) -> VexelResult<Vec<Image>> {
+        self.decode_ifd_chain(false)
+    }
+
+    fn decode_ifd_chain(&mut self, first_only: bool) -> VexelResult<Vec<Image>> {
         self.sections.clear();
         self.ifd_count = 0;
+        self.reader.seek(SeekFrom::Start(0))?;
 
         let first_ifd_offset = self.read_file_header()?;
+        let reduced_only = !self.chain_has_full_res(first_ifd_offset);
 
-        let mut frames: Vec<ImageFrame> = Vec::new();
+        let mut pages: Vec<Image> = Vec::new();
+        let mut first_error: Option<VexelError> = None;
         let mut next_ifd_offset = first_ifd_offset;
         let mut guard = IfdCycleGuard::default();
 
@@ -945,28 +961,75 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 break;
             }
 
-            next_ifd_offset = self.read_ifd(next_ifd_offset)?;
-
-            match self.decode_current_ifd() {
-                Ok(ifd_frames) => frames.extend(ifd_frames),
+            next_ifd_offset = match self.read_ifd(next_ifd_offset) {
+                Ok(offset) => offset,
                 Err(e) => {
-                    log_warn!("Failed to decode TIFF frame: {}", e);
-                    if frames.is_empty() {
-                        return Err(e);
+                    log_warn!("Failed to read TIFF IFD: {}", e);
+                    if first_error.is_none() {
+                        first_error = Some(e);
                     }
                     break;
+                }
+            };
+
+            let is_reduced_resolution = self.subfile_type & 1 != 0;
+            if is_reduced_resolution && !reduced_only {
+                continue;
+            }
+
+            if first_only && !pages.is_empty() {
+                continue;
+            }
+
+            match self.decode_current_ifd() {
+                Ok(ifd_frames) => {
+                    if let Some(first) = ifd_frames.first() {
+                        let width = first.width();
+                        let height = first.height();
+                        let pixel_format = first.pixel_format();
+                        pages.push(Image::new(width, height, pixel_format, ifd_frames));
+                    }
+                }
+                Err(e) => {
+                    log_warn!("Failed to decode TIFF page: {}", e);
+                    if !pages.is_empty() {
+                        break;
+                    }
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
                 }
             }
         }
 
-        if frames.is_empty() {
-            return Err(VexelError::Custom("No frames decoded from TIFF".to_string()));
+        if pages.is_empty() {
+            return Err(first_error.unwrap_or_else(|| VexelError::Custom("No pages decoded from TIFF".to_string())));
         }
 
-        let width = frames[0].width();
-        let height = frames[0].height();
-        let pixel_format = frames[0].pixel_format();
+        Ok(pages)
+    }
 
-        Ok(Image::new(width, height, pixel_format, frames))
+    fn chain_has_full_res(&mut self, first_ifd_offset: u32) -> bool {
+        let mut guard = IfdCycleGuard::default();
+        let mut offset = first_ifd_offset;
+
+        while offset != 0 {
+            if !guard.enter(offset) {
+                break;
+            }
+
+            let Ok(ifd) = Ifd::read(&mut self.reader, offset, self.byte_order, &mut self.limits) else {
+                break;
+            };
+
+            let subfile_type: u32 = ifd.value(TiffTags::NewSubfileType, &mut self.reader).unwrap_or(0);
+            if subfile_type & 1 == 0 {
+                return true;
+            }
+
+            offset = ifd.next_ifd_offset;
+        }
+
+        false
     }
 }

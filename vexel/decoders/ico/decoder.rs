@@ -199,7 +199,12 @@ impl<R: Read + Seek> IcoDecoder<R> {
         Ok(ImageFrame::new(entry.width, entry.height, pixels, 0))
     }
 
-    pub fn decode(&mut self) -> VexelResult<Image> {
+    fn read_directory(&mut self) -> VexelResult<()> {
+        self.reader.seek(SeekFrom::Start(0))?;
+        self.entries.clear();
+        self.entry_offsets.clear();
+        self.sections.clear();
+
         let count = match self.read_header() {
             Ok(c) => c,
             Err(e) => {
@@ -232,51 +237,75 @@ impl<R: Read + Seek> IcoDecoder<R> {
             return Err(VexelError::Custom("ICO file contains no valid entries".to_string()));
         }
 
-        let largest = self.entries.iter().max_by_key(|e| e.width * e.height).cloned().unwrap();
+        Ok(())
+    }
 
-        self.width = largest.width;
-        self.height = largest.height;
+    fn decode_entry(&mut self, entry: &IconDirEntry) -> Option<ImageFrame> {
+        if entry.width == 0 || entry.height == 0 {
+            log_warn!("ICO entry has zero dimensions ({}x{}), skipping", entry.width, entry.height);
+            return None;
+        }
+
+        if let Err(e) = self.limits.reserve_buffer(entry.width, entry.height, 4) {
+            log_warn!("ICO entry {}x{} exceeds limits, skipping: {}", entry.width, entry.height, e);
+            return None;
+        }
+
+        match entry.image_format {
+            IcoImageFormat::Png => match self.decode_png_frame(entry) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    log_warn!("Error decoding PNG frame in ICO: {}", e);
+                    None
+                }
+            },
+            IcoImageFormat::Bmp => match self.decode_bmp_frame(entry) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    log_warn!("Error decoding BMP frame in ICO: {}", e);
+                    None
+                }
+            },
+        }
+    }
+
+    pub fn decode(&mut self) -> VexelResult<Image> {
+        self.read_directory()?;
+
+        let mut candidates = self.entries.clone();
+        candidates.sort_by_key(|e| std::cmp::Reverse((e.width * e.height, e.bit_count)));
+
+        for entry in &candidates {
+            if let Some(frame) = self.decode_entry(entry) {
+                self.width = frame.width();
+                self.height = frame.height();
+                return Ok(Image::from_frame(frame));
+            }
+        }
+
+        Err(VexelError::Custom("Failed to decode any images from ICO file".to_string()))
+    }
+
+    pub fn decode_pages(&mut self) -> VexelResult<Vec<Image>> {
+        self.read_directory()?;
 
         let entries = self.entries.clone();
-        let mut frames = Vec::with_capacity(entries.len());
+        let mut pages = Vec::with_capacity(entries.len());
 
         for entry in &entries {
-            if entry.width == 0 || entry.height == 0 {
-                log_warn!("ICO entry has zero dimensions ({}x{}), skipping", entry.width, entry.height);
-                continue;
+            if let Some(frame) = self.decode_entry(entry) {
+                pages.push(Image::from_frame(frame));
             }
-
-            if let Err(e) = self.limits.reserve_buffer(entry.width, entry.height, 4) {
-                log_warn!("ICO entry {}x{} exceeds limits, skipping: {}", entry.width, entry.height, e);
-                continue;
-            }
-
-            let frame = match entry.image_format {
-                IcoImageFormat::Png => match self.decode_png_frame(entry) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        log_warn!("Error decoding PNG frame in ICO: {}", e);
-                        continue;
-                    }
-                },
-                IcoImageFormat::Bmp => match self.decode_bmp_frame(entry) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        log_warn!("Error decoding BMP frame in ICO: {}", e);
-                        continue;
-                    }
-                },
-            };
-            frames.push(frame);
         }
 
-        if frames.is_empty() {
-            return Err(VexelError::Custom("Failed to decode any frames from ICO file".to_string()));
+        if pages.is_empty() {
+            return Err(VexelError::Custom("Failed to decode any images from ICO file".to_string()));
         }
 
-        let pixel_format = frames[0].pixel_format();
+        self.width = pages.iter().map(|p| p.width()).max().unwrap_or(0);
+        self.height = pages.iter().map(|p| p.height()).max().unwrap_or(0);
 
-        Ok(Image::new(self.width, self.height, pixel_format, frames))
+        Ok(pages)
     }
 }
 

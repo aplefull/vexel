@@ -149,6 +149,9 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
     /// Decodes the image and returns an [`Image`] containing all frames.
     ///
+    /// For multi-page formats (ICO, multi-page TIFF) only the primary page is decoded.
+    /// Use [`decode_pages`](Self::decode_pages) to get every contained image.
+    ///
     /// # Errors
     ///
     /// - [`VexelError::IoError`] — underlying read or seek failed
@@ -186,6 +189,54 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         #[cfg(not(fuzzing))]
         {
             let result = panic::catch_unwind(AssertUnwindSafe(|| dispatch!()));
+
+            result.unwrap_or_else(|payload| {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+
+                Err(VexelError::Panic(msg.to_string()))
+            })
+        }
+    }
+
+    /// Decodes every page contained in the file, returning one [`Image`] per page.
+    ///
+    /// Multi-page formats yield one entry per contained image.
+    /// Every other format yields a single entry equal to the
+    /// result of [`decode`](Self::decode). Animation frames are not pages: an
+    /// animated GIF is a single page whose `Image` holds all frames.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`decode`](Self::decode); decoding fails only if no page could
+    /// be decoded at all.
+    pub fn decode_pages(&mut self) -> VexelResult<Vec<Image>> {
+        macro_rules! dispatch_pages {
+            () => {
+                match &mut self.decoder {
+                    Decoders::Ico(decoder) => decoder.decode_pages(),
+                    Decoders::Tiff(decoder) => decoder.decode_pages(),
+                    Decoders::Netpbm(decoder) => decoder.decode_pages(),
+                    _ => unreachable!(),
+                }
+            };
+        }
+
+        if !matches!(self.decoder, Decoders::Ico(_) | Decoders::Tiff(_) | Decoders::Netpbm(_)) {
+            return self.decode().map(|image| vec![image]);
+        }
+
+        #[cfg(fuzzing)]
+        {
+            return dispatch_pages!();
+        }
+
+        #[cfg(not(fuzzing))]
+        {
+            let result = panic::catch_unwind(AssertUnwindSafe(|| dispatch_pages!()));
 
             result.unwrap_or_else(|payload| {
                 let msg = payload
@@ -685,6 +736,36 @@ impl WasmDecoder {
         })
     }
 
+    /// Decodes every page contained in the file, returning one [`JsImage`] per page.
+    ///
+    /// Multi-page formats yield one entry per contained image; all other formats yield a single entry.
+    #[wasm_bindgen(js_name = decodePages)]
+    pub fn decode_pages(&mut self) -> Result<JsPages, String> {
+        let format = self.decoder.get_format();
+        let pages = self.decoder.decode_pages().map_err(|e| e.to_string())?;
+
+        Ok(JsPages {
+            pages: pages
+                .into_iter()
+                .map(|image| JsImage {
+                    width: image.width(),
+                    height: image.height(),
+                    image_format: format.clone(),
+                    frames: image
+                        .frames()
+                        .iter()
+                        .map(|frame| JsImageFrame {
+                            width: frame.width(),
+                            height: frame.height(),
+                            pixels: frame.to_rgba8(),
+                            delay: frame.delay(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+    }
+
     /// Decodes all embedded thumbnails and preview images found in the file.
     #[wasm_bindgen(js_name = decodeThumbnails)]
     pub fn decode_thumbnails(&mut self) -> Result<JsThumbnails, String> {
@@ -755,6 +836,14 @@ pub struct JsImageFrame {
     pub height: u32,
     pub pixels: Vec<u8>,
     pub delay: u32,
+}
+
+/// Pages returned by [`WasmDecoder::decode_pages`], one [`JsImage`] per
+/// image contained in the file, in file order.
+#[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct JsPages {
+    pub pages: Vec<JsImage>,
 }
 
 /// Embedded thumbnails returned by [`WasmDecoder::decode_thumbnails`], sorted

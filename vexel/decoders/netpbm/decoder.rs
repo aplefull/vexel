@@ -1,4 +1,4 @@
-use std::io::{Cursor, Read, Seek};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use super::simd;
 use super::types::{
@@ -6,7 +6,7 @@ use super::types::{
 };
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::image::{ImageFrame, PixelFormat};
+use crate::utils::image::ImageFrame;
 use crate::utils::info::NetpbmInfo;
 use crate::{log_warn, Image, Limits, PixelData};
 
@@ -704,10 +704,19 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        let mut frames: Vec<ImageFrame> = Vec::new();
-        let mut first_width = 0u32;
-        let mut first_height = 0u32;
-        let mut first_pixel_format = PixelFormat::RGB8;
+        let mut pages = self.decode_images(true)?;
+        Ok(pages.remove(0))
+    }
+
+    pub fn decode_pages(&mut self) -> VexelResult<Vec<Image>> {
+        self.decode_images(false)
+    }
+
+    fn decode_images(&mut self, first_only: bool) -> VexelResult<Vec<Image>> {
+        self.reader.seek(SeekFrom::Start(0))?;
+        self.lookahead = None;
+
+        let mut pages: Vec<Image> = Vec::new();
 
         loop {
             self.reset_frame_state();
@@ -715,7 +724,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             match self.read_header() {
                 Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
                 Err(_) => {
-                    if frames.is_empty() {
+                    if pages.is_empty() {
                         return Err(VexelError::Custom("Error reading header".to_string()));
                     }
                     break;
@@ -729,7 +738,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             let mut pixel_data = match self.read_and_decode_frame() {
                 Ok(data) => data,
                 Err(_) => {
-                    if frames.is_empty() {
+                    if pages.is_empty() {
                         return Err(VexelError::Custom("Error decoding image".to_string()));
                     }
                     break;
@@ -737,25 +746,13 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             };
 
             pixel_data.correct_pixels(width, height);
+            pages.push(Image::from_frame(ImageFrame::new(width, height, pixel_data, 0)));
 
-            if frames.is_empty() {
-                first_width = width;
-                first_height = height;
-                first_pixel_format = pixel_data.pixel_format();
-            }
-
-            frames.push(ImageFrame::new(width, height, pixel_data, 0));
-
-            if !self.has_more_data() {
+            if first_only || !self.has_more_data() {
                 break;
             }
         }
 
-        if frames.len() == 1 {
-            let frame = frames.remove(0);
-            return Ok(Image::from_frame(frame));
-        }
-
-        Ok(Image::new(first_width, first_height, first_pixel_format, frames))
+        Ok(pages)
     }
 }

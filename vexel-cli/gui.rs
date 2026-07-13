@@ -7,7 +7,11 @@ use std::time::{Duration, Instant};
 use egui::ViewportBuilder;
 use vexel::{Image, PixelData, Vexel};
 
-type ImageFrames = (Vec<Arc<egui::ColorImage>>, Vec<u32>, [usize; 2]);
+struct Page {
+    frames: Vec<Arc<egui::ColorImage>>,
+    delays: Vec<u32>,
+    size: [usize; 2],
+}
 
 fn get_directory_files(path: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -176,11 +180,10 @@ struct App {
     checker_texture: Option<egui::TextureHandle>,
     files: Vec<PathBuf>,
     current_file_index: usize,
-    frames: Vec<Arc<egui::ColorImage>>,
+    pages: Vec<Page>,
+    current_page: usize,
     current_frame: usize,
     last_frame_time: Instant,
-    frame_delays: Vec<u32>,
-    original_image_size: [usize; 2],
     thumbnails: Vec<Thumbnail>,
     viewing_thumbnail: Option<usize>,
     error_message: Option<String>,
@@ -192,7 +195,7 @@ struct App {
 }
 
 impl App {
-    fn image_to_frames(image: Image, normalize: bool) -> ImageFrames {
+    fn image_to_page(image: Image, normalize: bool) -> Page {
         const MAX_TEXTURE_SIZE: usize = 16384;
 
         let original_size = [image.width() as usize, image.height() as usize];
@@ -248,12 +251,12 @@ impl App {
             frame_delays.push(if delay <= 10 { 100 } else { delay }.max(17));
         }
 
-        (frames, frame_delays, original_size)
+        Page { frames, delays: frame_delays, size: original_size }
     }
 
     fn thumbnail_from_image(image: Image, normalize: bool) -> Option<Thumbnail> {
-        let (frames, _, size) = Self::image_to_frames(image, normalize);
-        frames.into_iter().next().map(|image| Thumbnail { image, size })
+        let page = Self::image_to_page(image, normalize);
+        page.frames.into_iter().next().map(|image| Thumbnail { image, size: page.size })
     }
 
     fn is_small_image(size: [usize; 2]) -> bool {
@@ -266,11 +269,10 @@ impl App {
             checker_texture: None,
             files,
             current_file_index: start_index,
-            frames: Vec::new(),
+            pages: Vec::new(),
+            current_page: 0,
             current_frame: 0,
             last_frame_time: Instant::now(),
-            frame_delays: Vec::new(),
-            original_image_size: [0, 0],
             thumbnails: Vec::new(),
             viewing_thumbnail: None,
             error_message: None,
@@ -290,7 +292,7 @@ impl App {
         path: &Path,
         normalize: bool,
         limits: vexel::Limits,
-    ) -> (Result<ImageFrames, String>, Vec<Thumbnail>) {
+    ) -> (Result<Vec<Page>, String>, Vec<Thumbnail>) {
         let mut decoder = match Vexel::open(path) {
             Ok(decoder) => decoder,
             Err(e) => return (Err(format!("{}: {}", path.display(), e)), Vec::new()),
@@ -304,12 +306,17 @@ impl App {
             .filter_map(|image| Self::thumbnail_from_image(image, normalize))
             .collect();
 
-        let result = decoder.decode().map_err(|e| format!("{}: {}", path.display(), e)).and_then(|image| {
-            let frames = Self::image_to_frames(image, normalize);
-            if frames.0.is_empty() {
+        let result = decoder.decode_pages().map_err(|e| format!("{}: {}", path.display(), e)).and_then(|images| {
+            let pages: Vec<Page> = images
+                .into_iter()
+                .map(|image| Self::image_to_page(image, normalize))
+                .filter(|page| !page.frames.is_empty())
+                .collect();
+
+            if pages.is_empty() {
                 Err(format!("{}: decoded image has no frames", path.display()))
             } else {
-                Ok(frames)
+                Ok(pages)
             }
         });
 
@@ -328,23 +335,23 @@ impl App {
         self.viewing_thumbnail = None;
 
         match result {
-            Ok((frames, frame_delays, original_size)) => {
-                self.frames = frames;
-                self.frame_delays = frame_delays;
-                self.original_image_size = original_size;
-                self.pixelated = Self::is_small_image(original_size);
+            Ok(pages) => {
+                self.pixelated = Self::is_small_image(pages[0].size);
+                self.pages = pages;
+                self.current_page = 0;
                 self.current_frame = 0;
                 self.last_frame_time = Instant::now();
                 self.error_message = None;
                 let options = self.texture_options();
                 if let Some(texture) = &mut self.texture {
-                    texture.set(self.frames[0].clone(), options);
+                    texture.set(self.pages[0].frames[0].clone(), options);
                 }
                 true
             }
             Err(e) => {
                 eprintln!("{}", e);
-                self.frames.clear();
+                self.pages.clear();
+                self.current_page = 0;
                 self.texture = None;
                 self.error_message = Some(e);
                 false
@@ -352,10 +359,14 @@ impl App {
         }
     }
 
+    fn page(&self) -> Option<&Page> {
+        self.pages.get(self.current_page)
+    }
+
     fn current_display_image(&self) -> Option<Arc<egui::ColorImage>> {
         match self.viewing_thumbnail {
             Some(index) => self.thumbnails.get(index).map(|t| t.image.clone()),
-            None => self.frames.get(self.current_frame).cloned(),
+            None => self.page().and_then(|page| page.frames.get(self.current_frame).cloned()),
         }
     }
 
@@ -367,7 +378,22 @@ impl App {
         self.viewing_thumbnail = view;
         self.current_frame = 0;
         self.last_frame_time = Instant::now();
+        self.update_texture();
+    }
 
+    fn select_page(&mut self, index: usize) {
+        if self.viewing_thumbnail.is_none() && self.current_page == index {
+            return;
+        }
+
+        self.viewing_thumbnail = None;
+        self.current_page = index.min(self.pages.len().saturating_sub(1));
+        self.current_frame = 0;
+        self.last_frame_time = Instant::now();
+        self.update_texture();
+    }
+
+    fn update_texture(&mut self) {
         match self.current_display_image() {
             Some(image) => {
                 let options = self.texture_options();
@@ -456,20 +482,31 @@ impl App {
     }
 
     fn update_frame(&mut self, ctx: &egui::Context) {
-        if self.frames.len() <= 1 || self.viewing_thumbnail.is_some() {
+        if self.viewing_thumbnail.is_some() {
+            return;
+        }
+
+        let Some(page) = self.pages.get(self.current_page) else {
+            return;
+        };
+
+        if page.frames.len() <= 1 {
             return;
         }
 
         let elapsed = self.last_frame_time.elapsed().as_millis() as u32;
-        let current_delay = self.frame_delays[self.current_frame];
+        let current_delay = page.delays.get(self.current_frame).copied().unwrap_or(100);
 
         if elapsed >= current_delay {
-            self.current_frame = (self.current_frame + 1) % self.frames.len();
+            let next_frame = (self.current_frame + 1) % page.frames.len();
+            let frame = page.frames[next_frame].clone();
+
+            self.current_frame = next_frame;
             self.last_frame_time = Instant::now();
 
             let options = self.texture_options();
             if let Some(texture) = &mut self.texture {
-                texture.set(self.frames[self.current_frame].clone(), options);
+                texture.set(frame, options);
             }
 
             ctx.request_repaint();
@@ -517,11 +554,15 @@ impl eframe::App for App {
 
                     let [w, h] = match self.viewing_thumbnail {
                         Some(index) => self.thumbnails[index].size,
-                        None => self.original_image_size,
+                        None => self.page().map(|page| page.size).unwrap_or([0, 0]),
                     };
                     add_row(ui, "DIMENSIONS", &format!("{w} × {h}"));
 
-                    let frame_count = self.frames.len();
+                    if self.pages.len() > 1 {
+                        add_row(ui, "PAGES", &self.pages.len().to_string());
+                    }
+
+                    let frame_count = self.page().map(|page| page.frames.len()).unwrap_or(0);
                     if frame_count > 1 {
                         add_row(ui, "FRAMES", &frame_count.to_string());
                     }
@@ -536,6 +577,32 @@ impl eframe::App for App {
                         ui.add_space(12.0);
                     };
 
+                    if self.pages.len() > 1 {
+                        add_separator(ui);
+
+                        ui.label(egui::RichText::new("PAGES").color(label_color).size(11.0));
+                        ui.add_space(6.0);
+
+                        let mut selected_page = None;
+
+                        for (index, page) in self.pages.iter().enumerate() {
+                            let [pw, ph] = page.size;
+                            let selected = self.viewing_thumbnail.is_none() && self.current_page == index;
+                            let text = format!("Page {} · {} × {}", index + 1, pw, ph);
+                            let label = egui::RichText::new(text).color(value_color).size(13.0);
+                            if ui.selectable_label(selected, label).clicked() {
+                                selected_page = Some(index);
+                            }
+                            ui.add_space(2.0);
+                        }
+
+                        if let Some(index) = selected_page {
+                            self.select_page(index);
+                        }
+
+                        ui.add_space(8.0);
+                    }
+
                     if !self.thumbnails.is_empty() {
                         add_separator(ui);
 
@@ -544,7 +611,7 @@ impl eframe::App for App {
 
                         let mut selection = None;
 
-                        if !self.frames.is_empty() {
+                        if !self.pages.is_empty() {
                             let selected = self.viewing_thumbnail.is_none();
                             let label = egui::RichText::new("Main image").color(value_color).size(13.0);
                             if ui.selectable_label(selected, label).clicked() {

@@ -6,15 +6,15 @@ use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
 
 use jpegxl_sys::color::color_encoding::JxlColorEncoding;
-use jpegxl_sys::common::types::{JxlBool, JxlDataType, JxlEndianness, JxlPixelFormat};
+use jpegxl_sys::common::types::{JxlBitDepth, JxlBitDepthType, JxlBool, JxlDataType, JxlEndianness, JxlPixelFormat};
 use jpegxl_sys::encoder::encode::{
     JxlColorEncodingSetToSRGB, JxlEncoderAddImageFrame, JxlEncoderCloseInput, JxlEncoderCreate, JxlEncoderDestroy,
     JxlEncoderFrameSettingsCreate, JxlEncoderInitBasicInfo, JxlEncoderInitFrameHeader, JxlEncoderProcessOutput,
-    JxlEncoderSetBasicInfo, JxlEncoderSetCodestreamLevel, JxlEncoderSetColorEncoding, JxlEncoderSetFrameHeader,
-    JxlEncoderSetFrameLossless, JxlEncoderStatus, JxlEncoderUseContainer,
+    JxlEncoderSetBasicInfo, JxlEncoderSetCodestreamLevel, JxlEncoderSetColorEncoding, JxlEncoderSetFrameBitDepth,
+    JxlEncoderSetFrameHeader, JxlEncoderSetFrameLossless, JxlEncoderStatus, JxlEncoderUseContainer,
 };
 use jpegxl_sys::metadata::codestream_header::{JxlAnimationHeader, JxlBasicInfo};
-use vexel::{Image, PixelData};
+use vexel::{Image, ImageFrame, PixelData};
 use webp::{AnimEncoder, AnimFrame, WebPConfig};
 
 fn scale_to_u16(value: f64) -> u16 {
@@ -71,13 +71,65 @@ pub struct Writer {}
 
 impl Writer {
     pub fn write_jxl(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
+        let frames: Vec<&ImageFrame> = image.frames().iter().collect();
+        Writer::encode_jxl_file(output_path, image.width(), image.height(), &frames)
+    }
+
+    pub fn write_jxl_pages(output_path: &PathBuf, pages: &[Image]) -> Result<(), Error> {
+        if pages.is_empty() {
+            return Err(Error::new(ErrorKind::InvalidData, "no pages to write"));
+        }
+
+        let mut all_frames = pages.iter().flat_map(|page| page.frames());
+        let first_format = all_frames.next().map(|frame| frame.pixel_format());
+        let uniform = match &first_format {
+            Some(format) => all_frames.all(|frame| frame.pixel_format() == *format),
+            None => return Err(Error::new(ErrorKind::InvalidData, "no frames to write")),
+        };
+
+        let converted: Vec<ImageFrame>;
+        let frames: Vec<&ImageFrame> = if uniform {
+            pages.iter().flat_map(|page| page.frames()).collect()
+        } else {
+            let any_alpha = pages.iter().flat_map(|page| page.frames()).any(|frame| frame.has_alpha());
+            eprintln!(
+                "Warning: pages have differing pixel formats, converting all to {}",
+                if any_alpha { "RGBA8" } else { "RGB8" }
+            );
+            converted = pages
+                .iter()
+                .flat_map(|page| page.frames())
+                .map(|frame| {
+                    let frame = frame.clone();
+                    if any_alpha {
+                        frame.into_rgba8()
+                    } else {
+                        frame.into_rgb8()
+                    }
+                })
+                .collect();
+            converted.iter().collect()
+        };
+
+        let canvas_width = frames.iter().map(|frame| frame.width()).max().unwrap_or(0);
+        let canvas_height = frames.iter().map(|frame| frame.height()).max().unwrap_or(0);
+
+        Writer::encode_jxl_file(output_path, canvas_width, canvas_height, &frames)
+    }
+
+    fn encode_jxl_file(
+        output_path: &PathBuf,
+        canvas_width: u32,
+        canvas_height: u32,
+        frames: &[&ImageFrame],
+    ) -> Result<(), Error> {
         let compressed = unsafe {
             let encoder = JxlEncoderCreate(std::ptr::null());
             if encoder.is_null() {
                 return Err(Error::other("failed to create JXL encoder"));
             }
 
-            let result = jxl_encode(encoder, image);
+            let result = jxl_encode(encoder, canvas_width, canvas_height, frames);
 
             JxlEncoderDestroy(encoder);
 
@@ -255,6 +307,49 @@ impl Writer {
         Ok(())
     }
 
+    pub fn write_pages(pages: &[Image], format: &str, output_path: &PathBuf) -> Result<(), Error> {
+        if pages.is_empty() {
+            return Err(Error::new(ErrorKind::InvalidData, "no pages to write"));
+        }
+
+        for page in pages {
+            Writer::validate_image(page)?;
+        }
+
+        if pages.len() == 1 {
+            return Writer::write_image(&pages[0], format, output_path);
+        }
+
+        match format {
+            "jxl" => {
+                let total_frames: usize = pages.iter().map(|page| page.frames().len()).sum();
+                if total_frames > pages.len() {
+                    eprintln!(
+                        "Warning: JXL cannot represent page structure; writing all {} frames from {} pages as a flat sequence",
+                        total_frames,
+                        pages.len()
+                    );
+                }
+                Writer::write_jxl_pages(output_path, pages)
+            }
+            "pam" | "ppm" | "webp" => {
+                let output_dir = Path::new(output_path).parent().unwrap_or_else(|| Path::new("."));
+                let output_file_name = Path::new(output_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid output file name"))?;
+
+                for (i, page) in pages.iter().enumerate() {
+                    let page_path = output_dir.join(format!("{}_page_{}.{}", output_file_name, i, format));
+                    Writer::write_image(page, format, &page_path)?;
+                }
+
+                Ok(())
+            }
+            _ => Err(Error::new(ErrorKind::InvalidInput, format!("Invalid format: {}", format))),
+        }
+    }
+
     fn validate_image(image: &Image) -> Result<(), Error> {
         use vexel::PixelFormat;
 
@@ -397,7 +492,7 @@ fn pixel_info_for(pixel_data: &PixelData) -> PixelInfo {
         PixelData::L1(_) => PixelInfo {
             data_type: JxlDataType::Uint8,
             num_channels: 1,
-            bits_per_sample: 8,
+            bits_per_sample: 1,
             exponent_bits_per_sample: 0,
             has_alpha: false,
             is_gray: true,
@@ -469,9 +564,14 @@ fn pixel_info_for(pixel_data: &PixelData) -> PixelInfo {
     }
 }
 
-unsafe fn jxl_encode(enc: *mut jpegxl_sys::encoder::encode::JxlEncoder, image: &Image) -> Result<Vec<u8>, String> {
-    let is_animated = image.frames().len() > 1;
-    let first_frame = &image.frames()[0];
+unsafe fn jxl_encode(
+    enc: *mut jpegxl_sys::encoder::encode::JxlEncoder,
+    canvas_width: u32,
+    canvas_height: u32,
+    frames: &[&ImageFrame],
+) -> Result<Vec<u8>, String> {
+    let first_frame = *frames.first().ok_or("no frames to encode")?;
+    let is_animated = frames.len() > 1;
     let info = pixel_info_for(first_frame.pixels());
 
     if is_animated {
@@ -486,8 +586,8 @@ unsafe fn jxl_encode(enc: *mut jpegxl_sys::encoder::encode::JxlEncoder, image: &
     let mut basic_info = MaybeUninit::<JxlBasicInfo>::uninit();
     JxlEncoderInitBasicInfo(basic_info.as_mut_ptr());
     let mut basic_info = basic_info.assume_init();
-    basic_info.xsize = image.width();
-    basic_info.ysize = image.height();
+    basic_info.xsize = canvas_width;
+    basic_info.ysize = canvas_height;
     basic_info.bits_per_sample = info.bits_per_sample;
     basic_info.exponent_bits_per_sample = info.exponent_bits_per_sample;
     basic_info.num_color_channels = if info.is_gray { 1 } else { 3 };
@@ -530,6 +630,19 @@ unsafe fn jxl_encode(enc: *mut jpegxl_sys::encoder::encode::JxlEncoder, image: &
         return Err("failed to set lossless mode".to_string());
     }
 
+    let bit_depth = JxlBitDepth {
+        r#type: if info.exponent_bits_per_sample > 0 {
+            JxlBitDepthType::FromPixelFormat
+        } else {
+            JxlBitDepthType::FromCodestream
+        },
+        bits_per_sample: info.bits_per_sample,
+        exponent_bits_per_sample: info.exponent_bits_per_sample,
+    };
+    if JxlEncoderSetFrameBitDepth(frame_settings, &bit_depth) != JxlEncoderStatus::Success {
+        return Err("failed to set frame bit depth".to_string());
+    }
+
     let pixel_format = JxlPixelFormat {
         num_channels: info.num_channels,
         data_type: info.data_type,
@@ -537,12 +650,26 @@ unsafe fn jxl_encode(enc: *mut jpegxl_sys::encoder::encode::JxlEncoder, image: &
         align: 0,
     };
 
-    for frame in image.frames() {
-        if is_animated {
+    for &frame in frames {
+        let has_crop = frame.width() != canvas_width || frame.height() != canvas_height;
+
+        if is_animated || has_crop {
             let mut frame_header = MaybeUninit::<jpegxl_sys::metadata::codestream_header::JxlFrameHeader>::uninit();
             JxlEncoderInitFrameHeader(frame_header.as_mut_ptr());
             let mut frame_header = frame_header.assume_init();
-            frame_header.duration = if frame.delay() == 0 { 1 } else { frame.delay() };
+
+            if is_animated {
+                frame_header.duration = if frame.delay() == 0 { 1 } else { frame.delay() };
+            }
+
+            if has_crop {
+                frame_header.layer_info.have_crop = JxlBool::True;
+                frame_header.layer_info.crop_x0 = 0;
+                frame_header.layer_info.crop_y0 = 0;
+                frame_header.layer_info.xsize = frame.width();
+                frame_header.layer_info.ysize = frame.height();
+            }
+
             if JxlEncoderSetFrameHeader(frame_settings, &frame_header) != JxlEncoderStatus::Success {
                 return Err("failed to set frame header".to_string());
             }

@@ -143,86 +143,44 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase {
             name: "NetPBM P1 multiframe",
             path: "netpbm/P1_multiframe.pbm",
-            validation: Some(Box::new(|image| {
-                let frames = image.frames();
-                if frames.len() != 3 {
-                    return Err(format!("expected 3 frames, got {}", frames.len()));
-                }
-                Ok(())
-            })),
-            comparison: Comparison::None,
+            validation: None,
+            comparison: Comparison::ExactPages { reference_path: "netpbm/P1_multiframe.jxl" },
         },
         TestCase {
             name: "NetPBM P2 multiframe",
             path: "netpbm/P2_multiframe.pgm",
-            validation: Some(Box::new(|image| {
-                let frames = image.frames();
-                if frames.len() != 3 {
-                    return Err(format!("expected 3 frames, got {}", frames.len()));
-                }
-                Ok(())
-            })),
-            comparison: Comparison::None,
+            validation: None,
+            comparison: Comparison::ExactPages { reference_path: "netpbm/P2_multiframe.jxl" },
         },
         TestCase {
             name: "NetPBM P3 multiframe",
             path: "netpbm/P3_multiframe.ppm",
-            validation: Some(Box::new(|image| {
-                let frames = image.frames();
-                if frames.len() != 3 {
-                    return Err(format!("expected 3 frames, got {}", frames.len()));
-                }
-                Ok(())
-            })),
-            comparison: Comparison::None,
+            validation: None,
+            comparison: Comparison::ExactPages { reference_path: "netpbm/P3_multiframe.jxl" },
         },
         TestCase {
             name: "NetPBM P4 multiframe",
             path: "netpbm/P4_multiframe.pbm",
-            validation: Some(Box::new(|image| {
-                let frames = image.frames();
-                if frames.len() != 3 {
-                    return Err(format!("expected 3 frames, got {}", frames.len()));
-                }
-                Ok(())
-            })),
-            comparison: Comparison::None,
+            validation: None,
+            comparison: Comparison::ExactPages { reference_path: "netpbm/P4_multiframe.jxl" },
         },
         TestCase {
             name: "NetPBM P5 multiframe",
             path: "netpbm/P5_multiframe.pgm",
-            validation: Some(Box::new(|image| {
-                let frames = image.frames();
-                if frames.len() != 3 {
-                    return Err(format!("expected 3 frames, got {}", frames.len()));
-                }
-                Ok(())
-            })),
-            comparison: Comparison::None,
+            validation: None,
+            comparison: Comparison::ExactPages { reference_path: "netpbm/P5_multiframe.jxl" },
         },
         TestCase {
             name: "NetPBM P6 multiframe",
             path: "netpbm/P6_multiframe.ppm",
-            validation: Some(Box::new(|image| {
-                let frames = image.frames();
-                if frames.len() != 3 {
-                    return Err(format!("expected 3 frames, got {}", frames.len()));
-                }
-                Ok(())
-            })),
-            comparison: Comparison::None,
+            validation: None,
+            comparison: Comparison::ExactPages { reference_path: "netpbm/P6_multiframe.jxl" },
         },
         TestCase {
             name: "NetPBM P7 multiframe",
             path: "netpbm/P7_multiframe.pam",
-            validation: Some(Box::new(|image| {
-                let frames = image.frames();
-                if frames.len() != 3 {
-                    return Err(format!("expected 3 frames, got {}", frames.len()));
-                }
-                Ok(())
-            })),
-            comparison: Comparison::None,
+            validation: None,
+            comparison: Comparison::ExactPages { reference_path: "netpbm/P7_multiframe.jxl" },
         },
         TestCase {
             name: "NetPBM P7 CMYK",

@@ -22,6 +22,7 @@ Examples:
   vexel image.png -O output.webp
   vexel \"*.png\" -f webp -o ./converted
   vexel --frames -f webp image.gif
+  vexel --pages image.tiff
   vexel --info image.png
   vexel --gui image.png
   vexel --gui ./images\
@@ -53,6 +54,13 @@ struct Cli {
 
     #[arg(long, help = "Write each frame as a separate file")]
     frames: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "frames",
+        help = "Decode and write all pages of multi-page images (single JXL file, separate files for other formats)"
+    )]
+    pages: bool,
 
     #[arg(long, value_parser = ["error", "warn", "debug", "none"], default_value = "error", help = "Minimum log level to display")]
     log_level: String,
@@ -140,8 +148,6 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
         return Ok(());
     }
 
-    let image = decoder.decode()?;
-
     let format = cli.format.as_deref().unwrap_or("jxl");
     let output_path = if let Some(output) = cli.output.as_deref() {
         let p = Path::new(output);
@@ -161,9 +167,14 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     }
 
     println!("Writing to: {}", output_path.display());
-    if cli.frames {
+    if cli.pages {
+        let pages = decoder.decode_pages()?;
+        Writer::write_pages(&pages, format, &output_path)?;
+    } else if cli.frames {
+        let image = decoder.decode()?;
         Writer::write_frames(&output_path, format, image)?;
     } else {
+        let image = decoder.decode()?;
         Writer::write_image(&image, format, &output_path)?;
     }
 

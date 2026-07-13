@@ -2,13 +2,18 @@ use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
 
-use jpegxl_sys::common::types::{JxlBitDepth, JxlBitDepthType, JxlDataType, JxlEndianness, JxlPixelFormat};
+use jpegxl_sys::common::types::{JxlBitDepth, JxlBitDepthType, JxlBool, JxlDataType, JxlEndianness, JxlPixelFormat};
 use jpegxl_sys::decode::{
-    JxlDecoderCloseInput, JxlDecoderCreate, JxlDecoderDestroy, JxlDecoderGetBasicInfo, JxlDecoderImageOutBufferSize,
-    JxlDecoderProcessInput, JxlDecoderSetImageOutBitDepth, JxlDecoderSetImageOutBuffer, JxlDecoderSetInput,
-    JxlDecoderStatus, JxlDecoderSubscribeEvents,
+    JxlDecoderCloseInput, JxlDecoderCreate, JxlDecoderDestroy, JxlDecoderGetBasicInfo, JxlDecoderGetFrameHeader,
+    JxlDecoderImageOutBufferSize, JxlDecoderProcessInput, JxlDecoderSetCoalescing, JxlDecoderSetImageOutBitDepth,
+    JxlDecoderSetImageOutBuffer, JxlDecoderSetInput, JxlDecoderSetParallelRunner, JxlDecoderStatus,
+    JxlDecoderSubscribeEvents,
 };
-use jpegxl_sys::metadata::codestream_header::JxlBasicInfo;
+use jpegxl_sys::metadata::codestream_header::{JxlBasicInfo, JxlFrameHeader};
+use jpegxl_sys::threads::thread_parallel_runner::{
+    JxlThreadParallelRunner, JxlThreadParallelRunnerCreate, JxlThreadParallelRunnerDefaultNumWorkerThreads,
+    JxlThreadParallelRunnerDestroy,
+};
 use libavif_sys as avif_sys;
 use vexel::{Image, PixelData, Vexel};
 
@@ -36,6 +41,9 @@ pub enum Comparison {
         reference_path: &'static str,
         mse_threshold: f64,
         ssim_threshold: f64,
+    },
+    ExactPages {
+        reference_path: &'static str,
     },
 }
 
@@ -101,10 +109,7 @@ pub fn image_to_reference_native(image: &Image) -> ReferenceImage {
     let height = image.height();
 
     let pixels = match image.pixels() {
-        PixelData::L1(p) => {
-            let n = (image.width() * image.height()) as usize;
-            ReferencePixels::U8(p.iter().flat_map(|&b| (0..8).map(move |i| (b >> (7 - i)) & 1)).take(n).collect())
-        }
+        PixelData::L1(p) => ReferencePixels::U8(p.iter().map(|&v| (v != 0) as u8).collect()),
         PixelData::RGB8(p) | PixelData::RGBA8(p) | PixelData::L8(p) | PixelData::LA8(p) => {
             ReferencePixels::U8(p.clone())
         }
@@ -132,10 +137,7 @@ pub fn frame_to_reference_native(image: &Image, frame_idx: usize) -> ReferenceIm
     let frame = &image.frames()[frame_idx];
 
     let pixels = match frame.pixels() {
-        PixelData::L1(p) => {
-            let n = (frame.width() * frame.height()) as usize;
-            ReferencePixels::U8(p.iter().flat_map(|&b| (0..8).map(move |i| (b >> (7 - i)) & 1)).take(n).collect())
-        }
+        PixelData::L1(p) => ReferencePixels::U8(p.iter().map(|&v| (v != 0) as u8).collect()),
         PixelData::RGB8(p) | PixelData::RGBA8(p) | PixelData::L8(p) | PixelData::LA8(p) => {
             ReferencePixels::U8(p.clone())
         }
@@ -196,15 +198,36 @@ pub fn read_reference_jxl_all_frames(path: &Path) -> Result<Vec<ReferenceImage>,
             return Err("JxlDecoderCreate returned null".into());
         }
 
-        let events = JxlDecoderStatus::BasicInfo as i32 | JxlDecoderStatus::FullImage as i32;
-        if JxlDecoderSubscribeEvents(dec, events) != JxlDecoderStatus::Success {
+        let runner = JxlThreadParallelRunnerCreate(std::ptr::null(), JxlThreadParallelRunnerDefaultNumWorkerThreads());
+        if runner.is_null() {
             JxlDecoderDestroy(dec);
-            return Err("JxlDecoderSubscribeEvents failed".into());
+            return Err("JxlThreadParallelRunnerCreate returned null".into());
+        }
+
+        macro_rules! bail {
+            ($msg:expr) => {{
+                JxlThreadParallelRunnerDestroy(runner);
+                JxlDecoderDestroy(dec);
+                return Err($msg.into());
+            }};
+        }
+
+        if JxlDecoderSetParallelRunner(dec, JxlThreadParallelRunner, runner) != JxlDecoderStatus::Success {
+            bail!("JxlDecoderSetParallelRunner failed");
+        }
+
+        let events =
+            JxlDecoderStatus::BasicInfo as i32 | JxlDecoderStatus::Frame as i32 | JxlDecoderStatus::FullImage as i32;
+        if JxlDecoderSubscribeEvents(dec, events) != JxlDecoderStatus::Success {
+            bail!("JxlDecoderSubscribeEvents failed");
+        }
+
+        if JxlDecoderSetCoalescing(dec, JxlBool::False) != JxlDecoderStatus::Success {
+            bail!("JxlDecoderSetCoalescing failed");
         }
 
         if JxlDecoderSetInput(dec, buf.as_ptr(), buf.len()) != JxlDecoderStatus::Success {
-            JxlDecoderDestroy(dec);
-            return Err("JxlDecoderSetInput failed".into());
+            bail!("JxlDecoderSetInput failed");
         }
         JxlDecoderCloseInput(dec);
 
@@ -226,14 +249,12 @@ pub fn read_reference_jxl_all_frames(path: &Path) -> Result<Vec<ReferenceImage>,
 
             match status {
                 JxlDecoderStatus::Error => {
-                    JxlDecoderDestroy(dec);
-                    return Err("JxlDecoderProcessInput returned error".into());
+                    bail!("JxlDecoderProcessInput returned error");
                 }
                 JxlDecoderStatus::Success => break,
                 JxlDecoderStatus::BasicInfo => {
                     if JxlDecoderGetBasicInfo(dec, basic_info.as_mut_ptr()) != JxlDecoderStatus::Success {
-                        JxlDecoderDestroy(dec);
-                        return Err("JxlDecoderGetBasicInfo failed".into());
+                        bail!("JxlDecoderGetBasicInfo failed");
                     }
                     let info = basic_info.assume_init_ref();
                     width = info.xsize;
@@ -243,11 +264,19 @@ pub fn read_reference_jxl_all_frames(path: &Path) -> Result<Vec<ReferenceImage>,
                     bit_depth = bd;
                     is_float = f;
                 }
+                JxlDecoderStatus::Frame => {
+                    let mut frame_header = MaybeUninit::<JxlFrameHeader>::uninit();
+                    if JxlDecoderGetFrameHeader(dec, frame_header.as_mut_ptr()) != JxlDecoderStatus::Success {
+                        bail!("JxlDecoderGetFrameHeader failed");
+                    }
+                    let frame_header = frame_header.assume_init();
+                    width = frame_header.layer_info.xsize;
+                    height = frame_header.layer_info.ysize;
+                }
                 JxlDecoderStatus::NeedImageOutBuffer => {
                     let mut buf_size = 0usize;
                     if JxlDecoderImageOutBufferSize(dec, &pixel_format, &mut buf_size) != JxlDecoderStatus::Success {
-                        JxlDecoderDestroy(dec);
-                        return Err("JxlDecoderImageOutBufferSize failed".into());
+                        bail!("JxlDecoderImageOutBufferSize failed");
                     }
 
                     macro_rules! decode_frame {
@@ -259,17 +288,14 @@ pub fn read_reference_jxl_all_frames(path: &Path) -> Result<Vec<ReferenceImage>,
                                 buf_size,
                             ) != JxlDecoderStatus::Success
                             {
-                                JxlDecoderDestroy(dec);
-                                return Err("JxlDecoderSetImageOutBuffer failed".into());
+                                bail!("JxlDecoderSetImageOutBuffer failed");
                             }
                             if JxlDecoderSetImageOutBitDepth(dec, &bit_depth) != JxlDecoderStatus::Success {
-                                JxlDecoderDestroy(dec);
-                                return Err("JxlDecoderSetImageOutBitDepth failed".into());
+                                bail!("JxlDecoderSetImageOutBitDepth failed");
                             }
                             let status = JxlDecoderProcessInput(dec);
                             if status != JxlDecoderStatus::FullImage && status != JxlDecoderStatus::Success {
-                                JxlDecoderDestroy(dec);
-                                return Err(format!("expected FullImage after setting buffer, got {:?}", status).into());
+                                bail!(format!("expected FullImage after setting buffer, got {:?}", status));
                             }
                             frames.push(ReferenceImage { width, height, pixels: $variant($buf) });
                         }};
@@ -291,6 +317,7 @@ pub fn read_reference_jxl_all_frames(path: &Path) -> Result<Vec<ReferenceImage>,
             }
         }
 
+        JxlThreadParallelRunnerDestroy(runner);
         JxlDecoderDestroy(dec);
     }
 
@@ -647,11 +674,70 @@ pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResu
                 psnr: Some(total_psnr / count),
             })
         }
+        Comparison::ExactPages { .. } => Err("ExactPages comparison requires decode_pages; use test_decode".into()),
     }
+}
+
+pub fn run_pages_comparison(
+    pages: &[Image],
+    comparison: &Comparison,
+) -> Result<TestResult, Box<dyn std::error::Error>> {
+    let Comparison::ExactPages { reference_path } = comparison else {
+        return Err("run_pages_comparison called with a non-pages comparison".into());
+    };
+
+    let ref_path = get_ref_path(reference_path);
+    let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
+    let ref_frames = read_reference_all_frames(&ref_path)?;
+
+    let decoded_count: usize = pages.iter().map(|page| page.frames().len()).sum();
+    if decoded_count != ref_frames.len() {
+        return Ok(TestResult::Fail(format!(
+            "frame count mismatch: decoded={}, reference={}",
+            decoded_count,
+            ref_frames.len()
+        )));
+    }
+
+    let mut ref_index = 0;
+    for (page_index, page) in pages.iter().enumerate() {
+        for frame_index in 0..page.frames().len() {
+            let actual = if is_jxl {
+                frame_to_reference_native(page, frame_index)
+            } else {
+                frame_to_reference_rgba8(page, frame_index)
+            };
+            if let Err(msg) = compare_exact(&actual, &ref_frames[ref_index]) {
+                return Ok(TestResult::Fail(format!("page {} frame {}: {}", page_index, frame_index, msg)));
+            }
+            ref_index += 1;
+        }
+    }
+
+    Ok(TestResult::Ok { mse: None, ssim: None, psnr: None })
 }
 
 pub fn test_decode(test_case: TestCase) -> Result<TestResult, Box<dyn std::error::Error>> {
     let mut decoder = Vexel::open(get_in_path(test_case.path))?;
+
+    if matches!(test_case.comparison, Comparison::ExactPages { .. }) {
+        return match decoder.decode_pages() {
+            Ok(pages) => {
+                if let Some(validate) = test_case.validation {
+                    match pages.first() {
+                        Some(first_page) => {
+                            if let Err(msg) = validate(first_page) {
+                                return Ok(TestResult::Fail(msg));
+                            }
+                        }
+                        None => return Ok(TestResult::Fail("decoded no pages".to_string())),
+                    }
+                }
+                run_pages_comparison(&pages, &test_case.comparison)
+            }
+            Err(e) => Ok(TestResult::Fail(format!("decode error: {:?}", e))),
+        };
+    }
 
     match decoder.decode() {
         Ok(image) => {
