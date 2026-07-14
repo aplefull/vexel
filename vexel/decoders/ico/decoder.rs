@@ -165,10 +165,26 @@ impl<R: Read + Seek> IcoDecoder<R> {
         self.sections.sort_by_key(|s| s.start_offset);
     }
 
+    fn max_readable_bytes(&self, entry: &IconDirEntry, bytes_available: u64) -> u64 {
+        let next_entry_offset = self
+            .entries
+            .iter()
+            .map(|e| e.image_offset as u64)
+            .filter(|&offset| offset > entry.image_offset as u64)
+            .min();
+
+        let bound = match next_entry_offset {
+            Some(offset) => offset - entry.image_offset as u64,
+            None => bytes_available,
+        };
+
+        bound.min(bytes_available)
+    }
+
     fn decode_png_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {
         self.reader.seek(SeekFrom::Start(entry.image_offset as u64))?;
         let bytes_available = self.reader.bytes_left().unwrap_or(0);
-        let bytes_to_read = (entry.bytes_in_res as u64).min(bytes_available) as usize;
+        let bytes_to_read = self.max_readable_bytes(entry, bytes_available) as usize;
         let png_bytes = self.reader.read_bytes(bytes_to_read)?;
 
         let mut png_decoder = PngDecoder::new(Cursor::new(png_bytes));
@@ -187,7 +203,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
     fn decode_bmp_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {
         self.reader.seek(SeekFrom::Start(entry.image_offset as u64))?;
         let bytes_available = self.reader.bytes_left().unwrap_or(0);
-        let bytes_to_read = (entry.bytes_in_res as u64).min(bytes_available) as usize;
+        let bytes_to_read = self.max_readable_bytes(entry, bytes_available) as usize;
         let bmp_bytes = self.reader.read_bytes(bytes_to_read)?;
 
         let (image, and_mask, actual_bpp) =

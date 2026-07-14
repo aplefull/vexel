@@ -50,5 +50,11 @@ pub fn test_cases() -> Vec<TestCase> {
             validation: None,
             comparison: Comparison::Exact { reference_path: "ico/32bpp_dir_reports_8bpp.jxl" },
         },
+        TestCase {
+            name: "ICO bad smile with incorrect image length",
+            path: "ico/bad_smile_incorrect_image_length.ico",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "ico/bad_smile_incorrect_image_length.jxl" },
+        },
     ]
 }

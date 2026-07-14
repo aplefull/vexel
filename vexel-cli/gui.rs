@@ -13,6 +13,97 @@ struct Page {
     size: [usize; 2],
 }
 
+fn ensure_locale_initialized() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| unsafe {
+        let empty = std::ffi::CString::new("").unwrap();
+        libc::setlocale(libc::LC_COLLATE, empty.as_ptr());
+    });
+}
+
+fn collate_key(s: &str) -> Vec<u8> {
+    ensure_locale_initialized();
+    let cstr = std::ffi::CString::new(s).unwrap_or_default();
+    unsafe {
+        let len = libc::strxfrm(std::ptr::null_mut(), cstr.as_ptr(), 0);
+        let mut buf = vec![0u8; len + 1];
+        libc::strxfrm(buf.as_mut_ptr() as *mut libc::c_char, cstr.as_ptr(), buf.len());
+        buf.truncate(len);
+        buf
+    }
+}
+
+fn collate_key_for_filename(s: &str) -> Vec<u8> {
+    const SENTINEL: &[u8] = b"\x01\x01\x01";
+
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len() * 2);
+    let mut trailing = Vec::new();
+
+    let mut prev = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'.' {
+            if prev != i {
+                result.extend(collate_key(&s[prev..i]));
+            }
+            result.extend(SENTINEL);
+            result.push(1);
+            i += 1;
+            prev = i;
+        } else if c.is_ascii_digit() {
+            if prev != i {
+                result.extend(collate_key(&s[prev..i]));
+            }
+            result.extend(SENTINEL);
+            result.push(2);
+            prev = i;
+
+            let mut leading_zeros = 0i32;
+            let mut digits = if c == b'0' { 0 } else { 1 };
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'0' && digits == 0 {
+                    leading_zeros += 1;
+                } else if bytes[i].is_ascii_digit() {
+                    digits += 1;
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            if digits == 0 {
+                digits += 1;
+                leading_zeros -= 1;
+            }
+
+            result.extend(std::iter::repeat_n(b':', (digits - 1) as usize));
+
+            if leading_zeros > 0 {
+                trailing.push(leading_zeros as u8);
+                prev += leading_zeros as usize;
+            }
+
+            result.extend(&bytes[prev..i]);
+            prev = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    if prev != i {
+        result.extend(collate_key(&s[prev..i]));
+    }
+
+    result.extend(trailing);
+    result
+}
+
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    collate_key_for_filename(a).cmp(&collate_key_for_filename(b))
+}
+
 fn get_directory_files(path: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
@@ -26,7 +117,7 @@ fn get_directory_files(path: &Path) -> Vec<PathBuf> {
     }
 
     files.sort_by(|a, b| match (a.file_name(), b.file_name()) {
-        (Some(a_name), Some(b_name)) => a_name.cmp(b_name),
+        (Some(a_name), Some(b_name)) => natural_cmp(&a_name.to_string_lossy(), &b_name.to_string_lossy()),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
