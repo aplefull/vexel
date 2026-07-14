@@ -194,5 +194,17 @@ pub fn test_cases() -> Vec<TestCase> {
             validation: None,
             comparison: Comparison::Exact { reference_path: "netpbm/cmyk_alpha.jxl" },
         },
+        TestCase {
+            name: "NetPBM corrupted negative width",
+            path: "netpbm/corrupted/negative_width.pgm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "netpbm/corrupted/negative_width.jxl" },
+        },
+        TestCase {
+            name: "NetPBM corrupted truncated data",
+            path: "netpbm/corrupted/truncated_data.ppm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "netpbm/corrupted/truncated_data.jxl" },
+        },
     ]
 }

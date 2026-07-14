@@ -92,7 +92,13 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn read_decimal(&mut self, first: u8) -> VexelResult<u32> {
-        let mut number = (first - b'0') as u32;
+        let mut number = match first {
+            b'0'..=b'9' => (first - b'0') as u32,
+            _ => {
+                log_warn!("Expected a digit, got byte: {}", first);
+                0
+            }
+        };
 
         while let Some(byte) = self.next_byte() {
             match byte {
@@ -309,10 +315,12 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
     fn read_binary_frame_data(&mut self, byte_count: usize) -> VexelResult<Vec<u8>> {
         let mut buf = vec![0u8; byte_count];
-        match self.reader.read_exact(&mut buf) {
-            Ok(()) => Ok(buf),
-            Err(_) => Ok(self.reader.read_to_end().unwrap_or_default()),
+        if self.reader.read_exact(&mut buf).is_err() {
+            let available = self.reader.read_to_end().unwrap_or_default();
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
         }
+        Ok(buf)
     }
 
     fn decode_ascii_bitmap(&mut self) -> VexelResult<PixelData> {
