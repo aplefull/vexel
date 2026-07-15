@@ -58,10 +58,6 @@ corpus-analyze file="" *args:
 corpus-diff baseline="" compare="" *args:
     python3 scripts/corpus_diff.py diff {{ if baseline != "" { "\"" + baseline + "\" " } else { "" } }}{{ if compare != "" { "\"" + compare + "\" " } else { "" } }}{{args}}
 
-# Generate or verify AVIF reference images
-convert *args:
-    python3 scripts/generate_references.py {{args}}
-
 # Generate a lossless JXL reference
 jxl input output="":
     cjxl --lossless_jpeg=0 --distance=0 --effort=1 "{{input}}" "{{ if output != "" { output } else { without_extension(input) + ".jxl" } }}"

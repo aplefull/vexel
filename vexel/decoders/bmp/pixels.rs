@@ -608,11 +608,24 @@ impl PixelDecoder {
     }
 
     pub fn decode_64bit_image(data: &[u8], width: u32, height: u32, bottom_up: bool) -> Image {
+        const S2_13_SCALE: f32 = 8192.0;
+
         let width_usize = width as usize;
         let height_usize = height as usize;
         let src_stride = width_usize * 8;
 
-        let mut image_data = vec![0u8; width_usize * height_usize * 4];
+        let mut image_data = vec![0f32; width_usize * height_usize * 4];
+
+        let convert_pixel = |dst: &mut [f32], src: &[u8]| {
+            let b = i16::from_le_bytes([src[0], src[1]]);
+            let g = i16::from_le_bytes([src[2], src[3]]);
+            let r = i16::from_le_bytes([src[4], src[5]]);
+            let a = i16::from_le_bytes([src[6], src[7]]);
+            dst[0] = r as f32 / S2_13_SCALE;
+            dst[1] = g as f32 / S2_13_SCALE;
+            dst[2] = b as f32 / S2_13_SCALE;
+            dst[3] = a as f32 / S2_13_SCALE;
+        };
 
         #[cfg(feature = "rayon")]
         {
@@ -624,10 +637,7 @@ impl PixelDecoder {
                 for x in 0..width_usize {
                     let byte_offset = row_offset + x * 8;
                     if byte_offset + 7 < data.len() {
-                        dst[x * 4] = data[byte_offset + 5];
-                        dst[x * 4 + 1] = data[byte_offset + 3];
-                        dst[x * 4 + 2] = data[byte_offset + 1];
-                        dst[x * 4 + 3] = data[byte_offset + 7];
+                        convert_pixel(&mut dst[x * 4..x * 4 + 4], &data[byte_offset..byte_offset + 8]);
                     }
                 }
             });
@@ -643,15 +653,15 @@ impl PixelDecoder {
                 for x in 0..width_usize {
                     let byte_offset = row_offset + x * 8;
                     if byte_offset + 7 < data.len() {
-                        image_data[dst_offset + x * 4] = data[byte_offset + 5];
-                        image_data[dst_offset + x * 4 + 1] = data[byte_offset + 3];
-                        image_data[dst_offset + x * 4 + 2] = data[byte_offset + 1];
-                        image_data[dst_offset + x * 4 + 3] = data[byte_offset + 7];
+                        convert_pixel(
+                            &mut image_data[dst_offset + x * 4..dst_offset + x * 4 + 4],
+                            &data[byte_offset..byte_offset + 8],
+                        );
                     }
                 }
             }
         }
 
-        Image::from_pixels(width, height, PixelData::RGBA8(image_data))
+        Image::from_pixels(width, height, PixelData::RGBA32F(image_data))
     }
 }

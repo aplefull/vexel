@@ -298,7 +298,7 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "BMP 64bpp",
             path: "bmp/64bpp.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/64bpp.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/64bpp.jxl" },
         },
         TestCase {
             name: "BMP ba-bm",

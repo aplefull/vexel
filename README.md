@@ -13,7 +13,7 @@ Every decoder is written from scratch. The core library has no algorithmic depen
 ## Supported formats
 
 Full support means the decoder handles ALL features and subformats of the format.
-Functional means some may not be implmented yet, but vast majority of files will decode correctly.
+Functional means some may not be implemented yet, but vast majority of files will decode correctly.
 
 | Format   | Status |
 |----------|--------|
@@ -21,13 +21,14 @@ Functional means some may not be implmented yet, but vast majority of files will
 | JPEG-LS  | Functional |
 | PNG      | Full support |
 | GIF      | Full support |
-| BMP      | Functional |
+| BMP      | Full support |
 | TGA      | Full support |
 | NetPBM   | Full support |
 | HDR      | Full support |
 | ICO/CUR  | Full support |
 | JBIG1    | Full support |
-| TIFF     | Partial - see notes below |
+| TIFF     | Functional - see notes below |
+| DNG      | Functional - see notes below |
 
 ### JPEG
 
@@ -40,20 +41,24 @@ All coding modes are implemented:
 - Differential sequential, differential progressive, differential lossless
 - Hierarchical
 
-Known gaps: restart markers are not handled in lossless and arithmetic lossless paths. And Hierarchical mode is not well tested yet.
+Note: Hierarchical mode is not well tested yet and may be incorrect.
 
 ### BMP
 
-Supports all bit depths (1, 4, 8, 16, 24, 32, 64), RLE4 and RLE8 compression, bitfield masks (RGB and RGBA), color table images, embedded JPEG and PNG, CORE headers, and the BM/BA/CI/CP/IC/PT file type variants. CMYK RLE and huffman compressions are not implemented.
+Supports all bit depths (1, 4, 8, 16, 24, 32, 64), RLE4/RLE8 (including CMYK variants), Huffman 1D and OS/2 RLE24 compression, bitfield masks (RGB and RGBA), color table images, embedded JPEG and PNG, CORE headers, and the BM/BA/CI/CP/IC/PT file type variants.
 
 ### TIFF
 TIFF is a beast, nothing supports every feature it has. We support most of the common and some rare features for now.
 
 Strips and tiles are supported, including volumetric tiled images. Multi-page files decode each IFD as a separate frame. Both chunky and planar configurations are supported.
 
-Supported compression: none, LZW, PackBits, Deflate/AdobeDeflate, JPEG (old and new), PNG, SGILog/SGILog24.
+Supported compression: none, LZW, PackBits, Deflate/AdobeDeflate, JPEG (old and new), PNG, CCITT Group 3/4 fax (RLE, T4, T6), ThunderScan, NeXT, SGILog/SGILog24.
 
-Color spaces supported: RGB, RGBA, grayscale, palette (color-mapped), YCbCr, CIELab, CMYK. 
+Color spaces supported: RGB, RGBA, grayscale, palette (color-mapped), YCbCr, CIELab, CMYK, LogL/LogLuv.
+
+### DNG
+
+Builds on the TIFF decoder. Decodes CFA and linear raw data, linearization tables, color matrices, and opcode-based polynomial maps. That's enough to decode most images, but some less common cases are not yet handled.
 
 ## Usage
 
@@ -98,6 +103,7 @@ decoder.set_limits(Limits {
     max_image_width: Some(8192),
     max_image_height: Some(8192),
     max_alloc: Some(256 * 1024 * 1024),
+    max_pixel_count: Some(64 * 1024 * 1024),
 });
 let image = decoder.decode()?;
 ```
@@ -128,7 +134,7 @@ Decoders produce one of the following pixel formats:
 | `L64F`     | 64-bit float grayscale |
 | `LA64F`    | 64-bit float grayscale + alpha |
 
-`image.as_rgb8()` and `image.as_rgba8()` convert any format to 8-bit and return the first frame's pixels as a `Vec<u8>`.
+`image.to_rgb8()` and `image.to_rgba8()` convert any format to 8-bit and return the first frame's pixels as a `Vec<u8>`.
 
 To work with the native data without converting, match on `frame.pixels()`:
 
@@ -153,7 +159,7 @@ match image.pixels() {
         // samples is &Vec<u16>, one value per pixel
     }
     other => {
-        let rgb8 = frame.as_rgb8();
+        let rgb8 = image.to_rgb8();
     }
 }
 ```
@@ -162,12 +168,14 @@ For animated formats, iterate over `image.frames()` and use `frame.delay()` to g
 
 ## WebAssembly
 
-The library builds to WASM. Four JS-facing exports are provided:
+The library builds to WASM, exposing a `Decoder` class:
 
-- `decodeImage(data: Uint8Array)` - decodes and returns all frames as RGBA8
-- `getInfo(data: Uint8Array)` - decodes and returns format metadata
-- `tryGuessFormat(data: Uint8Array)` - returns the detected format name without decoding
-- `setLogLevel(level: string)` - sets the minimum log level; accepts `"Debug"`, `"Warning"`, or `"Error"`
+- `new Decoder(data: Uint8Array)` - constructs a decoder, detecting the format from magic bytes
+- `decoder.decode()` / `decodePages()` / `decodeThumbnails()` - decode the image, all pages, or embedded thumbnails
+- `decoder.getInfo()` - returns format-specific metadata
+- `decoder.setLimits(...)` - overrides the default resource limits
+
+Standalone exports: `tryGuessFormat(data)`, `parseIcc(data)`, `setLogLevel(level)` (accepts `"Debug"`, `"Warning"`, or `"Error"`).
 
 ## Performance
 
@@ -203,14 +211,17 @@ cargo build --package vexel-cli
 vexel [OPTIONS] <PATH>
 
 Options:
-  -f, --format <FORMAT>    Output format: ppm, pam, webp, jxl [default: jxl]
-  -o, --output-dir <DIR>   Output directory for batch operations
-  -O, --output <FILE>      Output file path
-      --frames             Write each frame as a separate file
-      --info               Print format metadata and exit
-      --void               Decode but do not write output
-      --gui                Open decoded image in a GUI preview window
-      --log-level <LEVEL>  Log verbosity: Debug, Warning, Error
+  -f, --format <FORMAT>      Output format: ppm, pam, webp, jxl [default: jxl]
+  -o, --output-dir <DIR>     Output directory for batch operations
+  -O, --output <FILE>        Output file path
+      --frames               Write each frame as a separate file
+      --pages                Decode and write all pages of multi-page images
+      --info                 Print format metadata and exit
+      --void                 Decode but do not write output
+      --gui                  Open decoded image in a GUI preview window
+      --log-level <LEVEL>    Log verbosity: Debug, Warning, Error
+      --memory-limit <MiB>   Maximum memory usage in MiB, 0 = unlimited [default: 4096]
+      --no-limits            Disable pixel-data allocation and pixel-count decode limits
 ```
 
 PATH supports glob patterns for batch processing:
@@ -221,13 +232,11 @@ vexel -f webp image.png                # decode to WebP
 vexel image.png -O output.webp         # specify output path
 vexel "*.png" -f webp -o ./converted   # batch convert
 vexel --frames -f ppm image.gif        # write each frame separately
+vexel --pages image.tiff               # decode all pages of a multi-page image
 vexel --info image.png                 # print format metadata
 vexel --gui image.png                  # GUI preview
 vexel --gui ./images                   # browse directory in GUI
 ```
-
-Output formats JXL and WebP require the respective system libraries at link time (`libjxl`, `libwebp`).
-
 
 ## License
 
