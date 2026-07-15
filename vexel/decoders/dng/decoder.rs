@@ -7,8 +7,8 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{ImageFrame, PixelData};
 use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, half_to_f32, u16_from_bytes};
 use crate::utils::tiff::compression::{
-    apply_predictor_float, apply_predictor_horizontal, apply_predictor_horizontal_be, decompress_deflate,
-    decompress_lzw, decompress_packbits, predictor_x_factor,
+    apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_lzw, decompress_packbits,
+    predictor_x_factor,
 };
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
@@ -1442,11 +1442,7 @@ impl StripContext<'_> {
         match self.header.predictor {
             Predictor::None => {}
             Predictor::HorizontalDifferencing => {
-                if big_endian {
-                    apply_predictor_horizontal_be(data, width as u32, spp, bps);
-                } else {
-                    apply_predictor_horizontal(data, width as u32, spp, bps);
-                }
+                apply_predictor_horizontal(data, width as u32, spp, bps, big_endian);
             }
             Predictor::FloatingPoint | Predictor::FloatingPointX2 | Predictor::FloatingPointX4 => {
                 let x = predictor_x_factor(self.header.predictor);

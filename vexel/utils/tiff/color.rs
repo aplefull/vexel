@@ -41,18 +41,6 @@ pub fn float24_to_f32(bytes: &[u8], byte_order: ByteOrder) -> f32 {
     f32::from_bits(u32::from_le_bytes([q0, q1, q2, q3]))
 }
 
-pub fn f64_from_bytes(bytes: &[u8], byte_order: ByteOrder) -> f64 {
-    let bits = match byte_order {
-        ByteOrder::LittleEndian => {
-            u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
-        }
-        ByteOrder::BigEndian => {
-            u64::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
-        }
-    };
-    f64::from_bits(bits)
-}
-
 pub fn half_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) as u32) << 31;
     let exp = ((bits >> 10) & 0x1F) as u32;
@@ -80,21 +68,52 @@ pub fn half_to_f32(bits: u16) -> f32 {
     f32::from_bits(f32_bits)
 }
 
-pub fn clamp_u8(v: i32) -> u8 {
-    v.clamp(0, 255) as u8
+pub fn float_bits_to_f64(bits: u64, bps: u16) -> f64 {
+    if bps <= 1 {
+        return (bits & 1) as f64;
+    }
+
+    let e_bits = match bps {
+        2..=16 => (bps as u32 - 1).min(5),
+        17..=24 => 7,
+        25..=32 => 8,
+        _ => 11,
+    };
+    let m_bits = bps as u32 - 1 - e_bits;
+
+    let sign = if (bits >> (bps - 1)) & 1 == 1 { -1.0 } else { 1.0 };
+    let exp = ((bits >> m_bits) & ((1u64 << e_bits) - 1)) as i64;
+    let man = if m_bits == 0 { 0 } else { bits & ((1u64 << m_bits) - 1) };
+    let max_exp = (1i64 << e_bits) - 1;
+    let bias = (1i64 << (e_bits - 1)) - 1;
+
+    if exp == max_exp {
+        return if man == 0 { sign * f64::INFINITY } else { f64::NAN };
+    }
+
+    let frac = man as f64 / (1u64 << m_bits) as f64;
+    let value =
+        if exp == 0 { frac * 2f64.powi((1 - bias) as i32) } else { (1.0 + frac) * 2f64.powi((exp - bias) as i32) };
+
+    sign * value
 }
 
-pub fn cmyk_to_rgb(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
-    let c = c as f32 / 255.0;
-    let m = m as f32 / 255.0;
-    let y = y as f32 / 255.0;
-    let k = k as f32 / 255.0;
+pub fn ycbcr_to_rgb_f32(y: f32, cb: f32, cr: f32, luma: [f32; 3]) -> (f32, f32, f32) {
+    let (kr, kg, kb) = if luma[0] > 0.0 && luma[1] > 0.0 && luma[2] > 0.0 {
+        (luma[0], luma[1], luma[2])
+    } else {
+        (0.299, 0.587, 0.114)
+    };
 
-    let r = ((1.0 - c) * (1.0 - k) * 255.0).round() as u8;
-    let g = ((1.0 - m) * (1.0 - k) * 255.0).round() as u8;
-    let b = ((1.0 - y) * (1.0 - k) * 255.0).round() as u8;
+    let r = y + (2.0 - 2.0 * kr) * cr;
+    let b = y + (2.0 - 2.0 * kb) * cb;
+    let g = (y - kr * r - kb * b) / kg;
 
-    (r, g, b)
+    (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+}
+
+pub fn clamp_u8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
 }
 
 pub struct YCbCrTables {
@@ -198,21 +217,6 @@ pub fn lab_to_xyz(l: f32, a: f32, b: f32, white: [f32; 3]) -> (f32, f32, f32) {
     (x * white[0], y * white[1], z * white[2])
 }
 
-pub fn xyz_to_srgb(x: f32, y: f32, z: f32) -> (u8, u8, u8) {
-    let m = &SRGB_MATRIX;
-    let r_lin = m[0][0] * x + m[0][1] * y + m[0][2] * z;
-    let g_lin = m[1][0] * x + m[1][1] * y + m[1][2] * z;
-    let b_lin = m[2][0] * x + m[2][1] * y + m[2][2] * z;
-
-    fn linear_to_srgb(v: f32) -> u8 {
-        let v = v.clamp(0.0, 1.0);
-        let srgb = if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
-        (srgb * 255.0).round() as u8
-    }
-
-    (linear_to_srgb(r_lin), linear_to_srgb(g_lin), linear_to_srgb(b_lin))
-}
-
 pub fn xyz_to_srgb_f32(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
     let m = &SRGB_MATRIX;
     let r_lin = m[0][0] * x + m[0][1] * y + m[0][2] * z;
@@ -233,30 +237,6 @@ pub fn xyz_to_srgb_f32(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
 
 pub fn cmyk_to_rgb_f32(c: f32, m: f32, y: f32, k: f32) -> (f32, f32, f32) {
     ((1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k))
-}
-
-pub fn cielab_to_rgb(l_raw: u8, a_raw: i8, b_raw: i8) -> (u8, u8, u8) {
-    let l = l_raw as f32 * 100.0 / 255.0;
-    let a = a_raw as f32;
-    let b = b_raw as f32;
-    let (x, y, z) = lab_to_xyz(l, a, b, D50_WHITE);
-    xyz_to_srgb(x, y, z)
-}
-
-pub fn icclab_to_rgb(l_raw: u8, a_raw: u8, b_raw: u8) -> (u8, u8, u8) {
-    let l = l_raw as f32 * 100.0 / 255.0;
-    let a = a_raw as f32 - 128.0;
-    let b = b_raw as f32 - 128.0;
-    let (x, y, z) = lab_to_xyz(l, a, b, D50_WHITE);
-    xyz_to_srgb(x, y, z)
-}
-
-pub fn itulab_to_rgb(l_raw: u8, a_raw: u8, b_raw: u8) -> (u8, u8, u8) {
-    let l = l_raw as f32 * 100.0 / 255.0;
-    let a = a_raw as f32 - 128.0;
-    let b = b_raw as f32 - 128.0;
-    let (x, y, z) = lab_to_xyz(l, a, b, D65_WHITE);
-    xyz_to_srgb(x, y, z)
 }
 
 const UVSCALE: f64 = 410.0;

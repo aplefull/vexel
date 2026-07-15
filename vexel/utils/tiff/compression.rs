@@ -1,4 +1,5 @@
 use crate::utils::deflate::ZlibDecoder;
+use crate::utils::tiff::pixels::{read_msb_bits64, write_msb_bits};
 use crate::utils::tiff::types::Predictor;
 
 pub fn predictor_x_factor(predictor: Predictor) -> u32 {
@@ -354,6 +355,27 @@ pub fn decompress_sgilog(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
     out
 }
 
+pub fn decompress_sgilog_l16(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
+    let npixels_total = width * rows;
+    let mut raw = vec![0u32; npixels_total];
+    let mut offset = 0;
+
+    for row in 0..rows {
+        let row_start = row * width;
+        let tp = &mut raw[row_start..row_start + width];
+        for v in tp.iter_mut() {
+            *v = 0;
+        }
+        sgilog_decode_row(data, &mut offset, tp, width, &[8, 0]);
+    }
+
+    let mut out = Vec::with_capacity(npixels_total * 2);
+    for v in raw {
+        out.extend_from_slice(&(v as u16).to_be_bytes());
+    }
+    out
+}
+
 pub fn decompress_sgilog24(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
     let npixels_total = width * rows;
     let mut raw = vec![0u16; npixels_total];
@@ -375,220 +397,208 @@ pub fn decompress_sgilog24(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
     out
 }
 
-pub fn apply_predictor_horizontal(data: &mut [u8], width: u32, samples_per_pixel: u16, bits_per_sample: u16) {
-    if bits_per_sample == 8 {
-        let spp = samples_per_pixel as usize;
-        let row_stride = width as usize * spp;
+fn read_uint(bytes: &[u8], big_endian: bool) -> u64 {
+    let mut value = 0u64;
+    if big_endian {
+        for &b in bytes {
+            value = (value << 8) | b as u64;
+        }
+    } else {
+        for &b in bytes.iter().rev() {
+            value = (value << 8) | b as u64;
+        }
+    }
+    value
+}
+
+fn write_uint(bytes: &mut [u8], value: u64, big_endian: bool) {
+    let n = bytes.len();
+    for (i, b) in bytes.iter_mut().enumerate() {
+        let shift = if big_endian { (n - 1 - i) * 8 } else { i * 8 };
+        *b = (value >> shift) as u8;
+    }
+}
+
+pub fn apply_predictor_horizontal(
+    data: &mut [u8],
+    width: u32,
+    samples_per_pixel: u16,
+    bits_per_sample: u16,
+    big_endian: bool,
+) {
+    let spp = samples_per_pixel as usize;
+    if spp == 0 || bits_per_sample == 0 || bits_per_sample > 64 {
+        return;
+    }
+
+    if !bits_per_sample.is_multiple_of(8) {
+        let bps = bits_per_sample as usize;
+        let samples = width as usize * spp;
+        let row_stride = (samples * bps).div_ceil(8);
         if row_stride == 0 {
             return;
         }
         let rows = data.len() / row_stride;
+        let mask = (1u64 << bps) - 1;
 
         for row in 0..rows {
-            let row_start = row * row_stride;
+            let row_data = &mut data[row * row_stride..(row + 1) * row_stride];
+            for col in spp..samples {
+                let prev = read_msb_bits64(row_data, (col - spp) * bps, bits_per_sample);
+                let val = read_msb_bits64(row_data, col * bps, bits_per_sample);
+                write_msb_bits(row_data, col * bps, bits_per_sample, val.wrapping_add(prev) & mask);
+            }
+        }
+        return;
+    }
+
+    let bytes_per_sample = (bits_per_sample as usize) / 8;
+    let row_stride = width as usize * spp * bytes_per_sample;
+    if bytes_per_sample > 8 || row_stride == 0 {
+        return;
+    }
+    let rows = data.len() / row_stride;
+
+    if bytes_per_sample == 1 {
+        for row in 0..rows {
+            let row_data = &mut data[row * row_stride..(row + 1) * row_stride];
             for col in spp..row_stride {
-                let idx = row_start + col;
-                if idx < data.len() {
-                    data[idx] = data[idx].wrapping_add(data[idx - spp]);
-                }
+                row_data[col] = row_data[col].wrapping_add(row_data[col - spp]);
             }
         }
-    } else if bits_per_sample == 16 {
-        let spp = samples_per_pixel as usize;
-        let bytes_per_sample = 2usize;
-        let row_stride = width as usize * spp * bytes_per_sample;
-        if row_stride == 0 {
-            return;
-        }
-        let rows = data.len() / row_stride;
+        return;
+    }
 
-        for row in 0..rows {
-            let row_start = row * row_stride;
-            for col in spp..width as usize * spp {
-                let idx = row_start + col * bytes_per_sample;
-                let prev_idx = idx - spp * bytes_per_sample;
-                if idx + 1 < data.len() && prev_idx + 1 < data.len() {
-                    let val = u16::from_ne_bytes([data[idx], data[idx + 1]]);
-                    let prev = u16::from_ne_bytes([data[prev_idx], data[prev_idx + 1]]);
-                    let result = val.wrapping_add(prev).to_ne_bytes();
-                    data[idx] = result[0];
-                    data[idx + 1] = result[1];
-                }
-            }
-        }
-    } else if bits_per_sample == 32 {
-        let spp = samples_per_pixel as usize;
-        let bytes_per_sample = 4usize;
-        let row_stride = width as usize * spp * bytes_per_sample;
-        if row_stride == 0 {
-            return;
-        }
-        let rows = data.len() / row_stride;
+    let mask = if bits_per_sample >= 64 { u64::MAX } else { (1u64 << bits_per_sample) - 1 };
+    let sample_stride = spp * bytes_per_sample;
 
-        for row in 0..rows {
-            let row_start = row * row_stride;
-            for col in spp..width as usize * spp {
-                let idx = row_start + col * bytes_per_sample;
-                let prev_idx = idx - spp * bytes_per_sample;
-                if idx + 3 < data.len() && prev_idx + 3 < data.len() {
-                    let val = u32::from_ne_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]);
-                    let prev = u32::from_ne_bytes([
-                        data[prev_idx],
-                        data[prev_idx + 1],
-                        data[prev_idx + 2],
-                        data[prev_idx + 3],
-                    ]);
-                    let result = val.wrapping_add(prev).to_ne_bytes();
-                    data[idx] = result[0];
-                    data[idx + 1] = result[1];
-                    data[idx + 2] = result[2];
-                    data[idx + 3] = result[3];
-                }
-            }
-        }
-    } else if bits_per_sample == 64 {
-        let spp = samples_per_pixel as usize;
-        let bytes_per_sample = 8usize;
-        let row_stride = width as usize * spp * bytes_per_sample;
-        if row_stride == 0 {
-            return;
-        }
-        let rows = data.len() / row_stride;
-
-        for row in 0..rows {
-            let row_start = row * row_stride;
-            for col in spp..width as usize * spp {
-                let idx = row_start + col * bytes_per_sample;
-                let prev_idx = idx - spp * bytes_per_sample;
-                if idx + 7 < data.len() && prev_idx + 7 < data.len() {
-                    let val = u64::from_ne_bytes([
-                        data[idx],
-                        data[idx + 1],
-                        data[idx + 2],
-                        data[idx + 3],
-                        data[idx + 4],
-                        data[idx + 5],
-                        data[idx + 6],
-                        data[idx + 7],
-                    ]);
-                    let prev = u64::from_ne_bytes([
-                        data[prev_idx],
-                        data[prev_idx + 1],
-                        data[prev_idx + 2],
-                        data[prev_idx + 3],
-                        data[prev_idx + 4],
-                        data[prev_idx + 5],
-                        data[prev_idx + 6],
-                        data[prev_idx + 7],
-                    ]);
-                    let result = val.wrapping_add(prev).to_ne_bytes();
-                    data[idx..idx + 8].copy_from_slice(&result);
-                }
-            }
+    for row in 0..rows {
+        let row_data = &mut data[row * row_stride..(row + 1) * row_stride];
+        for col in spp..width as usize * spp {
+            let idx = col * bytes_per_sample;
+            let prev = read_uint(&row_data[idx - sample_stride..idx - sample_stride + bytes_per_sample], big_endian);
+            let val = read_uint(&row_data[idx..idx + bytes_per_sample], big_endian);
+            write_uint(&mut row_data[idx..idx + bytes_per_sample], val.wrapping_add(prev) & mask, big_endian);
         }
     }
 }
 
-pub fn apply_predictor_horizontal_be(data: &mut [u8], width: u32, samples_per_pixel: u16, bits_per_sample: u16) {
-    if bits_per_sample == 8 {
-        apply_predictor_horizontal(data, width, samples_per_pixel, bits_per_sample);
-        return;
-    }
+const THUNDER_2BIT_DELTAS: [i32; 4] = [0, 1, 0, -1];
+const THUNDER_3BIT_DELTAS: [i32; 8] = [0, 1, 2, 3, 0, -3, -2, -1];
 
-    if bits_per_sample == 16 {
-        let spp = samples_per_pixel as usize;
-        let bytes_per_sample = 2usize;
-        let row_stride = width as usize * spp * bytes_per_sample;
-        if row_stride == 0 {
-            return;
-        }
-        let rows = data.len() / row_stride;
+pub fn decompress_thunderscan(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
+    let row_bytes = width.div_ceil(2);
+    let mut out = vec![0u8; row_bytes * rows];
+    let mut ip = 0usize;
 
-        for row in 0..rows {
-            let row_start = row * row_stride;
-            for col in spp..width as usize * spp {
-                let idx = row_start + col * bytes_per_sample;
-                let prev_idx = idx - spp * bytes_per_sample;
-                if idx + 1 < data.len() && prev_idx + 1 < data.len() {
-                    let val = u16::from_be_bytes([data[idx], data[idx + 1]]);
-                    let prev = u16::from_be_bytes([data[prev_idx], data[prev_idx + 1]]);
-                    let result = val.wrapping_add(prev).to_be_bytes();
-                    data[idx] = result[0];
-                    data[idx + 1] = result[1];
+    for row_data in out.chunks_exact_mut(row_bytes) {
+        let mut npixels = 0usize;
+        let mut lastpixel = 0u8;
+
+        let set_pixel = |row_data: &mut [u8], npixels: &mut usize, v: u8| {
+            if *npixels < width {
+                if *npixels & 1 == 1 {
+                    row_data[*npixels / 2] |= v & 0xf;
+                } else {
+                    row_data[*npixels / 2] = (v & 0xf) << 4;
                 }
+                *npixels += 1;
             }
-        }
-    } else if bits_per_sample == 32 {
-        let spp = samples_per_pixel as usize;
-        let bytes_per_sample = 4usize;
-        let row_stride = width as usize * spp * bytes_per_sample;
-        if row_stride == 0 {
-            return;
-        }
-        let rows = data.len() / row_stride;
+        };
 
-        for row in 0..rows {
-            let row_start = row * row_stride;
-            for col in spp..width as usize * spp {
-                let idx = row_start + col * bytes_per_sample;
-                let prev_idx = idx - spp * bytes_per_sample;
-                if idx + 3 < data.len() && prev_idx + 3 < data.len() {
-                    let val = u32::from_be_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]);
-                    let prev = u32::from_be_bytes([
-                        data[prev_idx],
-                        data[prev_idx + 1],
-                        data[prev_idx + 2],
-                        data[prev_idx + 3],
-                    ]);
-                    let result = val.wrapping_add(prev).to_be_bytes();
-                    data[idx] = result[0];
-                    data[idx + 1] = result[1];
-                    data[idx + 2] = result[2];
-                    data[idx + 3] = result[3];
+        while ip < data.len() && npixels < width {
+            let n = data[ip];
+            ip += 1;
+            match n & 0xc0 {
+                0x00 => {
+                    for _ in 0..(n & 0x3f) {
+                        set_pixel(row_data, &mut npixels, lastpixel);
+                    }
                 }
-            }
-        }
-    } else if bits_per_sample == 64 {
-        let spp = samples_per_pixel as usize;
-        let bytes_per_sample = 8usize;
-        let row_stride = width as usize * spp * bytes_per_sample;
-        if row_stride == 0 {
-            return;
-        }
-        let rows = data.len() / row_stride;
-
-        for row in 0..rows {
-            let row_start = row * row_stride;
-            for col in spp..width as usize * spp {
-                let idx = row_start + col * bytes_per_sample;
-                let prev_idx = idx - spp * bytes_per_sample;
-                if idx + 7 < data.len() && prev_idx + 7 < data.len() {
-                    let val = u64::from_be_bytes([
-                        data[idx],
-                        data[idx + 1],
-                        data[idx + 2],
-                        data[idx + 3],
-                        data[idx + 4],
-                        data[idx + 5],
-                        data[idx + 6],
-                        data[idx + 7],
-                    ]);
-                    let prev = u64::from_be_bytes([
-                        data[prev_idx],
-                        data[prev_idx + 1],
-                        data[prev_idx + 2],
-                        data[prev_idx + 3],
-                        data[prev_idx + 4],
-                        data[prev_idx + 5],
-                        data[prev_idx + 6],
-                        data[prev_idx + 7],
-                    ]);
-                    let result = val.wrapping_add(prev).to_be_bytes();
-                    data[idx..idx + 8].copy_from_slice(&result);
+                0x40 => {
+                    for shift in [4u8, 2, 0] {
+                        let delta = ((n >> shift) & 3) as usize;
+                        if delta != 2 {
+                            lastpixel = ((lastpixel as i32 + THUNDER_2BIT_DELTAS[delta]) & 0xf) as u8;
+                            set_pixel(row_data, &mut npixels, lastpixel);
+                        }
+                    }
+                }
+                0x80 => {
+                    for shift in [3u8, 0] {
+                        let delta = ((n >> shift) & 7) as usize;
+                        if delta != 4 {
+                            lastpixel = ((lastpixel as i32 + THUNDER_3BIT_DELTAS[delta]) & 0xf) as u8;
+                            set_pixel(row_data, &mut npixels, lastpixel);
+                        }
+                    }
+                }
+                _ => {
+                    lastpixel = n & 0xf;
+                    set_pixel(row_data, &mut npixels, lastpixel);
                 }
             }
         }
     }
+
+    out
+}
+
+pub fn decompress_next(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
+    let row_bytes = (width * 2).div_ceil(8);
+    let mut out = vec![0xffu8; row_bytes * rows];
+    let mut ip = 0usize;
+
+    for row_data in out.chunks_exact_mut(row_bytes) {
+        if ip >= data.len() {
+            break;
+        }
+        let n = data[ip];
+        ip += 1;
+
+        match n {
+            0x00 => {
+                let end = (ip + row_bytes).min(data.len());
+                row_data[..end - ip].copy_from_slice(&data[ip..end]);
+                ip = end;
+            }
+            0x40 => {
+                if ip + 4 > data.len() {
+                    break;
+                }
+                let off = ((data[ip] as usize) << 8) | data[ip + 1] as usize;
+                let count = ((data[ip + 2] as usize) << 8) | data[ip + 3] as usize;
+                ip += 4;
+                if off + count > row_bytes || ip + count > data.len() {
+                    break;
+                }
+                row_data[off..off + count].copy_from_slice(&data[ip..ip + count]);
+                ip += count;
+            }
+            mut code => {
+                let mut npixels = 0usize;
+                loop {
+                    let grey = (code >> 6) & 0x3;
+                    for _ in 0..(code & 0x3f) {
+                        if npixels >= width {
+                            break;
+                        }
+                        let shift = 6 - (npixels & 3) * 2;
+                        let idx = npixels / 4;
+                        row_data[idx] = (row_data[idx] & !(0x3 << shift)) | (grey << shift);
+                        npixels += 1;
+                    }
+                    if npixels >= width || ip >= data.len() {
+                        break;
+                    }
+                    code = data[ip];
+                    ip += 1;
+                }
+            }
+        }
+    }
+
+    out
 }
 
 pub fn apply_predictor_float(

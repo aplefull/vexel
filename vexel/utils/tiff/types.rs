@@ -587,7 +587,7 @@ impl TryFrom<u32> for Predictor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TiffHeader {
     pub image_width: u32,
     pub image_length: u32,
@@ -616,6 +616,16 @@ pub struct TiffHeader {
     pub jpeg_tables: Vec<u8>,
     pub image_depth: u32,
     pub tile_depth: u32,
+    pub jpeg_q_tables: Vec<u32>,
+    pub jpeg_dc_tables: Vec<u32>,
+    pub jpeg_ac_tables: Vec<u32>,
+    pub jpeg_interchange_format: u32,
+    pub jpeg_interchange_format_length: u32,
+    pub jpeg_restart_interval: u16,
+    pub fill_order: u16,
+    pub orientation: u16,
+    pub t4_options: u32,
+    pub t6_options: u32,
 }
 
 impl Default for TiffHeader {
@@ -648,6 +658,16 @@ impl Default for TiffHeader {
             jpeg_tables: Vec::new(),
             image_depth: 1,
             tile_depth: 1,
+            jpeg_q_tables: Vec::new(),
+            jpeg_dc_tables: Vec::new(),
+            jpeg_ac_tables: Vec::new(),
+            jpeg_interchange_format: 0,
+            jpeg_interchange_format_length: 0,
+            jpeg_restart_interval: 0,
+            fill_order: 1,
+            orientation: 1,
+            t4_options: 0,
+            t6_options: 0,
         }
     }
 }
