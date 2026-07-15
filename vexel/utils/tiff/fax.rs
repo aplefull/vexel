@@ -491,10 +491,21 @@ fn render_row(transitions: &[u32], width: u32, out: &mut [u8]) {
 }
 
 pub fn decompress_ccitt(data: &[u8], width: u32, rows: usize, compression: Compression, t4_options: u32) -> Vec<u8> {
+    decompress_ccitt_counted(data, width, rows, compression, t4_options).0
+}
+
+pub fn decompress_ccitt_counted(
+    data: &[u8],
+    width: u32,
+    rows: usize,
+    compression: Compression,
+    t4_options: u32,
+) -> (Vec<u8>, usize) {
     let row_bytes = (width as usize).div_ceil(8);
     let mut out = vec![0u8; row_bytes * rows];
+    let mut clean_rows = 0usize;
     if width == 0 || rows == 0 {
-        return out;
+        return (out, clean_rows);
     }
 
     let mut bits = FaxBits::new(data);
@@ -517,6 +528,7 @@ pub fn decompress_ccitt(data: &[u8], width: u32, rows: usize, compression: Compr
                     }
                 };
                 render_row(&transitions, width, out_row);
+                clean_rows += 1;
                 bits.align_to(if compression == Compression::CCITTRLEWord { 16 } else { 8 });
             }
             _ if is_g4 => {
@@ -531,6 +543,7 @@ pub fn decompress_ccitt(data: &[u8], width: u32, rows: usize, compression: Compr
                     }
                 };
                 render_row(&transitions, width, out_row);
+                clean_rows += 1;
                 reference = transitions;
             }
             _ => {
@@ -575,10 +588,11 @@ pub fn decompress_ccitt(data: &[u8], width: u32, rows: usize, compression: Compr
                     }
                 };
                 render_row(&transitions, width, out_row);
+                clean_rows += 1;
                 reference = transitions;
             }
         }
     }
 
-    out
+    (out, clean_rows)
 }

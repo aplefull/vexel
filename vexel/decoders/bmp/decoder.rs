@@ -3,7 +3,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
 use crate::decoders::bmp::compression::RleDecoder;
 use crate::decoders::bmp::headers::HeaderReader;
-use crate::decoders::bmp::pixels::PixelDecoder;
+use crate::decoders::bmp::pixels::{mask_alpha_is_used, PixelDecoder};
 use crate::decoders::bmp::types::{
     BitmapCompression, BitmapFileHeader, BitmapInfoHeader, BmpExtraMasks, BmpPixelDataInfo, BmpSectionData,
     BmpSectionInfo, ColorEntry, DibHeader,
@@ -26,6 +26,7 @@ pub struct BmpDecoder<R: Read + Seek> {
     icc_profile: Option<ICCProfile>,
     data: Vec<u8>,
     rle_decoded: bool,
+    fallback_pixel_offset: u64,
     sections: Vec<BmpSectionInfo>,
     reader: BitReader<R>,
 }
@@ -54,6 +55,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             icc_profile: None,
             data: Vec::new(),
             rle_decoded: false,
+            fallback_pixel_offset: 0,
             sections: Vec::new(),
             reader: BitReader::with_le(reader),
         }
@@ -119,31 +121,49 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
     fn read_color_table(&mut self) -> VexelResult<()> {
         if self.dib_header.bits_per_pixel() <= 8 {
-            let num_colors = if self.dib_header.colors_used() > 0 {
-                self.dib_header.colors_used()
-            } else {
-                1u32 << self.dib_header.bits_per_pixel()
-            };
+            let max_colors = 1u32 << self.dib_header.bits_per_pixel();
+            let mut num_colors =
+                if self.dib_header.colors_used() > 0 { self.dib_header.colors_used() } else { max_colors };
+
+            if num_colors > max_colors {
+                log_warn!(
+                    "Color table claims {} entries for {}-bit image, clamping to {}",
+                    num_colors,
+                    self.dib_header.bits_per_pixel(),
+                    max_colors
+                );
+                num_colors = max_colors;
+            }
 
             let is_core = matches!(self.dib_header, DibHeader::Core(_));
-            let bytes_per_entry = if is_core { 3u64 } else { 4u64 };
-            let table_bytes = u64::from(num_colors).saturating_mul(bytes_per_entry);
+            let bytes_per_entry = if is_core { 3usize } else { 4usize };
+            let table_bytes = u64::from(num_colors).saturating_mul(bytes_per_entry as u64);
             self.limits.reserve(table_bytes)?;
 
             let start_offset = self.reader.stream_position().unwrap_or(0);
 
-            for _ in 0..num_colors {
-                let blue = self.reader.read_u8()?;
-                let green = self.reader.read_u8()?;
-                let red = self.reader.read_u8()?;
-                let reserved = if is_core { 0 } else { self.reader.read_u8()? };
+            for i in 0..num_colors {
+                let entry = match self.reader.read_bytes(bytes_per_entry) {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        log_warn!("Color table truncated at entry {} of {}: {}", i, num_colors, e);
+                        break;
+                    }
+                };
 
-                self.color_table.push(ColorEntry { blue, green, red, reserved });
+                self.color_table.push(ColorEntry {
+                    blue: entry[0],
+                    green: entry[1],
+                    red: entry[2],
+                    reserved: if is_core { 0 } else { entry[3] },
+                });
             }
 
             self.sections
                 .push(BmpSectionInfo { start_offset, data: BmpSectionData::ColorTable(self.color_table.clone()) });
         }
+
+        self.fallback_pixel_offset = self.reader.stream_position().unwrap_or(0);
 
         Ok(())
     }
@@ -170,18 +190,42 @@ impl<R: Read + Seek> BmpDecoder<R> {
     }
 
     fn read_pixel_data(&mut self) -> VexelResult<()> {
-        let pixel_offset = self.file_header.pixel_offset as u64;
+        const MIN_PIXEL_OFFSET: u64 = 26;
+
+        let mut pixel_offset = self.file_header.pixel_offset as u64;
         self.reader.seek(SeekFrom::Start(pixel_offset))?;
+        let mut bytes_until_eof = self.reader.bytes_left()?;
 
-        let is_rle = matches!(self.dib_header.compression(), BitmapCompression::BiRle4 | BitmapCompression::BiRle8);
+        if (pixel_offset < MIN_PIXEL_OFFSET || bytes_until_eof == 0)
+            && self.fallback_pixel_offset >= MIN_PIXEL_OFFSET
+            && self.fallback_pixel_offset != pixel_offset
+        {
+            log_warn!(
+                "Pixel data offset {} looks invalid, using offset {} right after the headers instead",
+                pixel_offset,
+                self.fallback_pixel_offset
+            );
+            pixel_offset = self.fallback_pixel_offset;
+            self.reader.seek(SeekFrom::Start(pixel_offset))?;
+            bytes_until_eof = self.reader.bytes_left()?;
+        }
 
-        let bytes_until_eof = self.reader.bytes_left()?;
-        let bytes_to_read = if is_rle {
+        let is_compressed = matches!(
+            self.dib_header.compression(),
+            BitmapCompression::BiRle4
+                | BitmapCompression::BiRle8
+                | BitmapCompression::BiCMYKRle4
+                | BitmapCompression::BiCMYKRle8
+                | BitmapCompression::Os2Huffman1D
+                | BitmapCompression::Os2Rle24
+        );
+
+        let bytes_to_read = if is_compressed {
             bytes_until_eof
         } else {
-            let row_size = (self.dib_header.bits_per_pixel() as u32 * self.width).div_ceil(32) * 4;
-            let data_size = row_size * self.height;
-            std::cmp::min(data_size as u64, bytes_until_eof)
+            let row_size = (u64::from(self.dib_header.bits_per_pixel()) * u64::from(self.width)).div_ceil(32) * 4;
+            let data_size = row_size * u64::from(self.height);
+            std::cmp::min(data_size, bytes_until_eof)
         };
 
         self.limits.reserve(bytes_to_read)?;
@@ -194,6 +238,16 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.data = self.reader.read_bytes(bytes_to_read as usize)?;
 
         Ok(())
+    }
+
+    fn convert_cmyk_color_table(&mut self) {
+        for entry in &mut self.color_table {
+            let (r, g, b) = PixelDecoder::cmyk_to_rgb(entry.reserved, entry.red, entry.green, entry.blue);
+            entry.red = r;
+            entry.green = g;
+            entry.blue = b;
+            entry.reserved = 0;
+        }
     }
 
     fn decode_jpeg(&mut self) -> VexelResult<Image> {
@@ -364,9 +418,12 @@ impl<R: Read + Seek> BmpDecoder<R> {
             Ok(_) => (),
         };
 
-        match self.dib_header.compression() {
+        let bottom_up = self.dib_header.height() > 0;
+        let compression = self.dib_header.compression();
+
+        match compression {
             BitmapCompression::BiRgb => (),
-            BitmapCompression::BiRle8 => {
+            BitmapCompression::BiRle8 | BitmapCompression::BiCMYKRle8 => {
                 if self.dib_header.bits_per_pixel() != 8 {
                     log_warn!("Invalid bit depth for RLE8 compression: {}", self.dib_header.bits_per_pixel());
                 }
@@ -377,8 +434,12 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 self.data = RleDecoder::decode_rle8(&self.data, self.width, self.height)?;
                 self.limits.free_usize(raw_size);
                 self.rle_decoded = true;
+
+                if compression == BitmapCompression::BiCMYKRle8 {
+                    self.convert_cmyk_color_table();
+                }
             }
-            BitmapCompression::BiRle4 => {
+            BitmapCompression::BiRle4 | BitmapCompression::BiCMYKRle4 => {
                 if self.dib_header.bits_per_pixel() != 4 {
                     log_warn!("Invalid bit depth for RLE4 compression: {}", self.dib_header.bits_per_pixel());
                 }
@@ -389,6 +450,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 self.data = RleDecoder::decode_rle4(&self.data, self.width, self.height)?;
                 self.limits.free_usize(raw_size);
                 self.rle_decoded = true;
+
+                if compression == BitmapCompression::BiCMYKRle4 {
+                    self.convert_cmyk_color_table();
+                }
             }
             BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields => (),
             BitmapCompression::BiJpeg => {
@@ -397,27 +462,72 @@ impl<R: Read + Seek> BmpDecoder<R> {
             BitmapCompression::BiPng => {
                 return self.decode_png();
             }
-            _ => {
-                // TODO: Implement other compression types
-                log_warn!("Unsupported compression type: {:?}", self.dib_header.compression());
-            }
-        }
+            BitmapCompression::Os2Huffman1D => {
+                if self.dib_header.bits_per_pixel() != 1 {
+                    log_warn!(
+                        "Invalid bit depth for Huffman 1D compression: {}, decoding as 1-bit",
+                        self.dib_header.bits_per_pixel()
+                    );
+                }
 
-        let bottom_up = self.dib_header.height() > 0;
+                let raw_size = self.data.len();
+                let src_stride = u64::from(self.width.div_ceil(8));
+                let dst_stride = (src_stride + 3) & !3;
+                let decoded_size = (src_stride + dst_stride).saturating_mul(u64::from(self.height));
+                self.limits.reserve(decoded_size)?;
+                self.data = RleDecoder::decode_huffman1d(&self.data, self.width, self.height);
+                self.limits.free(src_stride.saturating_mul(u64::from(self.height)));
+                self.limits.free_usize(raw_size);
+
+                return Ok(PixelDecoder::decode_1bit_image(
+                    &self.data,
+                    self.width,
+                    self.height,
+                    bottom_up,
+                    &self.color_table,
+                ));
+            }
+            BitmapCompression::Os2Rle24 => {
+                if self.dib_header.bits_per_pixel() != 24 {
+                    log_warn!(
+                        "Invalid bit depth for RLE24 compression: {}, decoding as 24-bit",
+                        self.dib_header.bits_per_pixel()
+                    );
+                }
+
+                let raw_size = self.data.len();
+                let stride = (u64::from(self.width) * 3 + 3) & !3;
+                let decoded_size = stride.saturating_mul(u64::from(self.height));
+                self.limits.reserve(decoded_size)?;
+                self.data = RleDecoder::decode_rle24(&self.data, self.width, self.height);
+                self.limits.free_usize(raw_size);
+
+                return Ok(PixelDecoder::decode_24bit_image(&self.data, self.width, self.height, bottom_up));
+            }
+            BitmapCompression::BiCmyk => match self.dib_header.bits_per_pixel() {
+                32 => {
+                    return Ok(PixelDecoder::decode_cmyk32_image(&self.data, self.width, self.height, bottom_up));
+                }
+                bpp if bpp <= 8 => self.convert_cmyk_color_table(),
+                bpp => {
+                    log_warn!("CMYK bitmap cannot have bit depth {}, decoding as RGB", bpp);
+                }
+            },
+        }
 
         let image = match self.dib_header.bits_per_pixel() {
             1 => PixelDecoder::decode_1bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table),
             2 => PixelDecoder::decode_2bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table),
             4 => {
                 if self.rle_decoded {
-                    RleDecoder::decode_rle4_image(&self.data, self.width, self.height, &self.color_table)
+                    RleDecoder::decode_rle4_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 } else {
                     PixelDecoder::decode_4bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 }
             }
             8 => {
                 if self.rle_decoded {
-                    RleDecoder::decode_rle8_image(&self.data, self.width, self.height, &self.color_table)
+                    RleDecoder::decode_rle8_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 } else {
                     PixelDecoder::decode_8bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 }
@@ -454,7 +564,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
                     .then(|| self.dib_header.color_masks().or(self.extra_masks))
                     .flatten()
                     .unwrap_or_else(|| {
-                        let has_alpha = self.data.chunks_exact(4).any(|px| px[3] != 0);
+                        let has_alpha = mask_alpha_is_used(&self.data, 0xFF000000, 4);
                         let a_mask = if has_alpha { 0xFF000000 } else { 0 };
                         (0x00FF0000, 0x0000FF00, 0x000000FF, a_mask)
                     });

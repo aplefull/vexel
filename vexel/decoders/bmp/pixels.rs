@@ -4,7 +4,59 @@ use crate::{log_warn, Image, PixelData};
 
 pub struct PixelDecoder;
 
+pub fn mask_alpha_is_used(data: &[u8], alpha_mask: u32, bytes_per_pixel: usize) -> bool {
+    if alpha_mask == 0 {
+        return false;
+    }
+
+    match bytes_per_pixel {
+        2 => data.chunks_exact(2).any(|px| u16::from_le_bytes([px[0], px[1]]) as u32 & alpha_mask != 0),
+        4 => data.chunks_exact(4).any(|px| u32::from_le_bytes([px[0], px[1], px[2], px[3]]) & alpha_mask != 0),
+        _ => {
+            log_warn!("Alpha mask can only be used with 2 or 4 bytes per pixel, got: {}", bytes_per_pixel);
+            false
+        }
+    }
+}
+
 impl PixelDecoder {
+    pub fn cmyk_to_rgb(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
+        let k = k as u32;
+        let r = ((255 - c as u32) * (255 - k) / 255) as u8;
+        let g = ((255 - m as u32) * (255 - k) / 255) as u8;
+        let b = ((255 - y as u32) * (255 - k) / 255) as u8;
+        (r, g, b)
+    }
+
+    pub fn decode_cmyk32_image(data: &[u8], width: u32, height: u32, bottom_up: bool) -> Image {
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let src_stride = width_usize * 4;
+
+        let mut image_data = vec![0u8; width_usize * height_usize * 3];
+
+        for dst_row in 0..height_usize {
+            let src_row = if bottom_up { height_usize - 1 - dst_row } else { dst_row };
+            let row_offset = src_row * src_stride;
+            let dst_offset = dst_row * width_usize * 3;
+
+            for x in 0..width_usize {
+                let src_offset = row_offset + x * 4;
+                let (k, y, m, c) = if src_offset + 3 < data.len() {
+                    (data[src_offset], data[src_offset + 1], data[src_offset + 2], data[src_offset + 3])
+                } else {
+                    (0, 0, 0, 0)
+                };
+                let (r, g, b) = Self::cmyk_to_rgb(c, m, y, k);
+                image_data[dst_offset + x * 3] = r;
+                image_data[dst_offset + x * 3 + 1] = g;
+                image_data[dst_offset + x * 3 + 2] = b;
+            }
+        }
+
+        Image::from_pixels(width, height, PixelData::RGB8(image_data))
+    }
+
     pub fn decode_1bit_image(
         data: &[u8],
         width: u32,
@@ -275,7 +327,14 @@ impl PixelDecoder {
         let width_usize = width as usize;
         let height_usize = height as usize;
         let src_stride = ((width_usize * 2) + 3) & !3;
-        let has_alpha = alpha_mask != 0;
+
+        let has_alpha = mask_alpha_is_used(data, alpha_mask, 2);
+        if alpha_mask != 0 && !has_alpha {
+            log_warn!(
+                "16-bit BMP declares alpha mask {:#x} but every pixel has alpha 0, treating as opaque",
+                alpha_mask
+            );
+        }
 
         let r_shift = if red_mask != 0 { red_mask.trailing_zeros() } else { 0 };
         let r_bits = red_mask.count_ones();
@@ -427,7 +486,14 @@ impl PixelDecoder {
         let width_usize = width as usize;
         let height_usize = height as usize;
         let src_stride = width_usize * 4;
-        let has_alpha = alpha_mask != 0;
+
+        let has_alpha = mask_alpha_is_used(data, alpha_mask, 4);
+        if alpha_mask != 0 && !has_alpha {
+            log_warn!(
+                "32-bit BMP declares alpha mask {:#x} but every pixel has alpha 0, treating as opaque",
+                alpha_mask
+            );
+        }
 
         let r_shift = if red_mask != 0 { red_mask.trailing_zeros() } else { 0 };
         let r_bits = red_mask.count_ones();

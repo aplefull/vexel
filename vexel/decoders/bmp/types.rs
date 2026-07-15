@@ -16,6 +16,8 @@ pub enum BitmapCompression {
     BiCmyk = 11,
     BiCMYKRle8 = 12,
     BiCMYKRle4 = 13,
+    Os2Huffman1D = 100,
+    Os2Rle24 = 101,
 }
 
 impl BitmapCompression {
@@ -33,6 +35,20 @@ impl BitmapCompression {
             13 => BitmapCompression::BiCMYKRle4,
             _ => {
                 log_warn!("Invalid compression type: {}", value);
+                BitmapCompression::BiRgb
+            }
+        }
+    }
+
+    pub fn from_u32_os2(value: u32) -> Self {
+        match value {
+            0 => BitmapCompression::BiRgb,
+            1 => BitmapCompression::BiRle8,
+            2 => BitmapCompression::BiRle4,
+            3 => BitmapCompression::Os2Huffman1D,
+            4 => BitmapCompression::Os2Rle24,
+            _ => {
+                log_warn!("Invalid OS/2 compression type: {}", value);
                 BitmapCompression::BiRgb
             }
         }

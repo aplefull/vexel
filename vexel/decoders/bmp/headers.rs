@@ -14,6 +14,21 @@ impl HeaderReader {
     pub fn read_file_header<R: Read + Seek>(
         reader: &mut BitReader<R>,
     ) -> VexelResult<(BitmapFileHeader, Option<BitmapArrayHeader>)> {
+        let peeked = reader.peek_bytes(16).unwrap_or_default();
+        if peeked.len() >= 16 && Self::looks_like_headerless_dib(&peeked) {
+            log_warn!("No BMP file header found; treating file as a headerless DIB");
+            return Ok((BitmapFileHeader { file_size: 0, reserved1: 0, reserved2: 0, pixel_offset: 0 }, None));
+        }
+
+        let mut vendor_prefix_len = 0u64;
+        if peeked.len() >= 2 && &peeked[0..2] != b"BM" {
+            if let Some(prefix_len) = Self::find_bmp_after_vendor_prefix(reader) {
+                log_warn!("Found a valid-looking BMP {} bytes into the file; skipping vendor prefix", prefix_len);
+                reader.seek(std::io::SeekFrom::Current(prefix_len as i64))?;
+                vendor_prefix_len = prefix_len;
+            }
+        }
+
         let signature = reader.read_u16()?;
 
         if signature == 0x4142 {
@@ -40,13 +55,80 @@ impl HeaderReader {
 
         Ok((
             BitmapFileHeader {
-                file_size: reader.read_u32()?,
+                file_size: reader.read_u32()?.saturating_add(vendor_prefix_len as u32),
                 reserved1: reader.read_u16()?,
                 reserved2: reader.read_u16()?,
-                pixel_offset: reader.read_u32()?,
+                pixel_offset: reader.read_u32()?.saturating_add(vendor_prefix_len as u32),
             },
             None,
         ))
+    }
+
+    fn looks_like_headerless_dib(header: &[u8]) -> bool {
+        let dib_header_size = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        if !matches!(dib_header_size, 40 | 52 | 56 | 64 | 108 | 124) {
+            return false;
+        }
+
+        let width = i32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        let height = i32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        let planes = u16::from_le_bytes([header[12], header[13]]);
+        let bpp = u16::from_le_bytes([header[14], header[15]]);
+
+        width != 0 && height != 0 && planes == 1 && matches!(bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32 | 64)
+    }
+
+    fn find_bmp_after_vendor_prefix<R: Read + Seek>(reader: &mut BitReader<R>) -> Option<u64> {
+        const PREFIX_SCAN_LIMIT: usize = 512;
+
+        let bytes_left = reader.bytes_left().ok()?;
+        let window_len = (PREFIX_SCAN_LIMIT as u64).min(bytes_left) as usize;
+        let window = reader.peek_bytes(window_len).ok()?;
+
+        for offset in 1..window.len().saturating_sub(30) {
+            if &window[offset..offset + 2] != b"BM" {
+                continue;
+            }
+
+            let bytes_remaining = bytes_left - offset as u64;
+            if Self::embedded_bmp_is_plausible(&window[offset..], bytes_remaining) {
+                return Some(offset as u64);
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn embedded_bmp_is_plausible(bytes: &[u8], bytes_remaining: u64) -> bool {
+        if bytes.len() < 30 {
+            return false;
+        }
+
+        let pixel_offset = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        let dib_header_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+
+        if !matches!(dib_header_size, 40 | 52 | 56 | 64 | 108 | 124) {
+            return false;
+        }
+
+        let width = i32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
+        let height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        let planes = u16::from_le_bytes([bytes[26], bytes[27]]);
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+
+        if width == 0 || height == 0 || planes != 1 || !matches!(bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32 | 64) {
+            return false;
+        }
+
+        let min_header_size = 14u64 + dib_header_size as u64;
+        if u64::from(pixel_offset) < min_header_size {
+            return false;
+        }
+
+        let row_size = (u64::from(bpp) * u64::from(width.unsigned_abs())).div_ceil(32) * 4;
+        let data_size = row_size * u64::from(height.unsigned_abs());
+
+        u64::from(pixel_offset).saturating_add(data_size) <= bytes_remaining.saturating_add(row_size)
     }
 
     pub fn read_info_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(DibHeader, u32, u32)> {
@@ -122,7 +204,7 @@ impl HeaderReader {
             height: reader.read_u32()? as i32,
             planes: reader.read_u16()?,
             bits_per_pixel: reader.read_u16()?,
-            compression: BitmapCompression::from_u32(reader.read_u32()?),
+            compression: BitmapCompression::from_u32_os2(reader.read_u32()?),
             image_size: reader.read_u32()?,
             x_pixels_per_meter: reader.read_u32()? as i32,
             y_pixels_per_meter: reader.read_u32()? as i32,
