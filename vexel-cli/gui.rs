@@ -911,13 +911,22 @@ impl eframe::App for App {
     }
 }
 
+fn load_icon() -> Option<Arc<egui::viewport::IconData>> {
+    const ICON_BYTES: &[u8] = include_bytes!("../icon/sizes/vexel-256.png");
+    eframe::icon_data::from_png_bytes(ICON_BYTES).ok().map(Arc::new)
+}
+
 pub fn display_image(
     files: Vec<PathBuf>,
     start_index: usize,
     limits: vexel::Limits,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let options = eframe::NativeOptions {
-        viewport: ViewportBuilder { min_inner_size: Some(egui::vec2(300.0, 300.0)), ..Default::default() },
+        viewport: ViewportBuilder {
+            min_inner_size: Some(egui::vec2(300.0, 300.0)),
+            icon: load_icon(),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
