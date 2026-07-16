@@ -15,10 +15,8 @@ pub const ATTR_TYPE_PREMULTIPLIED_ALPHA: u8 = 4;
 
 pub const TGA_FOOTER_SIZE: i64 = 26;
 pub const TGA_SIGNATURE: &[u8] = b"TRUEVISION-XFILE.\x00";
-pub const EXT_AREA_ATTR_TYPE_OFFSET: u64 = 0x1ee;
 
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct TgaHeader {
     pub id_length: u8,
     pub palette_type: u8,
@@ -32,13 +30,6 @@ pub struct TgaHeader {
     pub height: u16,
     pub bpp: u8,
     pub flags: u8,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ExtAlphaType {
-    Alpha,
-    PremultipliedAlpha,
-    NoAlpha,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -55,6 +46,25 @@ pub struct TgaHeaderData {
     pub height: u16,
     pub bpp: u8,
     pub flags: u8,
+}
+
+impl From<&TgaHeader> for TgaHeaderData {
+    fn from(header: &TgaHeader) -> Self {
+        Self {
+            id_length: header.id_length,
+            palette_type: header.palette_type,
+            image_type_raw: header.image_type_raw,
+            palette_first: header.palette_first,
+            palette_length: header.palette_length,
+            palette_bpp: header.palette_bpp,
+            x_origin: header.x_origin,
+            y_origin: header.y_origin,
+            width: header.width,
+            height: header.height,
+            bpp: header.bpp,
+            flags: header.flags,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
