@@ -21,6 +21,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub use wasm_bindgen_rayon::init_thread_pool;
 
 use crate::decoders::bmp::BmpDecoder;
+use crate::decoders::dicom::DicomDecoder;
 use crate::decoders::dng::DngDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
@@ -53,6 +54,7 @@ pub(crate) enum Decoders<R: Read + Seek> {
     Tga(TgaDecoder<R>),
     Jbig1(Jbig1Decoder<R>),
     Ico(IcoDecoder<R>),
+    Dicom(DicomDecoder<R>),
     Unknown,
 }
 
@@ -118,6 +120,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Tga => Decoders::Tga(TgaDecoder::new(reader)),
             ImageFormat::Jbig1 => Decoders::Jbig1(Jbig1Decoder::new(reader)),
             ImageFormat::Ico | ImageFormat::Cur => Decoders::Ico(IcoDecoder::new(reader)),
+            ImageFormat::Dicom => Decoders::Dicom(DicomDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -144,6 +147,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Tga(d) => d.set_limits(limits),
             Decoders::Jbig1(d) => d.set_limits(limits),
             Decoders::Ico(d) => d.set_limits(limits),
+            Decoders::Dicom(d) => d.set_limits(limits),
             Decoders::Unknown => {}
         }
     }
@@ -177,6 +181,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                     Decoders::Tga(decoder) => impl_decode!(decoder),
                     Decoders::Jbig1(decoder) => impl_decode!(decoder),
                     Decoders::Ico(decoder) => impl_decode!(decoder),
+                    Decoders::Dicom(decoder) => impl_decode!(decoder),
                     Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
                 }
             };
@@ -263,6 +268,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                     Decoders::Tiff(decoder) => decoder.decode_thumbnails(),
                     Decoders::Dng(decoder) => decoder.decode_thumbnails(),
                     Decoders::Tga(decoder) => decoder.decode_thumbnails(),
+                    Decoders::Dicom(decoder) => decoder.decode_thumbnails(),
                     _ => Ok(Vec::new()),
                 }
             };
@@ -353,6 +359,10 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = tiff_decoder.get_info();
                 ImageInfo::Tiff(image_data)
             }
+            Decoders::Dicom(dicom_decoder) => {
+                let image_data = dicom_decoder.get_info();
+                ImageInfo::Dicom(image_data)
+            }
             Decoders::Dng(_) => ImageInfo::Unknown,
             Decoders::Unknown => ImageInfo::Unknown,
         }
@@ -369,6 +379,14 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             }
         }
 
+        reader.seek(SeekFrom::Start(0))?;
+
+        // DICOM
+        let mut dicm = [0u8; 4];
+        if reader.seek(SeekFrom::Start(128)).is_ok() && reader.read_exact(&mut dicm).is_ok() && &dicm == b"DICM" {
+            reader.seek(SeekFrom::Start(0))?;
+            return Ok(ImageFormat::Dicom);
+        }
         reader.seek(SeekFrom::Start(0))?;
 
         // JPEG-LS
@@ -449,6 +467,12 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             let is_raw = format_detect::tiff_is_camera_raw(reader, first_ifd_offset, is_le);
             reader.seek(SeekFrom::Start(0))?;
             return if is_raw { Ok(ImageFormat::Dng) } else { Ok(ImageFormat::Tiff) };
+        }
+
+        // TODO: maybe move to try_harder
+        // DICOM
+        if decoders::dicom::decoder::looks_like_dicom_dataset(&header) {
+            return Ok(ImageFormat::Dicom);
         }
 
         // TGA

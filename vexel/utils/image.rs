@@ -107,6 +107,7 @@ pub enum ImageFormat {
     Jbig1,
     Ico,
     Cur,
+    Dicom,
     Unknown,
 }
 

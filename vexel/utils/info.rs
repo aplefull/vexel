@@ -5,6 +5,7 @@ use tsify::Tsify;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::decoders::bmp::BmpSectionInfo;
+use crate::decoders::dicom::types::DicomElementInfo;
 use crate::decoders::gif::GifSectionInfo;
 use crate::decoders::hdr::HdrSectionInfo;
 use crate::decoders::ico::IcoSectionInfo;
@@ -32,6 +33,7 @@ pub enum ImageInfo {
     Ico(IcoInfo),
     Tga(TgaInfo),
     Tiff(TiffInfo),
+    Dicom(DicomInfo),
     Unknown,
 }
 
@@ -102,6 +104,12 @@ pub struct TiffInfo {
     pub sections: Vec<TiffSectionInfo>,
 }
 
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct DicomInfo {
+    pub sections: Vec<DicomElementInfo>,
+}
+
 impl fmt::Display for ImageInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -116,6 +124,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Ico(info) => write!(f, "{}", info),
             ImageInfo::Tga(info) => write!(f, "{}", info),
             ImageInfo::Tiff(info) => write!(f, "{}", info),
+            ImageInfo::Dicom(info) => write!(f, "{}", info),
             ImageInfo::Unknown => write!(f, "Unknown format"),
         }
     }
@@ -1350,6 +1359,31 @@ impl fmt::Display for TiffInfo {
                     writeln!(f, "Offset 0x{:08X}  Pixel Data", section.start_offset)?;
                     writeln!(f, "  Length: {} bytes", pd.length)?;
                 }
+            }
+            writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for DicomInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "DICOM Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Total elements: {}", self.sections.len())?;
+        writeln!(f)?;
+
+        for element in &self.sections {
+            let indent = "  ".repeat(element.depth as usize);
+            let name = if element.name.is_empty() { "" } else { element.name.as_str() };
+            write!(
+                f,
+                "{}({:04X},{:04X}) {}  len={:<8} {}",
+                indent, element.group, element.element, element.vr, element.length, name
+            )?;
+            if !element.value.is_empty() {
+                write!(f, "  [{}]", element.value)?;
             }
             writeln!(f)?;
         }

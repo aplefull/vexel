@@ -1,4 +1,5 @@
 pub mod bmp;
+pub mod dicom;
 pub mod dng;
 pub mod gif;
 pub mod hdr;
