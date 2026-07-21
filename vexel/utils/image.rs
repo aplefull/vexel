@@ -108,6 +108,7 @@ pub enum ImageFormat {
     Ico,
     Cur,
     Dicom,
+    Exr,
     Unknown,
 }
 

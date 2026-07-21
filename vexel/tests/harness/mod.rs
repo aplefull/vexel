@@ -531,11 +531,33 @@ fn accumulate_stats<T: Copy, F: Fn(T) -> f64>(a: &[T], b: &[T], to_f64: F) -> Pi
     PixelStats { sum_a, sum_b, sum_a2, sum_b2, sum_ab, sum_sq_diff }
 }
 
+fn accumulate_stats_f32(a: &[f32], b: &[f32]) -> PixelStats {
+    let (mut sum_a, mut sum_b, mut sum_a2, mut sum_b2, mut sum_ab, mut sum_sq_diff) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    for (&xa, &xb) in a.iter().zip(b.iter()) {
+        let (x, y) = match (xa.is_finite(), xb.is_finite()) {
+            (true, true) => (xa as f64, xb as f64),
+            (false, false) if xa.is_nan() && xb.is_nan() => (0.0, 0.0),
+            (false, false) if xa == xb => (0.0, 0.0),
+            _ => (0.0, 1.0),
+        };
+        let diff = x - y;
+        sum_a += x;
+        sum_b += y;
+        sum_a2 += x * x;
+        sum_b2 += y * y;
+        sum_ab += x * y;
+        sum_sq_diff += diff * diff;
+    }
+
+    PixelStats { sum_a, sum_b, sum_a2, sum_b2, sum_ab, sum_sq_diff }
+}
+
 fn compute_pixel_stats(a: &ReferencePixels, b: &ReferencePixels) -> PixelStats {
     match (a, b) {
         (ReferencePixels::U8(a), ReferencePixels::U8(b)) => accumulate_stats(a, b, |x| x as f64),
         (ReferencePixels::U16(a), ReferencePixels::U16(b)) => accumulate_stats(a, b, |x| x as f64),
-        (ReferencePixels::F32(a), ReferencePixels::F32(b)) => accumulate_stats(a, b, |x| x as f64),
+        (ReferencePixels::F32(a), ReferencePixels::F32(b)) => accumulate_stats_f32(a, b),
         _ => unreachable!(),
     }
 }
@@ -718,6 +740,10 @@ pub fn run_pages_comparison(
 }
 
 pub fn test_decode(test_case: TestCase) -> Result<TestResult, Box<dyn std::error::Error>> {
+    if test_case.validation.is_none() && matches!(test_case.comparison, Comparison::None) {
+        return Ok(TestResult::Ok { mse: None, ssim: None, psnr: None });
+    }
+
     let mut decoder = Vexel::open(get_in_path(test_case.path))?;
 
     if matches!(test_case.comparison, Comparison::ExactPages { .. }) {

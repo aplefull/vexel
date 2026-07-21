@@ -6,6 +6,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::decoders::bmp::BmpSectionInfo;
 use crate::decoders::dicom::types::DicomElementInfo;
+use crate::decoders::exr::types::ExrPartInfo;
 use crate::decoders::gif::GifSectionInfo;
 use crate::decoders::hdr::HdrSectionInfo;
 use crate::decoders::ico::IcoSectionInfo;
@@ -34,6 +35,7 @@ pub enum ImageInfo {
     Tga(TgaInfo),
     Tiff(TiffInfo),
     Dicom(DicomInfo),
+    Exr(ExrInfo),
     Unknown,
 }
 
@@ -110,6 +112,14 @@ pub struct DicomInfo {
     pub sections: Vec<DicomElementInfo>,
 }
 
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct ExrInfo {
+    pub version: i32,
+    pub multipart: bool,
+    pub parts: Vec<ExrPartInfo>,
+}
+
 impl fmt::Display for ImageInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -125,6 +135,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Tga(info) => write!(f, "{}", info),
             ImageInfo::Tiff(info) => write!(f, "{}", info),
             ImageInfo::Dicom(info) => write!(f, "{}", info),
+            ImageInfo::Exr(info) => write!(f, "{}", info),
             ImageInfo::Unknown => write!(f, "Unknown format"),
         }
     }
@@ -1384,6 +1395,62 @@ impl fmt::Display for DicomInfo {
             )?;
             if !element.value.is_empty() {
                 write!(f, "  [{}]", element.value)?;
+            }
+            writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for ExrInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "OpenEXR Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Version: {}", self.version & 0xFF)?;
+        writeln!(f, "Multipart: {}", self.multipart)?;
+        writeln!(f, "Parts: {}", self.parts.len())?;
+        writeln!(f)?;
+
+        for (i, part) in self.parts.iter().enumerate() {
+            writeln!(f, "Part {}:", i)?;
+            if let Some(name) = &part.name {
+                writeln!(f, "  Name: {}", name)?;
+            }
+            writeln!(f, "  Type: {}", part.part_type)?;
+            writeln!(f, "  Compression: {}", part.compression)?;
+            writeln!(f, "  Size: {}x{}", part.width, part.height)?;
+            writeln!(
+                f,
+                "  Data window: ({}, {}) - ({}, {})",
+                part.data_window[0], part.data_window[1], part.data_window[2], part.data_window[3]
+            )?;
+            writeln!(
+                f,
+                "  Display window: ({}, {}) - ({}, {})",
+                part.display_window[0], part.display_window[1], part.display_window[2], part.display_window[3]
+            )?;
+            writeln!(f, "  Line order: {}", part.line_order)?;
+            if let Some(tile_size) = part.tile_size {
+                writeln!(f, "  Tile size: {}x{}", tile_size[0], tile_size[1])?;
+            }
+            writeln!(f, "  Chunks: {}", part.chunk_count)?;
+
+            writeln!(f, "  Channels:")?;
+            for channel in &part.channels {
+                write!(f, "    {} ({})", channel.name, channel.pixel_type)?;
+                if channel.x_sampling != 1 || channel.y_sampling != 1 {
+                    write!(f, " sampling {}x{}", channel.x_sampling, channel.y_sampling)?;
+                }
+                if channel.p_linear {
+                    write!(f, " pLinear")?;
+                }
+                writeln!(f)?;
+            }
+
+            writeln!(f, "  Attributes:")?;
+            for attr in &part.attributes {
+                writeln!(f, "    {} ({}, {} bytes)", attr.name, attr.attr_type, attr.size)?;
             }
             writeln!(f)?;
         }

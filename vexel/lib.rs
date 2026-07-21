@@ -23,6 +23,7 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::dicom::DicomDecoder;
 use crate::decoders::dng::DngDecoder;
+use crate::decoders::exr::ExrDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
 use crate::decoders::ico::IcoDecoder;
@@ -55,6 +56,7 @@ pub(crate) enum Decoders<R: Read + Seek> {
     Jbig1(Jbig1Decoder<R>),
     Ico(IcoDecoder<R>),
     Dicom(DicomDecoder<R>),
+    Exr(ExrDecoder<R>),
     Unknown,
 }
 
@@ -121,6 +123,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Jbig1 => Decoders::Jbig1(Jbig1Decoder::new(reader)),
             ImageFormat::Ico | ImageFormat::Cur => Decoders::Ico(IcoDecoder::new(reader)),
             ImageFormat::Dicom => Decoders::Dicom(DicomDecoder::new(reader)),
+            ImageFormat::Exr => Decoders::Exr(ExrDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -148,6 +151,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Jbig1(d) => d.set_limits(limits),
             Decoders::Ico(d) => d.set_limits(limits),
             Decoders::Dicom(d) => d.set_limits(limits),
+            Decoders::Exr(d) => d.set_limits(limits),
             Decoders::Unknown => {}
         }
     }
@@ -182,6 +186,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                     Decoders::Jbig1(decoder) => impl_decode!(decoder),
                     Decoders::Ico(decoder) => impl_decode!(decoder),
                     Decoders::Dicom(decoder) => impl_decode!(decoder),
+                    Decoders::Exr(decoder) => impl_decode!(decoder),
                     Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
                 }
             };
@@ -226,12 +231,13 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                     Decoders::Ico(decoder) => decoder.decode_pages(),
                     Decoders::Tiff(decoder) => decoder.decode_pages(),
                     Decoders::Netpbm(decoder) => decoder.decode_pages(),
+                    Decoders::Exr(decoder) => decoder.decode_pages(),
                     _ => unreachable!(),
                 }
             };
         }
 
-        if !matches!(self.decoder, Decoders::Ico(_) | Decoders::Tiff(_) | Decoders::Netpbm(_)) {
+        if !matches!(self.decoder, Decoders::Ico(_) | Decoders::Tiff(_) | Decoders::Netpbm(_) | Decoders::Exr(_)) {
             return self.decode().map(|image| vec![image]);
         }
 
@@ -363,6 +369,10 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = dicom_decoder.get_info();
                 ImageInfo::Dicom(image_data)
             }
+            Decoders::Exr(exr_decoder) => {
+                let image_data = exr_decoder.get_info();
+                ImageInfo::Exr(image_data)
+            }
             Decoders::Dng(_) => ImageInfo::Unknown,
             Decoders::Unknown => ImageInfo::Unknown,
         }
@@ -452,6 +462,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         // HDR
         if header.starts_with(b"#?RADIANCE") {
             return Ok(ImageFormat::Hdr);
+        }
+
+        // OpenEXR
+        if header.starts_with(&[0x76, 0x2F, 0x31, 0x01]) {
+            return Ok(ImageFormat::Exr);
         }
 
         // TIFF / DNG

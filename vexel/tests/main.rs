@@ -137,6 +137,11 @@ fn test_dng() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_exr() -> Result<(), Box<dyn std::error::Error>> {
+    run_test_cases(formats::exr::test_cases())
+}
+
+#[test]
 fn test_dicom() -> Result<(), Box<dyn std::error::Error>> {
     run_test_cases(formats::dicom::test_cases())
 }
@@ -157,6 +162,7 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
     test_cases.extend(formats::tiff::test_cases());
     test_cases.extend(formats::dng::test_cases());
     test_cases.extend(formats::dicom::test_cases());
+    test_cases.extend(formats::exr::test_cases());
 
     run_test_cases(test_cases)
 }

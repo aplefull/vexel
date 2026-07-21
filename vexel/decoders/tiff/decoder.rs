@@ -53,7 +53,6 @@ struct ChunkAssembler {
 }
 
 impl ChunkAssembler {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         width: usize,
         height: usize,

@@ -107,7 +107,6 @@ struct ProgressiveScanComp<'a> {
     ac_table: Option<&'a HuffmanTable>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_progressive_blocks<'a, 'b, F>(
     planes: &mut [ComponentPlane],
     infos: &[ProgressiveScanComp<'b>],
@@ -218,7 +217,6 @@ fn prog_dc_refine(reader: &mut JpegBitReader<'_>, block: &mut [i16; 64], success
     block[0] = (block[0] as i32 | ((bit as i32) << successive_low)) as i16;
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn prog_ac_first(
     reader: &mut JpegBitReader<'_>,
@@ -289,7 +287,6 @@ fn prog_ac_first(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn prog_ac_refine(
     reader: &mut JpegBitReader<'_>,
@@ -2795,7 +2792,6 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.interleaved_samples_to_image(output, num_components)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn decode_lossless_scan_subsampled(
         &mut self,
         scan: &ScanData,
