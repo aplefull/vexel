@@ -218,8 +218,8 @@ fn decode_frame_pixels(
 ) -> Option<PixelData> {
     let decoder = PixelDecoder::new(bit_depth, color_type, width, interlace, palette.clone(), transparency.clone());
 
-    let decompressed = ZlibDecoder::from_bytes(fdat.to_vec()).decode();
-    let frame_pixels = decoder.deinterlace_scan_lines(&decompressed, width, height).ok()?;
+    let decompressed = ZlibDecoder::from_slice(fdat).decode();
+    let frame_pixels = decoder.deinterlace_scan_lines_owned(decompressed, width, height).ok()?;
     let mut pixels = decoder.decode_pixels_by_type(frame_pixels).ok()?;
     pixels.correct_pixels(width, height);
     Some(pixels)

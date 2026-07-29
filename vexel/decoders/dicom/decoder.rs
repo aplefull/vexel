@@ -126,7 +126,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
         let (dataset_bytes, explicit, big_endian): (&[u8], bool, bool) = match transfer_syntax {
             TransferSyntax::DeflatedExplicitLittleEndian => {
                 let max_output = self.limits.max_alloc.unwrap_or(1 << 30) as usize;
-                inflated = DeflateDecoder::from_bytes(rest.to_vec()).decode_with_max(max_output);
+                inflated = DeflateDecoder::from_slice(rest).decode_with_max(max_output);
                 (&inflated, true, false)
             }
             TransferSyntax::Unknown => {
@@ -442,7 +442,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
                     let raw;
                     let data: &[u8] = if transfer_syntax == TransferSyntax::DeflatedImageFrameCompression {
                         let max_output = self.limits.max_alloc.unwrap_or(1 << 30) as usize;
-                        raw = DeflateDecoder::from_bytes(frame_bytes.to_vec()).decode_with_max(max_output);
+                        raw = DeflateDecoder::from_slice(frame_bytes).decode_with_max(max_output);
                         &raw
                     } else {
                         frame_bytes

@@ -91,9 +91,10 @@ impl<R: Read + Seek> PngDecoder<R> {
             };
             let bytes_per_row = ((bits_per_pixel * self.width).div_ceil(8) + 1) as usize;
             let capacity = bytes_per_row * self.height as usize;
-            let compressed_len = self.idat_data.len();
-            self.idat_data =
-                ZlibDecoder::from_bytes(std::mem::take(&mut self.idat_data)).decode_with_capacity(capacity);
+            let compressed = std::mem::take(&mut self.idat_data);
+            let compressed_len = compressed.len();
+            self.idat_data = ZlibDecoder::from_slice(&compressed).decode_with_capacity(capacity);
+            drop(compressed);
             self.limits.free_usize(compressed_len);
         }
 
@@ -132,7 +133,8 @@ impl<R: Read + Seek> PngDecoder<R> {
             self.transparency.clone(),
         );
 
-        let data = pixel_decoder.deinterlace_scan_lines(&self.idat_data, self.width, self.height)?;
+        let data =
+            pixel_decoder.deinterlace_scan_lines_owned(std::mem::take(&mut self.idat_data), self.width, self.height)?;
 
         let mut pixels = match self.color_type {
             ColorType::Indexed => pixel_decoder.decode_indexed(data)?,
@@ -161,7 +163,7 @@ impl<R: Read + Seek> PngDecoder<R> {
 
         let mut window = [0u8; 4];
 
-        let _first_length = self.reader.read_u32()?;
+        let mut pending_length = self.reader.read_u32()?;
 
         for byte in window.iter_mut() {
             *byte = self.reader.read_u8()?;
@@ -173,12 +175,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                     log_debug!("Found chunk: {:?}", chunk);
 
                     let chunk_data_start = self.reader.stream_position()?;
-                    let chunk_length = {
-                        self.reader.seek(SeekFrom::Start(chunk_data_start - 8))?;
-                        let len = self.reader.read_u32().unwrap_or(0);
-                        self.reader.seek(SeekFrom::Start(chunk_data_start))?;
-                        len
-                    };
+                    let chunk_length = pending_length;
                     let next_chunk_start = chunk_data_start + chunk_length as u64 + 4;
 
                     let result = match chunk {
@@ -218,6 +215,8 @@ impl<R: Read + Seek> PngDecoder<R> {
                             &mut self.idat_data,
                             &mut self.frames,
                             &mut self.limits,
+                            chunk_length,
+                            window,
                         ),
                         PngChunk::GAMA => match ChunkReader::read_gama(&mut self.reader, &mut self.chunks) {
                             Ok(gamma) => {
@@ -380,11 +379,12 @@ impl<R: Read + Seek> PngDecoder<R> {
                         Ok(_) => {}
                     }
 
-                    if self.reader.seek(SeekFrom::Start(next_chunk_start)).is_err() {
+                    let at_next = self.reader.stream_position().map(|p| p == next_chunk_start).unwrap_or(false);
+                    if !at_next && self.reader.seek(SeekFrom::Start(next_chunk_start)).is_err() {
                         break;
                     }
 
-                    let _next_length = match self.reader.read_u32() {
+                    pending_length = match self.reader.read_u32() {
                         Ok(len) => len,
                         Err(_) => break,
                     };
@@ -413,7 +413,7 @@ impl<R: Read + Seek> PngDecoder<R> {
 
                         self.reader.seek(SeekFrom::Start(current_pos + length_u32 as u64 + 4))?;
 
-                        let _next_length = match self.reader.read_u32() {
+                        pending_length = match self.reader.read_u32() {
                             Ok(len) => len,
                             Err(_) => break,
                         };
@@ -433,6 +433,15 @@ impl<R: Read + Seek> PngDecoder<R> {
                         window[1] = window[2];
                         window[2] = window[3];
                         window[3] = byte;
+
+                        let pos = self.reader.stream_position()?;
+                        if pos >= 8 {
+                            self.reader.seek(SeekFrom::Start(pos - 8))?;
+                            pending_length = self.reader.read_u32().unwrap_or(0);
+                            self.reader.seek(SeekFrom::Start(pos))?;
+                        } else {
+                            pending_length = 0;
+                        }
                     }
                 }
             }

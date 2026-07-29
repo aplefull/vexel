@@ -278,6 +278,15 @@ impl PixelDecoder {
         }
     }
 
+    pub fn deinterlace_scan_lines_owned(&self, data: Vec<u8>, width: u32, height: u32) -> VexelResult<Vec<u8>> {
+        if !self.interlace {
+            let filter_decoder = FilterDecoder::new(self.bit_depth, self.color_type);
+            return filter_decoder.unfilter_scanlines_owned(data, width);
+        }
+
+        self.deinterlace_scan_lines(&data, width, height)
+    }
+
     pub fn deinterlace_scan_lines(&self, data: &[u8], width: u32, height: u32) -> VexelResult<Vec<u8>> {
         let filter_decoder = FilterDecoder::new(self.bit_depth, self.color_type);
 

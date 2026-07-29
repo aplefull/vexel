@@ -297,7 +297,7 @@ pub fn decompress_packbits(data: &[u8]) -> Vec<u8> {
 }
 
 pub fn decompress_deflate(data: &[u8]) -> Vec<u8> {
-    ZlibDecoder::from_bytes(data.to_vec()).decode()
+    ZlibDecoder::from_slice(data).decode()
 }
 
 fn sgilog_decode_row(bp: &[u8], offset: &mut usize, tp: &mut [u32], npixels: usize, shifts: &[u32]) {

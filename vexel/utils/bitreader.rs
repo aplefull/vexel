@@ -103,14 +103,12 @@ impl<R: Read + Seek> BitReader<R> {
     /// - The 16-bit value read
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_u16(&mut self) -> Result<u16, std::io::Error> {
+        let mut bytes = [0u8; 2];
+        self.reader.read_exact(&mut bytes)?;
         if self.little_endian {
-            let low = self.read_u8()? as u16;
-            let high = self.read_u8()? as u16;
-            Ok((high << 8) | low)
+            Ok(u16::from_le_bytes(bytes))
         } else {
-            let high = self.read_u8()? as u16;
-            let low = self.read_u8()? as u16;
-            Ok((high << 8) | low)
+            Ok(u16::from_be_bytes(bytes))
         }
     }
 
@@ -120,18 +118,12 @@ impl<R: Read + Seek> BitReader<R> {
     /// - The 32-bit value read
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_u32(&mut self) -> Result<u32, std::io::Error> {
+        let mut bytes = [0u8; 4];
+        self.reader.read_exact(&mut bytes)?;
         if self.little_endian {
-            let b0 = self.read_u8()? as u32;
-            let b1 = self.read_u8()? as u32;
-            let b2 = self.read_u8()? as u32;
-            let b3 = self.read_u8()? as u32;
-            Ok(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+            Ok(u32::from_le_bytes(bytes))
         } else {
-            let b0 = self.read_u8()? as u32;
-            let b1 = self.read_u8()? as u32;
-            let b2 = self.read_u8()? as u32;
-            let b3 = self.read_u8()? as u32;
-            Ok((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+            Ok(u32::from_be_bytes(bytes))
         }
     }
 

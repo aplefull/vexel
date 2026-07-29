@@ -133,7 +133,7 @@ fn parse_zip_utf8_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 8 {
         return unknown_tag(data);
     }
-    let decompressed = ZlibDecoder::from_bytes(data[8..].to_vec()).decode_with_max(MAX_DECOMPRESSED_TEXT);
+    let decompressed = ZlibDecoder::from_slice(&data[8..]).decode_with_max(MAX_DECOMPRESSED_TEXT);
     if decompressed.is_empty() {
         return unknown_tag(data);
     }
@@ -145,7 +145,7 @@ fn parse_zip_xml_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 8 {
         return unknown_tag(data);
     }
-    let decompressed = ZlibDecoder::from_bytes(data[8..].to_vec()).decode_with_max(MAX_DECOMPRESSED_TEXT);
+    let decompressed = ZlibDecoder::from_slice(&data[8..]).decode_with_max(MAX_DECOMPRESSED_TEXT);
     if decompressed.is_empty() {
         return unknown_tag(data);
     }

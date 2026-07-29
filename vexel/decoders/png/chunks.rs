@@ -131,32 +131,16 @@ impl ChunkReader {
         idat_data: &mut Vec<u8>,
         frames: &mut [PngFrame],
         limits: &mut Limits,
+        length: u32,
+        chunk_type: [u8; 4],
     ) -> VexelResult<()> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        limits.reserve(length_u32 as u64)?;
-        let mut chunk_data = vec![0u8; length_u32 as usize];
-        let mut total_read = 0;
-        while total_read < chunk_data.len() {
-            match reader.read(&mut chunk_data[total_read..]) {
-                Ok(0) => break,
-                Ok(n) => total_read += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        if total_read < chunk_data.len() {
-            log_warn!("Truncated IDAT chunk: read {} of {} bytes", total_read, length_u32);
-            chunk_data.truncate(total_read);
-        }
-        reader.read_u32().ok();
+        let (start_offset, length_u32, chunk_type_str, crc, data_start, total_read) =
+            capture_chunk_into(reader, idat_data, limits, length, chunk_type)?;
 
         if !frames.is_empty() {
             let fctl_info = frames.last_mut().unwrap();
-            fctl_info.fdat.extend_from_slice(&chunk_data);
+            fctl_info.fdat.extend_from_slice(&idat_data[data_start..data_start + total_read]);
         }
-
-        idat_data.extend_from_slice(&chunk_data);
 
         chunks.push(PngChunkInfo {
             start_offset,
@@ -216,7 +200,7 @@ impl ChunkReader {
         }
 
         let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
-        let profile_data = ZlibDecoder::from_bytes(compressed_profile).decode_with_max(max_decompress);
+        let profile_data = ZlibDecoder::from_slice(&compressed_profile).decode_with_max(max_decompress);
         limits.free(length_u32 as u64);
         limits.reserve_usize(profile_data.len())?;
 
@@ -775,7 +759,7 @@ impl ChunkReader {
             if after_null + 1 < chunk_data.len() { chunk_data[after_null + 1..].to_vec() } else { Vec::new() };
 
         let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
-        let text_bytes = ZlibDecoder::from_bytes(compressed_text).decode_with_max(max_decompress);
+        let text_bytes = ZlibDecoder::from_slice(&compressed_text).decode_with_max(max_decompress);
         limits.free(length_u32 as u64);
         limits.reserve_usize(text_bytes.len() * 3)?;
 
@@ -838,7 +822,7 @@ impl ChunkReader {
             }
 
             let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
-            let decompressed = ZlibDecoder::from_bytes(text_bytes).decode_with_max(max_decompress);
+            let decompressed = ZlibDecoder::from_slice(&text_bytes).decode_with_max(max_decompress);
             limits.free(length_u32 as u64);
             limits.reserve_usize(decompressed.len() * 3)?;
             String::from_utf8_lossy(&decompressed).to_string()
@@ -999,6 +983,56 @@ impl ChunkReader {
 
         Ok(())
     }
+}
+
+fn capture_chunk_into<R: Read + Seek>(
+    reader: &mut BitReader<R>,
+    dst: &mut Vec<u8>,
+    limits: &mut Limits,
+    length_u32: u32,
+    chunk_type: [u8; 4],
+) -> VexelResult<(u64, u32, String, u32, usize, usize)> {
+    let start_offset = reader.stream_position()? - 8;
+    let chunk_type_str = String::from_utf8_lossy(&chunk_type).to_string();
+
+    limits.reserve(length_u32 as u64)?;
+
+    let data_start = dst.len();
+    dst.resize(data_start + length_u32 as usize, 0);
+
+    let mut total_read = 0;
+    while total_read < length_u32 as usize {
+        match reader.read(&mut dst[data_start + total_read..]) {
+            Ok(0) => break,
+            Ok(n) => total_read += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+
+    if total_read < length_u32 as usize {
+        log_warn!("Truncated {} chunk: read {} of {} bytes", chunk_type_str, total_read, length_u32);
+        dst.truncate(data_start + total_read);
+    }
+
+    let crc = reader.read_u32().unwrap_or(0);
+
+    const MAX_CRC_CHECK_SIZE: u32 = 64 * 1024 * 1024;
+    if length_u32 <= MAX_CRC_CHECK_SIZE {
+        let calculated_crc = CrcCalculator::new().calculate_crc_two_parts(&chunk_type, &dst[data_start..]);
+        if total_read == length_u32 as usize && calculated_crc != crc {
+            log_warn!(
+                "CRC mismatch for chunk {}: expected 0x{:08x}, calculated 0x{:08x}",
+                chunk_type_str,
+                crc,
+                calculated_crc
+            );
+        }
+    } else {
+        log_warn!("Chunk {} is too large for CRC validation ({} bytes), skipping", chunk_type_str, length_u32);
+    }
+
+    Ok((start_offset, length_u32, chunk_type_str, crc, data_start, total_read))
 }
 
 pub fn capture_chunk_info<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(u64, u32, String, u32)> {

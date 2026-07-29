@@ -208,6 +208,11 @@ impl HuffTable {
         Box::new(HuffTable { primary: vec![Entry::INVALID; primary_size], secondary: Vec::new(), primary_bits })
     }
 
+    fn reset(&mut self) {
+        self.primary.fill(Entry::INVALID);
+        self.secondary.clear();
+    }
+
     fn build(&mut self, lengths: &[u8], kind: SymbolKind) -> Result<(), io::Error> {
         let n = lengths.len();
         let mut bl_count = [0u32; MAX_BITS + 1];
@@ -352,7 +357,25 @@ fn build_fast_table(table: &mut HuffTable) {
     }
 }
 
-fn build_dynamic_tables(bits: &mut BitBuffer) -> Result<(Box<HuffTable>, Box<HuffTable>), io::Error> {
+struct TableScratch {
+    litlen: Box<HuffTable>,
+    dist: Box<HuffTable>,
+    cl: Box<HuffTable>,
+    lengths: Vec<u8>,
+}
+
+impl TableScratch {
+    fn new() -> Self {
+        TableScratch {
+            litlen: HuffTable::new(LITLEN_PRIMARY_BITS, LITLEN_PRIMARY_SIZE),
+            dist: HuffTable::new(DIST_PRIMARY_BITS, DIST_PRIMARY_SIZE),
+            cl: HuffTable::new(CL_PRIMARY_BITS, CL_PRIMARY_SIZE),
+            lengths: Vec::new(),
+        }
+    }
+}
+
+fn build_dynamic_tables(bits: &mut BitBuffer<'_>, scratch: &mut TableScratch) -> Result<(), io::Error> {
     let hlit = bits.read_bits(5)? as usize + 257;
     let hdist = bits.read_bits(5)? as usize + 1;
     let hclen = bits.read_bits(4)? as usize + 4;
@@ -362,11 +385,14 @@ fn build_dynamic_tables(bits: &mut BitBuffer) -> Result<(Box<HuffTable>, Box<Huf
         cl_lengths[CODE_LENGTH_ORDER[i]] = bits.read_bits(3)? as u8;
     }
 
-    let mut cl_table = HuffTable::new(CL_PRIMARY_BITS, CL_PRIMARY_SIZE);
-    cl_table.build(&cl_lengths, SymbolKind::CodeLen)?;
+    scratch.cl.reset();
+    scratch.cl.build(&cl_lengths, SymbolKind::CodeLen)?;
+
+    let TableScratch { cl: cl_table, lengths, litlen, dist } = scratch;
 
     let total = hlit + hdist;
-    let mut lengths = vec![0u8; total];
+    lengths.clear();
+    lengths.resize(total, 0);
     let mut i = 0;
     while i < total {
         if bits.count < 7 {
@@ -410,16 +436,16 @@ fn build_dynamic_tables(bits: &mut BitBuffer) -> Result<(Box<HuffTable>, Box<Huf
         }
     }
 
-    let mut litlen = HuffTable::new(LITLEN_PRIMARY_BITS, LITLEN_PRIMARY_SIZE);
+    litlen.reset();
     litlen.build(&lengths[..hlit], SymbolKind::Literal)?;
-    build_fast_table(&mut litlen);
+    build_fast_table(litlen);
 
-    let mut dist = HuffTable::new(DIST_PRIMARY_BITS, DIST_PRIMARY_SIZE);
+    dist.reset();
     if hdist > 0 && lengths[hlit..].iter().any(|&l| l != 0) {
         dist.build(&lengths[hlit..], SymbolKind::Dist)?;
     }
 
-    Ok((litlen, dist))
+    Ok(())
 }
 
 fn build_fixed_tables() -> (Box<HuffTable>, Box<HuffTable>) {
@@ -433,20 +459,29 @@ fn build_fixed_tables() -> (Box<HuffTable>, Box<HuffTable>) {
     (litlen, dist)
 }
 
-struct BitBuffer {
+struct BitBuffer<'a> {
     buf: u64,
     count: u32,
-    src: Vec<u8>,
+    src: &'a [u8],
     pos: usize,
 }
 
-impl BitBuffer {
-    fn new(src: Vec<u8>) -> Self {
+impl<'a> BitBuffer<'a> {
+    fn new(src: &'a [u8]) -> Self {
         BitBuffer { buf: 0, count: 0, src, pos: 0 }
     }
 
     #[inline(always)]
     fn fill(&mut self) {
+        if self.count <= 56 && self.pos + 8 <= self.src.len() {
+            let chunk = u64::from_le_bytes(self.src[self.pos..self.pos + 8].try_into().unwrap());
+            self.buf |= chunk << self.count;
+            let consumed = (64 - self.count) >> 3;
+            self.pos += consumed as usize;
+            self.count += consumed * 8;
+            return;
+        }
+
         while self.count <= 56 && self.pos < self.src.len() {
             self.buf |= (self.src[self.pos] as u64) << self.count;
             self.count += 8;
@@ -521,23 +556,10 @@ impl BitBuffer {
         self.consume(consumed);
         Ok(entry)
     }
-
-    #[inline(always)]
-    fn decode_dist(&mut self, table: &HuffTable) -> Result<Entry, io::Error> {
-        if self.count < 15 {
-            self.fill();
-        }
-        let (entry, consumed) = table.lookup(self.buf);
-        if entry.is_invalid() || consumed == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad dist code"));
-        }
-        self.consume(consumed);
-        Ok(entry)
-    }
 }
 
 fn decode_block(
-    bits: &mut BitBuffer,
+    bits: &mut BitBuffer<'_>,
     litlen: &HuffTable,
     dist: &HuffTable,
     output: &mut Vec<u8>,
@@ -587,10 +609,12 @@ fn decode_block(
             let base_val = entry.base_value() as usize;
             let base_len_bits = entry.base_len();
             let extra_bits = entry.full_len() - base_len_bits;
+
+            if bits.count < 33 {
+                bits.fill();
+            }
+
             let extra = if extra_bits > 0 {
-                if bits.count < extra_bits {
-                    bits.fill();
-                }
                 let v = bits.peek(extra_bits);
                 bits.consume(extra_bits);
                 v as usize
@@ -599,21 +623,16 @@ fn decode_block(
             };
             let match_len = base_val + extra;
 
-            let dist_entry = match bits.decode_dist(dist) {
-                Ok(e) => e,
-                Err(_) => return false,
-            };
-            if !dist_entry.is_dist() {
+            let (dist_entry, dist_consumed) = dist.lookup(bits.buf);
+            if dist_entry.is_invalid() || dist_consumed == 0 || !dist_entry.is_dist() {
                 return false;
             }
+            bits.consume(dist_consumed);
 
             let dist_base = dist_entry.base_value() as usize;
             let dist_base_bits = dist_entry.base_len();
             let dist_extra_bits = dist_entry.full_len() - dist_base_bits;
             let dist_extra = if dist_extra_bits > 0 {
-                if bits.count < dist_extra_bits {
-                    bits.fill();
-                }
                 let v = bits.peek(dist_extra_bits);
                 bits.consume(dist_extra_bits);
                 v as usize
@@ -636,12 +655,12 @@ fn decode_block(
     }
 }
 
-pub struct DeflateDecoder {
-    data: Vec<u8>,
+pub struct DeflateDecoder<'a> {
+    data: &'a [u8],
 }
 
-impl DeflateDecoder {
-    pub fn from_bytes(data: Vec<u8>) -> Self {
+impl<'a> DeflateDecoder<'a> {
+    pub fn from_slice(data: &'a [u8]) -> Self {
         DeflateDecoder { data }
     }
 
@@ -655,10 +674,11 @@ impl DeflateDecoder {
     }
 
     fn decode_impl(&self, capacity_hint: usize, max_output: usize) -> Vec<u8> {
-        let mut bits = BitBuffer::new(self.data.clone());
-        let mut output = Vec::with_capacity(capacity_hint);
+        let mut bits = BitBuffer::new(self.data);
+        let mut output = Vec::with_capacity(if capacity_hint > 0 { capacity_hint + 32 } else { 0 });
 
-        let (fixed_litlen, fixed_dist) = build_fixed_tables();
+        let mut fixed: Option<(Box<HuffTable>, Box<HuffTable>)> = None;
+        let mut scratch = TableScratch::new();
 
         loop {
             bits.fill();
@@ -701,9 +721,12 @@ impl DeflateDecoder {
                     }
                     ok
                 }
-                1 => decode_block(&mut bits, &fixed_litlen, &fixed_dist, &mut output, max_output),
-                2 => match build_dynamic_tables(&mut bits) {
-                    Ok((litlen, dist)) => decode_block(&mut bits, &litlen, &dist, &mut output, max_output),
+                1 => {
+                    let (litlen, dist) = fixed.get_or_insert_with(build_fixed_tables);
+                    decode_block(&mut bits, litlen, dist, &mut output, max_output)
+                }
+                2 => match build_dynamic_tables(&mut bits, &mut scratch) {
+                    Ok(()) => decode_block(&mut bits, &scratch.litlen, &scratch.dist, &mut output, max_output),
                     Err(_) => false,
                 },
                 _ => break,
@@ -718,12 +741,12 @@ impl DeflateDecoder {
     }
 }
 
-pub struct ZlibDecoder {
-    data: Vec<u8>,
+pub struct ZlibDecoder<'a> {
+    data: &'a [u8],
 }
 
-impl ZlibDecoder {
-    pub fn from_bytes(data: Vec<u8>) -> Self {
+impl<'a> ZlibDecoder<'a> {
+    pub fn from_slice(data: &'a [u8]) -> Self {
         ZlibDecoder { data }
     }
 
@@ -747,7 +770,7 @@ impl ZlibDecoder {
         }
     }
 
-    fn inner(&self) -> Option<DeflateDecoder> {
+    fn inner(&self) -> Option<DeflateDecoder<'a>> {
         if self.data.len() < 2 {
             return None;
         }
@@ -761,6 +784,6 @@ impl ZlibDecoder {
         if offset >= self.data.len() {
             return None;
         }
-        Some(DeflateDecoder::from_bytes(self.data[offset..].to_vec()))
+        Some(DeflateDecoder::from_slice(&self.data[offset..]))
     }
 }

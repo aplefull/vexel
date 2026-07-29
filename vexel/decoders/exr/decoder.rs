@@ -484,7 +484,7 @@ fn decompress_chunk_inner(
             Ok(unpredict_and_reorder(decoded))
         }
         ExrCompression::Zips | ExrCompression::Zip => {
-            let mut inflated = ZlibDecoder::from_bytes(data.to_vec()).decode_with_max(unpacked);
+            let mut inflated = ZlibDecoder::from_slice(data).decode_with_max(unpacked);
             if inflated.len() < unpacked {
                 log_warn!("EXR: zip chunk inflated to {} of {} expected bytes, padding", inflated.len(), unpacked);
                 inflated.resize(unpacked, 0);
@@ -513,7 +513,7 @@ fn decompress_chunk_inner(
                 })
                 .sum();
 
-            let mut inflated = ZlibDecoder::from_bytes(data.to_vec()).decode_with_max(expected_planes);
+            let mut inflated = ZlibDecoder::from_slice(data).decode_with_max(expected_planes);
             if inflated.len() < expected_planes {
                 log_warn!(
                     "EXR: pxr24 chunk inflated to {} of {} expected bytes, padding",

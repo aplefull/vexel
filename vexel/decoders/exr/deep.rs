@@ -162,7 +162,7 @@ fn decompress_deep_blob(compression: ExrCompression, data: &[u8], unpacked: usiz
             Ok(unpredict_and_reorder(decoded))
         }
         ExrCompression::Zips | ExrCompression::Zip => {
-            let mut inflated = ZlibDecoder::from_bytes(data.to_vec()).decode_with_max(unpacked);
+            let mut inflated = ZlibDecoder::from_slice(data).decode_with_max(unpacked);
             if inflated.len() < unpacked {
                 log_warn!("EXR: deep zip blob inflated to {} of {} expected bytes, padding", inflated.len(), unpacked);
                 inflated.resize(unpacked, 0);
