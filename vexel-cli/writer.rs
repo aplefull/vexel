@@ -675,18 +675,15 @@ unsafe fn jxl_encode(
             }
         }
 
-        let f32_converted: Option<Vec<f32>>;
-        let (ptr, len) = match frame.pixels() {
+        let f32_converted: Option<Vec<f32>> = match frame.pixels() {
             PixelData::RGB64F(d) | PixelData::RGBA64F(d) | PixelData::L64F(d) | PixelData::LA64F(d) => {
-                let converted: Vec<f32> = d.iter().map(|&v| v as f32).collect();
-                f32_converted = Some(converted);
-                let v = f32_converted.as_ref().unwrap();
-                (v.as_ptr() as *const c_void, v.len() * 4)
+                Some(d.iter().map(|&v| v as f32).collect())
             }
-            other => {
-                f32_converted = None;
-                pixel_data_ptr_and_len(other)
-            }
+            _ => None,
+        };
+        let (ptr, len) = match &f32_converted {
+            Some(v) => (v.as_ptr() as *const c_void, v.len() * 4),
+            None => pixel_data_ptr_and_len(frame.pixels()),
         };
 
         if JxlEncoderAddImageFrame(frame_settings, &pixel_format, ptr, len) != JxlEncoderStatus::Success {

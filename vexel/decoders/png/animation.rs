@@ -93,7 +93,7 @@ impl AnimationDecoder {
         let mut prev_dispose_op: u8 = 0;
         let mut prev_fctl: Option<&FctlChunk> = None;
 
-        for (frame, pixels) in frames.iter().zip(decoded_pixels.into_iter()) {
+        for (frame, pixels) in frames.iter().zip(decoded_pixels) {
             let fctl = &frame.fctl_info;
 
             if fctl.width == 0

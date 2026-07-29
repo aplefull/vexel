@@ -198,7 +198,27 @@ impl<R: Read + Seek> DicomDecoder<R> {
     }
 
     fn decode_dataset(&mut self, dataset: &DataSet, transfer_syntax: TransferSyntax) -> VexelResult<Image> {
-        let params = read_pixel_params(dataset)?;
+        let pixel_element = dataset
+            .get(tags::PIXEL_DATA)
+            .or_else(|| dataset.get(tags::FLOAT_PIXEL_DATA))
+            .or_else(|| dataset.get(tags::DOUBLE_FLOAT_PIXEL_DATA))
+            .ok_or_else(|| {
+                let sop_class = dataset.string(tags::SOP_CLASS_UID);
+                match sop_class {
+                    Some(uid) => VexelError::Custom(format!(
+                        "DICOM: file contains no pixel data (SOP Class UID: {}) - this is likely a non-image \
+                         object such as a structured report or surface/mesh segmentation, not a decodable image",
+                        uid
+                    )),
+                    None => VexelError::Custom(
+                        "DICOM: file contains no pixel data - this is likely a non-image object, not a decodable \
+                         image"
+                            .to_string(),
+                    ),
+                }
+            })?;
+
+        let params = read_pixel_params(dataset, transfer_syntax)?;
 
         self.limits.check_dimensions(params.cols, params.rows)?;
 
@@ -209,12 +229,6 @@ impl<R: Read + Seek> DicomDecoder<R> {
         };
 
         let palette = read_palette(dataset, &params);
-
-        let pixel_element = dataset
-            .get(tags::PIXEL_DATA)
-            .or_else(|| dataset.get(tags::FLOAT_PIXEL_DATA))
-            .or_else(|| dataset.get(tags::DOUBLE_FLOAT_PIXEL_DATA))
-            .ok_or_else(|| VexelError::Custom("DICOM: no pixel data element found".to_string()))?;
 
         let mut num_frames = dataset.int_value(tags::NUMBER_OF_FRAMES).unwrap_or(1).max(1) as usize;
 
@@ -444,14 +458,16 @@ impl<R: Read + Seek> DicomDecoder<R> {
                     let mut decoder = JpegLsDecoder::new(Cursor::new(frame_bytes.clone()));
                     decoder.set_limits(self.limits.clone());
                     let image = decoder.decode()?;
-                    absorb_codec_frame(image, params, palette, false, &mut mono_stored, &mut color_frames)?;
+                    let precision = decoder.precision();
+                    absorb_codec_frame(image, params, palette, false, precision, &mut mono_stored, &mut color_frames)?;
                 }
                 _ => {
                     let mut decoder = JpegDecoder::new(Cursor::new(frame_bytes.clone()));
                     decoder.set_limits(self.limits.clone());
                     let image = decoder.decode()?;
                     let dct = transfer_syntax == TransferSyntax::JpegDct;
-                    absorb_codec_frame(image, params, palette, dct, &mut mono_stored, &mut color_frames)?;
+                    let precision = decoder.precision();
+                    absorb_codec_frame(image, params, palette, dct, precision, &mut mono_stored, &mut color_frames)?;
                 }
             }
         }
@@ -512,6 +528,7 @@ fn absorb_codec_frame(
     params: &PixelParams,
     palette: Option<&[Lut; 3]>,
     dct: bool,
+    codec_precision: u8,
     mono_stored: &mut Vec<StoredFrame>,
     color_frames: &mut Vec<PixelData>,
 ) -> VexelResult<()> {
@@ -522,11 +539,12 @@ fn absorb_codec_frame(
         let stored = match pixels {
             PixelData::L8(v) => StoredFrame::U8(v),
             PixelData::L16(v) => {
-                let shift = if dct && params.bits_stored > 8 && params.bits_stored < 16 {
-                    16 - params.bits_stored.min(16) as u32
+                let precision = if codec_precision > 8 && codec_precision <= 16 {
+                    codec_precision as u16
                 } else {
-                    0
+                    params.bits_stored
                 };
+                let shift = if precision > 8 && precision < 16 { 16 - precision as u32 } else { 0 };
                 StoredFrame::U16(v.into_iter().map(|s| s >> shift).collect())
             }
             PixelData::RGB8(v) => StoredFrame::U8(v.chunks_exact(3).map(|c| c[0]).collect()),
@@ -540,7 +558,7 @@ fn absorb_codec_frame(
         return Ok(());
     }
 
-    let needs_ybr = params.photometric.is_ybr();
+    let needs_ybr = params.photometric.is_ybr() && !dct;
     match pixels {
         PixelData::RGB8(v) if needs_ybr => {
             let mut ybr_params = params.clone();
@@ -559,7 +577,7 @@ fn absorb_codec_frame(
     Ok(())
 }
 
-fn read_pixel_params(dataset: &DataSet) -> VexelResult<PixelParams> {
+fn read_pixel_params(dataset: &DataSet, transfer_syntax: TransferSyntax) -> VexelResult<PixelParams> {
     let rows = dataset.u16_value(tags::ROWS).unwrap_or(0) as u32;
     let cols = dataset.u16_value(tags::COLUMNS).unwrap_or(0) as u32;
 
@@ -612,6 +630,7 @@ fn read_pixel_params(dataset: &DataSet) -> VexelResult<PixelParams> {
         samples_per_pixel,
         planar,
         photometric,
+        pixel_big_endian: transfer_syntax.pixel_data_big_endian(),
     })
 }
 
@@ -643,30 +662,55 @@ fn read_lut(item: &DataSet, signed_input: bool) -> Option<Lut> {
     Some(Lut { first_mapped, bits, entries })
 }
 
+fn functional_group_items(dataset: &DataSet, group_tag: u32) -> Option<&DataSet> {
+    dataset
+        .sequence(tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE)
+        .and_then(|items| items.first())
+        .and_then(|frame| frame.sequence(group_tag))
+        .and_then(|items| items.first())
+        .or_else(|| {
+            dataset
+                .sequence(tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE)
+                .and_then(|items| items.first())
+                .and_then(|shared| shared.sequence(group_tag))
+                .and_then(|items| items.first())
+        })
+}
+
 fn read_mono_transform(dataset: &DataSet, params: &PixelParams) -> MonoTransform {
-    let rescale = match (dataset.f64_value(tags::RESCALE_SLOPE), dataset.f64_value(tags::RESCALE_INTERCEPT)) {
-        (Some(slope), Some(intercept)) if slope != 0.0 => Some((slope, intercept)),
-        _ => None,
-    };
+    let pixel_transform = functional_group_items(dataset, tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE);
+    let frame_voi = functional_group_items(dataset, tags::FRAME_VOI_LUT_SEQUENCE);
 
-    let modality_lut = dataset
+    let rescale_source = pixel_transform.filter(|d| d.get(tags::RESCALE_SLOPE).is_some()).unwrap_or(dataset);
+    let rescale =
+        match (rescale_source.f64_value(tags::RESCALE_SLOPE), rescale_source.f64_value(tags::RESCALE_INTERCEPT)) {
+            (Some(slope), Some(intercept)) if slope != 0.0 => Some((slope, intercept)),
+            _ => None,
+        };
+
+    let modality_lut = pixel_transform
+        .unwrap_or(dataset)
         .sequence(tags::MODALITY_LUT_SEQUENCE)
+        .or_else(|| dataset.sequence(tags::MODALITY_LUT_SEQUENCE))
         .and_then(|items| items.first())
         .and_then(|item| read_lut(item, params.signed));
 
-    let voi_lut = dataset
+    let voi_source = frame_voi.filter(|d| d.get(tags::WINDOW_CENTER).is_some()).unwrap_or(dataset);
+    let voi_lut = frame_voi
+        .unwrap_or(dataset)
         .sequence(tags::VOI_LUT_SEQUENCE)
+        .or_else(|| dataset.sequence(tags::VOI_LUT_SEQUENCE))
         .and_then(|items| items.first())
         .and_then(|item| read_lut(item, params.signed));
 
-    let centers = dataset.f64_list(tags::WINDOW_CENTER);
-    let widths = dataset.f64_list(tags::WINDOW_WIDTH);
+    let centers = voi_source.f64_list(tags::WINDOW_CENTER);
+    let widths = voi_source.f64_list(tags::WINDOW_WIDTH);
     let window = match (centers.first(), widths.first()) {
         (Some(&c), Some(&w)) if w > 0.0 => Some((c, w)),
         _ => None,
     };
 
-    let voi_function = dataset.string(tags::VOI_LUT_FUNCTION).map(|s| match s.trim() {
+    let voi_function = voi_source.string(tags::VOI_LUT_FUNCTION).map(|s| match s.trim() {
         "LINEAR_EXACT" => VoiFunction::LinearExact,
         "SIGMOID" => VoiFunction::Sigmoid,
         _ => VoiFunction::Linear,
@@ -698,10 +742,8 @@ fn read_palette_component(dataset: &DataSet, descriptor_tag: u32, data_tag: u32,
         } else {
             data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
         }
-    } else if let Some(data) = dataset.bytes(segmented_tag) {
-        expand_segmented_lut(data, bits)
     } else {
-        return None;
+        expand_segmented_lut(dataset.bytes(segmented_tag)?, bits)
     };
 
     if entries.is_empty() {

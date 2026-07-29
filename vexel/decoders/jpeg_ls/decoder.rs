@@ -36,6 +36,10 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         }
     }
 
+    pub fn precision(&self) -> u8 {
+        self.frame.as_ref().map(|f| f.precision).unwrap_or(0)
+    }
+
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
     }

@@ -1389,10 +1389,34 @@ impl<R: Read + Seek> JpegDecoder<R> {
             return Ok(());
         }
 
-        let version = self.reader.read_u16()?;
-        let flags0 = self.reader.read_u16()?;
-        let flags1 = self.reader.read_u16()?;
-        let color_transform = self.reader.read_u8()?;
+        if length < 12 {
+            let remaining = (length as usize).saturating_sub(7);
+            for _ in 0..remaining {
+                self.reader.read_u8()?;
+            }
+            self.record_segment(
+                segment_start,
+                "APP14",
+                JpegSegmentData::APP { marker: "APP14".to_string(), length, identifier: Some("Adobe".to_string()) },
+            );
+            return Ok(());
+        }
+
+        let payload_len = (length as usize).saturating_sub(7);
+        let mut payload = vec![0u8; payload_len];
+        for b in &mut payload {
+            *b = self.reader.read_u8()?;
+        }
+
+        let read_u16 = |i: usize| -> u16 {
+            let hi = payload.get(i).copied().unwrap_or(0) as u16;
+            let lo = payload.get(i + 1).copied().unwrap_or(0) as u16;
+            (hi << 8) | lo
+        };
+        let version = read_u16(0);
+        let flags0 = read_u16(2);
+        let flags1 = read_u16(4);
+        let color_transform = payload.last().copied().unwrap_or(0);
 
         self.adobe_color_transform = Some(color_transform);
         log_debug!("Adobe APP14: color_transform={}", color_transform);

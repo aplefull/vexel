@@ -21,6 +21,7 @@ pub mod tags {
     pub const FILE_META_GROUP_LENGTH: u32 = tag(0x0002, 0x0000);
     pub const TRANSFER_SYNTAX_UID: u32 = tag(0x0002, 0x0010);
 
+    pub const SOP_CLASS_UID: u32 = tag(0x0008, 0x0016);
     pub const MODALITY: u32 = tag(0x0008, 0x0060);
     pub const RECOMMENDED_DISPLAY_FRAME_RATE: u32 = tag(0x0008, 0x2144);
 
@@ -60,6 +61,11 @@ pub mod tags {
     pub const LUT_DESCRIPTOR: u32 = tag(0x0028, 0x3002);
     pub const LUT_DATA: u32 = tag(0x0028, 0x3006);
     pub const VOI_LUT_SEQUENCE: u32 = tag(0x0028, 0x3010);
+
+    pub const FRAME_VOI_LUT_SEQUENCE: u32 = tag(0x0028, 0x9132);
+    pub const PIXEL_VALUE_TRANSFORMATION_SEQUENCE: u32 = tag(0x0028, 0x9145);
+    pub const SHARED_FUNCTIONAL_GROUPS_SEQUENCE: u32 = tag(0x5200, 0x9229);
+    pub const PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE: u32 = tag(0x5200, 0x9230);
 
     pub const ICON_IMAGE_SEQUENCE: u32 = tag(0x0088, 0x0200);
 
@@ -323,6 +329,7 @@ pub enum TransferSyntax {
     ImplicitLittleEndian,
     ExplicitLittleEndian,
     ExplicitBigEndian,
+    PrivateGeBigEndian,
     DeflatedExplicitLittleEndian,
     EncapsulatedUncompressed,
     DeflatedImageFrameCompression,
@@ -360,7 +367,7 @@ impl TransferSyntax {
             | "1.2.840.10008.1.2.4.203" => TransferSyntax::Jpeg2000,
             "1.2.840.10008.1.2.4.110" | "1.2.840.10008.1.2.4.111" | "1.2.840.10008.1.2.4.112" => TransferSyntax::JpegXl,
             "1.2.840.10008.1.2.5" => TransferSyntax::Rle,
-            "1.2.840.113619.5.2" => TransferSyntax::ImplicitLittleEndian,
+            "1.2.840.113619.5.2" => TransferSyntax::PrivateGeBigEndian,
             _ => {
                 if let Some(rest) = uid.strip_prefix("1.2.840.10008.1.2.4.") {
                     if let Ok(n) = rest.split('.').next().unwrap_or("").parse::<u32>() {
@@ -377,11 +384,15 @@ impl TransferSyntax {
     }
 
     pub fn is_explicit_vr(&self) -> bool {
-        !matches!(self, TransferSyntax::ImplicitLittleEndian)
+        !matches!(self, TransferSyntax::ImplicitLittleEndian | TransferSyntax::PrivateGeBigEndian)
     }
 
     pub fn is_big_endian(&self) -> bool {
         matches!(self, TransferSyntax::ExplicitBigEndian)
+    }
+
+    pub fn pixel_data_big_endian(&self) -> bool {
+        matches!(self, TransferSyntax::PrivateGeBigEndian)
     }
 
     pub fn is_encapsulated(&self) -> bool {
@@ -404,6 +415,7 @@ impl TransferSyntax {
             TransferSyntax::ImplicitLittleEndian => "Implicit VR Little Endian",
             TransferSyntax::ExplicitLittleEndian => "Explicit VR Little Endian",
             TransferSyntax::ExplicitBigEndian => "Explicit VR Big Endian",
+            TransferSyntax::PrivateGeBigEndian => "Private GE Implicit VR Little Endian with Big Endian Pixel Data",
             TransferSyntax::DeflatedExplicitLittleEndian => "Deflated Explicit VR Little Endian",
             TransferSyntax::EncapsulatedUncompressed => "Encapsulated Uncompressed",
             TransferSyntax::DeflatedImageFrameCompression => "Deflated Image Frame Compression",

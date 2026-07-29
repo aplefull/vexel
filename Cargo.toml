@@ -12,6 +12,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 upper_case_acronyms = "allow"
 too_many_arguments = "allow"
 large_enum_variant = "allow"
+chunks_exact_to_as_chunks = "allow"
 
 [profile.release]
 debug=1

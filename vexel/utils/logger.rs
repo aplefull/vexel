@@ -81,7 +81,9 @@ macro_rules! log_error {
     };
 }
 
-pub(crate) use {log_debug, log_error, log_warn};
+pub(crate) use log_debug;
+pub(crate) use log_error;
+pub(crate) use log_warn;
 
 #[repr(u8)]
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]

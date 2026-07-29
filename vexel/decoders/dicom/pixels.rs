@@ -14,6 +14,7 @@ pub struct PixelParams {
     pub samples_per_pixel: u16,
     pub planar: bool,
     pub photometric: Photometric,
+    pub pixel_big_endian: bool,
 }
 
 impl PixelParams {
@@ -113,7 +114,11 @@ pub fn extract_native_frame(data: &[u8], params: &PixelParams) -> StoredFrame {
             for (i, v) in out.iter_mut().enumerate() {
                 let p = i * 2;
                 if p + 1 < data.len() {
-                    *v = u16::from_le_bytes([data[p], data[p + 1]]);
+                    *v = if params.pixel_big_endian {
+                        u16::from_be_bytes([data[p], data[p + 1]])
+                    } else {
+                        u16::from_le_bytes([data[p], data[p + 1]])
+                    };
                 }
             }
             if params.planar && samples > 1 {
@@ -126,8 +131,10 @@ pub fn extract_native_frame(data: &[u8], params: &PixelParams) -> StoredFrame {
             for (i, v) in out.iter_mut().enumerate() {
                 let p = i * bytes_per_sample;
                 let mut value = 0u32;
-                for b in 0..bytes_per_sample.min(4) {
-                    value |= (data.get(p + b).copied().unwrap_or(0) as u32) << (8 * b);
+                let n = bytes_per_sample.min(4);
+                for b in 0..n {
+                    let shift = if params.pixel_big_endian { 8 * (n - 1 - b) } else { 8 * b };
+                    value |= (data.get(p + b).copied().unwrap_or(0) as u32) << shift;
                 }
                 *v = value;
             }
@@ -242,6 +249,44 @@ fn stored_abs_range(params: &PixelParams, transform: &MonoTransform) -> (f64, f6
     }
 }
 
+fn actual_abs_range(frames: &[StoredFrame], mask: &SampleMask, transform: &MonoTransform) -> Option<(f64, f64)> {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+
+    let mut visit = |container: u32| {
+        let value = apply_modality(mask.apply(container), transform);
+        min = min.min(value);
+        max = max.max(value);
+    };
+
+    for frame in frames {
+        match frame {
+            StoredFrame::U8(v) => v.iter().for_each(|&s| visit(s as u32)),
+            StoredFrame::U16(v) => v.iter().for_each(|&s| visit(s as u32)),
+            StoredFrame::U32(v) => v.iter().for_each(|&s| visit(s)),
+            StoredFrame::F32(_) | StoredFrame::F64(_) => {}
+        }
+    }
+
+    if min.is_finite() && max.is_finite() && max > min {
+        Some((min, max))
+    } else {
+        None
+    }
+}
+
+fn uses_data_scale(transform: &MonoTransform) -> bool {
+    if transform.voi_lut.as_ref().is_some_and(|l| !l.entries.is_empty()) {
+        return false;
+    }
+    let function = transform.voi_function.unwrap_or(VoiFunction::Linear);
+    let valid_window = transform.window.is_some_and(|(_, w)| match function {
+        VoiFunction::LinearExact => w > 0.0,
+        _ => w >= 1.0,
+    });
+    !valid_window
+}
+
 enum MapMode {
     WindowLinear { left: f64, right: f64, offset: f64, gradient: f64 },
     WindowLinearExact { center: f64, width: f64 },
@@ -332,7 +377,11 @@ pub fn mono_frames_to_pixels(
     let deep = params.bits_stored > 8;
     let out_max = if deep { 65535.0 } else { 255.0 };
 
-    let (abs_min, abs_max) = stored_abs_range(params, transform);
+    let (abs_min, abs_max) = if uses_data_scale(transform) {
+        actual_abs_range(frames, &mask, transform).unwrap_or_else(|| stored_abs_range(params, transform))
+    } else {
+        stored_abs_range(params, transform)
+    };
     let mapper = DisplayMapper::new(transform, abs_min, abs_max, out_max);
     let frac_offset = abs_min - abs_min.trunc();
 
@@ -417,19 +466,34 @@ pub fn float_frames_to_pixels(frames: &[StoredFrame], transform: &MonoTransform)
         .collect()
 }
 
-fn sample_scale_table(params: &PixelParams, deep: bool) -> Vec<u16> {
+fn sample_scale_table(params: &PixelParams, deep: bool) -> Option<Vec<u16>> {
+    if params.bits_allocated > 16 {
+        return None;
+    }
+
     let mask = SampleMask::new(params);
-    let bits = params.bits_stored.clamp(1, 16) as u32;
-    let in_max = ((1u64 << bits) - 1) as f64;
+    let in_max = sample_in_max(params);
     let out_max = if deep { 65535.0 } else { 255.0 };
     let size = 1usize << params.bits_allocated.clamp(1, 16);
 
-    (0..size)
-        .map(|container| {
-            let v = mask.apply(container as u32).max(0) as f64;
-            ((v / in_max) * out_max).round().min(out_max) as u16
-        })
-        .collect()
+    Some(
+        (0..size)
+            .map(|container| {
+                let v = mask.apply(container as u32).max(0) as f64;
+                ((v / in_max) * out_max).round().min(out_max) as u16
+            })
+            .collect(),
+    )
+}
+
+fn sample_in_max(params: &PixelParams) -> f64 {
+    let bits = params.bits_stored.clamp(1, 32) as u32;
+    ((1u64 << bits) - 1) as f64
+}
+
+fn scale_sample(container: u32, mask: &SampleMask, in_max: f64, out_max: f64) -> u16 {
+    let v = mask.apply(container).max(0) as f64;
+    ((v / in_max) * out_max).round().min(out_max) as u16
 }
 
 fn ybr_to_rgb(y: f64, cb: f64, cr: f64, max: f64, partial: bool) -> (u16, u16, u16) {
@@ -510,8 +574,7 @@ pub fn color_frame_to_pixels(
             let palette_luts = palette;
             let deep = params.bits_stored > 8;
             let out_max = if deep { 65535.0 } else { 255.0 };
-            let bits = params.bits_stored.clamp(1, 16) as u32;
-            let in_max = ((1u64 << bits) - 1) as f64;
+            let in_max = sample_in_max(params);
 
             let mut out = Vec::with_capacity(pixels * 3);
             for p in 0..pixels {
@@ -531,8 +594,7 @@ pub fn color_frame_to_pixels(
         }
         Photometric::Cmyk => {
             let deep = params.bits_stored > 8;
-            let bits = params.bits_stored.clamp(1, 16) as u32;
-            let max = ((1u64 << bits) - 1) as i64;
+            let max = sample_in_max(params) as i64;
             let out_max = if deep { 65535.0 } else { 255.0 };
 
             let mut out = Vec::with_capacity(pixels * 3);
@@ -548,8 +610,7 @@ pub fn color_frame_to_pixels(
         }
         Photometric::Hsv => {
             let deep = params.bits_stored > 8;
-            let bits = params.bits_stored.clamp(1, 16) as u32;
-            let max = ((1u64 << bits) - 1) as f64;
+            let max = sample_in_max(params);
             let out_max = if deep { 65535.0 } else { 255.0 };
 
             let mut out = Vec::with_capacity(pixels * 3);
@@ -570,8 +631,7 @@ pub fn color_frame_to_pixels(
                 log_warn!("DICOM: YBR_PARTIAL_420 native data is not fully supported, interpreting as interleaved");
             }
             let deep = params.bits_stored > 8;
-            let bits = params.bits_stored.clamp(1, 16) as u32;
-            let max = ((1u64 << bits) - 1) as f64;
+            let max = sample_in_max(params);
             let out_max = if deep { 65535.0 } else { 255.0 };
 
             let mut out = Vec::with_capacity(pixels * 3);
@@ -590,6 +650,8 @@ pub fn color_frame_to_pixels(
             let samples = params.samples_per_pixel.max(1) as usize;
             let deep = params.bits_stored > 8;
             let table = sample_scale_table(params, deep);
+            let in_max = sample_in_max(params);
+            let out_max = if deep { 65535.0 } else { 255.0 };
             let has_alpha = samples >= 4;
             let channels = if has_alpha { 4 } else { 3 };
 
@@ -597,7 +659,10 @@ pub fn color_frame_to_pixels(
             for p in 0..pixels {
                 for s in 0..channels.min(samples) {
                     let container = samples_u32.get(p * samples + s).copied().unwrap_or(0);
-                    out.push(table[(container as usize).min(table.len() - 1)]);
+                    out.push(match &table {
+                        Some(t) => t[(container as usize).min(t.len() - 1)],
+                        None => scale_sample(container, &mask, in_max, out_max),
+                    });
                 }
                 for _ in samples..channels {
                     out.push(if deep { 65535 } else { 255 });
