@@ -176,9 +176,11 @@ pub struct HuffmanTable {
     pub fast_lookup: Vec<u32>,
 }
 
+pub const HUFF_PEEK_BITS: usize = 11;
+
 impl HuffmanTable {
     pub fn build_fast_lookup(&mut self) {
-        const PEEK_BITS: usize = 9;
+        const PEEK_BITS: usize = HUFF_PEEK_BITS;
         const TABLE_SIZE: usize = 1 << PEEK_BITS;
         let mut table = vec![0u32; TABLE_SIZE];
 
@@ -261,6 +263,7 @@ pub struct ScanData {
     pub arith_dc_tables: Vec<ArithmeticCodingTable>,
     pub arith_ac_tables: Vec<ArithmeticCodingTable>,
     pub data: Vec<u8>,
+    pub restart_offsets: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]

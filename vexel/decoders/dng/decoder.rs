@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
@@ -724,7 +723,6 @@ impl<R: Read + Seek> DngDecoder<R> {
         let bps = self.header.bits_per_sample.first().copied().unwrap_or(16);
         let spp = (self.header.samples_per_pixel as usize).max(1);
         let sample_count = image_width * image_height * spp;
-        let mut raw = vec![0u16; sample_count];
 
         self.prepare_lossy_curves();
 
@@ -739,6 +737,20 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let used_strips = offsets.len().min(byte_counts.len()).min(image_height.div_ceil(rows_per_strip));
 
+        if used_strips == 1 {
+            self.reader.seek(SeekFrom::Start(offsets[0] as u64))?;
+            let mut strip_data = vec![0u8; byte_counts[0] as usize];
+            self.reader.read_exact(&mut strip_data)?;
+
+            let strip_rows = rows_per_strip.min(image_height);
+            let mut decompressed = self.decompress_all(vec![(strip_data, strip_rows)], image_width, bps)?;
+
+            let mut strip = decompressed.pop().unwrap_or_default();
+            strip.resize(sample_count, 0);
+            return Ok(strip);
+        }
+
+        let mut raw = vec![0u16; sample_count];
         let batch = batch_len(rows_per_strip * image_width * spp * 2);
         let mut strip_idx = 0;
         while strip_idx < used_strips {
@@ -966,7 +978,7 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
     }
 
-    fn apply_orientation<T: Copy + Default>(&mut self, data: Vec<T>, channels: usize) -> Vec<T> {
+    fn apply_orientation<T: Copy + Default + Send + Sync>(&mut self, data: Vec<T>, channels: usize) -> Vec<T> {
         let orientation = self.dng.orientation;
         let w = self.width as usize;
         let h = self.height as usize;
@@ -976,8 +988,9 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let (dw, dh) = if orientation >= 5 { (h, w) } else { (w, h) };
         let mut out = vec![T::default(); data.len()];
-        for dy in 0..dh {
-            for dx in 0..dw {
+
+        let fill_row = |(dy, row): (usize, &mut [T])| {
+            for (dx, px) in row.chunks_exact_mut(channels).enumerate() {
                 let (sx, sy) = match orientation {
                     2 => (w - 1 - dx, dy),
                     3 => (w - 1 - dx, h - 1 - dy),
@@ -989,10 +1002,17 @@ impl<R: Read + Seek> DngDecoder<R> {
                     _ => (dx, dy),
                 };
                 let src = (sy * w + sx) * channels;
-                let dst = (dy * dw + dx) * channels;
-                out[dst..dst + channels].copy_from_slice(&data[src..src + channels]);
+                px.copy_from_slice(&data[src..src + channels]);
             }
+        };
+
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            out.par_chunks_mut(dw * channels).enumerate().for_each(fill_row);
         }
+        #[cfg(not(feature = "rayon"))]
+        out.chunks_mut(dw * channels).enumerate().for_each(fill_row);
 
         self.width = dw as u32;
         self.height = dh as u32;
@@ -1004,19 +1024,43 @@ impl<R: Read + Seek> DngDecoder<R> {
         let h = self.height as usize;
         let mut rgb = vec![0u16; w * h * 3];
 
-        for y in 0..h {
-            for x in 0..w {
-                let color = self.cfa_color(x as u32, y as u32);
-                let (r, g, b) = self.interpolate_pixel(raw, x, y, w, h, color);
-                let base = (y * w + x) * 3;
-                rgb[base] = r;
-                rgb[base + 1] = g;
-                rgb[base + 2] = b;
+        let cfa = CfaView { pattern: self.dng.cfa_pattern.unwrap_or(CfaPattern::Rggb), phase: self.cfa_phase };
+
+        let fill_row = |(y, row): (usize, &mut [u16])| {
+            for (x, px) in row.chunks_exact_mut(3).enumerate() {
+                let (r, g, b) = cfa.interpolate_pixel(raw, x, y, w, h);
+                px[0] = r;
+                px[1] = g;
+                px[2] = b;
             }
+        };
+
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            rgb.par_chunks_mut(w * 3).enumerate().for_each(fill_row);
         }
+        #[cfg(not(feature = "rayon"))]
+        rgb.chunks_mut(w * 3).enumerate().for_each(fill_row);
+
         rgb
     }
+}
 
+#[derive(Clone, Copy)]
+enum RowPattern {
+    Uniform(usize),
+    Alternating(usize, usize),
+    General,
+}
+
+#[derive(Clone, Copy)]
+struct CfaView {
+    pattern: CfaPattern,
+    phase: (u32, u32),
+}
+
+impl CfaView {
     fn sample(&self, raw: &[u16], x: i32, y: i32, w: usize, h: usize) -> u16 {
         let cx = x.clamp(0, w as i32 - 1) as usize;
         let cy = y.clamp(0, h as i32 - 1) as usize;
@@ -1040,15 +1084,14 @@ impl<R: Read + Seek> DngDecoder<R> {
         (sum / count) as u16
     }
 
-    fn interpolate_pixel(&self, raw: &[u16], x: usize, y: usize, w: usize, h: usize, color: usize) -> (u16, u16, u16) {
+    fn interpolate_pixel(&self, raw: &[u16], x: usize, y: usize, w: usize, h: usize) -> (u16, u16, u16) {
         let xi = x as i32;
         let yi = y as i32;
         let s = |dx: i32, dy: i32| self.sample(raw, xi + dx, yi + dy, w, h);
         let a = |offsets: &[(i32, i32)]| self.avg_in_bounds(raw, xi, yi, w, h, offsets);
-        let pattern = self.dng.cfa_pattern.unwrap_or(CfaPattern::Rggb);
-        let row_parity = ((y as u32 & 1) ^ self.cfa_phase.0) as usize;
-        let col_parity = ((x as u32 & 1) ^ self.cfa_phase.1) as usize;
-        let _ = color;
+        let pattern = self.pattern;
+        let row_parity = ((y as u32 & 1) ^ self.phase.0) as usize;
+        let col_parity = ((x as u32 & 1) ^ self.phase.1) as usize;
 
         let (r, g, b) = match pattern {
             CfaPattern::Rggb => match (row_parity, col_parity) {
@@ -1086,7 +1129,9 @@ impl<R: Read + Seek> DngDecoder<R> {
         };
         (r, g, b)
     }
+}
 
+impl<R: Read + Seek> DngDecoder<R> {
     fn build_color_transform(&self) -> ColorTransform {
         let cam_mul: Option<[f32; 3]> = if self.dng.as_shot_neutral.len() >= 3
             && self.dng.as_shot_neutral.iter().take(3).all(|v| v.abs() > 0.0001)
@@ -1130,12 +1175,78 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
     }
 
-    fn scale_colors(&self, raw: &[u16], pre_mul: [f32; 3], is_cfa: bool) -> Vec<u16> {
+    fn scale_colors_direct(
+        &self,
+        raw: &mut [u16],
+        pre_mul: [f32; 3],
+        row_samples: usize,
+        channel_rows: &[Vec<usize>],
+        black_rows: &[Vec<f32>],
+        lin_table: Option<&[u16]>,
+    ) {
+        let linearize = |r: u16, b: f32| -> f32 {
+            match lin_table {
+                Some(table) => (table[(r as usize).min(table.len() - 1)] as f32 - b).max(0.0),
+                None => (r as f32 - b).max(0.0),
+            }
+        };
+
+        let row_max = |(y, raw_row): (usize, &[u16])| -> f32 {
+            let black_row = &black_rows[y % black_rows.len()];
+            let mut m = 0.0f32;
+            for (&r, &b) in raw_row.iter().zip(black_row) {
+                m = m.max(linearize(r, b));
+            }
+            m
+        };
+
+        #[cfg(feature = "rayon")]
+        let data_max = {
+            use rayon::prelude::*;
+            raw.par_chunks(row_samples).enumerate().map(row_max).reduce(|| 0.0f32, f32::max)
+        };
+        #[cfg(not(feature = "rayon"))]
+        let data_max = raw.chunks(row_samples).enumerate().map(row_max).fold(0.0f32, f32::max);
+
+        let mut maximum = (self.get_white_level() - self.get_black_common()).max(1.0);
+        if data_max > 0.0 && data_max < maximum && data_max > maximum * 0.75 {
+            maximum = data_max;
+        }
+
+        let dmin = pre_mul.iter().copied().fold(f32::INFINITY, f32::min);
+        let mut scale_mul = [1.0f32; 3];
+        if dmin > 0.00001 && maximum > 0.0 {
+            for c in 0..3 {
+                scale_mul[c] = (pre_mul[c] / dmin) * 65535.0 / maximum;
+            }
+        }
+
+        let scale_rows: Vec<Vec<f32>> =
+            channel_rows.iter().map(|row| row.iter().map(|&ch| scale_mul[ch]).collect()).collect();
+
+        let apply_row = |(y, raw_row): (usize, &mut [u16])| {
+            let black_row = &black_rows[y % black_rows.len()];
+            let scale_row = &scale_rows[y % scale_rows.len()];
+            for ((r, &b), &s) in raw_row.iter_mut().zip(black_row).zip(scale_row) {
+                *r = (linearize(*r, b) * s).clamp(0.0, 65535.0) as u16;
+            }
+        };
+
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            raw.par_chunks_mut(row_samples).enumerate().for_each(apply_row);
+        }
+        #[cfg(not(feature = "rayon"))]
+        raw.chunks_mut(row_samples).enumerate().for_each(apply_row);
+    }
+
+    fn scale_colors(&self, raw: &mut [u16], pre_mul: [f32; 3], is_cfa: bool) {
         let w = self.width as usize;
         let spp = if is_cfa { 1 } else { (self.header.samples_per_pixel as usize).max(1) };
         let row_samples = w * spp;
         if raw.is_empty() || row_samples == 0 {
-            return Vec::new();
+            return;
         }
 
         let channel_rows: Vec<Vec<usize>> = if is_cfa {
@@ -1159,26 +1270,77 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let lin_table = self.dng.linearization_table.as_deref().filter(|t| !t.is_empty());
 
-        let mut vals = vec![0.0f32; raw.len()];
-        let mut data_max = 0.0f32;
-
-        for (y, (raw_row, val_row)) in raw.chunks(row_samples).zip(vals.chunks_mut(row_samples)).enumerate() {
-            let black_row = &black_rows[y % black_rows.len()];
+        let linearized = |r: u16| -> f32 {
             match lin_table {
-                Some(table) => {
-                    let last = table.len() - 1;
-                    for ((v, &r), &b) in val_row.iter_mut().zip(raw_row).zip(black_row) {
-                        *v = (table[(r as usize).min(last)] as f32 - b).max(0.0);
-                    }
-                }
-                None => {
-                    for ((v, &r), &b) in val_row.iter_mut().zip(raw_row).zip(black_row) {
-                        *v = (r as f32 - b).max(0.0);
-                    }
+                Some(table) => table[(r as usize).min(table.len() - 1)] as f32,
+                None => r as f32,
+            }
+        };
+
+        let distinct_blacks: Vec<f32> = {
+            let mut v: Vec<f32> = black_rows.iter().flatten().copied().collect();
+            v.sort_by(f32::total_cmp);
+            v.dedup();
+            v
+        };
+
+        if distinct_blacks.len() > MAX_BLACK_LUTS || lcm(black_rows.len(), channel_rows.len()) > MAX_LUT_ROWS {
+            self.scale_colors_direct(raw, pre_mul, row_samples, &channel_rows, &black_rows, lin_table);
+            return;
+        }
+
+        let black_index: Vec<Vec<usize>> = black_rows
+            .iter()
+            .map(|row| row.iter().map(|b| distinct_blacks.binary_search_by(|p| p.total_cmp(b)).unwrap_or(0)).collect())
+            .collect();
+
+        let black_lut: Vec<Vec<f32>> =
+            distinct_blacks.iter().map(|&b| (0..=u16::MAX).map(|r| (linearized(r) - b).max(0.0)).collect()).collect();
+
+        type RawMax = [u16; MAX_BLACK_LUTS];
+
+        let row_max = |(y, raw_row): (usize, &[u16])| -> RawMax {
+            let idx_row = &black_index[y % black_index.len()];
+            let mut m: RawMax = [0; MAX_BLACK_LUTS];
+            for (&r, &bi) in raw_row.iter().zip(idx_row) {
+                if r > m[bi] {
+                    m[bi] = r;
                 }
             }
-            data_max = val_row.iter().copied().fold(data_max, f32::max);
-        }
+            m
+        };
+
+        let merge = |mut a: RawMax, b: RawMax| {
+            for (x, y) in a.iter_mut().zip(&b) {
+                *x = (*x).max(*y);
+            }
+            a
+        };
+
+        let band_rows = (PARALLEL_CHUNK / row_samples.max(1)).max(1);
+        let band_samples = band_rows * row_samples;
+
+        let band_max = |(bi, band): (usize, &[u16])| -> RawMax {
+            let base = bi * band_rows;
+            band.chunks(row_samples)
+                .enumerate()
+                .map(|(dy, row)| row_max((base + dy, row)))
+                .fold([0u16; MAX_BLACK_LUTS], merge)
+        };
+
+        #[cfg(feature = "rayon")]
+        let raw_max = {
+            use rayon::prelude::*;
+            raw.par_chunks(band_samples).enumerate().map(band_max).reduce(|| [0u16; MAX_BLACK_LUTS], merge)
+        };
+        #[cfg(not(feature = "rayon"))]
+        let raw_max = raw.chunks(band_samples).enumerate().map(band_max).fold([0u16; MAX_BLACK_LUTS], merge);
+
+        let data_max = raw_max
+            .iter()
+            .take(distinct_blacks.len())
+            .enumerate()
+            .fold(0.0f32, |m, (bi, &r)| m.max(black_lut[bi][r as usize]));
 
         let mut maximum = (self.get_white_level() - self.get_black_common()).max(1.0);
         if data_max > 0.0 && data_max < maximum && data_max > maximum * 0.75 {
@@ -1193,18 +1355,75 @@ impl<R: Read + Seek> DngDecoder<R> {
             }
         }
 
-        let scale_rows: Vec<Vec<f32>> =
-            channel_rows.iter().map(|row| row.iter().map(|&ch| scale_mul[ch]).collect()).collect();
+        let combined: Vec<Vec<u16>> = distinct_blacks
+            .iter()
+            .flat_map(|&b| {
+                scale_mul.iter().map(move |&s| {
+                    (0..=u16::MAX).map(|r| (((linearized(r) - b).max(0.0)) * s).clamp(0.0, 65535.0) as u16).collect()
+                })
+            })
+            .collect();
 
-        let mut out = vec![0u16; raw.len()];
-        for (y, (val_row, out_row)) in vals.chunks(row_samples).zip(out.chunks_mut(row_samples)).enumerate() {
-            let scale_row = &scale_rows[y % scale_rows.len()];
-            for ((o, &v), &s) in out_row.iter_mut().zip(val_row).zip(scale_row) {
-                *o = (v * s).clamp(0.0, 65535.0) as u16;
+        let lut_rows = lcm(black_index.len(), channel_rows.len());
+        let lut_index: Vec<Vec<usize>> = (0..lut_rows)
+            .map(|y| {
+                let idx_row = &black_index[y % black_index.len()];
+                let ch_row = &channel_rows[y % channel_rows.len()];
+                idx_row.iter().zip(ch_row).map(|(&bi, &ch)| bi * 3 + ch).collect()
+            })
+            .collect();
+
+        let row_pattern: Vec<RowPattern> = lut_index
+            .iter()
+            .map(|idx| match idx.first() {
+                None => RowPattern::General,
+                Some(&first) if idx.iter().all(|&li| li == first) => RowPattern::Uniform(first),
+                Some(&first) if idx.len() >= 2 && idx.iter().enumerate().all(|(i, &li)| li == idx[i % 2]) => {
+                    RowPattern::Alternating(first, idx[1])
+                }
+                _ => RowPattern::General,
+            })
+            .collect();
+
+        let apply_band = |(bi, band): (usize, &mut [u16])| {
+            let base = bi * band_rows;
+            for (dy, raw_row) in band.chunks_mut(row_samples).enumerate() {
+                let y = (base + dy) % lut_index.len();
+                match row_pattern[y] {
+                    RowPattern::Uniform(li) => {
+                        let lut = &combined[li];
+                        for r in raw_row.iter_mut() {
+                            *r = lut[*r as usize];
+                        }
+                    }
+                    RowPattern::Alternating(l0, l1) => {
+                        let (a, b) = (&combined[l0], &combined[l1]);
+                        let mut it = raw_row.chunks_exact_mut(2);
+                        for px in &mut it {
+                            px[0] = a[px[0] as usize];
+                            px[1] = b[px[1] as usize];
+                        }
+                        if let [last] = it.into_remainder() {
+                            *last = a[*last as usize];
+                        }
+                    }
+                    RowPattern::General => {
+                        let idx_row = &lut_index[y];
+                        for (r, &li) in raw_row.iter_mut().zip(idx_row) {
+                            *r = combined[li][*r as usize];
+                        }
+                    }
+                }
             }
-        }
+        };
 
-        out
+        #[cfg(feature = "rayon")]
+        {
+            use rayon::prelude::*;
+            raw.par_chunks_mut(band_samples).enumerate().for_each(apply_band);
+        }
+        #[cfg(not(feature = "rayon"))]
+        raw.chunks_mut(band_samples).enumerate().for_each(apply_band);
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -1307,9 +1526,10 @@ impl<R: Read + Seek> DngDecoder<R> {
         let deep = self.header.bits_per_sample.first().copied().unwrap_or(16) > 8;
 
         let pixel_data = if is_cfa {
-            let scaled = self.scale_colors(&raw_pixels, transform.pre_mul, true);
-            let demosaiced = self.demosaic_bilinear(&scaled);
-            let rgb = convert_to_rgb16(&demosaiced, w * h, transform.rgb_cam);
+            self.scale_colors(&mut raw_pixels, transform.pre_mul, true);
+            let mut rgb = self.demosaic_bilinear(&raw_pixels);
+            drop(std::mem::take(&mut raw_pixels));
+            convert_to_rgb16(&mut rgb, w * h, transform.rgb_cam);
             let rgb = self.apply_orientation(rgb, 3);
             if deep {
                 PixelData::RGB16(rgb)
@@ -1317,16 +1537,23 @@ impl<R: Read + Seek> DngDecoder<R> {
                 PixelData::RGB8(downscale_to_u8(&rgb))
             }
         } else if spp >= 3 {
-            let scaled = self.scale_colors(&raw_pixels, transform.pre_mul, false);
+            self.scale_colors(&mut raw_pixels, transform.pre_mul, false);
             let pixel_count = w * h;
-            let mut rgb = vec![0u16; pixel_count * 3];
-            for i in 0..pixel_count {
-                let src = i * spp;
-                for c in 0..3 {
-                    rgb[i * 3 + c] = scaled.get(src + c).copied().unwrap_or(0);
+            let mut rgb = if spp == 3 {
+                std::mem::take(&mut raw_pixels)
+            } else {
+                let mut rgb = vec![0u16; pixel_count * 3];
+                for i in 0..pixel_count {
+                    let src = i * spp;
+                    for c in 0..3 {
+                        rgb[i * 3 + c] = raw_pixels.get(src + c).copied().unwrap_or(0);
+                    }
                 }
-            }
-            let rgb = convert_to_rgb16(&rgb, pixel_count, transform.rgb_cam);
+                drop(std::mem::take(&mut raw_pixels));
+                rgb
+            };
+            rgb.truncate(pixel_count * 3);
+            convert_to_rgb16(&mut rgb, pixel_count, transform.rgb_cam);
             let rgb = self.apply_orientation(rgb, 3);
             if deep {
                 PixelData::RGB16(rgb)
@@ -1334,8 +1561,9 @@ impl<R: Read + Seek> DngDecoder<R> {
                 PixelData::RGB8(downscale_to_u8(&rgb))
             }
         } else {
-            let scaled = self.scale_colors(&raw_pixels, [1.0, 1.0, 1.0], false);
-            let gray = convert_to_gray16(&scaled);
+            self.scale_colors(&mut raw_pixels, [1.0, 1.0, 1.0], false);
+            let mut gray = std::mem::take(&mut raw_pixels);
+            convert_to_gray16(&mut gray);
             let gray = self.apply_orientation(gray, 1);
             if deep {
                 PixelData::L16(gray)
@@ -1514,12 +1742,22 @@ impl StripContext<'_> {
 
         let precision_shift = stored_bits.saturating_sub(precision.clamp(1, stored_bits));
 
-        let mut out = Vec::with_capacity(sample_count);
-        for &s in raw_samples.iter().take(sample_count) {
-            out.push(s >> precision_shift);
-        }
-        while out.len() < sample_count {
-            out.push(0);
+        let mut out = raw_samples;
+        out.resize(sample_count, 0);
+        if precision_shift > 0 {
+            let shift = |chunk: &mut [u16]| {
+                for s in chunk {
+                    *s >>= precision_shift;
+                }
+            };
+
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                out.par_chunks_mut(PARALLEL_CHUNK).for_each(shift);
+            }
+            #[cfg(not(feature = "rayon"))]
+            shift(&mut out);
         }
         Ok(out)
     }
@@ -1641,66 +1879,64 @@ const XYZ_RGB: [[f32; 3]; 3] =
     [[0.4124564, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750], [0.0193339, 0.119192, 0.9503041]];
 
 const HISTOGRAM_SIZE: usize = 0x2000;
+const MAX_BLACK_LUTS: usize = 16;
+const MAX_LUT_ROWS: usize = 64;
 const AUTO_BRIGHT_THRESHOLD: f64 = 0.01;
 const PARALLEL_CHUNK: usize = 0x10000;
 
-fn convert_to_rgb16(rgb: &[u16], pixel_count: usize, rgb_cam: Option<[[f32; 3]; 3]>) -> Vec<u16> {
-    let converted: Cow<'_, [u16]> = match rgb_cam {
-        Some(m) => Cow::Owned(apply_cam_matrix(rgb, &m)),
-        None => Cow::Borrowed(rgb),
-    };
-
-    let histogram = build_rgb_histogram(&converted);
+fn convert_to_rgb16(rgb: &mut [u16], pixel_count: usize, rgb_cam: Option<[[f32; 3]; 3]>) {
+    let histogram = apply_cam_matrix_and_histogram(rgb, rgb_cam.as_ref());
     let t_white = auto_bright_white(&histogram, pixel_count, 3);
     let curve = gamma_curve_bt709(t_white << 3);
-    map_through_curve(&converted, &curve)
+    map_through_curve(rgb, &curve);
 }
 
-fn convert_to_gray16(gray: &[u16]) -> Vec<u16> {
+fn convert_to_gray16(gray: &mut [u16]) {
     let mut histogram = vec![[0u32; HISTOGRAM_SIZE]; 1];
-    for &v in gray {
+    for &v in gray.iter() {
         histogram[0][(v >> 3) as usize] += 1;
     }
     let t_white = auto_bright_white(&histogram, gray.len(), 1);
     let curve = gamma_curve_bt709(t_white << 3);
-    map_through_curve(gray, &curve)
+    map_through_curve(gray, &curve);
 }
 
 fn downscale_to_u8(values: &[u16]) -> Vec<u8> {
-    values.iter().map(|&v| (v >> 8) as u8).collect()
-}
-
-fn apply_cam_matrix(rgb: &[u16], m: &[[f32; 3]; 3]) -> Vec<u16> {
-    let mut out = vec![0u16; rgb.len()];
-
-    let transform = |dst: &mut [u16], src: &[u16]| {
-        for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(3)) {
-            let (r, g, b) = (s[0] as f32, s[1] as f32, s[2] as f32);
-            for c in 0..3 {
-                d[c] = (m[c][0] * r + m[c][1] * g + m[c][2] * b).clamp(0.0, 65535.0) as u16;
-            }
-        }
-    };
+    let mut out = vec![0u8; values.len()];
 
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
-        out.par_chunks_mut(PARALLEL_CHUNK * 3)
-            .zip(rgb.par_chunks(PARALLEL_CHUNK * 3))
-            .for_each(|(dst, src)| transform(dst, src));
+        out.par_chunks_mut(PARALLEL_CHUNK)
+            .zip(values.par_chunks(PARALLEL_CHUNK))
+            .for_each(|(dst, src)| super::simd::shift_u16_to_u8(src, dst));
     }
     #[cfg(not(feature = "rayon"))]
-    transform(&mut out, rgb);
+    super::simd::shift_u16_to_u8(values, &mut out);
 
     out
 }
 
-fn build_rgb_histogram(rgb: &[u16]) -> Vec<[u32; HISTOGRAM_SIZE]> {
-    let accumulate = |mut hist: Vec<[u32; HISTOGRAM_SIZE]>, chunk: &[u16]| {
-        for px in chunk.chunks_exact(3) {
-            hist[0][(px[0] >> 3) as usize] += 1;
-            hist[1][(px[1] >> 3) as usize] += 1;
-            hist[2][(px[2] >> 3) as usize] += 1;
+fn apply_cam_matrix_and_histogram(rgb: &mut [u16], m: Option<&[[f32; 3]; 3]>) -> Vec<[u32; HISTOGRAM_SIZE]> {
+    let accumulate = |mut hist: Vec<[u32; HISTOGRAM_SIZE]>, chunk: &mut [u16]| {
+        match m {
+            Some(m) => {
+                for d in chunk.chunks_exact_mut(3) {
+                    let (r, g, b) = (d[0] as f32, d[1] as f32, d[2] as f32);
+                    for c in 0..3 {
+                        let v = (m[c][0] * r + m[c][1] * g + m[c][2] * b).clamp(0.0, 65535.0) as u16;
+                        d[c] = v;
+                        hist[c][(v >> 3) as usize] += 1;
+                    }
+                }
+            }
+            None => {
+                for d in chunk.chunks_exact(3) {
+                    for c in 0..3 {
+                        hist[c][(d[c] >> 3) as usize] += 1;
+                    }
+                }
+            }
         }
         hist
     };
@@ -1708,7 +1944,7 @@ fn build_rgb_histogram(rgb: &[u16]) -> Vec<[u32; HISTOGRAM_SIZE]> {
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
-        rgb.par_chunks(PARALLEL_CHUNK * 3).fold(|| vec![[0u32; HISTOGRAM_SIZE]; 3], accumulate).reduce(
+        rgb.par_chunks_mut(PARALLEL_CHUNK * 3).fold(|| vec![[0u32; HISTOGRAM_SIZE]; 3], accumulate).reduce(
             || vec![[0u32; HISTOGRAM_SIZE]; 3],
             |mut a, b| {
                 for (ha, hb) in a.iter_mut().zip(&b) {
@@ -1724,14 +1960,20 @@ fn build_rgb_histogram(rgb: &[u16]) -> Vec<[u32; HISTOGRAM_SIZE]> {
     accumulate(vec![[0u32; HISTOGRAM_SIZE]; 3], rgb)
 }
 
-fn map_through_curve(values: &[u16], curve: &[u16]) -> Vec<u16> {
+fn map_through_curve(values: &mut [u16], curve: &[u16]) {
+    let map = |chunk: &mut [u16]| {
+        for v in chunk {
+            *v = curve[*v as usize];
+        }
+    };
+
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
-        values.par_iter().map(|&v| curve[v as usize]).collect()
+        values.par_chunks_mut(PARALLEL_CHUNK).for_each(map);
     }
     #[cfg(not(feature = "rayon"))]
-    values.iter().map(|&v| curve[v as usize]).collect()
+    map(values);
 }
 
 fn auto_bright_white(histogram: &[[u32; HISTOGRAM_SIZE]], pixel_count: usize, channels: usize) -> i32 {
@@ -1783,6 +2025,19 @@ fn gamma_curve_bt709(imax: i32) -> Vec<u16> {
         }
     }
     curve
+}
+
+fn lcm(a: usize, b: usize) -> usize {
+    if a == 0 || b == 0 {
+        return a.max(b).max(1);
+    }
+    let (mut x, mut y) = (a, b);
+    while y != 0 {
+        let t = x % y;
+        x = y;
+        y = t;
+    }
+    a / x * b
 }
 
 fn invert_3x3(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {

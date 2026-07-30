@@ -9,7 +9,7 @@ use crate::decoders::jpeg::types::{
     APP14AdobeData, APP2Data, ArithmeticCodingTable, ArithmeticCodingValue, ColorComponentInfo, DACData, DHTData,
     DQTData, HuffmanTable, IccProfileSequenceInfo, JFIFData, JFIFHeader, JpegCodingMethod, JpegMode, JpegSegmentData,
     JpegSegmentInfo, Predictor, QuantizationTable, SOFData, SOSData, ScanComponent, ScanData,
-    DEFAULT_QUANTIZATION_TABLE, ZIGZAG_MAP,
+    DEFAULT_QUANTIZATION_TABLE, HUFF_PEEK_BITS, ZIGZAG_MAP,
 };
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::ExifReader;
@@ -58,15 +58,15 @@ struct RasterPlane {
 
 #[inline(always)]
 fn get_next_symbol(reader: &mut JpegBitReader<'_>, table: &HuffmanTable) -> u8 {
-    if let Some(peek) = reader.peek9() {
+    if let Some(peek) = reader.peek_fast() {
         let entry = unsafe { *table.fast_lookup.get_unchecked(peek as usize) };
         if entry >> 16 != 0 {
             reader.consume(entry & 0xFF);
             return ((entry >> 8) & 0xFF) as u8;
         }
-        reader.consume(9);
+        reader.consume(HUFF_PEEK_BITS as u32);
         let mut code = peek;
-        for i in 9..16 {
+        for i in HUFF_PEEK_BITS..16 {
             code = (code << 1) | reader.read_bits(1);
             let first = unsafe { *table.first_code.get_unchecked(i) };
             if first != u32::MAX {
@@ -412,6 +412,12 @@ fn prog_ac_refine(
         *skips -= 1;
     }
 }
+
+#[rustfmt::skip]
+const SCAN_BLOCK_SIZE: usize = 64 * 1024;
+
+#[cfg(feature = "rayon")]
+const PARALLEL_LOSSLESS_MIN_SAMPLES: usize = 256 * 256;
 
 #[rustfmt::skip]
 const ARITH_TABLE: [(u32, u8, u8, u8); 114] = [
@@ -1834,86 +1840,92 @@ impl<R: Read + Seek> JpegDecoder<R> {
             log_warn!("Invalid SOS marker length, expected {}, got {}", 6 + (2 * scan_component_count as u16), length);
         }
 
-        let mut current_byte = self.reader.read_u8().unwrap_or_else(|_| {
-            log_warn!("Unexpected EOF while reading first byte of scan data");
-            0
-        });
-
+        let scan_start = self.reader.stream_position()?;
         let scan_data_limit = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4).max(65536);
         self.limits.reserve_usize(scan_data_limit)?;
-        let mut scan_data = Vec::with_capacity((self.width as usize * self.height as usize) / 4);
+        let remaining = self.reader.bytes_left().unwrap_or(0) as usize;
+        let mut scan_data = Vec::with_capacity(remaining.min(scan_data_limit));
         let is_arithmetic = self.coding_method == JpegCodingMethod::Arithmetic;
 
-        loop {
-            if scan_data.len() >= scan_data_limit {
-                log_warn!("Scan data exceeded limit of {} bytes, truncating", scan_data_limit);
-                break;
-            }
+        let mut restart_offsets: Vec<usize> = vec![0];
+        let mut block = vec![0u8; SCAN_BLOCK_SIZE];
+        let mut filled = 0usize;
+        let mut cursor = 0usize;
+        let mut block_origin = 0u64;
+        let mut truncated = false;
+        let mut end_marker: Option<u64> = None;
 
-            if current_byte != 0xFF {
-                scan_data.push(current_byte);
-                current_byte = match self.reader.read_u8() {
-                    Ok(byte) => byte,
+        loop {
+            if filled - cursor < 2 {
+                block.copy_within(cursor..filled, 0);
+                block_origin += cursor as u64;
+                filled -= cursor;
+                cursor = 0;
+
+                match self.reader.read(&mut block[filled..]) {
+                    Ok(0) => {
+                        log_warn!("Unexpected EOF while reading scan data, breaking");
+                        break;
+                    }
+                    Ok(n) => filled += n,
                     Err(_) => {
                         log_warn!("Unexpected EOF while reading scan data, breaking");
                         break;
                     }
-                };
-
+                }
                 continue;
             }
 
-            // We have 0xFF byte, read the next one
-            let next_byte = match self.reader.read_u8() {
-                Ok(byte) => byte,
-                Err(_) => {
-                    log_warn!("Unexpected EOF while reading scan data, breaking");
+            let chunk = &block[cursor..filled];
+            let run = chunk.iter().position(|&b| b == 0xFF).unwrap_or(chunk.len());
+            if run > 0 {
+                let space = scan_data_limit.saturating_sub(scan_data.len());
+                if run >= space {
+                    scan_data.extend_from_slice(&chunk[..space]);
+                    cursor += space;
+                    truncated = true;
                     break;
                 }
-            };
+                scan_data.extend_from_slice(&chunk[..run]);
+                cursor += run;
+                continue;
+            }
 
-            match next_byte {
+            if scan_data.len() >= scan_data_limit {
+                truncated = true;
+                break;
+            }
+
+            match block[cursor + 1] {
                 0x00 => {
-                    // Stuffed byte: for Huffman, de-stuff (emit 0xFF, discard 0x00)
-                    // For arithmetic, pass both bytes raw so the arithmetic decoder handles them
-                    scan_data.push(current_byte);
+                    scan_data.push(0xFF);
                     if is_arithmetic {
                         scan_data.push(0x00);
                     }
-                    current_byte = match self.reader.read_u8() {
-                        Ok(byte) => byte,
-                        Err(_) => {
-                            log_warn!("Unexpected EOF while reading scan data, breaking");
-                            break;
-                        }
-                    };
+                    cursor += 2;
                 }
                 0xFF => {
-                    // Another FF, reprocess it
-                    current_byte = next_byte;
+                    cursor += 1;
                 }
                 b if b >= (JpegMarker::RST0.to_u16() & 0xFF) as u8 && b <= (JpegMarker::RST7.to_u16() & 0xFF) as u8 => {
                     scan_data.push(0xFF);
                     scan_data.push(b);
-                    current_byte = match self.reader.read_u8() {
-                        Ok(byte) => byte,
-                        Err(_) => {
-                            log_warn!("Unexpected EOF while reading scan data, breaking");
-                            break;
-                        }
-                    };
-                }
-                b if b == (JpegMarker::EOI.to_u16() & 0xFF) as u8 => {
-                    self.reader.seek(SeekFrom::Current(-2))?;
-                    break;
+                    restart_offsets.push(scan_data.len());
+                    cursor += 2;
                 }
                 _ => {
-                    // Any other marker - end of scan
-                    self.reader.seek(SeekFrom::Current(-2))?;
+                    end_marker = Some(block_origin + cursor as u64);
                     break;
                 }
             }
         }
+
+        if truncated {
+            log_warn!("Scan data exceeded limit of {} bytes, truncating", scan_data_limit);
+        }
+
+        let stop = end_marker.unwrap_or(block_origin + cursor as u64);
+        self.reader.seek(SeekFrom::Start(scan_start + stop))?;
 
         let actual_scan_size = scan_data.len();
         self.limits.free_usize(scan_data_limit.saturating_sub(actual_scan_size));
@@ -1930,6 +1942,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             arith_dc_tables: self.dc_arithmetic_tables.clone(),
             arith_ac_tables: self.ac_arithmetic_tables.clone(),
             data: scan_data,
+            restart_offsets,
         };
 
         self.scans.push(scan);
@@ -2673,9 +2686,19 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let precision_correction = 16 - self.precision;
             let mut pixels = samples;
             if precision_correction > 0 {
-                for v in pixels.iter_mut() {
-                    *v <<= precision_correction;
+                let shift = |chunk: &mut [u16]| {
+                    for v in chunk {
+                        *v <<= precision_correction;
+                    }
+                };
+
+                #[cfg(feature = "rayon")]
+                {
+                    use rayon::prelude::*;
+                    pixels.par_chunks_mut(1 << 16).for_each(shift);
                 }
+                #[cfg(not(feature = "rayon"))]
+                shift(&mut pixels);
             }
 
             match components_count {
@@ -3047,6 +3070,23 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let ssss16_is_min = self.lossless_ssss16_is_min;
 
+        #[cfg(feature = "rayon")]
+        if Self::decode_lossless_scan_huffman_parallel(
+            scan,
+            sw,
+            sh,
+            views,
+            buf,
+            predictor,
+            point_transform,
+            default_prediction,
+            ssss16_is_min,
+            restart_interval,
+            &tables,
+        ) {
+            return;
+        }
+
         macro_rules! run {
             ($components:expr, $predict:expr) => {
                 Self::lossless_huffman_loop(
@@ -3086,6 +3126,109 @@ impl<R: Read + Seek> JpegDecoder<R> {
             Predictor::RaRbRc3 => dispatch!(|ra, rb, rc| rb + ((ra - rc) >> 1)),
             Predictor::RaRb => dispatch!(|ra, rb, _| (ra + rb) / 2),
         }
+    }
+
+    #[cfg(feature = "rayon")]
+    fn decode_lossless_scan_huffman_parallel(
+        scan: &ScanData,
+        sw: usize,
+        sh: usize,
+        views: &[(usize, usize)],
+        buf: &mut [u16],
+        predictor: Predictor,
+        point_transform: u8,
+        default_prediction: i32,
+        ssss16_is_min: bool,
+        restart_interval: usize,
+        tables: &[HuffmanTable],
+    ) -> bool {
+        use rayon::prelude::*;
+
+        if restart_interval == 0 || sw == 0 || !restart_interval.is_multiple_of(sw) {
+            return false;
+        }
+        if sw.saturating_mul(sh) < PARALLEL_LOSSLESS_MIN_SAMPLES {
+            return false;
+        }
+        let rows_per_segment = restart_interval / sw;
+
+        let ncomp = views.len();
+        if ncomp == 0 || !views.iter().enumerate().all(|(i, &(off, stride))| off == i && stride == ncomp) {
+            return false;
+        }
+        if buf.len() < sw * sh * ncomp {
+            return false;
+        }
+
+        let starts = &scan.restart_offsets;
+        let expected = sh.div_ceil(rows_per_segment);
+        if starts.len() < 2 || starts.len() != expected {
+            return false;
+        }
+
+        let samples_per_segment = rows_per_segment * sw * ncomp;
+        let data = scan.data.as_slice();
+
+        buf[..sw * sh * ncomp].par_chunks_mut(samples_per_segment).enumerate().for_each(|(seg, out)| {
+            let begin = starts[seg];
+            let end = starts.get(seg + 1).copied().unwrap_or(data.len());
+            let rows = out.len() / (sw * ncomp);
+            if rows == 0 || begin >= end {
+                return;
+            }
+
+            let mut reader = JpegBitReader::new(&data[begin..end]);
+            let make = |i: usize| LosslessComponent {
+                pos: i,
+                stride: ncomp,
+                row_stride: sw * ncomp,
+                table: &tables[i],
+                ra: 0,
+                rb: 0,
+            };
+
+            macro_rules! run {
+                ($components:expr, $predict:expr) => {
+                    Self::lossless_huffman_loop(
+                        &mut reader,
+                        sw,
+                        rows * sw,
+                        out,
+                        0,
+                        point_transform,
+                        default_prediction,
+                        ssss16_is_min,
+                        $components,
+                        $predict,
+                    )
+                };
+            }
+
+            macro_rules! dispatch {
+                ($predict:expr) => {
+                    match ncomp {
+                        1 => run!([make(0)], $predict),
+                        2 => run!([make(0), make(1)], $predict),
+                        3 => run!([make(0), make(1), make(2)], $predict),
+                        4 => run!([make(0), make(1), make(2), make(3)], $predict),
+                        n => run!((0..n).map(make).collect::<Vec<_>>(), $predict),
+                    }
+                };
+            }
+
+            match predictor {
+                Predictor::NoPrediction => dispatch!(|_, _, _| 0),
+                Predictor::Ra => dispatch!(|ra, _, _| ra),
+                Predictor::Rb => dispatch!(|_, rb, _| rb),
+                Predictor::Rc => dispatch!(|_, _, rc| rc),
+                Predictor::RaRbRc1 => dispatch!(|ra, rb, rc| ra + rb - rc),
+                Predictor::RaRbRc2 => dispatch!(|ra, rb, rc| ra + ((rb - rc) >> 1)),
+                Predictor::RaRbRc3 => dispatch!(|ra, rb, rc| rb + ((ra - rc) >> 1)),
+                Predictor::RaRb => dispatch!(|ra, rb, _| (ra + rb) / 2),
+            }
+        });
+
+        true
     }
 
     fn lossless_huffman_loop<'t, C, F>(
@@ -3172,7 +3315,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         let window = reader.peek_unchecked(32);
-        let entry = unsafe { *table.fast_lookup.get_unchecked((window >> 23) as usize) };
+        let entry = unsafe { *table.fast_lookup.get_unchecked((window >> (32 - HUFF_PEEK_BITS)) as usize) };
         let ssss = if entry >> 16 != 0 {
             let len = entry & 0xFF;
             let ssss = (entry >> 8) & 0xFF;
@@ -3184,10 +3327,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
             reader.consume(len);
             ssss
         } else {
-            reader.consume(9);
-            let mut code = window >> 23;
+            reader.consume(HUFF_PEEK_BITS as u32);
+            let mut code = window >> (32 - HUFF_PEEK_BITS);
             let mut symbol = u32::MAX;
-            for i in 9..16 {
+            for i in HUFF_PEEK_BITS..16 {
                 code = (code << 1) | reader.read_bits_unchecked(1);
                 let first = unsafe { *table.first_code.get_unchecked(i) };
                 if first != u32::MAX {

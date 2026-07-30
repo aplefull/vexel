@@ -8,6 +8,9 @@ use crate::utils::error::VexelResult;
 use crate::utils::icc::ICCProfile;
 use crate::utils::limits::Limits;
 
+const MAX_DECOMPRESSED_ICC: usize = 64 * 1024 * 1024;
+const MAX_DECOMPRESSED_TEXT: usize = 16 * 1024 * 1024;
+
 pub struct ChunkReader;
 
 impl ChunkReader {
@@ -199,7 +202,7 @@ impl ChunkReader {
             num_read += 1;
         }
 
-        let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
+        let max_decompress = decompress_ceiling(compressed_profile.len(), MAX_DECOMPRESSED_ICC, limits);
         let profile_data = ZlibDecoder::from_slice(&compressed_profile).decode_with_max(max_decompress);
         limits.free(length_u32 as u64);
         limits.reserve_usize(profile_data.len())?;
@@ -758,7 +761,7 @@ impl ChunkReader {
         let compressed_text =
             if after_null + 1 < chunk_data.len() { chunk_data[after_null + 1..].to_vec() } else { Vec::new() };
 
-        let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
+        let max_decompress = decompress_ceiling(compressed_text.len(), MAX_DECOMPRESSED_TEXT, limits);
         let text_bytes = ZlibDecoder::from_slice(&compressed_text).decode_with_max(max_decompress);
         limits.free(length_u32 as u64);
         limits.reserve_usize(text_bytes.len() * 3)?;
@@ -821,7 +824,7 @@ impl ChunkReader {
                 log_warn!("Invalid compression method in iTXt chunk: {}", compression_method);
             }
 
-            let max_decompress = limits.max_alloc.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
+            let max_decompress = decompress_ceiling(text_bytes.len(), MAX_DECOMPRESSED_TEXT, limits);
             let decompressed = ZlibDecoder::from_slice(&text_bytes).decode_with_max(max_decompress);
             limits.free(length_u32 as u64);
             limits.reserve_usize(decompressed.len() * 3)?;
@@ -982,6 +985,14 @@ impl ChunkReader {
         });
 
         Ok(())
+    }
+}
+
+fn decompress_ceiling(compressed_len: usize, absolute_max: usize, limits: &Limits) -> usize {
+    let ceiling = compressed_len.saturating_mul(1024).max(64 * 1024).min(absolute_max);
+    match limits.max_alloc {
+        Some(budget) => ceiling.min(budget.min(usize::MAX as u64) as usize),
+        None => ceiling,
     }
 }
 

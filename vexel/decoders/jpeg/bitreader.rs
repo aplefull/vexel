@@ -19,13 +19,13 @@ impl<'a> JpegBitReader<'a> {
 
         if self.pos + 8 <= self.data.len() {
             let chunk = u64::from_be_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
-            let bytes = ((63 - self.bits) >> 3) as usize;
-            self.buf = (self.buf << (bytes * 8)) | (chunk >> (64 - bytes * 8));
-            self.pos += bytes;
-            self.bits += (bytes * 8) as u32;
+            self.buf |= chunk >> self.bits;
+            let bytes = (63 - self.bits) >> 3;
+            self.pos += bytes as usize;
+            self.bits |= 56;
         } else {
             while self.bits <= 56 && self.pos < self.data.len() {
-                self.buf = (self.buf << 8) | self.data[self.pos] as u64;
+                self.buf |= (self.data[self.pos] as u64) << (56 - self.bits);
                 self.pos += 1;
                 self.bits += 8;
             }
@@ -42,28 +42,32 @@ impl<'a> JpegBitReader<'a> {
 
     #[inline(always)]
     pub fn peek_unchecked(&self, n: u32) -> u32 {
-        ((self.buf >> (self.bits - n)) & ((1u64 << n) - 1)) as u32
+        (self.buf >> (64 - n)) as u32
     }
 
     #[inline(always)]
     pub fn read_bits_unchecked(&mut self, n: u32) -> u32 {
+        let v = (self.buf >> (64 - n)) as u32;
+        self.buf <<= n;
         self.bits -= n;
-        ((self.buf >> self.bits) & ((1u64 << n) - 1)) as u32
+        v
     }
 
     #[inline(always)]
-    pub fn peek9(&mut self) -> Option<u32> {
-        if self.bits < 9 {
+    pub fn peek_fast(&mut self) -> Option<u32> {
+        const N: u32 = crate::decoders::jpeg::types::HUFF_PEEK_BITS as u32;
+        if self.bits < N {
             self.refill();
-            if self.bits < 9 {
+            if self.bits < N {
                 return None;
             }
         }
-        Some(((self.buf >> (self.bits - 9)) & 0x1FF) as u32)
+        Some((self.buf >> (64 - N)) as u32)
     }
 
     #[inline(always)]
     pub fn consume(&mut self, n: u32) {
+        self.buf <<= n;
         self.bits -= n;
     }
 
@@ -78,8 +82,10 @@ impl<'a> JpegBitReader<'a> {
                 self.bits = n;
             }
         }
+        let v = (self.buf >> (64 - n)) as u32;
+        self.buf <<= n;
         self.bits -= n;
-        ((self.buf >> self.bits) & ((1u64 << n) - 1)) as u32
+        v
     }
 
     #[inline(always)]
