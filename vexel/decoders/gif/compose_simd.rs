@@ -1,6 +1,36 @@
+pub struct Palette {
+    colors: [u32; 256],
+    valid: usize,
+}
+
+impl Palette {
+    pub fn new(color_table: &[u8]) -> Palette {
+        let mut colors = [0u32; 256];
+        let valid = (color_table.len() / 3).min(256);
+
+        for i in 0..valid {
+            let r = color_table[i * 3] as u32;
+            let g = color_table[i * 3 + 1] as u32;
+            let b = color_table[i * 3 + 2] as u32;
+            colors[i] = r | (g << 8) | (b << 16) | (0xFF << 24);
+        }
+
+        Palette { colors, valid }
+    }
+
+    fn effective_transparent(&self, transparent_index: Option<u8>) -> Option<u8> {
+        match transparent_index {
+            Some(t) => Some(t),
+            None if self.valid < 256 => Some(self.valid as u8),
+            None => None,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn compose_frame(
     indices: &[u8],
-    color_table: &[u8],
+    palette: &Palette,
     transparent_index: Option<u8>,
     frame_left: usize,
     frame_top: usize,
@@ -10,85 +40,14 @@ pub fn compose_frame(
     canvas_height: usize,
     canvas: &mut [u8],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") {
-        return unsafe {
-            compose_frame_avx2(
-                indices,
-                color_table,
-                transparent_index,
-                frame_left,
-                frame_top,
-                frame_width,
-                frame_height,
-                canvas_width,
-                canvas_height,
-                canvas,
-            )
-        };
+    if !(canvas.as_ptr() as usize).is_multiple_of(4) || !canvas.len().is_multiple_of(4) {
+        return;
     }
-
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return compose_frame_wasm(
-        indices,
-        color_table,
-        transparent_index,
-        frame_left,
-        frame_top,
-        frame_width,
-        frame_height,
-        canvas_width,
-        canvas_height,
-        canvas,
-    );
-
-    compose_frame_scalar(
-        indices,
-        color_table,
-        transparent_index,
-        frame_left,
-        frame_top,
-        frame_width,
-        frame_height,
-        canvas_width,
-        canvas_height,
-        canvas,
-    );
-}
-
-fn build_palette(color_table: &[u8]) -> [u32; 256] {
-    let mut palette = [0u32; 256];
-    let valid = (color_table.len() / 3).min(256);
-    for i in 0..valid {
-        let r = color_table[i * 3] as u32;
-        let g = color_table[i * 3 + 1] as u32;
-        let b = color_table[i * 3 + 2] as u32;
-        palette[i] = r | (g << 8) | (b << 16) | (0xFF << 24);
-    }
-    palette
-}
-
-// ─── Scalar ───────────────────────────────────────────────────
-
-fn compose_frame_scalar(
-    indices: &[u8],
-    color_table: &[u8],
-    transparent_index: Option<u8>,
-    frame_left: usize,
-    frame_top: usize,
-    frame_width: usize,
-    frame_height: usize,
-    canvas_width: usize,
-    canvas_height: usize,
-    canvas: &mut [u8],
-) {
-    let palette = build_palette(color_table);
-    let valid = (color_table.len() / 3).min(256);
 
     let clamped_h = frame_height.min(canvas_height.saturating_sub(frame_top));
     let clamped_w = frame_width.min(canvas_width.saturating_sub(frame_left));
 
-    if !(canvas.as_ptr() as usize).is_multiple_of(4) || !canvas.len().is_multiple_of(4) {
+    if clamped_w == 0 || clamped_h == 0 {
         return;
     }
 
@@ -102,22 +61,42 @@ fn compose_frame_scalar(
             continue;
         }
 
-        let index_row = &indices[index_row_start..index_row_start + clamped_w];
-        let canvas_row = &mut canvas_u32[canvas_row_start..canvas_row_start + clamped_w];
+        let src = &indices[index_row_start..index_row_start + clamped_w];
+        let dst = &mut canvas_u32[canvas_row_start..canvas_row_start + clamped_w];
 
-        match transparent_index {
-            None => {
-                for (idx, px) in index_row.iter().zip(canvas_row.iter_mut()) {
-                    if (*idx as usize) < valid {
-                        *px = palette[*idx as usize];
-                    }
-                }
+        compose_row(src, dst, palette, transparent_index);
+    }
+}
+
+fn compose_row(src: &[u8], dst: &mut [u32], palette: &Palette, transparent_index: Option<u8>) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        return unsafe { compose_row_avx2(src, dst, palette, transparent_index) };
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    return compose_row_wasm(src, dst, palette, transparent_index);
+
+    #[allow(unreachable_code)]
+    compose_row_scalar(src, dst, palette, transparent_index)
+}
+
+// ─── Scalar ───────────────────────────────────────────────────
+
+fn compose_row_scalar(src: &[u8], dst: &mut [u32], palette: &Palette, transparent_index: Option<u8>) {
+    let colors = &palette.colors;
+
+    match palette.effective_transparent(transparent_index) {
+        None => {
+            for (idx, px) in src.iter().zip(dst.iter_mut()) {
+                *px = colors[*idx as usize];
             }
-            Some(transparent) => {
-                for (idx, px) in index_row.iter().zip(canvas_row.iter_mut()) {
-                    if *idx != transparent && (*idx as usize) < valid {
-                        *px = palette[*idx as usize];
-                    }
+        }
+        Some(transparent) => {
+            let valid = palette.valid;
+            for (idx, px) in src.iter().zip(dst.iter_mut()) {
+                if *idx != transparent && (*idx as usize) < valid {
+                    *px = colors[*idx as usize];
                 }
             }
         }
@@ -128,216 +107,207 @@ fn compose_frame_scalar(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn compose_frame_avx2(
-    indices: &[u8],
-    color_table: &[u8],
-    transparent_index: Option<u8>,
-    frame_left: usize,
-    frame_top: usize,
-    frame_width: usize,
-    frame_height: usize,
-    canvas_width: usize,
-    canvas_height: usize,
-    canvas: &mut [u8],
-) {
+#[inline]
+unsafe fn lookup8(colors: *const u32, src: *const u8) -> std::arch::x86_64::__m256i {
     use std::arch::x86_64::*;
 
-    let palette = build_palette(color_table);
-    let valid = (color_table.len() / 3).min(256);
+    let c0 = *colors.add(*src as usize) as i32;
+    let c1 = *colors.add(*src.add(1) as usize) as i32;
+    let c2 = *colors.add(*src.add(2) as usize) as i32;
+    let c3 = *colors.add(*src.add(3) as usize) as i32;
+    let c4 = *colors.add(*src.add(4) as usize) as i32;
+    let c5 = *colors.add(*src.add(5) as usize) as i32;
+    let c6 = *colors.add(*src.add(6) as usize) as i32;
+    let c7 = *colors.add(*src.add(7) as usize) as i32;
 
-    let clamped_h = frame_height.min(canvas_height.saturating_sub(frame_top));
-    let clamped_w = frame_width.min(canvas_width.saturating_sub(frame_left));
+    _mm256_set_epi32(c7, c6, c5, c4, c3, c2, c1, c0)
+}
 
-    if !(canvas.as_ptr() as usize).is_multiple_of(4) || !canvas.len().is_multiple_of(4) {
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn compose_row_avx2(src: &[u8], dst: &mut [u32], palette: &Palette, transparent_index: Option<u8>) {
+    use std::arch::x86_64::*;
+
+    let len = src.len().min(dst.len());
+    let colors = palette.colors.as_ptr();
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+
+    let Some(transparent) = palette.effective_transparent(transparent_index) else {
+        let mut x = 0;
+        while x + 32 <= len {
+            let c0 = lookup8(colors, src_ptr.add(x));
+            let c1 = lookup8(colors, src_ptr.add(x + 8));
+            let c2 = lookup8(colors, src_ptr.add(x + 16));
+            let c3 = lookup8(colors, src_ptr.add(x + 24));
+
+            _mm256_storeu_si256(dst_ptr.add(x) as *mut __m256i, c0);
+            _mm256_storeu_si256(dst_ptr.add(x + 8) as *mut __m256i, c1);
+            _mm256_storeu_si256(dst_ptr.add(x + 16) as *mut __m256i, c2);
+            _mm256_storeu_si256(dst_ptr.add(x + 24) as *mut __m256i, c3);
+            x += 32;
+        }
+
+        while x + 8 <= len {
+            _mm256_storeu_si256(dst_ptr.add(x) as *mut __m256i, lookup8(colors, src_ptr.add(x)));
+            x += 8;
+        }
+
+        while x < len {
+            *dst_ptr.add(x) = *colors.add(*src_ptr.add(x) as usize);
+            x += 1;
+        }
+
         return;
-    }
+    };
 
-    let canvas_u32 = std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4);
+    let v_transparent = _mm256_set1_epi8(transparent as i8);
+    let mut x = 0;
 
-    let palette_ptr = palette.as_ptr() as *const i32;
-    let v_scale = _mm256_set1_epi32(4);
+    while x + 32 <= len {
+        let raw = _mm256_loadu_si256(src_ptr.add(x) as *const __m256i);
+        let eq = _mm256_cmpeq_epi8(raw, v_transparent);
+        let mask = _mm256_movemask_epi8(eq) as u32;
 
-    for y in 0..clamped_h {
-        let index_row_start = y * frame_width;
-        let canvas_row_start = (frame_top + y) * canvas_width + frame_left;
-
-        if index_row_start + clamped_w > indices.len() || canvas_row_start + clamped_w > canvas_u32.len() {
+        if mask == u32::MAX {
+            x += 32;
             continue;
         }
 
-        let index_row = &indices[index_row_start..index_row_start + clamped_w];
-        let canvas_row = &mut canvas_u32[canvas_row_start..canvas_row_start + clamped_w];
+        let c0 = lookup8(colors, src_ptr.add(x));
+        let c1 = lookup8(colors, src_ptr.add(x + 8));
+        let c2 = lookup8(colors, src_ptr.add(x + 16));
+        let c3 = lookup8(colors, src_ptr.add(x + 24));
 
-        let mut x = 0usize;
+        if mask == 0 {
+            _mm256_storeu_si256(dst_ptr.add(x) as *mut __m256i, c0);
+            _mm256_storeu_si256(dst_ptr.add(x + 8) as *mut __m256i, c1);
+            _mm256_storeu_si256(dst_ptr.add(x + 16) as *mut __m256i, c2);
+            _mm256_storeu_si256(dst_ptr.add(x + 24) as *mut __m256i, c3);
+            x += 32;
+            continue;
+        }
 
-        match transparent_index {
-            None => {
-                while x + 8 <= clamped_w {
-                    let idx_ptr = index_row.as_ptr().add(x);
+        let keep0 = _mm256_cvtepi8_epi32(_mm256_castsi256_si128(eq));
+        let keep1 = _mm256_cvtepi8_epi32(_mm_srli_si128(_mm256_castsi256_si128(eq), 8));
+        let hi = _mm256_extracti128_si256(eq, 1);
+        let keep2 = _mm256_cvtepi8_epi32(hi);
+        let keep3 = _mm256_cvtepi8_epi32(_mm_srli_si128(hi, 8));
 
-                    let idx0 = *idx_ptr as i32;
-                    let idx1 = *idx_ptr.add(1) as i32;
-                    let idx2 = *idx_ptr.add(2) as i32;
-                    let idx3 = *idx_ptr.add(3) as i32;
-                    let idx4 = *idx_ptr.add(4) as i32;
-                    let idx5 = *idx_ptr.add(5) as i32;
-                    let idx6 = *idx_ptr.add(6) as i32;
-                    let idx7 = *idx_ptr.add(7) as i32;
+        blend_store(dst_ptr.add(x), c0, keep0);
+        blend_store(dst_ptr.add(x + 8), c1, keep1);
+        blend_store(dst_ptr.add(x + 16), c2, keep2);
+        blend_store(dst_ptr.add(x + 24), c3, keep3);
+        x += 32;
+    }
 
-                    let vindex = _mm256_set_epi32(idx7, idx6, idx5, idx4, idx3, idx2, idx1, idx0);
-                    let voffsets = _mm256_mullo_epi32(vindex, v_scale);
-                    let colors = _mm256_i32gather_epi32(palette_ptr, voffsets, 1);
-                    _mm256_storeu_si256(canvas_row.as_mut_ptr().add(x) as *mut __m256i, colors);
-                    x += 8;
-                }
+    while x + 8 <= len {
+        let raw = _mm_loadl_epi64(src_ptr.add(x) as *const __m128i);
+        let eq = _mm_cmpeq_epi8(raw, _mm256_castsi256_si128(v_transparent));
+        let mask = _mm_movemask_epi8(eq) as u32 & 0xFF;
 
-                while x < clamped_w {
-                    let idx = index_row[x] as usize;
-                    if idx < valid {
-                        canvas_row[x] = palette[idx];
-                    }
-                    x += 1;
-                }
-            }
-            Some(transparent) => {
-                let v_transparent = _mm256_set1_epi32(transparent as i32);
-
-                while x + 8 <= clamped_w {
-                    let idx_ptr = index_row.as_ptr().add(x);
-
-                    let idx0 = *idx_ptr as i32;
-                    let idx1 = *idx_ptr.add(1) as i32;
-                    let idx2 = *idx_ptr.add(2) as i32;
-                    let idx3 = *idx_ptr.add(3) as i32;
-                    let idx4 = *idx_ptr.add(4) as i32;
-                    let idx5 = *idx_ptr.add(5) as i32;
-                    let idx6 = *idx_ptr.add(6) as i32;
-                    let idx7 = *idx_ptr.add(7) as i32;
-
-                    let vindex = _mm256_set_epi32(idx7, idx6, idx5, idx4, idx3, idx2, idx1, idx0);
-
-                    let not_transparent =
-                        _mm256_andnot_si256(_mm256_cmpeq_epi32(vindex, v_transparent), _mm256_set1_epi32(-1));
-
-                    let voffsets = _mm256_mullo_epi32(vindex, v_scale);
-                    let colors = _mm256_i32gather_epi32(palette_ptr, voffsets, 1);
-
-                    let existing = _mm256_loadu_si256(canvas_row.as_ptr().add(x) as *const __m256i);
-                    let blended = _mm256_blendv_epi8(existing, colors, not_transparent);
-                    _mm256_storeu_si256(canvas_row.as_mut_ptr().add(x) as *mut __m256i, blended);
-                    x += 8;
-                }
-
-                while x < clamped_w {
-                    let idx = index_row[x];
-                    if idx != transparent && (idx as usize) < valid {
-                        canvas_row[x] = palette[idx as usize];
-                    }
-                    x += 1;
-                }
+        if mask != 0xFF {
+            let c = lookup8(colors, src_ptr.add(x));
+            if mask == 0 {
+                _mm256_storeu_si256(dst_ptr.add(x) as *mut __m256i, c);
+            } else {
+                blend_store(dst_ptr.add(x), c, _mm256_cvtepi8_epi32(eq));
             }
         }
+
+        x += 8;
     }
+
+    while x < len {
+        let idx = *src_ptr.add(x);
+        if idx != transparent {
+            *dst_ptr.add(x) = *colors.add(idx as usize);
+        }
+        x += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn blend_store(dst: *mut u32, colors: std::arch::x86_64::__m256i, keep: std::arch::x86_64::__m256i) {
+    use std::arch::x86_64::*;
+
+    let existing = _mm256_loadu_si256(dst as *const __m256i);
+    _mm256_storeu_si256(dst as *mut __m256i, _mm256_blendv_epi8(colors, existing, keep));
 }
 
 // ─── WASM SIMD128 ─────────────────────────────────────────────
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn compose_frame_wasm(
-    indices: &[u8],
-    color_table: &[u8],
-    transparent_index: Option<u8>,
-    frame_left: usize,
-    frame_top: usize,
-    frame_width: usize,
-    frame_height: usize,
-    canvas_width: usize,
-    canvas_height: usize,
-    canvas: &mut [u8],
-) {
+fn compose_row_wasm(src: &[u8], dst: &mut [u32], palette: &Palette, transparent_index: Option<u8>) {
     use std::arch::wasm32::*;
 
-    let palette = build_palette(color_table);
-    let valid = (color_table.len() / 3).min(256);
+    let len = src.len().min(dst.len());
+    let colors = &palette.colors;
 
-    let clamped_h = frame_height.min(canvas_height.saturating_sub(frame_top));
-    let clamped_w = frame_width.min(canvas_width.saturating_sub(frame_left));
+    let Some(transparent) = palette.effective_transparent(transparent_index) else {
+        let mut x = 0;
+        while x + 4 <= len {
+            let c = u32x4(
+                colors[src[x] as usize],
+                colors[src[x + 1] as usize],
+                colors[src[x + 2] as usize],
+                colors[src[x + 3] as usize],
+            );
+            unsafe { v128_store(dst.as_mut_ptr().add(x) as *mut v128, c) };
+            x += 4;
+        }
 
-    if canvas.as_ptr() as usize % 4 != 0 || canvas.len() % 4 != 0 {
+        while x < len {
+            dst[x] = colors[src[x] as usize];
+            x += 1;
+        }
+
         return;
-    }
+    };
 
-    let canvas_u32 = unsafe { std::slice::from_raw_parts_mut(canvas.as_mut_ptr() as *mut u32, canvas.len() / 4) };
+    let v_transparent = u8x16_splat(transparent);
+    let mut x = 0;
 
-    for y in 0..clamped_h {
-        let index_row_start = y * frame_width;
-        let canvas_row_start = (frame_top + y) * canvas_width + frame_left;
+    while x + 16 <= len {
+        let raw = unsafe { v128_load(src.as_ptr().add(x) as *const v128) };
+        let eq = u8x16_eq(raw, v_transparent);
 
-        if index_row_start + clamped_w > indices.len() || canvas_row_start + clamped_w > canvas_u32.len() {
+        if !v128_any_true(eq) {
+            for g in 0..4 {
+                let b = x + g * 4;
+                let c = u32x4(
+                    colors[src[b] as usize],
+                    colors[src[b + 1] as usize],
+                    colors[src[b + 2] as usize],
+                    colors[src[b + 3] as usize],
+                );
+                unsafe { v128_store(dst.as_mut_ptr().add(b) as *mut v128, c) };
+            }
+            x += 16;
             continue;
         }
 
-        let index_row = &indices[index_row_start..index_row_start + clamped_w];
-        let canvas_row = &mut canvas_u32[canvas_row_start..canvas_row_start + clamped_w];
+        if u8x16_all_true(eq) {
+            x += 16;
+            continue;
+        }
 
-        let mut x = 0usize;
-
-        match transparent_index {
-            None => {
-                while x + 4 <= clamped_w {
-                    let p0 = palette[index_row[x] as usize];
-                    let p1 = palette[index_row[x + 1] as usize];
-                    let p2 = palette[index_row[x + 2] as usize];
-                    let p3 = palette[index_row[x + 3] as usize];
-                    let colors = u32x4(p0, p1, p2, p3);
-                    unsafe {
-                        v128_store(canvas_row.as_mut_ptr().add(x) as *mut v128, colors);
-                    }
-                    x += 4;
-                }
-
-                while x < clamped_w {
-                    let idx = index_row[x] as usize;
-                    if idx < valid {
-                        canvas_row[x] = palette[idx];
-                    }
-                    x += 1;
-                }
-            }
-            Some(transparent) => {
-                let v_transparent = u32x4_splat(transparent as u32);
-
-                while x + 4 <= clamped_w {
-                    let i0 = index_row[x] as u32;
-                    let i1 = index_row[x + 1] as u32;
-                    let i2 = index_row[x + 2] as u32;
-                    let i3 = index_row[x + 3] as u32;
-
-                    let vindex = u32x4(i0, i1, i2, i3);
-                    let mask = u32x4_eq(vindex, v_transparent);
-
-                    let p0 = palette[i0 as usize];
-                    let p1 = palette[i1 as usize];
-                    let p2 = palette[i2 as usize];
-                    let p3 = palette[i3 as usize];
-                    let colors = u32x4(p0, p1, p2, p3);
-
-                    let existing = unsafe { v128_load(canvas_row.as_ptr().add(x) as *const v128) };
-                    let blended = v128_bitselect(existing, colors, mask);
-                    unsafe {
-                        v128_store(canvas_row.as_mut_ptr().add(x) as *mut v128, blended);
-                    }
-                    x += 4;
-                }
-
-                while x < clamped_w {
-                    let idx = index_row[x];
-                    if idx != transparent && (idx as usize) < valid {
-                        canvas_row[x] = palette[idx as usize];
-                    }
-                    x += 1;
-                }
+        for i in x..x + 16 {
+            let idx = src[i];
+            if idx != transparent {
+                dst[i] = colors[idx as usize];
             }
         }
+        x += 16;
+    }
+
+    while x < len {
+        let idx = src[x];
+        if idx != transparent {
+            dst[x] = colors[idx as usize];
+        }
+        x += 1;
     }
 }

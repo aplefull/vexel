@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
 
-use super::compose_simd::compose_frame;
+use super::compose_simd::{compose_frame, Palette};
 use super::lzw::decompress_lzw;
 use super::types::{
     ApplicationExtension, DisposalMethod, GifApplicationExtensionData, GifColorTableInfo, GifCommentData, GifDecoder,
@@ -684,8 +684,18 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
         let needs_scratch = self.frames.iter().any(|f| matches!(f.disposal_method, DisposalMethod::Previous));
         let composer = GifComposer::new(self.width, self.height, needs_scratch, &mut self.limits)?;
+        let frames = std::sync::Arc::new(std::mem::take(&mut self.frames));
 
-        Ok(GifFrames { decoder: self, composer, next_index: 0, batch: VecDeque::new(), exhausted: false })
+        Ok(GifFrames {
+            decoder: self,
+            frames,
+            composer,
+            next_index: 0,
+            batch: VecDeque::new(),
+            decoded_upto: 0,
+            pending: None,
+            exhausted: false,
+        })
     }
 }
 
@@ -694,6 +704,8 @@ struct GifComposer {
     height: u32,
     canvas: Vec<u8>,
     scratch: Vec<u8>,
+    palette: Palette,
+    palette_source: Vec<u8>,
 }
 
 impl GifComposer {
@@ -709,7 +721,15 @@ impl GifComposer {
             Vec::new()
         };
 
-        Ok(GifComposer { width, height, canvas, scratch })
+        Ok(GifComposer { width, height, canvas, scratch, palette: Palette::new(&[]), palette_source: Vec::new() })
+    }
+
+    fn sync_palette(&mut self, color_table: &[u8]) {
+        if self.palette_source != color_table {
+            self.palette = Palette::new(color_table);
+            self.palette_source.clear();
+            self.palette_source.extend_from_slice(color_table);
+        }
     }
 
     fn compose(&mut self, frame: &GifFrameInfo, indices: &[u8], global_color_table: &[u8]) -> ImageFrame {
@@ -717,24 +737,28 @@ impl GifComposer {
             self.scratch.copy_from_slice(&self.canvas);
         }
 
-        let color_table = if frame.local_color_table_flag { &frame.local_color_table } else { global_color_table };
+        let color_table =
+            if frame.local_color_table_flag { frame.local_color_table.as_slice() } else { global_color_table };
+        self.sync_palette(color_table);
+
+        let width = self.width as usize;
+        let height = self.height as usize;
 
         compose_frame(
             indices,
-            color_table,
+            &self.palette,
             frame.transparent_index,
             frame.left as usize,
             frame.top as usize,
             frame.width as usize,
             frame.height as usize,
-            self.width as usize,
-            self.height as usize,
+            width,
+            height,
             &mut self.canvas,
         );
 
-        let mut pixels = PixelData::RGBA8(self.canvas.clone());
-        pixels.correct_pixels(self.width, self.height);
-        let composed = ImageFrame::new(self.width, self.height, pixels, frame.delay as u32);
+        let composed =
+            ImageFrame::new(self.width, self.height, PixelData::RGBA8(self.canvas.clone()), frame.delay as u32);
 
         self.dispose(frame);
 
@@ -769,28 +793,62 @@ const LOOKAHEAD_BATCH: usize = 16;
 
 pub(crate) struct GifFrames<R: Read + Seek + Sync> {
     decoder: GifDecoder<R>,
+    frames: std::sync::Arc<Vec<GifFrameInfo>>,
     composer: GifComposer,
     next_index: usize,
     batch: VecDeque<Vec<u8>>,
+    decoded_upto: usize,
+    pending: Option<std::sync::mpsc::Receiver<VexelResult<Vec<Vec<u8>>>>>,
     exhausted: bool,
 }
 
 impl<R: Read + Seek + Sync> GifFrames<R> {
-    fn fill_batch(&mut self) -> VexelResult<()> {
-        let end = (self.next_index + LOOKAHEAD_BATCH).min(self.decoder.frames.len());
-        let pending = &self.decoder.frames[self.next_index..end];
-
+    fn decode_range(frames: &[GifFrameInfo]) -> VexelResult<Vec<Vec<u8>>> {
         #[cfg(feature = "rayon")]
-        let decoded: Vec<Vec<u8>> = {
+        {
             use rayon::prelude::*;
-            pending.par_iter().map(GifDecoder::<R>::decode_frame_indices).collect::<VexelResult<Vec<_>>>()?
-        };
+            frames.par_iter().map(GifDecoder::<R>::decode_frame_indices).collect()
+        }
 
         #[cfg(not(feature = "rayon"))]
-        let decoded: Vec<Vec<u8>> =
-            pending.iter().map(GifDecoder::<R>::decode_frame_indices).collect::<VexelResult<Vec<_>>>()?;
+        frames.iter().map(GifDecoder::<R>::decode_frame_indices).collect()
+    }
 
-        self.batch = decoded.into();
+    #[cfg(feature = "rayon")]
+    fn start_prefetch(&mut self) {
+        if self.pending.is_some() || self.decoded_upto >= self.frames.len() {
+            return;
+        }
+
+        let start = self.decoded_upto;
+        let end = (start + LOOKAHEAD_BATCH).min(self.frames.len());
+        self.decoded_upto = end;
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.pending = Some(rx);
+
+        let frames = self.frames.clone();
+        rayon::spawn(move || {
+            let _ = tx.send(Self::decode_range(&frames[start..end]));
+        });
+    }
+
+    fn fill_batch(&mut self) -> VexelResult<()> {
+        #[cfg(feature = "rayon")]
+        if let Some(rx) = self.pending.take() {
+            let decoded = rx.recv().map_err(|_| VexelError::Custom("GIF prefetch worker disappeared".into()))??;
+            self.batch = decoded.into();
+            self.start_prefetch();
+            return Ok(());
+        }
+
+        let start = self.next_index;
+        let end = (start + LOOKAHEAD_BATCH).min(self.frames.len());
+        self.decoded_upto = end;
+        self.batch = Self::decode_range(&self.frames[start..end])?.into();
+
+        #[cfg(feature = "rayon")]
+        self.start_prefetch();
 
         Ok(())
     }
@@ -798,7 +856,7 @@ impl<R: Read + Seek + Sync> GifFrames<R> {
 
 impl<R: Read + Seek + Sync> FrameSource for GifFrames<R> {
     fn next_frame(&mut self) -> VexelResult<Option<ImageFrame>> {
-        if self.exhausted || self.next_index >= self.decoder.frames.len() {
+        if self.exhausted || self.next_index >= self.frames.len() {
             return Ok(None);
         }
 
@@ -819,7 +877,7 @@ impl<R: Read + Seek + Sync> FrameSource for GifFrames<R> {
             return Ok(None);
         };
 
-        let frame = &self.decoder.frames[self.next_index];
+        let frame = &self.frames[self.next_index];
         let composed = self.composer.compose(frame, &indices, &self.decoder.global_color_table);
         self.next_index += 1;
 
@@ -827,6 +885,6 @@ impl<R: Read + Seek + Sync> FrameSource for GifFrames<R> {
     }
 
     fn frame_count_hint(&self) -> Option<usize> {
-        Some(self.decoder.frames.len().saturating_sub(self.next_index))
+        Some(self.frames.len().saturating_sub(self.next_index))
     }
 }
