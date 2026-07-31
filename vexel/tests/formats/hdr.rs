@@ -7,24 +7,28 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "hdr/common.hdr",
             validation: None,
             comparison: Comparison::Exact { reference_path: "hdr/common.avif" },
+            ..Default::default()
         },
         TestCase {
             name: "HDR forest_path",
             path: "hdr/forest_path.hdr",
             validation: None,
             comparison: Comparison::Exact { reference_path: "hdr/forest_path.avif" },
+            ..Default::default()
         },
         TestCase {
             name: "HDR venice_sunset_4k",
             path: "hdr/venice_sunset_4k.hdr",
             validation: None,
             comparison: Comparison::Exact { reference_path: "hdr/venice_sunset_4k.avif" },
+            ..Default::default()
         },
         TestCase {
             name: "HDR venice_sunset_8k",
             path: "hdr/venice_sunset_8k.hdr",
             validation: None,
             comparison: Comparison::Exact { reference_path: "hdr/venice_sunset_8k.avif" },
+            ..Default::default()
         },
     ]
 }

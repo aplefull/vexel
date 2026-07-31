@@ -14,7 +14,7 @@ use jpegxl_sys::encoder::encode::{
     JxlEncoderSetFrameHeader, JxlEncoderSetFrameLossless, JxlEncoderStatus, JxlEncoderUseContainer,
 };
 use jpegxl_sys::metadata::codestream_header::{JxlAnimationHeader, JxlBasicInfo};
-use vexel::{Image, ImageFrame, PixelData};
+use vexel::{Frames, Image, ImageFrame, PixelData};
 use webp::{AnimEncoder, AnimFrame, WebPConfig};
 
 fn scale_to_u16(value: f64) -> u16 {
@@ -71,8 +71,8 @@ pub struct Writer {}
 
 impl Writer {
     pub fn write_jxl(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
-        let frames: Vec<&ImageFrame> = image.frames().iter().collect();
-        Writer::encode_jxl_file(output_path, image.width(), image.height(), &frames)
+        let frame = ImageFrame::new_still(image.width(), image.height(), image.pixels().clone());
+        Writer::encode_jxl_file(output_path, image.width(), image.height(), frame, &mut std::iter::empty(), false)
     }
 
     pub fn write_jxl_pages(output_path: &PathBuf, pages: &[Image]) -> Result<(), Error> {
@@ -80,48 +80,45 @@ impl Writer {
             return Err(Error::new(ErrorKind::InvalidData, "no pages to write"));
         }
 
-        let mut all_frames = pages.iter().flat_map(|page| page.frames());
-        let first_format = all_frames.next().map(|frame| frame.pixel_format());
-        let uniform = match &first_format {
-            Some(format) => all_frames.all(|frame| frame.pixel_format() == *format),
-            None => return Err(Error::new(ErrorKind::InvalidData, "no frames to write")),
-        };
+        let first_format = pages[0].pixel_format();
+        let uniform = pages.iter().all(|page| page.pixel_format() == first_format);
 
-        let converted: Vec<ImageFrame>;
-        let frames: Vec<&ImageFrame> = if uniform {
-            pages.iter().flat_map(|page| page.frames()).collect()
+        let frames: Vec<ImageFrame> = if uniform {
+            pages.iter().map(|page| ImageFrame::new_still(page.width(), page.height(), page.pixels().clone())).collect()
         } else {
-            let any_alpha = pages.iter().flat_map(|page| page.frames()).any(|frame| frame.has_alpha());
+            let any_alpha = pages.iter().any(|page| page.has_alpha());
             eprintln!(
                 "Warning: pages have differing pixel formats, converting all to {}",
                 if any_alpha { "RGBA8" } else { "RGB8" }
             );
-            converted = pages
+            pages
                 .iter()
-                .flat_map(|page| page.frames())
-                .map(|frame| {
-                    let frame = frame.clone();
-                    if any_alpha {
-                        frame.into_rgba8()
-                    } else {
-                        frame.into_rgb8()
-                    }
+                .map(|page| {
+                    let pixels =
+                        if any_alpha { page.pixels().clone().into_rgba8() } else { page.pixels().clone().into_rgb8() };
+                    ImageFrame::new_still(page.width(), page.height(), pixels)
                 })
-                .collect();
-            converted.iter().collect()
+                .collect()
         };
 
         let canvas_width = frames.iter().map(|frame| frame.width()).max().unwrap_or(0);
         let canvas_height = frames.iter().map(|frame| frame.height()).max().unwrap_or(0);
 
-        Writer::encode_jxl_file(output_path, canvas_width, canvas_height, &frames)
+        let is_animated = frames.len() > 1;
+        let mut frames = frames.into_iter().map(Ok);
+        let first =
+            frames.next().transpose()?.ok_or_else(|| Error::new(ErrorKind::InvalidData, "no pages to write"))?;
+
+        Writer::encode_jxl_file(output_path, canvas_width, canvas_height, first, &mut frames, is_animated)
     }
 
     fn encode_jxl_file(
         output_path: &PathBuf,
         canvas_width: u32,
         canvas_height: u32,
-        frames: &[&ImageFrame],
+        first_frame: ImageFrame,
+        rest: &mut dyn Iterator<Item = Result<ImageFrame, Error>>,
+        is_animated: bool,
     ) -> Result<(), Error> {
         let compressed = unsafe {
             let encoder = JxlEncoderCreate(std::ptr::null());
@@ -129,7 +126,7 @@ impl Writer {
                 return Err(Error::other("failed to create JXL encoder"));
             }
 
-            let result = jxl_encode(encoder, canvas_width, canvas_height, frames);
+            let result = jxl_encode(encoder, canvas_width, canvas_height, first_frame, rest, is_animated);
 
             JxlEncoderDestroy(encoder);
 
@@ -143,33 +140,75 @@ impl Writer {
         Ok(())
     }
 
+    fn write_jxl_animation(output_path: &PathBuf, frames: Frames<'_>) -> Result<(), Error> {
+        let is_animated = frames.frame_count_hint().is_none_or(|count| count > 1);
+
+        let mut frames = frames.map(|frame| frame.map_err(Error::other));
+        let first =
+            frames.next().transpose()?.ok_or_else(|| Error::new(ErrorKind::InvalidData, "no frames to write"))?;
+
+        let (width, height) = (first.width(), first.height());
+
+        Writer::encode_jxl_file(output_path, width, height, first, &mut frames, is_animated)
+    }
+
     pub fn write_webp(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
         let width = image.width();
         let height = image.height();
-
         let has_alpha = image.has_alpha();
-        let mut timestamp_ms = 0i32;
-        let pixel_bufs: Vec<(Cow<[u8]>, i32)> = image
-            .frames()
-            .iter()
-            .map(|frame| {
-                let delta = if frame.delay() == 0 { 1 } else { frame.delay() as i32 };
-                timestamp_ms += delta;
-                let pixels: Cow<[u8]> = match (has_alpha, frame.pixels()) {
-                    (true, PixelData::RGBA8(p)) => Cow::Borrowed(p.as_slice()),
-                    (true, other) => Cow::Owned(other.clone().into_rgba8_bytes()),
-                    (false, PixelData::RGB8(p)) => Cow::Borrowed(p.as_slice()),
-                    (false, other) => Cow::Owned(other.clone().into_rgb8_bytes()),
-                };
-                (pixels, timestamp_ms)
-            })
-            .collect();
+
+        let pixels: Cow<[u8]> = match (has_alpha, image.pixels()) {
+            (true, PixelData::RGBA8(p)) => Cow::Borrowed(p.as_slice()),
+            (true, other) => Cow::Owned(other.clone().into_rgba8_bytes()),
+            (false, PixelData::RGB8(p)) => Cow::Borrowed(p.as_slice()),
+            (false, other) => Cow::Owned(other.clone().into_rgb8_bytes()),
+        };
 
         let mut config = WebPConfig::new().unwrap();
         config.lossless = 1i32;
 
         let mut encoder = AnimEncoder::new(width, height, &config);
+        let anim_frame = if has_alpha {
+            AnimFrame::from_rgba(&pixels, width, height, 1)
+        } else {
+            AnimFrame::from_rgb(&pixels, width, height, 1)
+        };
+        encoder.add_frame(anim_frame);
 
+        let data = encoder.encode();
+
+        let mut file = File::create(output_path)?;
+        file.write_all(&data)?;
+
+        Ok(())
+    }
+
+    fn write_webp_animation(output_path: &PathBuf, frames: Frames<'_>) -> Result<(), Error> {
+        let mut config = WebPConfig::new().unwrap();
+        config.lossless = 1i32;
+
+        let mut timestamp_ms = 0i32;
+        let mut canvas: Option<(u32, u32, bool)> = None;
+        let mut pixel_bufs: Vec<(Vec<u8>, i32)> = Vec::new();
+
+        for frame in frames {
+            let frame = frame.map_err(Error::other)?;
+            let (_, _, has_alpha) = *canvas.get_or_insert((frame.width(), frame.height(), frame.has_alpha()));
+
+            let delta = if frame.delay() == 0 { 1 } else { frame.delay() as i32 };
+            timestamp_ms += delta;
+
+            let pixels =
+                if has_alpha { frame.into_pixels().into_rgba8_bytes() } else { frame.into_pixels().into_rgb8_bytes() };
+
+            pixel_bufs.push((pixels, timestamp_ms));
+        }
+
+        let Some((width, height, has_alpha)) = canvas else {
+            return Err(Error::new(ErrorKind::InvalidData, "no frames to write"));
+        };
+
+        let mut encoder = AnimEncoder::new(width, height, &config);
         for (pixels, ts) in &pixel_bufs {
             let anim_frame = if has_alpha {
                 AnimFrame::from_rgba(pixels, width, height, *ts)
@@ -191,7 +230,7 @@ impl Writer {
         let width = image.width();
         let height = image.height();
 
-        let (meta, payload): (&str, Cow<[u8]>) = match image.frames()[0].pixels() {
+        let (meta, payload): (&str, Cow<[u8]>) = match image.pixels() {
             PixelData::RGB8(p) => ("DEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\n", Cow::Borrowed(p.as_slice())),
             PixelData::RGBA8(p) => ("DEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\n", Cow::Borrowed(p.as_slice())),
             PixelData::RGB16(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
@@ -237,7 +276,7 @@ impl Writer {
         let width = image.width();
         let height = image.height();
 
-        let (magic, maxval, payload): (&str, &str, Cow<[u8]>) = match image.frames()[0].pixels() {
+        let (magic, maxval, payload): (&str, &str, Cow<[u8]>) = match image.pixels() {
             PixelData::RGB8(p) => ("P6", "255", Cow::Borrowed(p.as_slice())),
             PixelData::RGBA8(p) => ("P6", "255", Cow::Owned(strip_channels(p, 4, 3))),
             PixelData::RGB16(p) => ("P6", "65535", Cow::Owned(u16_be_bytes(p, 1, 1))),
@@ -277,31 +316,48 @@ impl Writer {
         }
     }
 
-    pub fn write_frames(output_path: &PathBuf, format: &str, image: Image) -> Result<(), Error> {
-        Writer::validate_image(&image)?;
+    pub fn write_animation(output_path: &PathBuf, format: &str, frames: Frames<'_>) -> Result<(), Error> {
+        match format {
+            "webp" => Writer::write_webp_animation(output_path, frames),
+            "jxl" => Writer::write_jxl_animation(output_path, frames),
+            "pam" | "ppm" => {
+                let mut frames = frames;
+                let first = frames
+                    .next_frame()
+                    .map_err(Error::other)?
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidData, "no frames to write"))?;
 
-        for (i, frame) in image.into_frames().into_iter().enumerate() {
-            let ext = match format {
-                "pam" => "pam",
-                "ppm" => "ppm",
-                "jxl" => "jxl",
-                "webp" => "webp",
-                _ => return Err(Error::new(ErrorKind::InvalidInput, format!("Invalid format: {}", format))),
-            };
+                if frames.next_frame().map_err(Error::other)?.is_some() {
+                    eprintln!("Warning: {} cannot store animation; writing the first frame only", format);
+                }
 
-            let output_dir = Path::new(output_path).parent().unwrap();
-            let output_file_name = Path::new(output_path).file_stem().unwrap().to_str().unwrap();
-            let output_path = output_dir.join(format!("{}_frame_{}.{}", output_file_name, i, ext));
-
-            let frame_image = Image::from_frame(frame);
-
-            match format {
-                "pam" => Writer::write_pam(&output_path, &frame_image)?,
-                "ppm" => Writer::write_ppm(&output_path, &frame_image)?,
-                "jxl" => Writer::write_jxl(&output_path, &frame_image)?,
-                "webp" => Writer::write_webp(&output_path, &frame_image)?,
-                _ => return Err(Error::new(ErrorKind::InvalidInput, format!("Invalid format: {}", format))),
+                Writer::write_image(&first.into_image(), format, output_path)
             }
+            _ => Err(Error::new(ErrorKind::InvalidInput, format!("Invalid format: {}", format))),
+        }
+    }
+
+    pub fn write_frames(output_path: &PathBuf, format: &str, frames: Frames<'_>) -> Result<(), Error> {
+        let ext = match format {
+            "pam" => "pam",
+            "ppm" => "ppm",
+            "jxl" => "jxl",
+            "webp" => "webp",
+            _ => return Err(Error::new(ErrorKind::InvalidInput, format!("Invalid format: {}", format))),
+        };
+
+        let output_dir = Path::new(output_path).parent().unwrap_or_else(|| Path::new("."));
+        let output_file_name = Path::new(output_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid output file name"))?;
+
+        for (i, frame) in frames.enumerate() {
+            let frame_image = frame.map_err(Error::other)?.into_image();
+            Writer::validate_image(&frame_image)?;
+
+            let output_path = output_dir.join(format!("{}_frame_{}.{}", output_file_name, i, ext));
+            Writer::write_image(&frame_image, format, &output_path)?;
         }
 
         Ok(())
@@ -322,14 +378,10 @@ impl Writer {
 
         match format {
             "jxl" => {
-                let total_frames: usize = pages.iter().map(|page| page.frames().len()).sum();
-                if total_frames > pages.len() {
-                    eprintln!(
-                        "Warning: JXL cannot represent page structure; writing all {} frames from {} pages as a flat sequence",
-                        total_frames,
-                        pages.len()
-                    );
-                }
+                eprintln!(
+                    "Warning: JXL cannot represent page structure; writing all {} pages as a flat sequence",
+                    pages.len()
+                );
                 Writer::write_jxl_pages(output_path, pages)
             }
             "pam" | "ppm" | "webp" => {
@@ -352,10 +404,6 @@ impl Writer {
 
     fn validate_image(image: &Image) -> Result<(), Error> {
         use vexel::PixelFormat;
-
-        if image.frames().is_empty() {
-            return Err(Error::new(ErrorKind::InvalidData, "image has no frames"));
-        }
 
         if image.width() == 0 || image.height() == 0 {
             return Err(Error::new(
@@ -389,7 +437,7 @@ impl Writer {
         };
 
         let expected_bytes = expected_pixels * channels * bytes_per_element;
-        let actual_bytes = image.frames()[0].pixels().as_bytes().len();
+        let actual_bytes = image.pixels().as_bytes().len();
 
         if actual_bytes != expected_bytes {
             let msg = format!(
@@ -568,10 +616,10 @@ unsafe fn jxl_encode(
     enc: *mut jpegxl_sys::encoder::encode::JxlEncoder,
     canvas_width: u32,
     canvas_height: u32,
-    frames: &[&ImageFrame],
+    first_frame: ImageFrame,
+    rest: &mut dyn Iterator<Item = Result<ImageFrame, Error>>,
+    is_animated: bool,
 ) -> Result<Vec<u8>, String> {
-    let first_frame = *frames.first().ok_or("no frames to encode")?;
-    let is_animated = frames.len() > 1;
     let info = pixel_info_for(first_frame.pixels());
 
     if is_animated {
@@ -650,7 +698,7 @@ unsafe fn jxl_encode(
         align: 0,
     };
 
-    for &frame in frames {
+    let add_frame = |frame: &ImageFrame| -> Result<(), String> {
         let has_crop = frame.width() != canvas_width || frame.height() != canvas_height;
 
         if is_animated || has_crop {
@@ -689,11 +737,34 @@ unsafe fn jxl_encode(
         if JxlEncoderAddImageFrame(frame_settings, &pixel_format, ptr, len) != JxlEncoderStatus::Success {
             return Err("failed to add image frame".to_string());
         }
+
+        Ok(())
+    };
+
+    let mut compressed = Vec::new();
+
+    add_frame(&first_frame)?;
+    drop(first_frame);
+    jxl_drain_output(enc, &mut compressed, false)?;
+
+    for frame in rest {
+        let frame = frame.map_err(|e| e.to_string())?;
+        add_frame(&frame)?;
+        drop(frame);
+        jxl_drain_output(enc, &mut compressed, false)?;
     }
 
     JxlEncoderCloseInput(enc);
+    jxl_drain_output(enc, &mut compressed, true)?;
 
-    let mut compressed = Vec::new();
+    Ok(compressed)
+}
+
+unsafe fn jxl_drain_output(
+    enc: *mut jpegxl_sys::encoder::encode::JxlEncoder,
+    compressed: &mut Vec<u8>,
+    until_done: bool,
+) -> Result<(), String> {
     let mut output_buf = vec![0u8; 65536];
 
     loop {
@@ -705,11 +776,13 @@ unsafe fn jxl_encode(
         compressed.extend_from_slice(&output_buf[..written]);
 
         match status {
-            JxlEncoderStatus::Success => break,
-            JxlEncoderStatus::NeedMoreOutput => continue,
+            JxlEncoderStatus::Success => return Ok(()),
+            JxlEncoderStatus::NeedMoreOutput => {
+                if !until_done && written == 0 {
+                    return Ok(());
+                }
+            }
             JxlEncoderStatus::Error => return Err("JXL encoder error during output processing".to_string()),
         }
     }
-
-    Ok(compressed)
 }

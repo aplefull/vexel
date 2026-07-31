@@ -4,6 +4,7 @@ pub mod deflate;
 pub mod error;
 pub mod exif;
 pub(crate) mod format_detect;
+pub mod frames;
 pub mod icc;
 pub mod image;
 pub mod info;

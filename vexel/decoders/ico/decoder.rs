@@ -191,13 +191,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
         png_decoder.set_limits(self.limits.clone());
         let image = png_decoder.decode()?;
 
-        let frame = image.frames().first().cloned().unwrap_or_else(|| {
-            let mut pixels = PixelData::RGBA8(vec![0u8; (entry.width * entry.height * 4) as usize]);
-            pixels.correct_pixels(entry.width, entry.height);
-            ImageFrame::new(entry.width, entry.height, pixels, 0)
-        });
-
-        Ok(frame)
+        Ok(ImageFrame::new(image.width(), image.height(), image.into_pixels(), 0))
     }
 
     fn decode_bmp_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {

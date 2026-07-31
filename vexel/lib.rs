@@ -10,6 +10,8 @@ use serde::Serialize;
 use tsify::Tsify;
 pub(crate) use utils::bitreader;
 pub use utils::error::{VexelError, VexelResult};
+pub use utils::frames::Frames;
+use utils::frames::{BufferedFrames, SingleFrame};
 pub use utils::icc;
 pub use utils::icc::ICCProfile;
 pub use utils::image::{Image, ImageFormat, ImageFrame, PixelData, PixelFormat};
@@ -210,6 +212,58 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
                 Err(VexelError::Panic(msg.to_string()))
             })
+        }
+    }
+
+    /// Decodes the image as a stream of animation frames.
+    ///
+    /// Returns an iterator that produces one [`ImageFrame`] at a time. Each frame
+    /// is owned by the caller and its memory is released as soon as the frame is
+    /// dropped, so animations of any size can be processed in constant memory.
+    ///
+    /// Formats without animation support yield exactly one frame with a delay of
+    /// `0`.
+    ///
+    /// This consumes the decoder's position in the underlying reader. Calling
+    /// [`decode`](Self::decode) and then `decode_frames` on the same instance is
+    /// not supported; construct a new [`Vexel`] if both are needed.
+    ///
+    /// ```no_run
+    /// use vexel::Vexel;
+    ///
+    /// let mut decoder = Vexel::open("animation.gif")?;
+    /// let mut frames = decoder.decode_frames()?;
+    ///
+    /// while let Some(frame) = frames.next_frame()? {
+    ///     println!("{}ms", frame.delay());
+    /// }
+    /// # Ok::<(), vexel::VexelError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Same as [`decode`](Self::decode). Errors encountered part-way through an
+    /// animation end the iteration.
+    pub fn decode_frames(&mut self) -> VexelResult<Frames<'_>> {
+        let decoder = std::mem::replace(&mut self.decoder, Decoders::Unknown);
+
+        match decoder {
+            Decoders::Gif(gif) => Ok(Frames::new(gif.into_frame_source()?)),
+            other => {
+                self.decoder = other;
+
+                // TODO: try to remove BufferedFrame, it exists only because of DICOM and PNG now,
+                // because they produce all frames at once.
+                match &mut self.decoder {
+                    Decoders::Png(png) => png.decode_frames().map(|frames| Frames::new(BufferedFrames::new(frames))),
+                    // TODO: a multi-frame DICOM object is a cine loop or a volume of
+                    // slices rather than an animation
+                    Decoders::Dicom(dicom) => {
+                        dicom.decode_frames().map(|frames| Frames::new(BufferedFrames::new(frames)))
+                    }
+                    _ => self.decode().map(|image| Frames::new(SingleFrame::new(image))),
+                }
+            }
         }
     }
 
@@ -562,6 +616,7 @@ pub fn parse_icc(data: &[u8]) -> VexelResult<ICCProfile> {
 #[wasm_bindgen(js_name = Decoder)]
 pub struct WasmDecoder {
     decoder: Vexel<Cursor<Vec<u8>>>,
+    pending_frames: Option<std::vec::IntoIter<ImageFrame>>,
 }
 
 #[wasm_bindgen(js_class = Decoder)]
@@ -574,7 +629,7 @@ impl WasmDecoder {
     pub fn new(data: &[u8]) -> Result<WasmDecoder, String> {
         let cursor = Cursor::new(data.to_vec());
         let decoder = Vexel::new(cursor).map_err(|e| e.to_string())?;
-        Ok(WasmDecoder { decoder })
+        Ok(WasmDecoder { decoder, pending_frames: None })
     }
 
     /// Sets resource limits that the decoder will enforce during decoding.
@@ -592,9 +647,11 @@ impl WasmDecoder {
         });
     }
 
-    /// Decodes the image and returns a [`JsImage`] with all frames as RGBA8.
+    /// Decodes the image and returns it as RGBA8.
     ///
-    /// Pixel data for each frame is a flat byte vector of length `width * height * 4`.
+    /// For animated images this is the first frame. Use
+    /// [`nextFrame`](WasmDecoder::next_frame) to walk the whole animation.
+    /// Pixel data is a flat byte vector of length `width * height * 4`.
     #[wasm_bindgen(js_name = decode)]
     pub fn decode(&mut self) -> Result<JsImage, String> {
         let image = self.decoder.decode().map_err(|e| e.to_string())?;
@@ -603,17 +660,37 @@ impl WasmDecoder {
             width: image.width(),
             height: image.height(),
             image_format: self.decoder.get_format(),
-            frames: image
-                .frames()
-                .iter()
-                .map(|frame| JsImageFrame {
-                    width: frame.width(),
-                    height: frame.height(),
-                    pixels: frame.to_rgba8(),
-                    delay: frame.delay(),
-                })
-                .collect(),
+            pixels: image.to_rgba8(),
         })
+    }
+
+    /// Returns the next animation frame as RGBA8, or `null` once the animation
+    /// is exhausted.
+    ///
+    /// The first call starts decoding; each frame is released once JavaScript
+    /// drops it, so long animations can be painted without retaining them all.
+    /// Images without animation yield exactly one frame.
+    #[wasm_bindgen(js_name = nextFrame)]
+    pub fn next_frame(&mut self) -> Result<Option<JsImageFrame>, String> {
+        if self.pending_frames.is_none() {
+            let frames = self
+                .decoder
+                .decode_frames()
+                .map_err(|e| e.to_string())?
+                .collect::<VexelResult<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+
+            self.pending_frames = Some(frames.into_iter());
+        }
+
+        let frame = self.pending_frames.as_mut().and_then(|frames| frames.next());
+
+        Ok(frame.map(|frame| JsImageFrame {
+            width: frame.width(),
+            height: frame.height(),
+            pixels: frame.to_rgba8(),
+            delay: frame.delay(),
+        }))
     }
 
     /// Decodes every page contained in the file, returning one [`JsImage`] per page.
@@ -631,16 +708,7 @@ impl WasmDecoder {
                     width: image.width(),
                     height: image.height(),
                     image_format: format.clone(),
-                    frames: image
-                        .frames()
-                        .iter()
-                        .map(|frame| JsImageFrame {
-                            width: frame.width(),
-                            height: frame.height(),
-                            pixels: frame.to_rgba8(),
-                            delay: frame.delay(),
-                        })
-                        .collect(),
+                    pixels: image.to_rgba8(),
                 })
                 .collect(),
         })
@@ -659,16 +727,7 @@ impl WasmDecoder {
                     width: image.width(),
                     height: image.height(),
                     image_format: format.clone(),
-                    frames: image
-                        .frames()
-                        .iter()
-                        .map(|frame| JsImageFrame {
-                            width: frame.width(),
-                            height: frame.height(),
-                            pixels: frame.to_rgba8(),
-                            delay: frame.delay(),
-                        })
-                        .collect(),
+                    pixels: image.to_rgba8(),
                 })
                 .collect(),
         })
@@ -696,21 +755,23 @@ impl WasmDecoder {
 
 /// WebAssembly-compatible image returned by [`WasmDecoder::decode`].
 ///
-/// Pixels in each frame are always RGBA8, regardless of the source format.
+/// `pixels` is always RGBA8, regardless of the source format, and is a flat
+/// byte vector with length `width * height * 4`.
 #[derive(Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct JsImage {
     pub width: u32,
     pub height: u32,
     pub image_format: ImageFormat,
-    pub frames: Vec<JsImageFrame>,
+    pub pixels: Vec<u8>,
 }
 
-/// A single frame within a [`JsImage`].
+/// A single animation frame returned by [`WasmDecoder::next_frame`].
 ///
 /// `pixels` is a flat RGBA8 byte vector with length `width * height * 4`.
 /// `delay` is the display duration in milliseconds; `0` for non-animated images.
 #[derive(Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct JsImageFrame {
     pub width: u32,
     pub height: u32,

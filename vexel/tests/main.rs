@@ -319,33 +319,26 @@ pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut decoder = Vexel::open(in_path)?;
 
-    match decoder.decode() {
-        Ok(image) => {
-            if !save {
-                println!("Decoded image: {}x{}, {} frames", image.width(), image.height(), image.frames().len());
-                return Ok(());
-            }
+    let frames = decoder.decode_frames()?.collect::<Result<Vec<_>, _>>()?;
 
-            if image.frames().len() > 1 {
-                let frames = image.frames();
-                for (i, frame) in frames.iter().enumerate() {
-                    let frame_out_path = out_path.with_file_name(format!(
-                        "{}_frame{}.avif",
-                        out_path.file_stem().unwrap().to_string_lossy(),
-                        i
-                    ));
+    if !save {
+        let first = frames.first().ok_or("decoded no frames")?;
+        println!("Decoded image: {}x{}, {} frames", first.width(), first.height(), frames.len());
+        return Ok(());
+    }
 
-                    let avif_data = libavif::encode_rgb8(frame.width(), frame.height(), &frame.to_rgba8())?;
-                    std::fs::write(frame_out_path, avif_data.as_ref())?;
-                }
-            } else {
-                let avif_data = libavif::encode_rgb8(image.width(), image.height(), &image.to_rgba8())?;
-                std::fs::write(out_path, avif_data.as_ref())?;
-            }
+    if frames.len() > 1 {
+        for (i, frame) in frames.iter().enumerate() {
+            let frame_out_path =
+                out_path.with_file_name(format!("{}_frame{}.avif", out_path.file_stem().unwrap().to_string_lossy(), i));
+
+            let avif_data = libavif::encode_rgb8(frame.width(), frame.height(), &frame.to_rgba8())?;
+            std::fs::write(frame_out_path, avif_data.as_ref())?;
         }
-        Err(e) => {
-            panic!("Error decoding image: {:?}", e);
-        }
+    } else {
+        let frame = frames.first().ok_or("decoded no frames")?;
+        let avif_data = libavif::encode_rgb8(frame.width(), frame.height(), &frame.to_rgba8())?;
+        std::fs::write(out_path, avif_data.as_ref())?;
     }
 
     Ok(())

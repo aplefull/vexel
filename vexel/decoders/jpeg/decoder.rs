@@ -16,7 +16,7 @@ use crate::utils::exif::ExifReader;
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::JpegInfo;
 use crate::utils::marker::Marker;
-use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData, PixelFormat};
+use crate::{log_debug, log_warn, Image, Limits, PixelData};
 
 #[derive(Debug, Clone)]
 struct ComponentPlane {
@@ -2669,7 +2669,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             Self::lossless_ycbcr_to_rgb(&mut samples, self.precision);
         }
 
-        let (pixel_data, pixel_format) = if self.precision <= 8 {
+        let pixel_data = if self.precision <= 8 {
             let precision_correction = 8 - self.precision;
             self.limits.reserve_usize(samples.len())?;
             let pixels: Vec<u8> = samples.iter().map(|&s| (s as u8) << precision_correction).collect();
@@ -2677,10 +2677,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
             self.limits.free_usize(sample_bytes);
 
             match components_count {
-                1 => (PixelData::L8(pixels), PixelFormat::L8),
-                2 => (PixelData::LA8(pixels), PixelFormat::LA8),
-                4 => (PixelData::RGBA8(pixels), PixelFormat::RGBA8),
-                _ => (PixelData::RGB8(pixels), PixelFormat::RGB8),
+                1 => PixelData::L8(pixels),
+                2 => PixelData::LA8(pixels),
+                4 => PixelData::RGBA8(pixels),
+                _ => PixelData::RGB8(pixels),
             }
         } else {
             let precision_correction = 16 - self.precision;
@@ -2702,15 +2702,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
 
             match components_count {
-                1 => (PixelData::L16(pixels), PixelFormat::L16),
-                2 => (PixelData::LA16(pixels), PixelFormat::LA16),
-                4 => (PixelData::RGBA16(pixels), PixelFormat::RGBA16),
-                _ => (PixelData::RGB16(pixels), PixelFormat::RGB16),
+                1 => PixelData::L16(pixels),
+                2 => PixelData::LA16(pixels),
+                4 => PixelData::RGBA16(pixels),
+                _ => PixelData::RGB16(pixels),
             }
         };
 
-        let frame = ImageFrame::new(self.width, self.height, pixel_data, 0);
-        Ok(Image::new(self.width, self.height, pixel_format, vec![frame]))
+        Ok(Image::from_pixels(self.width, self.height, pixel_data))
     }
 
     fn lossless_ycbcr_to_rgb(samples: &mut [u16], precision: u8) {

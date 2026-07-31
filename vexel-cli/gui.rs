@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::ViewportBuilder;
-use vexel::{Image, PixelData, Vexel};
+use vexel::{Frames, Image, ImageFormat, ImageFrame, PixelData, Vexel};
 
 struct Page {
     frames: Vec<Arc<egui::ColorImage>>,
@@ -286,63 +286,86 @@ struct App {
 }
 
 impl App {
-    fn image_to_page(image: Image, normalize: bool) -> Page {
+    fn frame_to_texture(frame: ImageFrame, normalize: bool) -> Arc<egui::ColorImage> {
         const MAX_TEXTURE_SIZE: usize = 16384;
 
-        let original_size = [image.width() as usize, image.height() as usize];
+        let src_width = frame.width() as usize;
+        let src_height = frame.height() as usize;
+        let has_alpha = frame.has_alpha();
 
-        let mut frames = Vec::new();
-        let mut frame_delays = Vec::new();
-
-        for frame in image.into_frames() {
-            let src_width = frame.width() as usize;
-            let src_height = frame.height() as usize;
-            let delay = frame.delay();
-            let has_alpha = frame.has_alpha();
-
-            let mut pixels = frame.into_pixels();
-            if normalize {
-                pixels = normalize_pixels(pixels);
-            }
-
-            let buffer = pixels.into_rgba8_bytes();
-
-            let scale =
-                (MAX_TEXTURE_SIZE as f32 / src_width as f32).min(MAX_TEXTURE_SIZE as f32 / src_height as f32).min(1.0);
-
-            let (dst_width, dst_height, final_buffer) = if scale < 1.0 {
-                let dst_w = ((src_width as f32 * scale) as usize).max(1);
-                let dst_h = ((src_height as f32 * scale) as usize).max(1);
-                let mut dst = vec![0u8; dst_w * dst_h * 4];
-
-                for dy in 0..dst_h {
-                    for dx in 0..dst_w {
-                        let sx = ((dx as f32 + 0.5) / scale) as usize;
-                        let sy = ((dy as f32 + 0.5) / scale) as usize;
-                        let sx = sx.min(src_width - 1);
-                        let sy = sy.min(src_height - 1);
-                        let src_idx = (sy * src_width + sx) * 4;
-                        let dst_idx = (dy * dst_w + dx) * 4;
-                        dst[dst_idx..dst_idx + 4].copy_from_slice(&buffer[src_idx..src_idx + 4]);
-                    }
-                }
-
-                (dst_w, dst_h, dst)
-            } else {
-                (src_width, src_height, buffer)
-            };
-
-            let color_image = if has_alpha {
-                egui::ColorImage::from_rgba_unmultiplied([dst_width, dst_height], &final_buffer)
-            } else {
-                egui::ColorImage::from_rgba_premultiplied([dst_width, dst_height], &final_buffer)
-            };
-            frames.push(Arc::new(color_image));
-
-            frame_delays.push(if delay <= 10 { 100 } else { delay }.max(17));
+        let mut pixels = frame.into_pixels();
+        if normalize {
+            pixels = normalize_pixels(pixels);
         }
 
-        Page { frames, delays: frame_delays, size: original_size }
+        let buffer = pixels.into_rgba8_bytes();
+
+        let scale =
+            (MAX_TEXTURE_SIZE as f32 / src_width as f32).min(MAX_TEXTURE_SIZE as f32 / src_height as f32).min(1.0);
+
+        let (dst_width, dst_height, final_buffer) = if scale < 1.0 {
+            let dst_w = ((src_width as f32 * scale) as usize).max(1);
+            let dst_h = ((src_height as f32 * scale) as usize).max(1);
+            let mut dst = vec![0u8; dst_w * dst_h * 4];
+
+            for dy in 0..dst_h {
+                for dx in 0..dst_w {
+                    let sx = ((dx as f32 + 0.5) / scale) as usize;
+                    let sy = ((dy as f32 + 0.5) / scale) as usize;
+                    let sx = sx.min(src_width - 1);
+                    let sy = sy.min(src_height - 1);
+                    let src_idx = (sy * src_width + sx) * 4;
+                    let dst_idx = (dy * dst_w + dx) * 4;
+                    dst[dst_idx..dst_idx + 4].copy_from_slice(&buffer[src_idx..src_idx + 4]);
+                }
+            }
+
+            (dst_w, dst_h, dst)
+        } else {
+            (src_width, src_height, buffer)
+        };
+
+        let color_image = if has_alpha {
+            egui::ColorImage::from_rgba_unmultiplied([dst_width, dst_height], &final_buffer)
+        } else {
+            egui::ColorImage::from_rgba_premultiplied([dst_width, dst_height], &final_buffer)
+        };
+
+        Arc::new(color_image)
+    }
+
+    fn frame_delay(delay: u32) -> u32 {
+        if delay <= 10 { 100 } else { delay }.max(17)
+    }
+
+    fn image_to_page(image: Image, normalize: bool) -> Page {
+        let original_size = [image.width() as usize, image.height() as usize];
+        let frame = ImageFrame::new_still(image.width(), image.height(), image.into_pixels());
+
+        Page {
+            frames: vec![Self::frame_to_texture(frame, normalize)],
+            delays: vec![Self::frame_delay(0)],
+            size: original_size,
+        }
+    }
+
+    fn frames_to_page(frames: Frames<'_>, normalize: bool) -> Page {
+        let mut textures = Vec::new();
+        let mut delays = Vec::new();
+        let mut size = [0usize, 0usize];
+
+        for frame in frames {
+            let Ok(frame) = frame else { break };
+
+            if textures.is_empty() {
+                size = [frame.width() as usize, frame.height() as usize];
+            }
+
+            delays.push(Self::frame_delay(frame.delay()));
+            textures.push(Self::frame_to_texture(frame, normalize));
+        }
+
+        Page { frames: textures, delays, size }
     }
 
     fn thumbnail_from_image(image: Image, normalize: bool) -> Option<Thumbnail> {
@@ -397,12 +420,34 @@ impl App {
             .filter_map(|image| Self::thumbnail_from_image(image, normalize))
             .collect();
 
-        let result = decoder.decode_pages().map_err(|e| format!("{}: {}", path.display(), e)).and_then(|images| {
-            let pages: Vec<Page> = images
-                .into_iter()
-                .map(|image| Self::image_to_page(image, normalize))
-                .filter(|page| !page.frames.is_empty())
-                .collect();
+        let is_multi_page = matches!(
+            decoder.get_format(),
+            ImageFormat::Ico
+                | ImageFormat::Cur
+                | ImageFormat::Tiff
+                | ImageFormat::Exr
+                | ImageFormat::NetPbmP1
+                | ImageFormat::NetPbmP2
+                | ImageFormat::NetPbmP3
+                | ImageFormat::NetPbmP4
+                | ImageFormat::NetPbmP5
+                | ImageFormat::NetPbmP6
+                | ImageFormat::NetPbmP7
+        );
+
+        let result = if is_multi_page {
+            decoder.decode_pages().map_err(|e| format!("{}: {}", path.display(), e)).map(|images| {
+                images.into_iter().map(|image| Self::image_to_page(image, normalize)).collect::<Vec<Page>>()
+            })
+        } else {
+            decoder
+                .decode_frames()
+                .map_err(|e| format!("{}: {}", path.display(), e))
+                .map(|frames| vec![Self::frames_to_page(frames, normalize)])
+        };
+
+        let result = result.and_then(|pages| {
+            let pages: Vec<Page> = pages.into_iter().filter(|page| !page.frames.is_empty()).collect();
 
             if pages.is_empty() {
                 Err(format!("{}: decoded image has no frames", path.display()))

@@ -9,7 +9,7 @@ use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::PngInfo;
-use crate::{log_debug, log_warn, Image, Limits, PixelData, PixelFormat};
+use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData};
 
 pub struct PngDecoder<R: Read + Seek> {
     width: u32,
@@ -149,7 +149,7 @@ impl<R: Read + Seek> PngDecoder<R> {
         Ok(pixels)
     }
 
-    pub fn decode(&mut self) -> VexelResult<Image> {
+    fn decode_inner(&mut self) -> VexelResult<DecodedPng> {
         let mut signature = vec![0u8; 8];
         self.reader.seek(SeekFrom::Start(0))?;
         self.reader.read_exact(&mut signature)?;
@@ -458,15 +458,43 @@ impl<R: Read + Seek> PngDecoder<R> {
                 self.transparency.clone(),
             );
 
-            if let Ok(image_frames) = result {
-                return Ok(Image::new(self.width, self.height, PixelFormat::RGBA8, image_frames));
-            } else {
-                log_warn!("Error decoding APNG frames: {:?}", result);
+            match result {
+                Ok(image_frames) => return Ok(DecodedPng::Animation(image_frames)),
+                Err(e) => log_warn!("Error decoding APNG frames: {:?}", e),
             }
         }
 
         let pixel_data = self.decode_pixels()?;
 
-        Ok(Image::from_pixels(self.width, self.height, pixel_data))
+        Ok(DecodedPng::Still(Image::from_pixels(self.width, self.height, pixel_data)))
     }
+
+    pub fn decode(&mut self) -> VexelResult<Image> {
+        match self.decode_inner()? {
+            DecodedPng::Still(image) => Ok(image),
+            DecodedPng::Animation(frames) => {
+                let first = frames
+                    .into_iter()
+                    .next()
+                    .ok_or(VexelError::Custom("PNG: animation contains no frames".to_string()))?;
+
+                Ok(Image::from_frame(first))
+            }
+        }
+    }
+
+    pub(crate) fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
+        match self.decode_inner()? {
+            DecodedPng::Still(image) => {
+                let (width, height) = (image.width(), image.height());
+                Ok(vec![ImageFrame::new(width, height, image.into_pixels(), 0)])
+            }
+            DecodedPng::Animation(frames) => Ok(frames),
+        }
+    }
+}
+
+enum DecodedPng {
+    Still(Image),
+    Animation(Vec<ImageFrame>),
 }

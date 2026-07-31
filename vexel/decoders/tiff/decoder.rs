@@ -1217,13 +1217,10 @@ impl<R: Read + Seek> TiffDecoder<R> {
             }
 
             match self.decode_current_ifd() {
+                // TODO: an IFD with ImageDepth > 1 produces several slices, which are
+                // flattened into separate pages here.
                 Ok(ifd_frames) => {
-                    if let Some(first) = ifd_frames.first() {
-                        let width = first.width();
-                        let height = first.height();
-                        let pixel_format = first.pixel_format();
-                        pages.push(Image::new(width, height, pixel_format, ifd_frames));
-                    }
+                    pages.extend(ifd_frames.into_iter().map(Image::from_frame));
                 }
                 Err(e) => {
                     log_warn!("Failed to decode TIFF page: {}", e);

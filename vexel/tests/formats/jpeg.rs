@@ -11,60 +11,70 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG Lossless",
             path: "jpeg/2x2_lossless.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/2x2_lossless.avif" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG Lossless 16-bit",
             path: "jpeg/jpeg_lossless16bit.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/jpeg_lossless16bit.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG Lossless 8-bit RGB",
             path: "jpeg/jpeg_lossless_sel1-rgb.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/jpeg_lossless_sel1-rgb.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG Lossless YCbCr (JFIF)",
             path: "jpeg/red_4x4_lossless_ycbcr.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/red_4x4_lossless_ycbcr.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG Lossless subsampled interleaved",
             path: "jpeg/polite_cat_lossless.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/polite_cat_lossless.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG Lossless 10-bit",
             path: "jpeg/jpeg-lossless-XA1.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/jpeg-lossless-XA1.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG Lossless 12-bit",
             path: "jpeg/jpeg-lossless-MR4.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/jpeg-lossless-MR4.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG lossless 4 components",
             path: "jpeg/rgb_alpha_u1_lossless.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/rgb_alpha_u1_lossless.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG lossless 4 components 12-bit",
             path: "jpeg/rgb_alpha_u2_lossless.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/rgb_alpha_u2_lossless.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG 4 components",
@@ -75,6 +85,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG 4 components 12-bit",
@@ -85,6 +96,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG no Adobe marker",
@@ -95,6 +107,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG Adobe marker",
@@ -105,6 +118,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG arithmetic (cat)",
@@ -115,6 +129,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG arithmetic (2x2)",
@@ -125,6 +140,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG arithmetic (rainbow)",
@@ -135,6 +151,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG arithmetic (demo1)",
@@ -145,6 +162,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG arithmetic (demo2)",
@@ -155,6 +173,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG arithmetic (progressive)",
@@ -168,18 +187,21 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: 0.9,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG lossless arithmetic",
             path: "jpeg/2x2_lossless_arithmetic.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/2x2_lossless_arithmetic.avif" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG lossless arithmetic 2",
             path: "jpeg/cat_lossless_arithmetic.jpg",
             validation: None,
             comparison: Comparison::Exact { reference_path: "jpeg/cat_lossless_arithmetic.avif" },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG extended sequential",
@@ -190,6 +212,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG extended sequential",
@@ -200,6 +223,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG progressive 12-bit",
@@ -210,6 +234,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG YCCK",
@@ -220,6 +245,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG asymmetric subsampling",
@@ -230,6 +256,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG blue channel subsampling",
@@ -240,6 +267,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "JPEG MJPEG",
@@ -250,6 +278,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
     ]
 }

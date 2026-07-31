@@ -11,6 +11,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM ct.002",
@@ -21,6 +22,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM CT.29537.39",
@@ -31,6 +33,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM CT.4032.1",
@@ -41,6 +44,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM MR.29497.30",
@@ -51,6 +55,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM MR.29497.9",
@@ -61,6 +66,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM mr-lspine",
@@ -71,6 +77,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SIEMENS_CTpat1_img02",
@@ -81,6 +88,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM test (RGB)",
@@ -91,6 +99,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM US.3395.1",
@@ -102,6 +111,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: 0.999,
                 ssim_threshold: 0.999,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM 2_skull_ct",
@@ -112,6 +122,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM dti_tra_dir16_AP",
@@ -122,6 +133,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM GSPS_Liver",
@@ -132,6 +144,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM image-000002",
@@ -142,6 +155,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM image-000006",
@@ -152,6 +166,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM image-000007",
@@ -162,6 +177,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM image-000008",
@@ -172,6 +188,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM image-000025",
@@ -182,6 +199,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM non-uniform_3d_t",
@@ -192,6 +210,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM perfusion_ct",
@@ -202,6 +221,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM PhilipsAchieva1",
@@ -212,6 +232,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM Philips_DIFFUSION_MOD",
@@ -222,6 +243,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM Radiogenomics_CT",
@@ -232,6 +254,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM Radiogenomics_PT",
@@ -242,6 +265,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM rtstruct_r3",
@@ -252,6 +276,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM series-000002",
@@ -262,6 +287,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM Siemens_fMRI2",
@@ -272,6 +298,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM Toshiba_Aquilion_1",
@@ -282,6 +309,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM XRayRF",
@@ -292,6 +320,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM PrivateGE big endian pixel data",
@@ -302,6 +331,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM GE Signa HDx big endian",
@@ -312,252 +342,294 @@ pub fn test_cases() -> Vec<TestCase> {
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM 0020",
             path: "dicom/0020.DCM",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/0020.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM f32bit",
             path: "dicom/f32bit.dcm",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/f32bit.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM MRBRAIN",
             path: "dicom/MRBRAIN.DCM",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/MRBRAIN.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM mr_enh_color_lossy",
             path: "dicom/mr_enh_color_lossy.dcm",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/mr_enh_color_lossy.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SignedShortLosslessBug",
             path: "dicom/SignedShortLosslessBug.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SignedShortLosslessBug.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM us_acuson",
             path: "dicom/us_acuson.dcm",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/us_acuson.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM US-GE-4AICL142",
             path: "dicom/US-GE-4AICL142.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/US-GE-4AICL142.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM us_rle_ybr",
             path: "dicom/us_rle_ybr.dcm",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/us_rle_ybr.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM us_valid_pixel_aspect",
             path: "dicom/us_valid_pixel_aspect.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/us_valid_pixel_aspect.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM bad_sequence",
             path: "dicom/bad_sequence.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/bad_sequence.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM emri_small_jpeg_ls_lossless",
             path: "dicom/emri_small_jpeg_ls_lossless.dcm",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/emri_small_jpeg_ls_lossless.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM gdcm-US-ALOKA-16_big",
             path: "dicom/gdcm-US-ALOKA-16_big.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/gdcm-US-ALOKA-16_big.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM MR-SIEMENS-DICOM-WithOverlays",
             path: "dicom/MR-SIEMENS-DICOM-WithOverlays.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/MR-SIEMENS-DICOM-WithOverlays.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM MR_small_RLE",
             path: "dicom/MR_small_RLE.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/MR_small_RLE.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM MR_truncated",
             path: "dicom/MR_truncated.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/MR_truncated.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb",
             path: "dicom/SC_rgb.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_2frame",
             path: "dicom/SC_rgb_2frame.dcm",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/SC_rgb_2frame.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_16bit",
             path: "dicom/SC_rgb_16bit.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_16bit.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_32bit",
             path: "dicom/SC_rgb_32bit.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_32bit.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_expb",
             path: "dicom/SC_rgb_expb.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_expb.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_expb_32bit",
             path: "dicom/SC_rgb_expb_32bit.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_expb_32bit.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_rle",
             path: "dicom/SC_rgb_rle.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_rle.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_rle_2frame",
             path: "dicom/SC_rgb_rle_2frame.dcm",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/SC_rgb_rle_2frame.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_rle_16bit",
             path: "dicom/SC_rgb_rle_16bit.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_rle_16bit.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_rle_32bit",
             path: "dicom/SC_rgb_rle_32bit.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_rle_32bit.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_jpeg_gdcm",
             path: "dicom/SC_rgb_jpeg_gdcm.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_jpeg_gdcm.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_jpeg_lossy_gdcm",
             path: "dicom/SC_rgb_jpeg_lossy_gdcm.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_jpeg_lossy_gdcm.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_dcmtk_ebcr",
             path: "dicom/SC_rgb_dcmtk_ebcr.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_dcmtk_ebcr.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_dcmtk_ebcyn1",
             path: "dicom/SC_rgb_dcmtk_ebcyn1.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_dcmtk_ebcyn1.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_dcmtk_ebcys2",
             path: "dicom/SC_rgb_dcmtk_ebcys2.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_dcmtk_ebcys2.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_gdcm2k_uncompressed",
             path: "dicom/SC_rgb_gdcm2k_uncompressed.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_gdcm2k_uncompressed.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_small_odd",
             path: "dicom/SC_rgb_small_odd.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_small_odd.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_rgb_small_odd_jpeg",
             path: "dicom/SC_rgb_small_odd_jpeg.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_rgb_small_odd_jpeg.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_ybr_full_uncompressed",
             path: "dicom/SC_ybr_full_uncompressed.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_ybr_full_uncompressed.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM SC_ybr_full_422_uncompressed",
             path: "dicom/SC_ybr_full_422_uncompressed.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/SC_ybr_full_422_uncompressed.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM WG04 XA1 uncompressed",
             path: "dicom/XA1_UNC.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/XA1_UNC.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM WG04 XA1 RLE lossless",
             path: "dicom/XA1_RLE.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/XA1_RLE.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM WG04 XA1 JPEG lossless",
             path: "dicom/XA1_JPLL.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/XA1_JPLL.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM WG04 XA1 JPEG-LS lossless",
             path: "dicom/XA1_JLSL.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/XA1_JLSL.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM WG04 XA1 JPEG-LS near-lossless",
             path: "dicom/XA1_JLSN.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/XA1_JLSN.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DICOM WG04 XA1 JPEG lossy",
             path: "dicom/XA1_JPLY.dcm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dicom/XA1_JPLY.jxl" },
+            ..Default::default()
         },
         // TODO: Tiles in this one are decoded as frames, maybe we want to stich them together instead
         TestCase {
@@ -565,6 +637,7 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "dicom/lossyJPEG-RGB.dcm",
             validation: None,
             comparison: Comparison::ExactFrames { reference_path: "dicom/lossyJPEG-RGB.jxl" },
+            ..Default::default()
         },
     ]
 }

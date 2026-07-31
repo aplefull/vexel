@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{Read, Seek};
 
 use super::compose_simd::compose_frame;
@@ -9,8 +10,9 @@ use super::types::{
 };
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::frames::FrameSource;
 use crate::utils::info::GifInfo;
-use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData, PixelFormat};
+use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData};
 
 impl<R: Read + Seek + Sync> GifDecoder<R> {
     pub fn new(reader: R) -> Self {
@@ -607,7 +609,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         result
     }
 
-    pub fn decode(&mut self) -> VexelResult<Image> {
+    fn read_structure(&mut self) -> VexelResult<()> {
         match self.read_header() {
             Ok(_) => {}
             Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
@@ -625,115 +627,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             }
         };
 
-        #[cfg(feature = "rayon")]
-        let decoded_indices: Vec<Vec<u8>> = {
-            use rayon::prelude::*;
-            self.frames
-                .par_iter()
-                .map(|frame| {
-                    let max_output = (frame.width as usize).saturating_mul(frame.height as usize).max(1);
-                    let mut indices = match decompress_lzw(frame, max_output) {
-                        Ok(i) => i,
-                        Err(e) => {
-                            log_warn!("Error decoding frame: {:?}", e);
-                            return Err(e);
-                        }
-                    };
+        Ok(())
+    }
 
-                    if frame.interlace_flag {
-                        indices = Self::deinterlace_indices(frame.width, frame.height, &indices);
-                    }
-
-                    Ok(indices)
-                })
-                .collect::<VexelResult<Vec<_>>>()?
-        };
-
-        #[cfg(not(feature = "rayon"))]
-        let decoded_indices: Vec<Vec<u8>> = self
-            .frames
-            .iter()
-            .map(|frame| {
-                let max_output = (frame.width as usize).saturating_mul(frame.height as usize).max(1);
-                let mut indices = match decompress_lzw(frame, max_output) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        log_warn!("Error decoding frame: {:?}", e);
-                        return Err(e);
-                    }
-                };
-
-                if frame.interlace_flag {
-                    indices = Self::deinterlace_indices(frame.width, frame.height, &indices);
-                }
-
-                Ok(indices)
-            })
-            .collect::<VexelResult<Vec<_>>>()?;
-
-        let canvas_size = (self.width * self.height * 4) as usize;
-        self.limits.reserve_usize(canvas_size)?;
-        let mut canvas = vec![0u8; canvas_size];
-        let mut image_frames = Vec::new();
-
-        let needs_scratch = self.frames.iter().any(|f| matches!(f.disposal_method, DisposalMethod::Previous));
-        let mut scratch = if needs_scratch {
-            self.limits.reserve_usize(canvas_size)?;
-            vec![0u8; canvas_size]
-        } else {
-            Vec::new()
-        };
-
-        for (frame, indices) in self.frames.iter().zip(decoded_indices) {
-            if matches!(frame.disposal_method, DisposalMethod::Previous) {
-                scratch.copy_from_slice(&canvas);
-            }
-
-            let color_table =
-                if frame.local_color_table_flag { &frame.local_color_table } else { &self.global_color_table };
-
-            compose_frame(
-                &indices,
-                color_table,
-                frame.transparent_index,
-                frame.left as usize,
-                frame.top as usize,
-                frame.width as usize,
-                frame.height as usize,
-                self.width as usize,
-                self.height as usize,
-                &mut canvas,
-            );
-
-            if let Err(e) = self.limits.reserve_usize(canvas_size) {
-                log_warn!("Frame budget exhausted after {} frames, truncating: {:?}", image_frames.len(), e);
-                break;
-            }
-
-            let mut pixels = PixelData::RGBA8(canvas.clone());
-            pixels.correct_pixels(self.width, self.height);
-            image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
-
-            match frame.disposal_method {
-                DisposalMethod::None => {}
-                DisposalMethod::Background => {
-                    let clamped_h = frame.height.min(self.height.saturating_sub(frame.top));
-                    let clamped_w = frame.width.min(self.width.saturating_sub(frame.left));
-                    for y in 0..clamped_h {
-                        let canvas_y = frame.top + y;
-                        let row_base = (canvas_y * self.width + frame.left) as usize * 4;
-                        let row_end = row_base + clamped_w as usize * 4;
-                        if row_end <= canvas.len() {
-                            canvas[row_base..row_end].fill(0);
-                        }
-                    }
-                }
-                DisposalMethod::Previous => {
-                    canvas.copy_from_slice(&scratch);
-                }
-            }
-        }
-
+    fn resolve_dimensions(&mut self) -> VexelResult<()> {
         if self.width == 0 {
             self.width = self.canvas_width;
         }
@@ -743,9 +640,193 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         }
 
         if self.width == 0 || self.height == 0 {
-            return Err(crate::utils::error::VexelError::InvalidDimensions { width: self.width, height: self.height });
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
-        Ok(Image::new(self.width, self.height, PixelFormat::RGBA8, image_frames))
+        Ok(())
+    }
+
+    fn decode_frame_indices(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
+        let max_output = (frame.width as usize).saturating_mul(frame.height as usize).max(1);
+        let mut indices = decompress_lzw(frame, max_output).inspect_err(|e| {
+            log_warn!("Error decoding frame: {:?}", e);
+        })?;
+
+        if frame.interlace_flag {
+            indices = Self::deinterlace_indices(frame.width, frame.height, &indices);
+        }
+
+        Ok(indices)
+    }
+
+    pub fn decode(&mut self) -> VexelResult<Image> {
+        self.read_structure()?;
+        self.resolve_dimensions()?;
+
+        let indices = match self.frames.first() {
+            Some(frame) => Self::decode_frame_indices(frame)?,
+            None => {
+                let canvas_size = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
+                self.limits.reserve_usize(canvas_size)?;
+                return Ok(Image::from_pixels(self.width, self.height, PixelData::RGBA8(vec![0u8; canvas_size])));
+            }
+        };
+
+        let mut composer = GifComposer::new(self.width, self.height, false, &mut self.limits)?;
+        let frame = composer.compose(&self.frames[0], &indices, &self.global_color_table);
+
+        Ok(Image::from_frame(frame))
+    }
+
+    pub(crate) fn into_frame_source(mut self) -> VexelResult<GifFrames<R>> {
+        self.read_structure()?;
+        self.resolve_dimensions()?;
+
+        let needs_scratch = self.frames.iter().any(|f| matches!(f.disposal_method, DisposalMethod::Previous));
+        let composer = GifComposer::new(self.width, self.height, needs_scratch, &mut self.limits)?;
+
+        Ok(GifFrames { decoder: self, composer, next_index: 0, batch: VecDeque::new(), exhausted: false })
+    }
+}
+
+struct GifComposer {
+    width: u32,
+    height: u32,
+    canvas: Vec<u8>,
+    scratch: Vec<u8>,
+}
+
+impl GifComposer {
+    fn new(width: u32, height: u32, needs_scratch: bool, limits: &mut Limits) -> VexelResult<GifComposer> {
+        let canvas_size = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+        limits.reserve_usize(canvas_size)?;
+        let canvas = vec![0u8; canvas_size];
+
+        let scratch = if needs_scratch {
+            limits.reserve_usize(canvas_size)?;
+            vec![0u8; canvas_size]
+        } else {
+            Vec::new()
+        };
+
+        Ok(GifComposer { width, height, canvas, scratch })
+    }
+
+    fn compose(&mut self, frame: &GifFrameInfo, indices: &[u8], global_color_table: &[u8]) -> ImageFrame {
+        if matches!(frame.disposal_method, DisposalMethod::Previous) && !self.scratch.is_empty() {
+            self.scratch.copy_from_slice(&self.canvas);
+        }
+
+        let color_table = if frame.local_color_table_flag { &frame.local_color_table } else { global_color_table };
+
+        compose_frame(
+            indices,
+            color_table,
+            frame.transparent_index,
+            frame.left as usize,
+            frame.top as usize,
+            frame.width as usize,
+            frame.height as usize,
+            self.width as usize,
+            self.height as usize,
+            &mut self.canvas,
+        );
+
+        let mut pixels = PixelData::RGBA8(self.canvas.clone());
+        pixels.correct_pixels(self.width, self.height);
+        let composed = ImageFrame::new(self.width, self.height, pixels, frame.delay as u32);
+
+        self.dispose(frame);
+
+        composed
+    }
+
+    fn dispose(&mut self, frame: &GifFrameInfo) {
+        match frame.disposal_method {
+            DisposalMethod::None => {}
+            DisposalMethod::Background => {
+                let clamped_h = frame.height.min(self.height.saturating_sub(frame.top));
+                let clamped_w = frame.width.min(self.width.saturating_sub(frame.left));
+                for y in 0..clamped_h {
+                    let canvas_y = frame.top + y;
+                    let row_base = (canvas_y * self.width + frame.left) as usize * 4;
+                    let row_end = row_base + clamped_w as usize * 4;
+                    if row_end <= self.canvas.len() {
+                        self.canvas[row_base..row_end].fill(0);
+                    }
+                }
+            }
+            DisposalMethod::Previous => {
+                if !self.scratch.is_empty() {
+                    self.canvas.copy_from_slice(&self.scratch);
+                }
+            }
+        }
+    }
+}
+
+const LOOKAHEAD_BATCH: usize = 16;
+
+pub(crate) struct GifFrames<R: Read + Seek + Sync> {
+    decoder: GifDecoder<R>,
+    composer: GifComposer,
+    next_index: usize,
+    batch: VecDeque<Vec<u8>>,
+    exhausted: bool,
+}
+
+impl<R: Read + Seek + Sync> GifFrames<R> {
+    fn fill_batch(&mut self) -> VexelResult<()> {
+        let end = (self.next_index + LOOKAHEAD_BATCH).min(self.decoder.frames.len());
+        let pending = &self.decoder.frames[self.next_index..end];
+
+        #[cfg(feature = "rayon")]
+        let decoded: Vec<Vec<u8>> = {
+            use rayon::prelude::*;
+            pending.par_iter().map(GifDecoder::<R>::decode_frame_indices).collect::<VexelResult<Vec<_>>>()?
+        };
+
+        #[cfg(not(feature = "rayon"))]
+        let decoded: Vec<Vec<u8>> =
+            pending.iter().map(GifDecoder::<R>::decode_frame_indices).collect::<VexelResult<Vec<_>>>()?;
+
+        self.batch = decoded.into();
+
+        Ok(())
+    }
+}
+
+impl<R: Read + Seek + Sync> FrameSource for GifFrames<R> {
+    fn next_frame(&mut self) -> VexelResult<Option<ImageFrame>> {
+        if self.exhausted || self.next_index >= self.decoder.frames.len() {
+            return Ok(None);
+        }
+
+        if self.batch.is_empty() {
+            if let Err(e) = self.fill_batch() {
+                self.exhausted = true;
+                if self.next_index == 0 {
+                    return Err(e);
+                }
+
+                log_warn!("Stopping GIF frame iteration after {} frames: {:?}", self.next_index, e);
+                return Ok(None);
+            }
+        }
+
+        let Some(indices) = self.batch.pop_front() else {
+            self.exhausted = true;
+            return Ok(None);
+        };
+
+        let frame = &self.decoder.frames[self.next_index];
+        let composed = self.composer.compose(frame, &indices, &self.decoder.global_color_table);
+        self.next_index += 1;
+
+        Ok(Some(composed))
+    }
+
+    fn frame_count_hint(&self) -> Option<usize> {
+        Some(self.decoder.frames.len().saturating_sub(self.next_index))
     }
 }

@@ -7,24 +7,28 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "dng/5G4A9395-compressed-lossy.DNG",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dng/5G4A9395-compressed-lossy.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DNG A002_651_20240229_000001_2k_12bit",
             path: "dng/A002_651_20240229_000001_2k_12bit.DNG",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dng/A002_651_20240229_000001_2k_12bit.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DNG RAW_LEICA_M8",
             path: "dng/RAW_LEICA_M8.DNG",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dng/RAW_LEICA_M8.jxl" },
+            ..Default::default()
         },
         TestCase {
             name: "DNG YDXJ0026",
             path: "dng/YDXJ0026.DNG",
             validation: None,
             comparison: Comparison::Exact { reference_path: "dng/YDXJ0026.jxl" },
+            ..Default::default()
         },
     ]
 }

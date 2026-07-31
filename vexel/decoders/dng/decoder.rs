@@ -3,7 +3,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::image::{ImageFrame, PixelData};
+use crate::utils::image::PixelData;
 use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, half_to_f32, u16_from_bytes};
 use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_lzw, decompress_packbits,
@@ -1572,8 +1572,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             }
         };
 
-        let frame = ImageFrame::new(self.width, self.height, pixel_data, 0);
-        Ok(Image::new(self.width, self.height, frame.pixel_format(), vec![frame]))
+        Ok(Image::from_pixels(self.width, self.height, pixel_data))
     }
 }
 

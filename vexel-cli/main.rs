@@ -137,7 +137,11 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     decoder.set_limits(build_limits(cli));
 
     if cli.void {
-        let _ = decoder.decode();
+        if let Ok(frames) = decoder.decode_frames() {
+            for frame in frames {
+                drop(frame);
+            }
+        }
         return Ok(());
     }
 
@@ -171,11 +175,9 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
         let pages = decoder.decode_pages()?;
         Writer::write_pages(&pages, format, &output_path)?;
     } else if cli.frames {
-        let image = decoder.decode()?;
-        Writer::write_frames(&output_path, format, image)?;
+        Writer::write_frames(&output_path, format, decoder.decode_frames()?)?;
     } else {
-        let image = decoder.decode()?;
-        Writer::write_image(&image, format, &output_path)?;
+        Writer::write_animation(&output_path, format, decoder.decode_frames()?)?;
     }
 
     Ok(())

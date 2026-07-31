@@ -15,7 +15,7 @@ use jpegxl_sys::threads::thread_parallel_runner::{
     JxlThreadParallelRunnerDestroy,
 };
 use libavif_sys as avif_sys;
-use vexel::{Image, PixelData, Vexel};
+use vexel::{Image, ImageFrame, PixelData, Vexel};
 
 pub const BASE_PATH: &str = "./tests/images/";
 pub const REFERENCES_PATH: &str = "./tests/references/";
@@ -49,11 +49,20 @@ pub enum Comparison {
 
 pub type ValidationFn = Box<dyn Fn(&Image) -> Result<(), String>>;
 
+pub type FrameValidationFn = Box<dyn Fn(&[ImageFrame]) -> Result<(), String>>;
+
 pub struct TestCase {
     pub name: &'static str,
     pub path: &'static str,
     pub validation: Option<ValidationFn>,
+    pub frame_validation: Option<FrameValidationFn>,
     pub comparison: Comparison,
+}
+
+impl Default for TestCase {
+    fn default() -> Self {
+        TestCase { name: "", path: "", validation: None, frame_validation: None, comparison: Comparison::None }
+    }
 }
 
 pub enum TestResult {
@@ -131,10 +140,9 @@ pub fn image_to_reference_rgba8(image: &Image) -> ReferenceImage {
     ReferenceImage { width: image.width(), height: image.height(), pixels: ReferencePixels::U8(image.to_rgba8()) }
 }
 
-pub fn frame_to_reference_native(image: &Image, frame_idx: usize) -> ReferenceImage {
-    let width = image.width();
-    let height = image.height();
-    let frame = &image.frames()[frame_idx];
+pub fn frame_to_reference_native(frame: &ImageFrame) -> ReferenceImage {
+    let width = frame.width();
+    let height = frame.height();
 
     let pixels = match frame.pixels() {
         PixelData::L1(p) => ReferencePixels::U8(p.iter().map(|&v| (v != 0) as u8).collect()),
@@ -155,8 +163,7 @@ pub fn frame_to_reference_native(image: &Image, frame_idx: usize) -> ReferenceIm
     ReferenceImage { width, height, pixels }
 }
 
-pub fn frame_to_reference_rgba8(image: &Image, frame_idx: usize) -> ReferenceImage {
-    let frame = &image.frames()[frame_idx];
+pub fn frame_to_reference_rgba8(frame: &ImageFrame) -> ReferenceImage {
     ReferenceImage { width: frame.width(), height: frame.height(), pixels: ReferencePixels::U8(frame.to_rgba8()) }
 }
 
@@ -640,47 +647,52 @@ pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResu
                 Err(msg) => Ok(TestResult::Fail(msg)),
             }
         }
-        Comparison::ExactFrames { reference_path } => {
-            let ref_path = get_ref_path(reference_path);
-            let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
-            let ref_frames = read_reference_all_frames(&ref_path)?;
-            let dec_frames = image.frames();
-            if dec_frames.len() != ref_frames.len() {
-                return Ok(TestResult::Fail(format!(
-                    "frame count mismatch: decoded={}, reference={}",
-                    dec_frames.len(),
-                    ref_frames.len()
-                )));
-            }
-            for (i, ref_frame) in ref_frames.iter().enumerate() {
-                let actual =
-                    if is_jxl { frame_to_reference_native(image, i) } else { frame_to_reference_rgba8(image, i) };
+        Comparison::ExactFrames { .. } | Comparison::FuzzyFrames { .. } => {
+            Err("frame comparisons require decode_frames; use test_decode".into())
+        }
+        Comparison::ExactPages { .. } => Err("ExactPages comparison requires decode_pages; use test_decode".into()),
+    }
+}
+
+pub fn run_frames_comparison(
+    frames: &[ImageFrame],
+    comparison: &Comparison,
+) -> Result<TestResult, Box<dyn std::error::Error>> {
+    let (reference_path, thresholds) = match comparison {
+        Comparison::ExactFrames { reference_path } => (reference_path, None),
+        Comparison::FuzzyFrames { reference_path, mse_threshold, ssim_threshold } => {
+            (reference_path, Some((*mse_threshold, *ssim_threshold)))
+        }
+        _ => return Err("run_frames_comparison called with a non-frames comparison".into()),
+    };
+
+    let ref_path = get_ref_path(reference_path);
+    let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
+    let ref_frames = read_reference_all_frames(&ref_path)?;
+
+    if frames.len() != ref_frames.len() {
+        return Ok(TestResult::Fail(format!(
+            "frame count mismatch: decoded={}, reference={}",
+            frames.len(),
+            ref_frames.len()
+        )));
+    }
+
+    let mut total_mse = 0.0f64;
+    let mut total_ssim = 0.0f64;
+    let mut total_psnr = 0.0f64;
+
+    for (i, ref_frame) in ref_frames.iter().enumerate() {
+        let actual = if is_jxl { frame_to_reference_native(&frames[i]) } else { frame_to_reference_rgba8(&frames[i]) };
+
+        match thresholds {
+            None => {
                 if let Err(msg) = compare_exact(&actual, ref_frame) {
                     return Ok(TestResult::Fail(format!("frame {}: {}", i, msg)));
                 }
             }
-            Ok(TestResult::Ok { mse: None, ssim: None, psnr: None })
-        }
-        Comparison::FuzzyFrames { reference_path, mse_threshold, ssim_threshold } => {
-            let ref_path = get_ref_path(reference_path);
-            let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
-            let ref_frames = read_reference_all_frames(&ref_path)?;
-            let dec_frames = image.frames();
-            if dec_frames.len() != ref_frames.len() {
-                return Ok(TestResult::Fail(format!(
-                    "frame count mismatch: decoded={}, reference={}",
-                    dec_frames.len(),
-                    ref_frames.len()
-                )));
-            }
-            let mut total_mse = 0.0f64;
-            let mut total_ssim = 0.0f64;
-            let mut total_psnr = 0.0f64;
-            let n = dec_frames.len();
-            for (i, ref_frame) in ref_frames.iter().enumerate() {
-                let actual =
-                    if is_jxl { frame_to_reference_native(image, i) } else { frame_to_reference_rgba8(image, i) };
-                match compare_fuzzy(&actual, ref_frame, *mse_threshold, *ssim_threshold) {
+            Some((mse_threshold, ssim_threshold)) => {
+                match compare_fuzzy(&actual, ref_frame, mse_threshold, ssim_threshold) {
                     Ok((mse, ssim, psnr)) => {
                         total_mse += mse;
                         total_ssim += ssim;
@@ -689,15 +701,15 @@ pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResu
                     Err(msg) => return Ok(TestResult::Fail(format!("frame {}: {}", i, msg))),
                 }
             }
-            let count = n.max(1) as f64;
-            Ok(TestResult::Ok {
-                mse: Some(total_mse / count),
-                ssim: Some(total_ssim / count),
-                psnr: Some(total_psnr / count),
-            })
         }
-        Comparison::ExactPages { .. } => Err("ExactPages comparison requires decode_pages; use test_decode".into()),
     }
+
+    if thresholds.is_none() {
+        return Ok(TestResult::Ok { mse: None, ssim: None, psnr: None });
+    }
+
+    let count = frames.len().max(1) as f64;
+    Ok(TestResult::Ok { mse: Some(total_mse / count), ssim: Some(total_ssim / count), psnr: Some(total_psnr / count) })
 }
 
 pub fn run_pages_comparison(
@@ -712,27 +724,18 @@ pub fn run_pages_comparison(
     let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
     let ref_frames = read_reference_all_frames(&ref_path)?;
 
-    let decoded_count: usize = pages.iter().map(|page| page.frames().len()).sum();
-    if decoded_count != ref_frames.len() {
+    if pages.len() != ref_frames.len() {
         return Ok(TestResult::Fail(format!(
-            "frame count mismatch: decoded={}, reference={}",
-            decoded_count,
+            "page count mismatch: decoded={}, reference={}",
+            pages.len(),
             ref_frames.len()
         )));
     }
 
-    let mut ref_index = 0;
     for (page_index, page) in pages.iter().enumerate() {
-        for frame_index in 0..page.frames().len() {
-            let actual = if is_jxl {
-                frame_to_reference_native(page, frame_index)
-            } else {
-                frame_to_reference_rgba8(page, frame_index)
-            };
-            if let Err(msg) = compare_exact(&actual, &ref_frames[ref_index]) {
-                return Ok(TestResult::Fail(format!("page {} frame {}: {}", page_index, frame_index, msg)));
-            }
-            ref_index += 1;
+        let actual = if is_jxl { image_to_reference_native(page) } else { image_to_reference_rgba8(page) };
+        if let Err(msg) = compare_exact(&actual, &ref_frames[page_index]) {
+            return Ok(TestResult::Fail(format!("page {}: {}", page_index, msg)));
         }
     }
 
@@ -740,7 +743,10 @@ pub fn run_pages_comparison(
 }
 
 pub fn test_decode(test_case: TestCase) -> Result<TestResult, Box<dyn std::error::Error>> {
-    if test_case.validation.is_none() && matches!(test_case.comparison, Comparison::None) {
+    if test_case.validation.is_none()
+        && test_case.frame_validation.is_none()
+        && matches!(test_case.comparison, Comparison::None)
+    {
         return Ok(TestResult::Ok { mse: None, ssim: None, psnr: None });
     }
 
@@ -763,6 +769,41 @@ pub fn test_decode(test_case: TestCase) -> Result<TestResult, Box<dyn std::error
             }
             Err(e) => Ok(TestResult::Fail(format!("decode error: {:?}", e))),
         };
+    }
+
+    let needs_frames = test_case.frame_validation.is_some()
+        || matches!(test_case.comparison, Comparison::ExactFrames { .. } | Comparison::FuzzyFrames { .. });
+
+    if needs_frames {
+        let frames = match decoder.decode_frames() {
+            Ok(frames) => match frames.collect::<Result<Vec<_>, _>>() {
+                Ok(frames) => frames,
+                Err(e) => return Ok(TestResult::Fail(format!("decode error: {:?}", e))),
+            },
+            Err(e) => return Ok(TestResult::Fail(format!("decode error: {:?}", e))),
+        };
+
+        let Some(first) = frames.first() else {
+            return Ok(TestResult::Fail("decoded no frames".to_string()));
+        };
+
+        if let Some(validate) = test_case.validation {
+            if let Err(msg) = validate(&first.clone().into_image()) {
+                return Ok(TestResult::Fail(msg));
+            }
+        }
+
+        if let Some(validate) = test_case.frame_validation {
+            if let Err(msg) = validate(&frames) {
+                return Ok(TestResult::Fail(msg));
+            }
+        }
+
+        if matches!(test_case.comparison, Comparison::None) {
+            return Ok(TestResult::Ok { mse: None, ssim: None, psnr: None });
+        }
+
+        return run_frames_comparison(&frames, &test_case.comparison);
     }
 
     match decoder.decode() {

@@ -13,7 +13,7 @@ use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::utils::deflate::DeflateDecoder;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::image::{Image, ImageFrame, PixelData, PixelFormat};
+use crate::utils::image::{Image, ImageFrame, PixelData};
 use crate::utils::info::DicomInfo;
 use crate::{log_debug, log_warn, Limits};
 
@@ -170,6 +170,16 @@ impl<R: Read + Seek> DicomDecoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
+        let mut frames = self.decode_frames()?;
+
+        if frames.is_empty() {
+            return Err(VexelError::Custom("DICOM: no frames could be decoded".to_string()));
+        }
+
+        Ok(Image::from_frame(frames.remove(0)))
+    }
+
+    pub(crate) fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
         self.load()?;
         let parsed = self.parsed.take().ok_or_else(|| VexelError::Custom("DICOM: no parsed dataset".to_string()))?;
 
@@ -188,7 +198,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
         let mut thumbnails = Vec::new();
         for icon in icons {
             match self.decode_dataset(&icon, TransferSyntax::ImplicitLittleEndian) {
-                Ok(image) => thumbnails.push(image),
+                Ok(frames) => thumbnails.extend(frames.into_iter().map(Image::from_frame)),
                 Err(e) => log_warn!("DICOM: failed to decode icon image: {}", e),
             }
         }
@@ -197,7 +207,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
         Ok(thumbnails)
     }
 
-    fn decode_dataset(&mut self, dataset: &DataSet, transfer_syntax: TransferSyntax) -> VexelResult<Image> {
+    fn decode_dataset(&mut self, dataset: &DataSet, transfer_syntax: TransferSyntax) -> VexelResult<Vec<ImageFrame>> {
         let pixel_element = dataset
             .get(tags::PIXEL_DATA)
             .or_else(|| dataset.get(tags::FLOAT_PIXEL_DATA))
@@ -264,8 +274,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
             frames.push(ImageFrame::new(params.cols, params.rows, pixels, delay));
         }
 
-        let format = frames.first().map(|f| f.pixel_format()).unwrap_or(PixelFormat::L8);
-        Ok(Image::new(params.cols, params.rows, format, frames))
+        Ok(frames)
     }
 
     fn decode_native_frames(
