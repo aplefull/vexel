@@ -500,17 +500,12 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 break;
             }
 
-            let mut buffer = vec![0u8; block_size];
-            match self.reader.read_exact(&mut buffer) {
-                Ok(_) => {}
-                Err(e) => {
-                    log_warn!("Error reading image sub-block data: {:?}", e);
-                    data.extend_from_slice(&buffer);
-                    break;
-                }
+            let start = data.len();
+            data.resize(start + block_size, 0);
+            if let Err(e) = self.reader.read_exact(&mut data[start..]) {
+                log_warn!("Error reading image sub-block data: {:?}", e);
+                break;
             }
-
-            data.extend(buffer);
         }
 
         self.sections.push(GifSectionInfo {
@@ -677,22 +672,22 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             .collect::<VexelResult<Vec<_>>>()?;
 
         let canvas_size = (self.width * self.height * 4) as usize;
+        self.limits.reserve_usize(canvas_size)?;
         let mut canvas = vec![0u8; canvas_size];
         let mut image_frames = Vec::new();
 
+        let needs_scratch = self.frames.iter().any(|f| matches!(f.disposal_method, DisposalMethod::Previous));
+        let mut scratch = if needs_scratch {
+            self.limits.reserve_usize(canvas_size)?;
+            vec![0u8; canvas_size]
+        } else {
+            Vec::new()
+        };
+
         for (frame, indices) in self.frames.iter().zip(decoded_indices) {
-            let needs_saved_canvas =
-                matches!(frame.disposal_method, DisposalMethod::Previous | DisposalMethod::Background);
-            let saved_canvas = if needs_saved_canvas {
-                if let Err(e) = self.limits.reserve_usize(canvas_size) {
-                    log_warn!("Cannot clone canvas for disposal method, falling back: {:?}", e);
-                    None
-                } else {
-                    Some(canvas.clone())
-                }
-            } else {
-                None
-            };
+            if matches!(frame.disposal_method, DisposalMethod::Previous) {
+                scratch.copy_from_slice(&canvas);
+            }
 
             let color_table =
                 if frame.local_color_table_flag { &frame.local_color_table } else { &self.global_color_table };
@@ -710,45 +705,31 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 &mut canvas,
             );
 
+            if let Err(e) = self.limits.reserve_usize(canvas_size) {
+                log_warn!("Frame budget exhausted after {} frames, truncating: {:?}", image_frames.len(), e);
+                break;
+            }
+
+            let mut pixels = PixelData::RGBA8(canvas.clone());
+            pixels.correct_pixels(self.width, self.height);
+            image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
+
             match frame.disposal_method {
-                DisposalMethod::None => {
-                    if let Err(e) = self.limits.reserve_usize(canvas_size) {
-                        log_warn!("Cannot clone canvas for next frame, reusing: {:?}", e);
-                        let mut pixels = PixelData::RGBA8(std::mem::replace(&mut canvas, vec![0u8; canvas_size]));
-                        pixels.correct_pixels(self.width, self.height);
-                        image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
-                    } else {
-                        let next_canvas = canvas.clone();
-                        let mut pixels = PixelData::RGBA8(canvas);
-                        pixels.correct_pixels(self.width, self.height);
-                        image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
-                        canvas = next_canvas;
-                    }
-                }
+                DisposalMethod::None => {}
                 DisposalMethod::Background => {
-                    let mut next_canvas = saved_canvas.unwrap_or_else(|| vec![0u8; canvas_size]);
                     let clamped_h = frame.height.min(self.height.saturating_sub(frame.top));
                     let clamped_w = frame.width.min(self.width.saturating_sub(frame.left));
                     for y in 0..clamped_h {
                         let canvas_y = frame.top + y;
                         let row_base = (canvas_y * self.width + frame.left) as usize * 4;
                         let row_end = row_base + clamped_w as usize * 4;
-                        if row_end <= next_canvas.len() {
-                            next_canvas[row_base..row_end].fill(0);
+                        if row_end <= canvas.len() {
+                            canvas[row_base..row_end].fill(0);
                         }
                     }
-                    let mut pixels = PixelData::RGBA8(canvas);
-                    pixels.correct_pixels(self.width, self.height);
-                    image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
-                    canvas = next_canvas;
-                    self.limits.free_usize(canvas_size);
                 }
                 DisposalMethod::Previous => {
-                    let mut pixels = PixelData::RGBA8(canvas);
-                    pixels.correct_pixels(self.width, self.height);
-                    image_frames.push(ImageFrame::new(self.width, self.height, pixels, frame.delay as u32));
-                    canvas = saved_canvas.unwrap_or_else(|| vec![0u8; canvas_size]);
-                    self.limits.free_usize(canvas_size);
+                    canvas.copy_from_slice(&scratch);
                 }
             }
         }
