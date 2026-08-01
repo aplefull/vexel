@@ -8,7 +8,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, jpeg, jpeg-ls, png, gif, bmp, tiff, hdr, tga, netpbm, ico, jbig1]
+        options: [all, jpeg, jpeg-ls, png, gif, bmp, tiff, dng, hdr, tga, netpbm, ico, jbig1, dicom, exr]
       seconds:
         description: 'Time limit per target (seconds)'
         required: true
@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        format: [jpeg, jpeg-ls, png, gif, bmp, tiff, hdr, tga, netpbm, ico, jbig1]
+        format: [jpeg, jpeg-ls, png, gif, bmp, tiff, dng, hdr, tga, netpbm, ico, jbig1, dicom, exr]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly

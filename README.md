@@ -50,7 +50,7 @@ Supports all bit depths (1, 4, 8, 16, 24, 32, 64), RLE4/RLE8 (including CMYK var
 ### TIFF
 TIFF is a beast, nothing supports every feature it has. We support most of the common and some rare features for now.
 
-Strips and tiles are supported, including volumetric tiled images. Multi-page files decode each IFD as a separate frame. Both chunky and planar configurations are supported.
+Strips and tiles are supported, including volumetric tiled images. Multi-page files decode each IFD as a separate page via `decode_pages()`. Both chunky and planar configurations are supported.
 
 Supported compression: none, LZW, PackBits, Deflate/AdobeDeflate, JPEG (old and new), PNG, CCITT Group 3/4 fax (RLE, T4, T6), ThunderScan, NeXT, SGILog/SGILog24.
 
@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{}x{}", image.width(), image.height());
 
-    let pixels: Vec<u8> = image.as_rgba8();
+    let pixels: Vec<u8> = image.to_rgba8();
 
     let info = decoder.get_info();
     println!("{:?}", info);
@@ -134,7 +134,7 @@ Decoders produce one of the following pixel formats:
 | `L64F`     | 64-bit float grayscale |
 | `LA64F`    | 64-bit float grayscale + alpha |
 
-`image.to_rgb8()` and `image.to_rgba8()` convert any format to 8-bit and return the first frame's pixels as a `Vec<u8>`.
+`image.to_rgb8()` and `image.to_rgba8()` convert any format to 8-bit and return the pixels as a `Vec<u8>`.
 
 To work with the native data without converting, match on `frame.pixels()`:
 
@@ -164,7 +164,31 @@ match image.pixels() {
 }
 ```
 
-For animated formats, iterate over `image.frames()` and use `frame.delay()` to get the display duration in milliseconds.
+### Animated images
+
+An `Image` is always a single picture - `decode()` on an animation returns its first frame. To walk an animation, use `decode_frames()`, which yields one frame at a time. Each frame is freed when you drop it, so animations of any length decode in constant memory:
+
+```rust
+use vexel::Vexel;
+
+let mut decoder = Vexel::open("animation.gif")?;
+let mut frames = decoder.decode_frames()?;
+
+while let Some(frame) = frames.next_frame()? {
+    encoder.add_frame(frame.pixels().as_bytes(), frame.delay())?;
+}
+```
+
+It also implements `Iterator`, yielding `Result<ImageFrame, VexelError>`:
+
+```rust
+for frame in decoder.decode_frames()? {
+    let frame = frame?;
+    upload_texture(&frame);
+}
+```
+
+Formats without animation support yield exactly one frame, so the same loop works for every format. Note that `decode_frames()` consumes the decoder's position in the reader - construct a new `Vexel` if you need to decode again.
 
 ## WebAssembly
 
@@ -172,8 +196,19 @@ The library builds to WASM, exposing a `Decoder` class:
 
 - `new Decoder(data: Uint8Array)` - constructs a decoder, detecting the format from magic bytes
 - `decoder.decode()` / `decodePages()` / `decodeThumbnails()` - decode the image, all pages, or embedded thumbnails
+- `decoder.nextFrame()` - returns the next animation frame as RGBA8, or `null` when exhausted
 - `decoder.getInfo()` - returns format-specific metadata
 - `decoder.setLimits(...)` - overrides the default resource limits
+
+`decode()` returns a single picture (the first frame of an animation); `nextFrame()` walks the frames one at a time:
+
+```js
+let frame;
+while ((frame = decoder.nextFrame()) !== null) {
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.pixels), frame.width, frame.height), 0, 0);
+    await sleep(frame.delay);
+}
+```
 
 Standalone exports: `tryGuessFormat(data)`, `parseIcc(data)`, `setLogLevel(level)` (accepts `"Debug"`, `"Warning"`, or `"Error"`).
 
