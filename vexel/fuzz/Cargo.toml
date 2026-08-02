@@ -120,3 +120,10 @@ path = "fuzz_targets/decode_exr.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_jpeg2000"
+path = "fuzz_targets/decode_jpeg2000.rs"
+test = false
+doc = false
+bench = false

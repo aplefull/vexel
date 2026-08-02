@@ -36,6 +36,7 @@ pub enum ImageInfo {
     Tiff(TiffInfo),
     Dicom(DicomInfo),
     Exr(ExrInfo),
+    Jpeg2000(Jpeg2000Info),
     Unknown,
 }
 
@@ -120,6 +121,32 @@ pub struct ExrInfo {
     pub parts: Vec<ExrPartInfo>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct Jpeg2000ComponentInfo {
+    pub precision: u32,
+    pub signed: bool,
+    pub dx: u32,
+    pub dy: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct Jpeg2000Info {
+    pub width: u32,
+    pub height: u32,
+    pub num_components: u32,
+    pub tile_width: u32,
+    pub tile_height: u32,
+    pub num_tiles: u32,
+    pub num_layers: u32,
+    pub num_resolutions: u32,
+    pub progression_order: String,
+    pub reversible: bool,
+    pub multiple_component_transform: bool,
+    pub components: Vec<Jpeg2000ComponentInfo>,
+}
+
 impl fmt::Display for ImageInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -136,6 +163,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Tiff(info) => write!(f, "{}", info),
             ImageInfo::Dicom(info) => write!(f, "{}", info),
             ImageInfo::Exr(info) => write!(f, "{}", info),
+            ImageInfo::Jpeg2000(info) => write!(f, "{}", info),
             ImageInfo::Unknown => write!(f, "Unknown format"),
         }
     }
@@ -1453,6 +1481,36 @@ impl fmt::Display for ExrInfo {
                 writeln!(f, "    {} ({}, {} bytes)", attr.name, attr.attr_type, attr.size)?;
             }
             writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for Jpeg2000Info {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "JPEG 2000 Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Size: {}x{}", self.width, self.height)?;
+        writeln!(f, "Components: {}", self.num_components)?;
+        writeln!(f, "Tile size: {}x{}", self.tile_width, self.tile_height)?;
+        writeln!(f, "Tiles: {}", self.num_tiles)?;
+        writeln!(f, "Layers: {}", self.num_layers)?;
+        writeln!(f, "Resolutions: {}", self.num_resolutions)?;
+        writeln!(f, "Progression order: {}", self.progression_order)?;
+        writeln!(f, "Wavelet: {}", if self.reversible { "5/3 reversible" } else { "9/7 irreversible" })?;
+        writeln!(f, "Component transform: {}", self.multiple_component_transform)?;
+
+        for (index, component) in self.components.iter().enumerate() {
+            writeln!(
+                f,
+                "  Component {}: {} bit{}, subsampling {}x{}",
+                index,
+                component.precision,
+                if component.signed { " signed" } else { " unsigned" },
+                component.dx,
+                component.dy
+            )?;
         }
 
         Ok(())

@@ -109,6 +109,7 @@ pub enum ImageFormat {
     Cur,
     Dicom,
     Exr,
+    Jpeg2000,
     Unknown,
 }
 

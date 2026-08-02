@@ -31,6 +31,7 @@ use crate::decoders::hdr::HdrDecoder;
 use crate::decoders::ico::IcoDecoder;
 use crate::decoders::jbig1::Jbig1Decoder;
 use crate::decoders::jpeg::decoder::JpegDecoder;
+use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;
@@ -59,6 +60,7 @@ pub(crate) enum Decoders<R: Read + Seek> {
     Ico(IcoDecoder<R>),
     Dicom(DicomDecoder<R>),
     Exr(ExrDecoder<R>),
+    Jpeg2000(Jpeg2000Decoder<R>),
     Unknown,
 }
 
@@ -126,6 +128,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Ico | ImageFormat::Cur => Decoders::Ico(IcoDecoder::new(reader)),
             ImageFormat::Dicom => Decoders::Dicom(DicomDecoder::new(reader)),
             ImageFormat::Exr => Decoders::Exr(ExrDecoder::new(reader)),
+            ImageFormat::Jpeg2000 => Decoders::Jpeg2000(Jpeg2000Decoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -154,6 +157,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             Decoders::Ico(d) => d.set_limits(limits),
             Decoders::Dicom(d) => d.set_limits(limits),
             Decoders::Exr(d) => d.set_limits(limits),
+            Decoders::Jpeg2000(d) => d.set_limits(limits),
             Decoders::Unknown => {}
         }
     }
@@ -189,6 +193,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                     Decoders::Ico(decoder) => impl_decode!(decoder),
                     Decoders::Dicom(decoder) => impl_decode!(decoder),
                     Decoders::Exr(decoder) => impl_decode!(decoder),
+                    Decoders::Jpeg2000(decoder) => impl_decode!(decoder),
                     Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
                 }
             };
@@ -427,6 +432,10 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 let image_data = exr_decoder.get_info();
                 ImageInfo::Exr(image_data)
             }
+            Decoders::Jpeg2000(jpeg2000_decoder) => {
+                let image_data = jpeg2000_decoder.get_info();
+                ImageInfo::Jpeg2000(image_data)
+            }
             Decoders::Dng(_) => ImageInfo::Unknown,
             Decoders::Unknown => ImageInfo::Unknown,
         }
@@ -521,6 +530,13 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         // OpenEXR
         if header.starts_with(&[0x76, 0x2F, 0x31, 0x01]) {
             return Ok(ImageFormat::Exr);
+        }
+
+        // JPEG 2000
+        if header.starts_with(&[0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A])
+            || header.starts_with(&[0xFF, 0x4F, 0xFF, 0x51])
+        {
+            return Ok(ImageFormat::Jpeg2000);
         }
 
         // TIFF / DNG

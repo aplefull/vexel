@@ -32,16 +32,16 @@ Examples:
 #[clap(name = "vexel", after_help = AFTER_HELP)]
 struct Cli {
     #[arg(required = true)]
-    path: String,
+    path: PathBuf,
 
     #[arg(short, long, value_parser = ["ppm", "pam", "webp", "jxl"], help = "Output format [default: jxl]")]
     format: Option<String>,
 
     #[arg(short = 'o', long = "output-dir", help = "Output directory for converted files")]
-    output_dir: Option<String>,
+    output_dir: Option<PathBuf>,
 
     #[arg(short = 'O', long = "output", help = "Output file path (single file only)", conflicts_with = "output_dir")]
-    output: Option<String>,
+    output: Option<PathBuf>,
 
     #[arg(long, help = "Display the image")]
     gui: bool,
@@ -84,47 +84,59 @@ fn build_limits(cli: &Cli) -> vexel::Limits {
     }
 }
 
-fn get_files(path: &str) -> Vec<PathBuf> {
-    let mut files = Vec::new();
+fn get_files(path: &Path) -> Vec<PathBuf> {
     let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".."));
-    let absolute_pattern = if Path::new(path).is_relative() {
-        base_dir.join(path).to_string_lossy().into_owned()
-    } else {
-        path.to_string()
+    let absolute = if path.is_relative() { base_dir.join(path) } else { path.to_path_buf() };
+
+    if absolute.is_file() {
+        return vec![absolute];
+    }
+
+    let Some(pattern) = absolute.to_str() else {
+        return Vec::new();
     };
 
-    for entry in glob(&absolute_pattern).expect("Failed to read glob pattern") {
-        match entry {
-            Ok(path) => {
-                if !path.is_file() {
-                    continue;
-                }
+    let entries = match glob(pattern) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!("Invalid glob pattern: {}", err);
+            return Vec::new();
+        }
+    };
 
-                files.push(path);
-            }
-            Err(e) => println!("{:?}", e),
+    let mut files = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(path) if path.is_file() => files.push(path),
+            Ok(_) => continue,
+            Err(err) => eprintln!("{}", err),
         }
     }
 
     files
 }
 
-fn get_output_path(file: &Path, output_dir: Option<&str>, format: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let file_stem = file.file_stem().ok_or("Invalid file name")?.to_str().ok_or("Invalid file stem")?;
+fn get_output_path(
+    file: &Path,
+    output_dir: Option<&Path>,
+    format: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let stem = file.file_stem().ok_or("Invalid file name")?;
+
+    let mut file_name = stem.to_os_string();
+    file_name.push(".");
+    file_name.push(format);
 
     let output_path = if let Some(dir) = output_dir {
-        let output_dir = Path::new(dir);
-
-        if !output_dir.exists() {
-            fs::create_dir_all(output_dir)?;
+        if !dir.exists() {
+            fs::create_dir_all(dir)?;
         }
 
-        let output_dir =
-            if output_dir.is_relative() { std::env::current_dir()?.join(output_dir) } else { output_dir.to_path_buf() };
+        let dir = if dir.is_relative() { std::env::current_dir()?.join(dir) } else { dir.to_path_buf() };
 
-        output_dir.join(format!("{}.{}", file_stem, format))
+        dir.join(file_name)
     } else {
-        file.parent().unwrap_or_else(|| Path::new("..")).join(format!("{}.{}", file_stem, format))
+        file.parent().unwrap_or_else(|| Path::new("..")).join(file_name)
     };
 
     Ok(output_path)
@@ -154,11 +166,10 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
 
     let format = cli.format.as_deref().unwrap_or("jxl");
     let output_path = if let Some(output) = cli.output.as_deref() {
-        let p = Path::new(output);
-        if p.is_relative() {
-            std::env::current_dir()?.join(p)
+        if output.is_relative() {
+            std::env::current_dir()?.join(output)
         } else {
-            p.to_path_buf()
+            output.to_path_buf()
         }
     } else {
         get_output_path(file, cli.output_dir.as_deref(), format)?
@@ -220,7 +231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.gui {
         let (files, start_index) = gui::collect_gui_files(&cli.path);
         if files.is_empty() {
-            eprintln!("No files found matching path: {}", cli.path);
+            eprintln!("No files found matching path: {}", cli.path.display());
             return Ok(());
         }
 
@@ -232,7 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let files = get_files(&cli.path);
 
     if files.is_empty() {
-        eprintln!("No files found matching pattern: {}", cli.path);
+        eprintln!("No files found matching pattern: {}", cli.path.display());
         return Ok(());
     }
 

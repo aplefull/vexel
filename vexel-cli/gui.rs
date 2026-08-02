@@ -126,8 +126,7 @@ fn get_directory_files(path: &Path) -> Vec<PathBuf> {
     files
 }
 
-pub fn collect_gui_files(path: &str) -> (Vec<PathBuf>, usize) {
-    let input = Path::new(path);
+pub fn collect_gui_files(input: &Path) -> (Vec<PathBuf>, usize) {
     if input.is_dir() {
         (get_directory_files(input), 0)
     } else {
@@ -666,8 +665,17 @@ impl eframe::App for App {
         self.refresh_texture(ctx);
         self.update_frame(ctx);
 
-        let file_name =
-            self.files[self.current_file_index].file_name().and_then(|n| n.to_str()).unwrap_or("Unknown").to_string();
+        let file_name = self.files[self.current_file_index]
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let title = if self.files.len() > 1 {
+            format!("Vexel - [{}/{}] {}", self.current_file_index + 1, self.files.len(), file_name)
+        } else {
+            format!("Vexel - {}", file_name)
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
 
         if self.panel_open {
             let panel_frame = egui::Frame {
@@ -687,6 +695,10 @@ impl eframe::App for App {
                     };
 
                     add_row(ui, "FILENAME", &file_name);
+
+                    if self.files.len() > 1 {
+                        add_row(ui, "FILE", &format!("{} / {}", self.current_file_index + 1, self.files.len()));
+                    }
 
                     let [w, h] = match self.viewing_thumbnail {
                         Some(index) => self.thumbnails[index].size,
@@ -961,6 +973,57 @@ fn load_icon() -> Option<Arc<egui::viewport::IconData>> {
     eframe::icon_data::from_png_bytes(ICON_BYTES).ok().map(Arc::new)
 }
 
+fn install_system_fonts(ctx: &egui::Context) {
+    use font_kit::family_name::FamilyName;
+    use font_kit::properties::Properties;
+    use font_kit::source::SystemSource;
+
+    const FAMILIES: &[&str] = &[
+        "Noto Sans CJK JP",
+        "Noto Sans CJK SC",
+        "Noto Sans",
+        "Droid Sans Fallback",
+        "DejaVu Sans",
+        "Arial Unicode MS",
+        "Segoe UI",
+    ];
+
+    let source = SystemSource::new();
+    let mut fonts = egui::FontDefinitions::default();
+    let mut added = Vec::new();
+
+    for family in FAMILIES {
+        let handle = match source.select_best_match(&[FamilyName::Title((*family).to_string())], &Properties::new()) {
+            Ok(handle) => handle,
+            Err(_) => continue,
+        };
+
+        let Ok(font) = handle.load() else {
+            continue;
+        };
+
+        let Some(data) = font.copy_font_data() else {
+            continue;
+        };
+
+        let name = (*family).to_string();
+        fonts.font_data.insert(name.clone(), egui::FontData::from_owned((*data).clone()));
+        added.push(name);
+    }
+
+    if added.is_empty() {
+        return;
+    }
+
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if let Some(list) = fonts.families.get_mut(&family) {
+            list.extend(added.iter().cloned());
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 pub fn display_image(
     files: Vec<PathBuf>,
     start_index: usize,
@@ -979,6 +1042,8 @@ pub fn display_image(
         "Vexel",
         options,
         Box::new(move |cc| {
+            install_system_fonts(&cc.egui_ctx);
+
             let mut visuals = cc.egui_ctx.style().visuals.clone();
             visuals.panel_fill = egui::Color32::from_rgb(0x28, 0x2c, 0x34);
             visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x3a, 0x3f, 0x4b);

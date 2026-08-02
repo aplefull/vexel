@@ -741,30 +741,18 @@ unsafe fn jxl_encode(
         Ok(())
     };
 
-    let mut compressed = Vec::new();
-
     add_frame(&first_frame)?;
     drop(first_frame);
-    jxl_drain_output(enc, &mut compressed, false)?;
 
     for frame in rest {
         let frame = frame.map_err(|e| e.to_string())?;
         add_frame(&frame)?;
         drop(frame);
-        jxl_drain_output(enc, &mut compressed, false)?;
     }
 
     JxlEncoderCloseInput(enc);
-    jxl_drain_output(enc, &mut compressed, true)?;
 
-    Ok(compressed)
-}
-
-unsafe fn jxl_drain_output(
-    enc: *mut jpegxl_sys::encoder::encode::JxlEncoder,
-    compressed: &mut Vec<u8>,
-    until_done: bool,
-) -> Result<(), String> {
+    let mut compressed = Vec::new();
     let mut output_buf = vec![0u8; 65536];
 
     loop {
@@ -776,13 +764,11 @@ unsafe fn jxl_drain_output(
         compressed.extend_from_slice(&output_buf[..written]);
 
         match status {
-            JxlEncoderStatus::Success => return Ok(()),
-            JxlEncoderStatus::NeedMoreOutput => {
-                if !until_done && written == 0 {
-                    return Ok(());
-                }
-            }
+            JxlEncoderStatus::Success => break,
+            JxlEncoderStatus::NeedMoreOutput => continue,
             JxlEncoderStatus::Error => return Err("JXL encoder error during output processing".to_string()),
         }
     }
+
+    Ok(compressed)
 }
