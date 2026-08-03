@@ -8,17 +8,17 @@ pub struct Segment {
     pub num_passes: u32,
 }
 
-pub struct CodeBlock {
+pub struct CodeBlock<'a> {
     pub x0: i32,
     pub y0: i32,
     pub x1: i32,
     pub y1: i32,
     pub num_bps: u32,
-    pub segments: Vec<Segment>,
-    pub data: Vec<u8>,
+    pub segments: &'a [Segment],
+    pub data: &'a [u8],
 }
 
-impl CodeBlock {
+impl CodeBlock<'_> {
     pub fn width(&self) -> u32 {
         (self.x1 - self.x0).max(0) as u32
     }
@@ -404,11 +404,11 @@ impl T1Decoder {
         let mut passtype = PassType::Cleanup;
         self.mqc.reset_dec_states();
 
-        if cblk.segments.is_empty() {
+        if !cblk.segments.iter().any(|s| s.num_passes > 0) {
             return true;
         }
 
-        for segment in &cblk.segments {
+        for segment in cblk.segments.iter().filter(|s| s.num_passes > 0) {
             let use_raw = bpno_plus_one <= cblk.num_bps as i32 - 4 && passtype != PassType::Cleanup && cblksty.lazy();
             let coder = if use_raw { SegmentCoder::Raw } else { SegmentCoder::Mq };
 

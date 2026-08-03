@@ -1,6 +1,7 @@
 use crate::decoders::jpeg2000::codestream::Codestream;
 use crate::decoders::jpeg2000::dwt::{self, Line};
 use crate::decoders::jpeg2000::ht::{HtCodeBlock, HtDecoder};
+use crate::decoders::jpeg2000::simd;
 use crate::decoders::jpeg2000::t1::{CodeBlock, Segment, T1Decoder};
 use crate::decoders::jpeg2000::t2::{self, HeaderReader, TagTree};
 use crate::decoders::jpeg2000::types::*;
@@ -17,15 +18,9 @@ struct CblkState {
     mb: u32,
     num_len_bits: u32,
     included: bool,
-    segments: Vec<SegmentState>,
+    segments: Vec<Segment>,
+    max_passes: Vec<u32>,
     data: Vec<u8>,
-}
-
-struct SegmentState {
-    num_passes: u32,
-    max_passes: u32,
-    data_start: usize,
-    data_len: usize,
 }
 
 struct Precinct {
@@ -90,6 +85,24 @@ pub struct DecodedTile {
     pub x1: i32,
     pub y1: i32,
     pub components: Vec<Vec<f32>>,
+}
+
+#[cfg(feature = "rayon")]
+thread_local! {
+    static INSIDE_PARALLEL_TILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(feature = "rayon")]
+fn inner_parallelism_allowed() -> bool {
+    !INSIDE_PARALLEL_TILE.with(|flag| flag.get())
+}
+
+#[cfg(feature = "rayon")]
+pub fn with_parallel_tile<R>(run: impl FnOnce() -> R) -> R {
+    INSIDE_PARALLEL_TILE.with(|flag| flag.set(true));
+    let result = run();
+    INSIDE_PARALLEL_TILE.with(|flag| flag.set(false));
+    result
 }
 
 pub struct TileDecoder<'a> {
@@ -458,6 +471,7 @@ fn build_precincts(
                         num_len_bits: 3,
                         included: false,
                         segments: Vec::new(),
+                        max_passes: Vec::new(),
                         data: Vec::new(),
                     });
                 }
@@ -619,16 +633,20 @@ fn read_packet(
             let mut added: Vec<SegmentAddition> = Vec::new();
 
             loop {
-                let (index, room) = match cblk.segments.last() {
-                    Some(last) if last.num_passes < last.max_passes => {
-                        (cblk.segments.len() - 1, last.max_passes - last.num_passes)
-                    }
-                    _ => {
+                let last_room = match (cblk.segments.last(), cblk.max_passes.last()) {
+                    (Some(last), Some(&max)) if last.num_passes < max => Some(max - last.num_passes),
+                    _ => None,
+                };
+
+                let (index, room) = match last_room {
+                    Some(room) => (cblk.segments.len() - 1, room),
+                    None => {
                         let first = cblk.segments.is_empty();
-                        let previous_max = cblk.segments.last().map(|s| s.max_passes).unwrap_or(0);
+                        let previous_max = cblk.max_passes.last().copied().unwrap_or(0);
                         let max_passes = t2::segment_max_passes(params.coding.cblk_style, first, previous_max);
 
-                        cblk.segments.push(SegmentState { num_passes: 0, max_passes, data_start: 0, data_len: 0 });
+                        cblk.segments.push(Segment { data_start: 0, data_len: 0, num_passes: 0 });
+                        cblk.max_passes.push(max_passes);
 
                         (cblk.segments.len() - 1, max_passes)
                     }
@@ -794,134 +812,204 @@ fn decode_ht_block(
     true
 }
 
+struct BlockTask<'a> {
+    block: CodeBlock<'a>,
+    mb: u32,
+    orient: BandOrient,
+    step_size: f32,
+    base_x: i32,
+    base_y: i32,
+}
+
+struct DecodedBlock {
+    samples: Vec<i32>,
+    cw: usize,
+    ch: usize,
+    step_size: f32,
+    base_x: i32,
+    base_y: i32,
+}
+
+struct BlockScratch {
+    t1: T1Decoder,
+    ht: HtDecoder,
+    ht_samples: Vec<i32>,
+}
+
+impl BlockScratch {
+    fn new() -> Self {
+        Self { t1: T1Decoder::new(), ht: HtDecoder::new(), ht_samples: Vec::new() }
+    }
+}
+
+fn collect_block_tasks(tilec: &TileComponent) -> Vec<BlockTask<'_>> {
+    let mut tasks = Vec::new();
+
+    for (resno, resolution) in tilec.resolutions.iter().enumerate() {
+        let prev = if resno == 0 {
+            None
+        } else {
+            let previous = &tilec.resolutions[resno - 1];
+            Some((previous.x1 - previous.x0, previous.y1 - previous.y0))
+        };
+
+        for band in &resolution.bands {
+            let (offset_x, offset_y) = band_offset(band.orient, prev);
+
+            for precinct in &band.precincts {
+                for cblk in &precinct.cblks {
+                    if !cblk.included || cblk.data.is_empty() {
+                        continue;
+                    }
+
+                    if cblk.x1 <= cblk.x0 || cblk.y1 <= cblk.y0 {
+                        continue;
+                    }
+
+                    tasks.push(BlockTask {
+                        block: CodeBlock {
+                            x0: cblk.x0,
+                            y0: cblk.y0,
+                            x1: cblk.x1,
+                            y1: cblk.y1,
+                            num_bps: cblk.num_bps,
+                            segments: &cblk.segments,
+                            data: &cblk.data,
+                        },
+                        mb: cblk.mb,
+                        orient: band.orient,
+                        step_size: band.step_size,
+                        base_x: offset_x + (cblk.x0 - band.x0),
+                        base_y: offset_y + (cblk.y0 - band.y0),
+                    });
+                }
+            }
+        }
+    }
+
+    tasks
+}
+
+fn decode_block(scratch: &mut BlockScratch, task: &BlockTask<'_>, params: &BlockParams) -> Option<DecodedBlock> {
+    let cw = task.block.width() as usize;
+    let ch = task.block.height() as usize;
+
+    let decoded_ht = if uses_ht_block(params.cblk_style, &task.block) {
+        decode_ht_block(&mut scratch.ht, &task.block, task.mb, params.cblk_style, &mut scratch.ht_samples)
+    } else {
+        false
+    };
+
+    if !decoded_ht && !scratch.t1.decode_cblk(&task.block, task.orient, params.roi_shift, params.cblk_style) {
+        return None;
+    }
+
+    let samples: &mut [i32] = if decoded_ht { &mut scratch.ht_samples } else { scratch.t1.data_mut() };
+
+    if params.roi_shift > 0 {
+        if params.roi_shift >= 31 {
+            samples.iter_mut().for_each(|value| *value = 0);
+        } else {
+            let threshold = 1i32 << params.roi_shift;
+            for value in samples.iter_mut() {
+                let magnitude = value.abs();
+                if magnitude >= threshold {
+                    let scaled = magnitude >> params.roi_shift;
+                    *value = if *value < 0 { -scaled } else { scaled };
+                }
+            }
+        }
+    }
+
+    let samples = if decoded_ht { &scratch.ht_samples } else { scratch.t1.data() };
+
+    Some(DecodedBlock {
+        samples: samples[..(cw * ch).min(samples.len())].to_vec(),
+        cw,
+        ch,
+        step_size: task.step_size,
+        base_x: task.base_x,
+        base_y: task.base_y,
+    })
+}
+
+fn write_block(tilec: &mut TileComponent, block: &DecodedBlock, width: usize, reversible: bool) {
+    let x_start = (-block.base_x).max(0) as usize;
+    let x_end = block.cw.min((width as i32 - block.base_x).max(0) as usize);
+
+    if x_start >= x_end {
+        return;
+    }
+
+    for y in 0..block.ch {
+        let dest_y = block.base_y + y as i32;
+        if dest_y < 0 {
+            continue;
+        }
+
+        let row_start = dest_y as usize * width + (block.base_x + x_start as i32) as usize;
+        let row_end = row_start + (x_end - x_start);
+
+        let Some(source) = block.samples.get(y * block.cw + x_start..y * block.cw + x_end) else {
+            continue;
+        };
+
+        let Some(dest) = tilec.data.get_mut(row_start..row_end) else {
+            continue;
+        };
+
+        simd::dequantize_row(source, dest, reversible, block.step_size);
+    }
+}
+
+struct BlockParams {
+    roi_shift: u32,
+    cblk_style: CodeBlockStyle,
+}
+
 fn decode_code_blocks(tilec: &mut TileComponent, params: &ComponentCoding) {
-    let mut t1 = T1Decoder::new();
-    let reversible = params.coding.reversible;
-    let roi_shift = params.roi_shift;
-    let cblk_style = params.coding.cblk_style;
-
-    let mut ht = HtDecoder::new();
-    let mut ht_samples: Vec<i32> = Vec::new();
-
     let width = tilec.width() as usize;
     if width == 0 {
         return;
     }
 
-    let num_resolutions = tilec.resolutions.len();
+    let reversible = params.coding.reversible;
+    let block_params = BlockParams { roi_shift: params.roi_shift, cblk_style: params.coding.cblk_style };
 
-    for resno in 0..num_resolutions {
-        let prev = if resno == 0 {
-            None
-        } else {
-            Some((
-                tilec.resolutions[resno - 1].x1 - tilec.resolutions[resno - 1].x0,
-                tilec.resolutions[resno - 1].y1 - tilec.resolutions[resno - 1].y0,
-            ))
-        };
+    let tasks = collect_block_tasks(tilec);
+    if tasks.is_empty() {
+        return;
+    }
 
-        let num_bands = tilec.resolutions[resno].bands.len();
+    let decoded = decode_block_tasks(&tasks, &block_params);
 
-        for bandno in 0..num_bands {
-            let band_orient = tilec.resolutions[resno].bands[bandno].orient;
-            let band_x0 = tilec.resolutions[resno].bands[bandno].x0;
-            let band_y0 = tilec.resolutions[resno].bands[bandno].y0;
-            let step_size = tilec.resolutions[resno].bands[bandno].step_size;
-
-            let num_precincts = tilec.resolutions[resno].bands[bandno].precincts.len();
-
-            for precno in 0..num_precincts {
-                let num_cblks = tilec.resolutions[resno].bands[bandno].precincts[precno].cblks.len();
-
-                for cblkno in 0..num_cblks {
-                    let cblk = &tilec.resolutions[resno].bands[bandno].precincts[precno].cblks[cblkno];
-
-                    if !cblk.included || cblk.data.is_empty() {
-                        continue;
-                    }
-
-                    let block = CodeBlock {
-                        x0: cblk.x0,
-                        y0: cblk.y0,
-                        x1: cblk.x1,
-                        y1: cblk.y1,
-                        num_bps: cblk.num_bps,
-                        segments: cblk
-                            .segments
-                            .iter()
-                            .filter(|s| s.num_passes > 0)
-                            .map(|s| Segment {
-                                data_start: s.data_start,
-                                data_len: s.data_len,
-                                num_passes: s.num_passes,
-                            })
-                            .collect(),
-                        data: cblk.data.clone(),
-                    };
-
-                    let (cx0, cy0) = (block.x0, block.y0);
-                    let cw = block.width() as usize;
-                    let ch = block.height() as usize;
-
-                    if cw == 0 || ch == 0 {
-                        continue;
-                    }
-
-                    let decoded_ht = if uses_ht_block(cblk_style, &block) {
-                        decode_ht_block(&mut ht, &block, cblk.mb, cblk_style, &mut ht_samples)
-                    } else {
-                        false
-                    };
-
-                    if !decoded_ht && !t1.decode_cblk(&block, band_orient, roi_shift, cblk_style) {
-                        continue;
-                    }
-
-                    let samples: &mut [i32] = if decoded_ht { &mut ht_samples } else { t1.data_mut() };
-
-                    if roi_shift > 0 {
-                        if roi_shift >= 31 {
-                            samples.iter_mut().for_each(|value| *value = 0);
-                        } else {
-                            let threshold = 1i32 << roi_shift;
-                            for value in samples.iter_mut() {
-                                let magnitude = value.abs();
-                                if magnitude >= threshold {
-                                    let scaled = magnitude >> roi_shift;
-                                    *value = if *value < 0 { -scaled } else { scaled };
-                                }
-                            }
-                        }
-                    }
-
-                    let (offset_x, offset_y) = band_offset(band_orient, prev);
-
-                    let samples: &[i32] = if decoded_ht { &ht_samples } else { t1.data() };
-
-                    for y in 0..ch {
-                        for x in 0..cw {
-                            let value = samples[y * cw + x];
-
-                            let dest_x = offset_x + (cx0 - band_x0) + x as i32;
-                            let dest_y = offset_y + (cy0 - band_y0) + y as i32;
-
-                            if dest_x < 0 || dest_y < 0 {
-                                continue;
-                            }
-
-                            let index = dest_y as usize * width + dest_x as usize;
-                            if index >= tilec.data.len() {
-                                continue;
-                            }
-
-                            tilec.data[index] = dequantize(value, reversible, step_size);
-                        }
-                    }
-                }
-            }
-        }
+    for block in decoded.into_iter().flatten() {
+        write_block(tilec, &block, width, reversible);
     }
 }
+
+#[cfg(feature = "rayon")]
+fn decode_block_tasks(tasks: &[BlockTask<'_>], params: &BlockParams) -> Vec<Option<DecodedBlock>> {
+    use rayon::prelude::*;
+
+    if tasks.len() < PARALLEL_BLOCK_THRESHOLD || !inner_parallelism_allowed() {
+        return decode_block_tasks_serial(tasks, params);
+    }
+
+    tasks.par_iter().map_init(BlockScratch::new, |scratch, task| decode_block(scratch, task, params)).collect()
+}
+
+#[cfg(not(feature = "rayon"))]
+fn decode_block_tasks(tasks: &[BlockTask<'_>], params: &BlockParams) -> Vec<Option<DecodedBlock>> {
+    decode_block_tasks_serial(tasks, params)
+}
+
+fn decode_block_tasks_serial(tasks: &[BlockTask<'_>], params: &BlockParams) -> Vec<Option<DecodedBlock>> {
+    let mut scratch = BlockScratch::new();
+    tasks.iter().map(|task| decode_block(&mut scratch, task, params)).collect()
+}
+
+const PARALLEL_BLOCK_THRESHOLD: usize = 8;
 
 fn band_offset(orient: BandOrient, prev: Option<(i32, i32)>) -> (i32, i32) {
     let Some((prev_w, prev_h)) = prev else {
@@ -933,14 +1021,6 @@ fn band_offset(orient: BandOrient, prev: Option<(i32, i32)>) -> (i32, i32) {
         BandOrient::Hl => (prev_w, 0),
         BandOrient::Lh => (0, prev_h),
         BandOrient::Hh => (prev_w, prev_h),
-    }
-}
-
-fn dequantize(value: i32, reversible: bool, step_size: f32) -> f32 {
-    if reversible {
-        (value / 2) as f32
-    } else {
-        (value as f32 / 2.0) * step_size
     }
 }
 
@@ -984,40 +1064,41 @@ fn inverse_dwt_53(tilec: &mut TileComponent, width: usize, height: usize) {
         let cas_x = (tilec.resolutions[resno].x0 % 2).unsigned_abs() as usize;
         let cas_y = (tilec.resolutions[resno].y0 % 2).unsigned_abs() as usize;
 
-        let mut row = vec![0i32; rw.max(1) + 8];
-        let mut column = vec![0i32; rh.max(1) + 8];
+        let row_line = Line { sn: prev_w as i32, dn: (rw - prev_w) as i32, cas: cas_x as i32 };
+        let column_line = Line { sn: prev_h as i32, dn: (rh - prev_h) as i32, cas: cas_y as i32 };
 
-        for y in 0..rh.min(height) {
-            let src: Vec<i32> = (0..rw).map(|x| tilec.data.get(y * width + x).copied().unwrap_or(0.0) as i32).collect();
-            dwt::interleave_h(&mut row[..rw], &src, prev_w, rw - prev_w, cas_x);
+        let num_rows = rh.min(height);
+        let num_columns = rw.min(width);
 
-            dwt::decode_line_53(
-                &mut row[..rw],
-                &Line { sn: prev_w as i32, dn: (rw - prev_w) as i32, cas: cas_x as i32 },
-            );
+        dwt_rows::<i32, _>(&mut tilec.data, width, num_rows, rw, |scratch, row, data| {
+            for (slot, x) in scratch[..rw].iter_mut().zip(0..rw) {
+                *slot = data.get(x).copied().unwrap_or(0.0) as i32;
+            }
 
-            for x in 0..rw {
-                if let Some(slot) = tilec.data.get_mut(y * width + x) {
-                    *slot = row[x] as f32;
+            dwt::interleave_h(&mut row[..rw], &scratch[..rw], prev_w, rw - prev_w, cas_x);
+            dwt::decode_line_53(&mut row[..rw], &row_line);
+
+            for (x, &value) in row[..rw].iter().enumerate() {
+                if let Some(slot) = data.get_mut(x) {
+                    *slot = value as f32;
                 }
             }
-        }
+        });
 
-        for x in 0..rw.min(width) {
-            let src: Vec<i32> = (0..rh).map(|y| tilec.data.get(y * width + x).copied().unwrap_or(0.0) as i32).collect();
-            dwt::interleave_v(&mut column[..rh], &src, 1, prev_h, rh - prev_h, cas_y);
+        dwt_columns::<i32, _>(&mut tilec.data, width, num_columns, rh, |scratch, column, data, x| {
+            for (slot, y) in scratch[..rh].iter_mut().zip(0..rh) {
+                *slot = data.get(y * width + x).copied().unwrap_or(0.0) as i32;
+            }
 
-            dwt::decode_line_53(
-                &mut column[..rh],
-                &Line { sn: prev_h as i32, dn: (rh - prev_h) as i32, cas: cas_y as i32 },
-            );
+            dwt::interleave_v(&mut column[..rh], &scratch[..rh], 1, prev_h, rh - prev_h, cas_y);
+            dwt::decode_line_53(&mut column[..rh], &column_line);
 
-            for y in 0..rh {
-                if let Some(slot) = tilec.data.get_mut(y * width + x) {
-                    *slot = column[y] as f32;
+            for (y, &value) in column[..rh].iter().enumerate() {
+                if let Some(slot) = data.get_mut(y * width + x) {
+                    *slot = value as f32;
                 }
             }
-        }
+        });
     }
 }
 
@@ -1039,82 +1120,152 @@ fn inverse_dwt_97(tilec: &mut TileComponent, width: usize, height: usize) {
         let cas_x = (tilec.resolutions[resno].x0 % 2).unsigned_abs() as usize;
         let cas_y = (tilec.resolutions[resno].y0 % 2).unsigned_abs() as usize;
 
-        let mut row = vec![0f32; rw.max(1) + 8];
-        let mut column = vec![0f32; rh.max(1) + 8];
+        let row_line = Line { sn: prev_w as i32, dn: (rw - prev_w) as i32, cas: cas_x as i32 };
+        let column_line = Line { sn: prev_h as i32, dn: (rh - prev_h) as i32, cas: cas_y as i32 };
 
-        for y in 0..rh.min(height) {
-            let src: Vec<f32> = (0..rw).map(|x| tilec.data.get(y * width + x).copied().unwrap_or(0.0)).collect();
-            dwt::interleave_h(&mut row[..rw], &src, prev_w, rw - prev_w, cas_x);
+        let num_rows = rh.min(height);
+        let num_columns = rw.min(width);
 
-            dwt::decode_line_97(
-                &mut row[..rw],
-                &Line { sn: prev_w as i32, dn: (rw - prev_w) as i32, cas: cas_x as i32 },
-            );
+        dwt_rows::<f32, _>(&mut tilec.data, width, num_rows, rw, |scratch, row, data| {
+            let available = rw.min(data.len());
 
-            for x in 0..rw {
-                if let Some(slot) = tilec.data.get_mut(y * width + x) {
-                    *slot = row[x];
-                }
-            }
-        }
+            scratch[..rw].fill(0.0);
+            scratch[..available].copy_from_slice(&data[..available]);
 
-        for x in 0..rw.min(width) {
-            let src: Vec<f32> = (0..rh).map(|y| tilec.data.get(y * width + x).copied().unwrap_or(0.0)).collect();
-            dwt::interleave_v(&mut column[..rh], &src, 1, prev_h, rh - prev_h, cas_y);
+            dwt::interleave_h(&mut row[..rw], &scratch[..rw], prev_w, rw - prev_w, cas_x);
+            dwt::decode_line_97(&mut row[..rw], &row_line);
 
-            dwt::decode_line_97(
-                &mut column[..rh],
-                &Line { sn: prev_h as i32, dn: (rh - prev_h) as i32, cas: cas_y as i32 },
-            );
+            data[..available].copy_from_slice(&row[..available]);
+        });
 
-            for y in 0..rh {
-                if let Some(slot) = tilec.data.get_mut(y * width + x) {
-                    *slot = column[y];
-                }
-            }
-        }
+        dwt_columns::<f32, _>(&mut tilec.data, width, num_columns, rh, |scratch, column, data, x| {
+            simd::gather_column_f32(data, scratch, x, width, rh);
+            dwt::interleave_v(&mut column[..rh], &scratch[..rh], 1, prev_h, rh - prev_h, cas_y);
+
+            dwt::decode_line_97(&mut column[..rh], &column_line);
+
+            simd::scatter_column_f32(&column[..rh], data, x, width, rh);
+        });
     }
 }
 
-#[allow(clippy::needless_range_loop)]
+struct DwtScratch<T> {
+    line: Vec<T>,
+    scratch: Vec<T>,
+}
+
+impl<T: Default + Clone> DwtScratch<T> {
+    fn new(len: usize) -> Self {
+        Self { line: vec![T::default(); len + 8], scratch: vec![T::default(); len + 8] }
+    }
+}
+
+const PARALLEL_LINE_THRESHOLD: usize = 16;
+const PARALLEL_LINE_WORK_THRESHOLD: usize = 1 << 14;
+
+#[cfg(feature = "rayon")]
+fn worth_parallel_lines(num_lines: usize, line_len: usize) -> bool {
+    num_lines >= PARALLEL_LINE_THRESHOLD
+        && num_lines.saturating_mul(line_len) >= PARALLEL_LINE_WORK_THRESHOLD
+        && inner_parallelism_allowed()
+}
+
+fn dwt_rows<T, F>(data: &mut [f32], width: usize, num_rows: usize, line_len: usize, apply: F)
+where
+    T: Default + Clone + Send,
+    F: Fn(&mut [T], &mut [T], &mut [f32]) + Sync + Send,
+{
+    if num_rows == 0 || width == 0 {
+        return;
+    }
+
+    #[cfg(feature = "rayon")]
+    if worth_parallel_lines(num_rows, line_len) {
+        use rayon::prelude::*;
+
+        data.par_chunks_mut(width).take(num_rows).for_each_init(
+            || DwtScratch::<T>::new(line_len),
+            |state, chunk| apply(&mut state.scratch, &mut state.line, chunk),
+        );
+
+        return;
+    }
+
+    let mut state = DwtScratch::<T>::new(line_len);
+    for chunk in data.chunks_mut(width).take(num_rows) {
+        apply(&mut state.scratch, &mut state.line, chunk);
+    }
+}
+
+struct ColumnView {
+    data: *mut f32,
+    len: usize,
+}
+
+unsafe impl Send for ColumnView {}
+unsafe impl Sync for ColumnView {}
+
+impl ColumnView {
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn columns_of<'a>(&self) -> &'a mut [f32] {
+        std::slice::from_raw_parts_mut(self.data, self.len)
+    }
+}
+
+fn dwt_columns<T, F>(data: &mut [f32], width: usize, num_columns: usize, line_len: usize, apply: F)
+where
+    T: Default + Clone + Send,
+    F: Fn(&mut [T], &mut [T], &mut [f32], usize) + Sync + Send,
+{
+    if num_columns == 0 || width == 0 {
+        return;
+    }
+
+    #[cfg(feature = "rayon")]
+    if worth_parallel_lines(num_columns, line_len) {
+        use rayon::prelude::*;
+
+        let view = ColumnView { data: data.as_mut_ptr(), len: data.len() };
+
+        (0..num_columns).into_par_iter().for_each_init(
+            || DwtScratch::<T>::new(line_len),
+            |state, x| {
+                let data = unsafe { view.columns_of() };
+                apply(&mut state.scratch, &mut state.line, data, x);
+            },
+        );
+
+        return;
+    }
+
+    let mut state = DwtScratch::<T>::new(line_len);
+    for x in 0..num_columns {
+        apply(&mut state.scratch, &mut state.line, data, x);
+    }
+}
+
+fn split_color_planes(planes: &mut [Vec<f32>]) -> Option<(&mut [f32], &mut [f32], &mut [f32])> {
+    if planes.len() < 3 {
+        return None;
+    }
+
+    let len = planes[0].len().min(planes[1].len()).min(planes[2].len());
+
+    let (first, rest) = planes.split_at_mut(1);
+    let (second, third) = rest.split_at_mut(1);
+
+    Some((&mut first[0][..len], &mut second[0][..len], &mut third[0][..len]))
+}
+
 fn inverse_rct_tile(planes: &mut [Vec<f32>]) {
-    if planes.len() < 3 {
-        return;
-    }
-
-    let len = planes[0].len().min(planes[1].len()).min(planes[2].len());
-
-    for i in 0..len {
-        let y = planes[0][i] as i32;
-        let u = planes[1][i] as i32;
-        let v = planes[2][i] as i32;
-
-        let g = y - ((u + v) >> 2);
-        let r = v + g;
-        let b = u + g;
-
-        planes[0][i] = r as f32;
-        planes[1][i] = g as f32;
-        planes[2][i] = b as f32;
+    if let Some((y, u, v)) = split_color_planes(planes) {
+        simd::inverse_rct_row(y, u, v);
     }
 }
 
-#[allow(clippy::needless_range_loop)]
 fn inverse_ict_tile(planes: &mut [Vec<f32>]) {
-    if planes.len() < 3 {
-        return;
-    }
-
-    let len = planes[0].len().min(planes[1].len()).min(planes[2].len());
-
-    for i in 0..len {
-        let y = planes[0][i];
-        let u = planes[1][i];
-        let v = planes[2][i];
-
-        planes[0][i] = y + 1.402 * v;
-        planes[1][i] = y - 0.344_13 * u - 0.714_14 * v;
-        planes[2][i] = y + 1.772 * u;
+    if let Some((y, u, v)) = split_color_planes(planes) {
+        simd::inverse_ict_row(y, u, v);
     }
 }
 

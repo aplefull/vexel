@@ -1,3 +1,5 @@
+use crate::decoders::jpeg2000::simd;
+
 const DWT_ALPHA: f32 = -1.586_134_3;
 const DWT_BETA: f32 = -0.052_980_118;
 const DWT_GAMMA: f32 = 0.882_911_1;
@@ -80,15 +82,39 @@ fn clamp_dd(a: &[i32], i: i32, sn: i32) -> i32 {
 }
 
 fn step1(a: &mut [f32], offset: usize, start: i32, end: i32, c: f32) {
-    for i in start.max(0)..end.max(0) {
-        let index = offset + (i as usize) * 2;
-        if index < a.len() {
-            a[index] *= c;
-        }
+    let start = start.max(0);
+    let end = end.max(0);
+
+    if start >= end || offset >= a.len() {
+        return;
     }
+
+    let available = (a.len() - offset).div_ceil(2);
+    let count = ((end - start) as usize).min(available.saturating_sub(start as usize));
+
+    simd::scale_stride2(a, offset + (start as usize) * 2, count, c);
 }
 
 fn step2(a: &mut [f32], l_offset: usize, w_offset: usize, end: i32, m: i32, c: f32) {
+    let imax = end.min(m).max(0) as usize;
+
+    if w_offset == 0 || l_offset + 2 != w_offset {
+        return step2_scalar(a, l_offset, w_offset, end, m, c);
+    }
+
+    let count = if w_offset < a.len() { imax.min((a.len() - w_offset).div_ceil(2)) } else { 0 };
+
+    simd::lift_stride2(a, w_offset, count, c);
+
+    let l = if count == 0 { l_offset } else { w_offset + (count - 1) * 2 };
+    let w = w_offset + count * 2;
+
+    if count == imax && m < end && l < a.len() && w > 0 && w - 1 < a.len() {
+        a[w - 1] += 2.0 * c * a[l];
+    }
+}
+
+fn step2_scalar(a: &mut [f32], l_offset: usize, w_offset: usize, end: i32, m: i32, c: f32) {
     let imax = end.min(m).max(0);
 
     let mut l = l_offset;

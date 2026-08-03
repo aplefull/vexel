@@ -4,6 +4,7 @@ pub mod dwt;
 pub mod ht;
 pub mod ht_luts;
 pub mod mq;
+pub mod simd;
 pub mod t1;
 pub mod t1_luts;
 pub mod t2;

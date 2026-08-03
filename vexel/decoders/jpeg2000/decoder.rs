@@ -1,6 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::decoders::jpeg2000::codestream::{self, Codestream};
+use crate::decoders::jpeg2000::simd;
 use crate::decoders::jpeg2000::tile::{self, TileDecoder};
 use crate::decoders::jpeg2000::types::*;
 use crate::utils::error::{VexelError, VexelResult};
@@ -88,6 +89,13 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
         let mut decoded_any = false;
         let mut ppm_cursor = 0usize;
 
+        let occupied = tile_data.iter().filter(|bytes| !bytes.is_empty()).count();
+        let sequential_headers = !parsed.ppm_data.is_empty();
+
+        if self.can_decode_tiles_in_parallel(occupied, sequential_headers) {
+            return self.decode_tiles_parallel(parsed, &tile_data, planes);
+        }
+
         for (tile_index, bytes) in tile_data.iter().enumerate() {
             if bytes.is_empty() {
                 continue;
@@ -100,6 +108,71 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
                     tile::log_tile_summary(tile_index as u32, &decoded);
                     compose_tile(&mut planes, &decoded, siz);
                     decoded_any = true;
+                }
+                Err(error) => {
+                    log_warn!("JPEG 2000: failed to decode tile {}: {}", tile_index, error);
+                }
+            }
+        }
+
+        if !decoded_any {
+            return Err(VexelError::Custom("JPEG 2000: no tile could be decoded".to_string()));
+        }
+
+        Ok(planes)
+    }
+
+    #[cfg(feature = "rayon")]
+    fn can_decode_tiles_in_parallel(&self, occupied_tiles: usize, sequential_headers: bool) -> bool {
+        occupied_tiles >= PARALLEL_TILE_THRESHOLD && !sequential_headers
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    fn can_decode_tiles_in_parallel(&self, _occupied_tiles: usize, _sequential_headers: bool) -> bool {
+        false
+    }
+
+    #[cfg(feature = "rayon")]
+    fn decode_tiles_parallel(
+        &mut self,
+        parsed: &Codestream,
+        tile_data: &[Vec<u8>],
+        mut planes: Vec<Vec<i32>>,
+    ) -> VexelResult<Vec<Vec<i32>>> {
+        use rayon::prelude::*;
+
+        let siz = &parsed.siz;
+        let budget = self.limits.clone();
+
+        let decoded: Vec<(usize, VexelResult<tile::DecodedTile>)> = tile_data
+            .par_iter()
+            .enumerate()
+            .filter(|(_, bytes)| !bytes.is_empty())
+            .map(|(tile_index, bytes)| {
+                let mut limits = budget.clone();
+                let mut ppm_cursor = 0usize;
+                let mut decoder = TileDecoder::new(parsed, &mut limits, &mut ppm_cursor);
+
+                let result = tile::with_parallel_tile(|| decoder.decode_tile(tile_index as u32, bytes));
+
+                (tile_index, result)
+            })
+            .collect();
+
+        let mut decoded_any = false;
+
+        for (tile_index, result) in decoded {
+            match result {
+                Ok(tile) => {
+                    tile::log_tile_summary(tile_index as u32, &tile);
+
+                    let footprint: usize = tile.components.iter().map(|c| c.len() * 4).sum();
+                    self.limits.reserve_usize(footprint)?;
+
+                    compose_tile(&mut planes, &tile, siz);
+                    decoded_any = true;
+
+                    self.limits.free_usize(footprint);
                 }
                 Err(error) => {
                     log_warn!("JPEG 2000: failed to decode tile {}: {}", tile_index, error);
@@ -137,15 +210,11 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
             };
 
             if let Some(plane) = planes.get_mut(index) {
-                for sample in plane.iter_mut() {
-                    *sample = (*sample + shift).clamp(min, max);
-                }
+                simd::shift_and_clamp(plane, shift, min, max);
 
                 if component.signed {
                     let bias = 1i32 << (precision - 1);
-                    for sample in plane.iter_mut() {
-                        *sample += bias;
-                    }
+                    simd::shift_and_clamp(plane, bias, i32::MIN, i32::MAX);
                 }
             }
         }
@@ -201,12 +270,28 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
             self.limits.reserve_usize(width.saturating_mul(height).saturating_mul(4))?;
             let mut expanded = vec![0i32; width * height];
 
+            if cw == 0 || ch == 0 {
+                result.push(expanded);
+                continue;
+            }
+
+            let mut previous_sy = usize::MAX;
+
             for y in 0..height {
-                let sy = (y / component.dy as usize).min(ch.saturating_sub(1));
-                for x in 0..width {
-                    let sx = (x / component.dx as usize).min(cw.saturating_sub(1));
-                    expanded[y * width + x] = plane.get(sy * cw + sx).copied().unwrap_or(0);
+                let sy = (y / component.dy as usize).min(ch - 1);
+                let (before, current) = expanded.split_at_mut(y * width);
+
+                let row = &mut current[..width];
+
+                if sy == previous_sy {
+                    row.copy_from_slice(&before[(y - 1) * width..y * width]);
+                    continue;
                 }
+
+                let source = &plane[sy * cw..(sy * cw + cw).min(plane.len())];
+                simd::replicate_row(source, row, component.dx as usize);
+
+                previous_sy = sy;
             }
 
             result.push(expanded);
@@ -358,18 +443,6 @@ fn component_dimensions(siz: &SizInfo, component: &ComponentInfo) -> (usize, usi
     (x1.saturating_sub(x0) as usize, y1.saturating_sub(y0) as usize)
 }
 
-fn round_half_to_even(value: f32) -> i32 {
-    if !value.is_finite() {
-        return 0;
-    }
-
-    let rounded = value.round();
-    let result =
-        if (value - value.trunc()).abs() == 0.5 && rounded % 2.0 != 0.0 { rounded - value.signum() } else { rounded };
-
-    result.clamp(i32::MIN as f32, i32::MAX as f32) as i32
-}
-
 fn compose_tile(planes: &mut [Vec<i32>], tile: &tile::DecodedTile, siz: &SizInfo) {
     for (index, samples) in tile.components.iter().enumerate() {
         let component = match siz.components.get(index) {
@@ -398,25 +471,35 @@ fn compose_tile(planes: &mut [Vec<i32>], tile: &tile::DecodedTile, siz: &SizInfo
         let origin_x = siz.x0siz.div_ceil(component.dx) as i32;
         let origin_y = siz.y0siz.div_ceil(component.dy) as i32;
 
+        let base_x = (tcx0 - origin_x) as isize;
+        let base_y = (tcy0 - origin_y) as isize;
+
+        let x_start = (-base_x).max(0) as usize;
+        let x_end = tile_w.min((plane_w as isize - base_x).max(0) as usize);
+
+        if x_start >= x_end {
+            continue;
+        }
+
         for y in 0..tile_h {
-            let dest_y = (tcy0 - origin_y) as isize + y as isize;
+            let dest_y = base_y + y as isize;
             if dest_y < 0 || dest_y as usize >= plane_h {
                 continue;
             }
 
-            for x in 0..tile_w {
-                let dest_x = (tcx0 - origin_x) as isize + x as isize;
-                if dest_x < 0 || dest_x as usize >= plane_w {
-                    continue;
-                }
+            let source_start = y * tile_w + x_start;
+            let source_end = source_start + (x_end - x_start);
 
-                let source = y * tile_w + x;
-                let dest = dest_y as usize * plane_w + dest_x as usize;
+            let dest_start = dest_y as usize * plane_w + (base_x + x_start as isize) as usize;
+            let dest_end = dest_start + (x_end - x_start);
 
-                if let (Some(&value), Some(slot)) = (samples.get(source), plane.get_mut(dest)) {
-                    *slot = round_half_to_even(value);
-                }
-            }
+            let (Some(source), Some(dest)) =
+                (samples.get(source_start..source_end), plane.get_mut(dest_start..dest_end))
+            else {
+                continue;
+            };
+
+            simd::round_half_to_even_row(source, dest);
         }
     }
 }
@@ -654,74 +737,88 @@ fn pack_pixels(
 
     match (num_color, has_alpha, use_16bit) {
         (1, false, false) => {
-            let mut out = Vec::with_capacity(pixel_count);
-            for i in 0..pixel_count {
-                out.push(sample(gray, i) as u8);
-            }
+            let out = fill_pixels(pixel_count, 1, |i, pixel| pixel[0] = sample(gray, i) as u8);
             Ok(PixelData::L8(out))
         }
         (1, false, true) => {
-            let mut out = Vec::with_capacity(pixel_count);
-            for i in 0..pixel_count {
-                out.push(sample(gray, i) as u16);
-            }
+            let out = fill_pixels(pixel_count, 1, |i, pixel| pixel[0] = sample(gray, i) as u16);
             Ok(PixelData::L16(out))
         }
         (1, true, false) => {
-            let mut out = Vec::with_capacity(pixel_count * 2);
-            for i in 0..pixel_count {
-                out.push(sample(gray, i) as u8);
-                out.push(alpha_or_full(i) as u8);
-            }
+            let out = fill_pixels(pixel_count, 2, |i, pixel| {
+                pixel[0] = sample(gray, i) as u8;
+                pixel[1] = alpha_or_full(i) as u8;
+            });
             Ok(PixelData::LA8(out))
         }
         (1, true, true) => {
-            let mut out = Vec::with_capacity(pixel_count * 2);
-            for i in 0..pixel_count {
-                out.push(sample(gray, i) as u16);
-                out.push(alpha_or_full(i) as u16);
-            }
+            let out = fill_pixels(pixel_count, 2, |i, pixel| {
+                pixel[0] = sample(gray, i) as u16;
+                pixel[1] = alpha_or_full(i) as u16;
+            });
             Ok(PixelData::LA16(out))
         }
         (_, false, false) => {
-            let mut out = Vec::with_capacity(pixel_count * 3);
-            for i in 0..pixel_count {
-                out.push(sample(red, i) as u8);
-                out.push(sample(green, i) as u8);
-                out.push(sample(blue, i) as u8);
-            }
+            let out = fill_pixels(pixel_count, 3, |i, pixel| {
+                pixel[0] = sample(red, i) as u8;
+                pixel[1] = sample(green, i) as u8;
+                pixel[2] = sample(blue, i) as u8;
+            });
             Ok(PixelData::RGB8(out))
         }
         (_, false, true) => {
-            let mut out = Vec::with_capacity(pixel_count * 3);
-            for i in 0..pixel_count {
-                out.push(sample(red, i) as u16);
-                out.push(sample(green, i) as u16);
-                out.push(sample(blue, i) as u16);
-            }
+            let out = fill_pixels(pixel_count, 3, |i, pixel| {
+                pixel[0] = sample(red, i) as u16;
+                pixel[1] = sample(green, i) as u16;
+                pixel[2] = sample(blue, i) as u16;
+            });
             Ok(PixelData::RGB16(out))
         }
         (_, true, false) => {
-            let mut out = Vec::with_capacity(pixel_count * 4);
-            for i in 0..pixel_count {
-                out.push(sample(red, i) as u8);
-                out.push(sample(green, i) as u8);
-                out.push(sample(blue, i) as u8);
-                out.push(alpha_or_full(i) as u8);
-            }
+            let out = fill_pixels(pixel_count, 4, |i, pixel| {
+                pixel[0] = sample(red, i) as u8;
+                pixel[1] = sample(green, i) as u8;
+                pixel[2] = sample(blue, i) as u8;
+                pixel[3] = alpha_or_full(i) as u8;
+            });
             Ok(PixelData::RGBA8(out))
         }
         (_, true, true) => {
-            let mut out = Vec::with_capacity(pixel_count * 4);
-            for i in 0..pixel_count {
-                out.push(sample(red, i) as u16);
-                out.push(sample(green, i) as u16);
-                out.push(sample(blue, i) as u16);
-                out.push(alpha_or_full(i) as u16);
-            }
+            let out = fill_pixels(pixel_count, 4, |i, pixel| {
+                pixel[0] = sample(red, i) as u16;
+                pixel[1] = sample(green, i) as u16;
+                pixel[2] = sample(blue, i) as u16;
+                pixel[3] = alpha_or_full(i) as u16;
+            });
             Ok(PixelData::RGBA16(out))
         }
     }
+}
+
+const PARALLEL_PIXEL_THRESHOLD: usize = 1 << 16;
+const PARALLEL_TILE_THRESHOLD: usize = 4;
+
+fn fill_pixels<T, F>(pixel_count: usize, channels: usize, write: F) -> Vec<T>
+where
+    T: Default + Clone + Send,
+    F: Fn(usize, &mut [T]) + Sync + Send,
+{
+    let mut out = vec![T::default(); pixel_count * channels];
+
+    #[cfg(feature = "rayon")]
+    if pixel_count >= PARALLEL_PIXEL_THRESHOLD {
+        use rayon::prelude::*;
+
+        out.par_chunks_mut(channels).enumerate().for_each(|(i, pixel)| write(i, pixel));
+
+        return out;
+    }
+
+    for (i, pixel) in out.chunks_mut(channels).enumerate() {
+        write(i, pixel);
+    }
+
+    out
 }
 
 fn build_info(parsed: &Codestream) -> Jpeg2000Info {
