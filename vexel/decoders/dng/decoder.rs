@@ -1718,6 +1718,7 @@ impl StripContext<'_> {
         let cursor = Cursor::new(jpeg_data);
         let mut jpeg_decoder = JpegDecoder::new(cursor);
         jpeg_decoder.set_lossless_ssss16_is_min(self.dng.dng_version == 0 || self.dng.dng_version >= 0x01010000);
+        jpeg_decoder.set_lossless_skip_color_transform(true);
         let image = match jpeg_decoder.decode() {
             Ok(img) => img,
             Err(e) => {

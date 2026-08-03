@@ -4,6 +4,29 @@ use crate::{log_warn, Image, PixelData};
 
 pub struct PixelDecoder;
 
+fn mask_shift_bits(mask: u32, channel: &str) -> (u32, u32) {
+    if mask == 0 {
+        return (0, 0);
+    }
+
+    let shift = mask.trailing_zeros();
+    let span = u32::BITS - mask.leading_zeros() - shift;
+    let bits = mask.count_ones();
+
+    if span != bits {
+        log_warn!(
+            "BMP {} mask {:#x} is not contiguous, using the {} bit span at offset {}",
+            channel,
+            mask,
+            span,
+            shift
+        );
+        return (shift, span);
+    }
+
+    (shift, bits)
+}
+
 pub fn mask_alpha_is_used(data: &[u8], alpha_mask: u32, bytes_per_pixel: usize) -> bool {
     if alpha_mask == 0 {
         return false;
@@ -336,14 +359,10 @@ impl PixelDecoder {
             );
         }
 
-        let r_shift = if red_mask != 0 { red_mask.trailing_zeros() } else { 0 };
-        let r_bits = red_mask.count_ones();
-        let g_shift = if green_mask != 0 { green_mask.trailing_zeros() } else { 0 };
-        let g_bits = green_mask.count_ones();
-        let b_shift = if blue_mask != 0 { blue_mask.trailing_zeros() } else { 0 };
-        let b_bits = blue_mask.count_ones();
-        let a_shift = if alpha_mask != 0 { alpha_mask.trailing_zeros() } else { 0 };
-        let a_bits = alpha_mask.count_ones();
+        let (r_shift, r_bits) = mask_shift_bits(red_mask, "red");
+        let (g_shift, g_bits) = mask_shift_bits(green_mask, "green");
+        let (b_shift, b_bits) = mask_shift_bits(blue_mask, "blue");
+        let (a_shift, a_bits) = mask_shift_bits(alpha_mask, "alpha");
 
         let channels = if has_alpha { 4 } else { 3 };
         let mut image_data = vec![0u8; width_usize * height_usize * channels];
@@ -495,14 +514,10 @@ impl PixelDecoder {
             );
         }
 
-        let r_shift = if red_mask != 0 { red_mask.trailing_zeros() } else { 0 };
-        let r_bits = red_mask.count_ones();
-        let g_shift = if green_mask != 0 { green_mask.trailing_zeros() } else { 0 };
-        let g_bits = green_mask.count_ones();
-        let b_shift = if blue_mask != 0 { blue_mask.trailing_zeros() } else { 0 };
-        let b_bits = blue_mask.count_ones();
-        let a_shift = if alpha_mask != 0 { alpha_mask.trailing_zeros() } else { 0 };
-        let a_bits = alpha_mask.count_ones();
+        let (r_shift, r_bits) = mask_shift_bits(red_mask, "red");
+        let (g_shift, g_bits) = mask_shift_bits(green_mask, "green");
+        let (b_shift, b_bits) = mask_shift_bits(blue_mask, "blue");
+        let (a_shift, a_bits) = mask_shift_bits(alpha_mask, "alpha");
 
         if has_alpha {
             let mut image_data = vec![0u8; width_usize * height_usize * 4];

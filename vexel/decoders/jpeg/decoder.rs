@@ -1083,6 +1083,7 @@ pub struct JpegDecoder<R: Read + Seek> {
     pending_expand_v: bool,
     hierarchical_frames: Vec<HierarchicalFrame>,
     lossless_ssss16_is_min: bool,
+    lossless_skip_color_transform: bool,
     icc_chunks: Vec<(u8, Vec<u8>)>,
 }
 
@@ -1122,12 +1123,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
             pending_expand_v: false,
             hierarchical_frames: Vec::new(),
             lossless_ssss16_is_min: true,
+            lossless_skip_color_transform: false,
             icc_chunks: Vec::new(),
         }
     }
 
     pub fn set_lossless_ssss16_is_min(&mut self, is_min: bool) {
         self.lossless_ssss16_is_min = is_min;
+    }
+
+    pub fn set_lossless_skip_color_transform(&mut self, skip: bool) {
+        self.lossless_skip_color_transform = skip;
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
@@ -1422,7 +1428,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let version = read_u16(0);
         let flags0 = read_u16(2);
         let flags1 = read_u16(4);
-        let color_transform = payload.last().copied().unwrap_or(0);
+        let color_transform = payload.get(6).copied().unwrap_or(0);
 
         self.adobe_color_transform = Some(color_transform);
         log_debug!("Adobe APP14: color_transform={}", color_transform);
@@ -2665,7 +2671,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let ids: Vec<u8> = self.components.iter().map(|c| c.id).collect();
         let explicit_ycbcr = self.jfif_header.is_some() || self.adobe_color_transform.is_some_and(|ct| ct != 0);
-        if components_count == 3 && ids != [0x52, 0x47, 0x42] && explicit_ycbcr {
+        if components_count == 3 && ids != [0x52, 0x47, 0x42] && explicit_ycbcr && !self.lossless_skip_color_transform {
             Self::lossless_ycbcr_to_rgb(&mut samples, self.precision);
         }
 

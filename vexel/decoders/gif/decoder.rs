@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 use super::compose_simd::{compose_frame, Palette};
 use super::lzw::decompress_lzw;
@@ -268,21 +268,50 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    fn skip_sub_blocks(reader: &mut BitReader<R>) -> VexelResult<()> {
+        loop {
+            let block_size = match reader.read_u8() {
+                Ok(size) => size as usize,
+                Err(_) => return Ok(()),
+            };
+
+            if block_size == 0 {
+                return Ok(());
+            }
+
+            for _ in 0..block_size {
+                if reader.read_u8().is_err() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     fn read_plain_text_extension(&mut self, start_offset: u64) -> VexelResult<()> {
-        let block_size = self.reader.read_u8()?;
-        if block_size != 12 {
+        let block_size = self.reader.read_u8()? as usize;
+
+        let mut header = [0u8; 12];
+        let header_len = block_size.min(header.len());
+        if block_size != header.len() {
             log_warn!("Invalid plain text extension block size: {}", block_size);
         }
 
-        let left = self.reader.read_u16()?.swap_bytes();
-        let top = self.reader.read_u16()?.swap_bytes();
-        let width = self.reader.read_u16()?.swap_bytes();
-        let height = self.reader.read_u16()?.swap_bytes();
-        let cell_width = self.reader.read_u8()?;
-        let cell_height = self.reader.read_u8()?;
-        let foreground_color = self.reader.read_u8()?;
-        let background_color = self.reader.read_u8()?;
+        for byte in header.iter_mut().take(header_len) {
+            *byte = self.reader.read_u8()?;
+        }
+        for _ in header_len..block_size {
+            self.reader.read_u8()?;
+        }
+
+        let read_u16 = |bytes: &[u8]| u16::from_le_bytes([bytes[0], bytes[1]]);
+        let left = read_u16(&header[0..2]);
+        let top = read_u16(&header[2..4]);
+        let width = read_u16(&header[4..6]);
+        let height = read_u16(&header[6..8]);
+        let cell_width = header[8];
+        let cell_height = header[9];
+        let foreground_color = header[10];
+        let background_color = header[11];
 
         let mut text = String::new();
         loop {
@@ -398,21 +427,17 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                         0xFF => {
                             self.read_application_extension(block_start)?;
                         }
-                        /*0x01 => {
-                            self.read_plain_text_extension(block_start)?;
-                        }*/
+                        0x01 => {
+                            let resume_offset = self.reader.stream_position().unwrap_or(block_start);
+                            if let Err(e) = self.read_plain_text_extension(block_start) {
+                                log_warn!("Failed to read plain text extension, skipping: {:?}", e);
+                                self.reader.seek(SeekFrom::Start(resume_offset))?;
+                                Self::skip_sub_blocks(&mut self.reader)?;
+                            }
+                        }
                         _ => {
                             log_warn!("Skipping unknown extension: {:#04x}", label);
-
-                            loop {
-                                let block_size = self.reader.read_u8()? as usize;
-                                if block_size == 0 {
-                                    break;
-                                }
-                                for _ in 0..block_size {
-                                    self.reader.read_u8()?;
-                                }
-                            }
+                            Self::skip_sub_blocks(&mut self.reader)?;
                         }
                     }
                 }

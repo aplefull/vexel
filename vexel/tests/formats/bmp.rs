@@ -489,5 +489,19 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "bmp/corrupted/rletopdown.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "BMP corrupted issue982",
+            path: "bmp/corrupted/issue982.bmp",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "bmp/corrupted/issue982.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "BMP test32bfv4",
+            path: "bmp/test32bfv4.bmp",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "bmp/test32bfv4.jxl" },
+            ..Default::default()
+        },
     ]
 }

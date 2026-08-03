@@ -107,6 +107,8 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     pub fn new(mut reader: R) -> VexelResult<Vexel<R>> {
         let format = Vexel::try_guess_format(&mut reader)?;
 
+        log_debug!("Detected image format: {:?}", format);
+
         let decoder = match format {
             ImageFormat::Jpeg => Decoders::Jpeg(JpegDecoder::new(reader)),
             ImageFormat::JpegLs => Decoders::JpegLs(JpegLsDecoder::new(reader)),

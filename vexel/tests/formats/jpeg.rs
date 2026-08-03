@@ -77,6 +77,17 @@ pub fn test_cases() -> Vec<TestCase> {
             ..Default::default()
         },
         TestCase {
+            name: "JPEG YCCK progressive",
+            path: "jpeg/cmyk_logo.jpg",
+            validation: None,
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/cmyk_logo.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+            ..Default::default()
+        },
+        TestCase {
             name: "JPEG 4 components",
             path: "jpeg/rgb_alpha_u1.jpg",
             validation: None,

@@ -1583,5 +1583,19 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "tiff/ycbcr-cat.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "TIFF quad-lzw old-style",
+            path: "tiff/quad-lzw.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/quad-lzw.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF testfax3_bug54_1dnoEOL",
+            path: "tiff/testfax3_bug54_1dnoEOL.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/testfax3_bug54_1dnoEOL.jxl" },
+            ..Default::default()
+        },
     ]
 }

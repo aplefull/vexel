@@ -23,10 +23,11 @@ struct LzwTable {
     free: u16,
     nbits: u32,
     max_code: u16,
+    early_change: u16,
 }
 
 impl LzwTable {
-    fn new() -> Self {
+    fn new(early_change: bool) -> Self {
         let mut prefix = vec![0u16; LZW_MAX_ENTRIES + 1];
         let mut suffix = vec![0u8; LZW_MAX_ENTRIES + 1];
         for (i, s) in suffix.iter_mut().enumerate().take(256) {
@@ -34,13 +35,21 @@ impl LzwTable {
         }
         prefix[LZW_CLEAR_CODE as usize] = 0;
         prefix[LZW_EOI_CODE as usize] = 0;
-        LzwTable { prefix, suffix, free: LZW_FIRST_CODE, nbits: LZW_MIN_BITS, max_code: (1u16 << LZW_MIN_BITS) - 2 }
+        let early_change = if early_change { 1 } else { 0 };
+        LzwTable {
+            prefix,
+            suffix,
+            free: LZW_FIRST_CODE,
+            nbits: LZW_MIN_BITS,
+            max_code: (1u16 << LZW_MIN_BITS) - 1 - early_change,
+            early_change,
+        }
     }
 
     fn reset(&mut self) {
         self.free = LZW_FIRST_CODE;
         self.nbits = LZW_MIN_BITS;
-        self.max_code = (1u16 << LZW_MIN_BITS) - 2;
+        self.max_code = (1u16 << LZW_MIN_BITS) - 1 - self.early_change;
     }
 
     fn add(&mut self, prefix_code: u16, suffix_byte: u8) {
@@ -52,7 +61,7 @@ impl LzwTable {
         self.free += 1;
         if self.free > self.max_code && self.nbits < LZW_MAX_BITS {
             self.nbits += 1;
-            self.max_code = (1u16 << self.nbits) - 2;
+            self.max_code = (1u16 << self.nbits) - 1 - self.early_change;
         }
     }
 
@@ -152,7 +161,7 @@ pub fn decompress_lzw(data: &[u8]) -> Vec<u8> {
 
 fn decompress_lzw_msb(data: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
-    let mut table = LzwTable::new();
+    let mut table = LzwTable::new(true);
     let mut reader = BitReaderMsb::new(data);
     let mut old_code: Option<u16> = None;
 
@@ -211,7 +220,7 @@ fn decompress_lzw_msb(data: &[u8]) -> Vec<u8> {
 
 fn decompress_lzw_lsb(data: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
-    let mut table = LzwTable::new();
+    let mut table = LzwTable::new(false);
     let mut reader = BitReaderLsb::new(data);
     let mut old_code: Option<u16> = None;
 

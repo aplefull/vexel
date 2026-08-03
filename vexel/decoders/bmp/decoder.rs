@@ -169,14 +169,29 @@ impl<R: Read + Seek> BmpDecoder<R> {
     }
 
     fn read_icc_profile(&mut self) -> VexelResult<()> {
+        const ICC_MIN_PROFILE_SIZE: u64 = 128;
+
         let (profile_data_offset, profile_size) = match &self.dib_header {
             DibHeader::V5(h) if h.profile_size > 0 => (h.profile_data, h.profile_size),
             _ => return Ok(()),
         };
 
-        self.limits.reserve(u64::from(profile_size))?;
-
         let file_offset = 14u64 + profile_data_offset as u64;
+        let stream_len = self.reader.seek(SeekFrom::End(0)).unwrap_or(0);
+        if file_offset >= stream_len {
+            log_warn!("BMP ICC profile offset {} is past end of file, skipping", file_offset);
+            return Ok(());
+        }
+
+        let available = stream_len - file_offset;
+        let profile_size = u64::from(profile_size).min(available);
+        if profile_size < ICC_MIN_PROFILE_SIZE {
+            log_warn!("BMP ICC profile is truncated to {} bytes, skipping", profile_size);
+            return Ok(());
+        }
+
+        self.limits.reserve(profile_size)?;
+
         self.reader.seek(SeekFrom::Start(file_offset))?;
         let data = self.reader.read_bytes(profile_size as usize)?;
 

@@ -30,5 +30,12 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "dng/YDXJ0026.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "DNG iphone12pro-linearraw",
+            path: "dng/iphone12pro-linearraw.DNG",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dng/iphone12pro-linearraw.jxl" },
+            ..Default::default()
+        },
     ]
 }
