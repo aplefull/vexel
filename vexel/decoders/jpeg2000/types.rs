@@ -93,6 +93,7 @@ impl BoxType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Colorspace {
     Cmyk,
+    Cielab,
     Srgb,
     Gray,
     Sycc,
@@ -104,6 +105,7 @@ impl Colorspace {
     pub fn from_u32(value: u32) -> Self {
         match value {
             12 => Colorspace::Cmyk,
+            14 => Colorspace::Cielab,
             16 => Colorspace::Srgb,
             17 => Colorspace::Gray,
             18 => Colorspace::Sycc,

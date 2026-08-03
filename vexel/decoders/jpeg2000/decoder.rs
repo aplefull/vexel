@@ -239,6 +239,10 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
             Some(Colorspace::Sycc) => convert_sycc_to_rgb(&mut upsampled, component_precision),
             Some(Colorspace::Eycc) => convert_esycc_to_rgb(&mut upsampled, component_precision, &signed),
             Some(Colorspace::Cmyk) => convert_cmyk_to_rgb(&mut upsampled, &mut precisions),
+            Some(Colorspace::Cielab) => {
+                let range = container.and_then(|container| container.cielab_range);
+                convert_cielab_to_rgb(&mut upsampled, &mut precisions, range);
+            }
             _ => {}
         }
 
@@ -434,6 +438,98 @@ fn convert_cmyk_to_rgb(planes: &mut Vec<Vec<i32>>, precisions: &mut Vec<u32>) {
     precisions.iter_mut().for_each(|p| *p = 8);
 }
 
+fn lab_to_srgb_channel(value: f64) -> f64 {
+    if value <= 0.0031308 {
+        12.92 * value
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn convert_cielab_to_rgb(planes: &mut [Vec<i32>], precisions: &mut [u32], range: Option<codestream::CielabRange>) {
+    if planes.len() < 3 {
+        return;
+    }
+
+    let precision_of = |index: usize| -> f64 {
+        let precision = precisions.get(index).copied().unwrap_or(8).clamp(1, 32);
+        ((1u64 << precision) - 1) as f64
+    };
+
+    let (max_l, max_a, max_b) = (precision_of(0), precision_of(1), precision_of(2));
+
+    let (range_l, offset_l, range_a, offset_a, range_b, offset_b) = match range {
+        Some(range) => (
+            range.range_l as f64,
+            range.offset_l as f64,
+            range.range_a as f64,
+            range.offset_a as f64,
+            range.range_b as f64,
+            range.offset_b as f64,
+        ),
+        None => {
+            let precision_a = precisions.get(1).copied().unwrap_or(8).clamp(1, 32);
+            let precision_b = precisions.get(2).copied().unwrap_or(8).clamp(1, 32);
+            (
+                100.0,
+                0.0,
+                170.0,
+                (1u64 << (precision_a - 1)) as f64,
+                200.0,
+                (1u64 << (precision_b - 2)) as f64 + (1u64 << (precision_b - 3)) as f64,
+            )
+        }
+    };
+
+    let min_l = -(range_l * offset_l) / max_l;
+    let min_a = -(range_a * offset_a) / max_a;
+    let min_b = -(range_b * offset_b) / max_b;
+
+    const WHITE_X: f64 = 0.9642;
+    const WHITE_Y: f64 = 1.0;
+    const WHITE_Z: f64 = 0.8249;
+
+    let len = planes.iter().take(3).map(|plane| plane.len()).min().unwrap_or(0);
+
+    let (first, rest) = planes.split_at_mut(1);
+    let (second, third) = rest.split_at_mut(1);
+    let plane_l = &mut first[0][..len];
+    let plane_a = &mut second[0][..len];
+    let plane_b = &mut third[0][..len];
+
+    for ((sample_l, sample_a), sample_b) in plane_l.iter_mut().zip(plane_a.iter_mut()).zip(plane_b.iter_mut()) {
+        let l = min_l + *sample_l as f64 * range_l / max_l;
+        let a = min_a + *sample_a as f64 * range_a / max_a;
+        let b = min_b + *sample_b as f64 * range_b / max_b;
+
+        let fy = (l + 16.0) / 116.0;
+        let fx = fy + a / 500.0;
+        let fz = fy - b / 200.0;
+
+        let finv = |value: f64| -> f64 {
+            if value > 6.0 / 29.0 {
+                value * value * value
+            } else {
+                3.0 * (6.0f64 / 29.0).powi(2) * (value - 4.0 / 29.0)
+            }
+        };
+
+        let x = WHITE_X * finv(fx);
+        let y = WHITE_Y * finv(fy);
+        let z = WHITE_Z * finv(fz);
+
+        let red = 3.1338561 * x - 1.6168667 * y - 0.4906146 * z;
+        let green = -0.9787684 * x + 1.9161415 * y + 0.0334540 * z;
+        let blue = 0.0719453 * x - 0.2289914 * y + 1.4052427 * z;
+
+        *sample_l = (lab_to_srgb_channel(red).clamp(0.0, 1.0) * 65535.0).round() as i32;
+        *sample_a = (lab_to_srgb_channel(green).clamp(0.0, 1.0) * 65535.0).round() as i32;
+        *sample_b = (lab_to_srgb_channel(blue).clamp(0.0, 1.0) * 65535.0).round() as i32;
+    }
+
+    precisions.iter_mut().take(3).for_each(|precision| *precision = 16);
+}
+
 fn component_dimensions(siz: &SizInfo, component: &ComponentInfo) -> (usize, usize) {
     let x0 = siz.x0siz.div_ceil(component.dx);
     let y0 = siz.y0siz.div_ceil(component.dy);
@@ -504,6 +600,20 @@ fn compose_tile(planes: &mut [Vec<i32>], tile: &tile::DecodedTile, siz: &SizInfo
     }
 }
 
+fn maps_every_column(mapping: &[codestream::ComponentMapping], num_columns: usize) -> bool {
+    let mut used = vec![false; num_columns];
+
+    for entry in mapping {
+        if entry.kind == codestream::MappingType::Palette {
+            if let Some(slot) = used.get_mut(entry.palette_column as usize) {
+                *slot = true;
+            }
+        }
+    }
+
+    used.iter().all(|column| *column)
+}
+
 fn apply_palette(
     palette: &codestream::Palette,
     planes: &[Vec<i32>],
@@ -518,7 +628,7 @@ fn apply_palette(
         return None;
     }
 
-    let mapping: Vec<codestream::ComponentMapping> = if palette.component_mapping.is_empty() {
+    let identity_mapping = || -> Vec<codestream::ComponentMapping> {
         (0..num_columns)
             .map(|i| codestream::ComponentMapping {
                 component: 0,
@@ -526,6 +636,13 @@ fn apply_palette(
                 palette_column: i as u8,
             })
             .collect()
+    };
+
+    let mapping: Vec<codestream::ComponentMapping> = if palette.component_mapping.is_empty() {
+        identity_mapping()
+    } else if planes.len() == 1 && !maps_every_column(&palette.component_mapping, num_columns) {
+        log_warn!("JPEG 2000: component mapping does not cover the palette; using direct column order");
+        identity_mapping()
     } else {
         palette.component_mapping.clone()
     };

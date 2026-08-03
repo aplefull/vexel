@@ -285,6 +285,20 @@ pub fn test_cases() -> Vec<TestCase> {
             ..Default::default()
         },
         TestCase {
+            name: "JPEG 2000 palette with incomplete component mapping",
+            path: "jpeg2000/issue235.jp2",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "jpeg2000/issue235.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG 2000 CIELab colorspace",
+            path: "jpeg2000/issue559-eci-090-CIELab.jp2",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "jpeg2000/issue559-eci-090-CIELab.jxl" },
+            ..Default::default()
+        },
+        TestCase {
             name: "JPEG 2000 corrupted tile index out of range",
             path: "jpeg2000/corrupted/2.pdf.SIGFPE.706.1112.jp2",
             validation: None,

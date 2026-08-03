@@ -802,6 +802,17 @@ pub struct Jp2Container {
     pub palette: Option<Palette>,
     pub channel_definitions: Vec<ChannelDefinition>,
     pub enumerated_colorspace: Option<Colorspace>,
+    pub cielab_range: Option<CielabRange>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CielabRange {
+    pub range_l: u32,
+    pub offset_l: u32,
+    pub range_a: u32,
+    pub offset_a: u32,
+    pub range_b: u32,
+    pub offset_b: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -860,6 +871,7 @@ pub fn parse_jp2(data: &[u8]) -> VexelResult<Jp2Container> {
         palette: None,
         channel_definitions: Vec::new(),
         enumerated_colorspace: None,
+        cielab_range: None,
     };
 
     walk_boxes(data, &mut container, 0);
@@ -933,9 +945,13 @@ fn walk_boxes(data: &[u8], container: &mut Jp2Container, depth: u32) {
             }
             BoxType::Header => walk_boxes(body, container, depth + 1),
             BoxType::Colr => {
-                if body.len() >= 7 && body[0] == 1 {
-                    container.enumerated_colorspace =
-                        Some(Colorspace::from_u32(u32::from_be_bytes([body[3], body[4], body[5], body[6]])));
+                if body.len() >= 7 && body[0] == 1 && container.enumerated_colorspace.is_none() {
+                    let colorspace = Colorspace::from_u32(u32::from_be_bytes([body[3], body[4], body[5], body[6]]));
+                    container.enumerated_colorspace = Some(colorspace);
+
+                    if colorspace == Colorspace::Cielab {
+                        container.cielab_range = parse_cielab_range(&body[7..]);
+                    }
                 }
             }
             BoxType::Palette => {
@@ -1010,6 +1026,26 @@ fn parse_palette(body: &[u8]) -> Option<Palette> {
         column_depths: depths.iter().map(|(depth, _)| *depth).collect(),
         column_signed: depths.iter().map(|(_, signed)| *signed).collect(),
         component_mapping: Vec::new(),
+    })
+}
+
+fn parse_cielab_range(body: &[u8]) -> Option<CielabRange> {
+    if body.len() < 28 {
+        return None;
+    }
+
+    let value = |index: usize| -> u32 {
+        let start = index * 4;
+        u32::from_be_bytes([body[start], body[start + 1], body[start + 2], body[start + 3]])
+    };
+
+    Some(CielabRange {
+        range_l: value(0),
+        offset_l: value(1),
+        range_a: value(2),
+        offset_a: value(3),
+        range_b: value(4),
+        offset_b: value(5),
     })
 }
 
