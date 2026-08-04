@@ -4,6 +4,7 @@ use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::dicom::DicomDecoder;
 use crate::decoders::dng::DngDecoder;
 use crate::decoders::exr::ExrDecoder;
+use crate::decoders::farbfeld::FarbfeldDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
 use crate::decoders::ico::IcoDecoder;
@@ -88,6 +89,7 @@ impl_decoder!(IcoDecoder, Ico, pages = true);
 impl_decoder!(DicomDecoder, Dicom, thumbnails = true, frames = true);
 impl_decoder!(ExrDecoder, Exr, pages = true);
 impl_decoder!(Jpeg2000Decoder, Jpeg2000);
+impl_decoder!(FarbfeldDecoder, Farbfeld);
 
 impl<R: Read + Seek + Sync> ImageDecoder<R> for GifDecoder<R> {
     fn set_limits(&mut self, limits: Limits) {

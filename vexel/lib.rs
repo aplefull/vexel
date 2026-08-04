@@ -26,6 +26,7 @@ use crate::decoders::bmp::BmpDecoder;
 use crate::decoders::dicom::DicomDecoder;
 use crate::decoders::dng::DngDecoder;
 use crate::decoders::exr::ExrDecoder;
+use crate::decoders::farbfeld::FarbfeldDecoder;
 use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
 use crate::decoders::ico::IcoDecoder;
@@ -127,6 +128,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Dicom => Decoders::Dicom(DicomDecoder::new(reader)),
             ImageFormat::Exr => Decoders::Exr(ExrDecoder::new(reader)),
             ImageFormat::Jpeg2000 => Decoders::Jpeg2000(Jpeg2000Decoder::new(reader)),
+            ImageFormat::Farbfeld => Decoders::Farbfeld(FarbfeldDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -395,6 +397,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         // OpenEXR
         if header.starts_with(&[0x76, 0x2F, 0x31, 0x01]) {
             return Ok(ImageFormat::Exr);
+        }
+
+        // farbfeld
+        if header.starts_with(decoders::farbfeld::decoder::MAGIC) {
+            return Ok(ImageFormat::Farbfeld);
         }
 
         // JPEG 2000

@@ -110,6 +110,7 @@ pub enum ImageFormat {
     Dicom,
     Exr,
     Jpeg2000,
+    Farbfeld,
     Unknown,
 }
 

@@ -147,6 +147,11 @@ fn test_jpeg2000() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_farbfeld() -> Result<(), Box<dyn std::error::Error>> {
+    run_test_cases(formats::farbfeld::test_cases())
+}
+
+#[test]
 fn test_dicom() -> Result<(), Box<dyn std::error::Error>> {
     run_test_cases(formats::dicom::test_cases())
 }

@@ -2,6 +2,7 @@ pub mod bmp;
 pub mod dicom;
 pub mod dng;
 pub mod exr;
+pub mod farbfeld;
 pub mod gif;
 pub mod hdr;
 pub mod ico;

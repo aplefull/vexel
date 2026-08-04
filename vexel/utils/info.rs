@@ -7,6 +7,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use crate::decoders::bmp::BmpSectionInfo;
 use crate::decoders::dicom::types::DicomElementInfo;
 use crate::decoders::exr::types::ExrPartInfo;
+use crate::decoders::farbfeld::FarbfeldSectionInfo;
 use crate::decoders::gif::GifSectionInfo;
 use crate::decoders::hdr::HdrSectionInfo;
 use crate::decoders::ico::IcoSectionInfo;
@@ -37,6 +38,7 @@ pub enum ImageInfo {
     Dicom(DicomInfo),
     Exr(ExrInfo),
     Jpeg2000(Jpeg2000Info),
+    Farbfeld(FarbfeldInfo),
     Unknown,
 }
 
@@ -115,6 +117,12 @@ pub struct DicomInfo {
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
+pub struct FarbfeldInfo {
+    pub sections: Vec<FarbfeldSectionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct ExrInfo {
     pub version: i32,
     pub multipart: bool,
@@ -164,6 +172,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Dicom(info) => write!(f, "{}", info),
             ImageInfo::Exr(info) => write!(f, "{}", info),
             ImageInfo::Jpeg2000(info) => write!(f, "{}", info),
+            ImageInfo::Farbfeld(info) => write!(f, "{}", info),
             ImageInfo::Unknown => write!(f, "Unknown format"),
         }
     }
@@ -1425,6 +1434,32 @@ impl fmt::Display for DicomInfo {
                 write!(f, "  [{}]", element.value)?;
             }
             writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for FarbfeldInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::farbfeld::FarbfeldSectionData;
+
+        writeln!(f, "Farbfeld Information")?;
+        writeln!(f, "=====================")?;
+
+        for section in &self.sections {
+            match &section.data {
+                FarbfeldSectionData::Header(header) => {
+                    writeln!(f, "Header (offset {}):", section.start_offset)?;
+                    writeln!(f, "  Size: {}x{}", header.width, header.height)?;
+                    writeln!(f, "  Channels: 4 (RGBA)")?;
+                    writeln!(f, "  Bit depth: 16")?;
+                }
+                FarbfeldSectionData::PixelData(data) => {
+                    writeln!(f, "Pixel data (offset {}):", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", data.length)?;
+                }
+            }
         }
 
         Ok(())
