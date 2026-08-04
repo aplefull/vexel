@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::ViewportBuilder;
-use vexel::{Frames, Image, ImageFormat, ImageFrame, PixelData, Vexel};
+use vexel::{Frames, Image, ImageFrame, PixelData, Vexel};
 
 struct Page {
     frames: Vec<Arc<egui::ColorImage>>,
@@ -419,22 +419,7 @@ impl App {
             .filter_map(|image| Self::thumbnail_from_image(image, normalize))
             .collect();
 
-        let is_multi_page = matches!(
-            decoder.get_format(),
-            ImageFormat::Ico
-                | ImageFormat::Cur
-                | ImageFormat::Tiff
-                | ImageFormat::Exr
-                | ImageFormat::NetPbmP1
-                | ImageFormat::NetPbmP2
-                | ImageFormat::NetPbmP3
-                | ImageFormat::NetPbmP4
-                | ImageFormat::NetPbmP5
-                | ImageFormat::NetPbmP6
-                | ImageFormat::NetPbmP7
-        );
-
-        let result = if is_multi_page {
+        let result = if decoder.supports_pages() {
             decoder.decode_pages().map_err(|e| format!("{}: {}", path.display(), e)).map(|images| {
                 images.into_iter().map(|image| Self::image_to_page(image, normalize)).collect::<Vec<Page>>()
             })

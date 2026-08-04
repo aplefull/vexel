@@ -37,31 +37,27 @@ use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
+pub(crate) use crate::decoders::Decoders;
 use crate::utils::format_detect;
 
-macro_rules! impl_decode {
-    ($decoder:expr) => {
-        $decoder.decode()
-    };
-}
+fn catch_decoder_panic<T>(decode: impl FnOnce() -> VexelResult<T>) -> VexelResult<T> {
+    #[cfg(fuzzing)]
+    {
+        decode()
+    }
 
-pub(crate) enum Decoders<R: Read + Seek> {
-    Jpeg(JpegDecoder<R>),
-    JpegLs(JpegLsDecoder<R>),
-    Png(PngDecoder<R>),
-    Gif(GifDecoder<R>),
-    Bmp(BmpDecoder<R>),
-    Netpbm(NetPbmDecoder<R>),
-    Hdr(HdrDecoder<R>),
-    Tiff(TiffDecoder<R>),
-    Dng(DngDecoder<R>),
-    Tga(TgaDecoder<R>),
-    Jbig1(Jbig1Decoder<R>),
-    Ico(IcoDecoder<R>),
-    Dicom(DicomDecoder<R>),
-    Exr(ExrDecoder<R>),
-    Jpeg2000(Jpeg2000Decoder<R>),
-    Unknown,
+    #[cfg(not(fuzzing))]
+    {
+        panic::catch_unwind(AssertUnwindSafe(decode)).unwrap_or_else(|payload| {
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+
+            Err(VexelError::Panic(msg.to_string()))
+        })
+    }
 }
 
 /// The main image decoder.
@@ -144,23 +140,9 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     /// applied after decoding has started have no effect.
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits.clone();
-        match &mut self.decoder {
-            Decoders::Jpeg(d) => d.set_limits(limits),
-            Decoders::JpegLs(d) => d.set_limits(limits),
-            Decoders::Png(d) => d.set_limits(limits),
-            Decoders::Gif(d) => d.set_limits(limits),
-            Decoders::Netpbm(d) => d.set_limits(limits),
-            Decoders::Bmp(d) => d.set_limits(limits),
-            Decoders::Hdr(d) => d.set_limits(limits),
-            Decoders::Tiff(d) => d.set_limits(limits),
-            Decoders::Dng(d) => d.set_limits(limits),
-            Decoders::Tga(d) => d.set_limits(limits),
-            Decoders::Jbig1(d) => d.set_limits(limits),
-            Decoders::Ico(d) => d.set_limits(limits),
-            Decoders::Dicom(d) => d.set_limits(limits),
-            Decoders::Exr(d) => d.set_limits(limits),
-            Decoders::Jpeg2000(d) => d.set_limits(limits),
-            Decoders::Unknown => {}
+
+        if let Some(decoder) = self.decoder.as_dyn() {
+            decoder.set_limits(limits);
         }
     }
 
@@ -178,48 +160,12 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     /// - [`VexelError::Custom`] — a format-specific error that does not fit another variant
     /// - [`VexelError::Panic`] — the decoder panicked internally; the panic message is captured
     pub fn decode(&mut self) -> VexelResult<Image> {
-        macro_rules! dispatch {
-            () => {
-                match &mut self.decoder {
-                    Decoders::Jpeg(decoder) => impl_decode!(decoder),
-                    Decoders::JpegLs(decoder) => impl_decode!(decoder),
-                    Decoders::Png(decoder) => impl_decode!(decoder),
-                    Decoders::Gif(decoder) => impl_decode!(decoder),
-                    Decoders::Netpbm(decoder) => impl_decode!(decoder),
-                    Decoders::Bmp(decoder) => impl_decode!(decoder),
-                    Decoders::Hdr(decoder) => impl_decode!(decoder),
-                    Decoders::Tiff(decoder) => impl_decode!(decoder),
-                    Decoders::Dng(decoder) => impl_decode!(decoder),
-                    Decoders::Tga(decoder) => impl_decode!(decoder),
-                    Decoders::Jbig1(decoder) => impl_decode!(decoder),
-                    Decoders::Ico(decoder) => impl_decode!(decoder),
-                    Decoders::Dicom(decoder) => impl_decode!(decoder),
-                    Decoders::Exr(decoder) => impl_decode!(decoder),
-                    Decoders::Jpeg2000(decoder) => impl_decode!(decoder),
-                    Decoders::Unknown => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
-                }
-            };
-        }
+        let decoder = &mut self.decoder;
 
-        #[cfg(fuzzing)]
-        {
-            return dispatch!();
-        }
-
-        #[cfg(not(fuzzing))]
-        {
-            let result = panic::catch_unwind(AssertUnwindSafe(|| dispatch!()));
-
-            result.unwrap_or_else(|payload| {
-                let msg = payload
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| payload.downcast_ref::<&str>().copied())
-                    .unwrap_or("unknown panic");
-
-                Err(VexelError::Panic(msg.to_string()))
-            })
-        }
+        catch_decoder_panic(move || match decoder.as_dyn() {
+            Some(decoder) => decoder.decode(),
+            None => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
+        })
     }
 
     /// Decodes the image as a stream of animation frames.
@@ -259,17 +205,21 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             other => {
                 self.decoder = other;
 
+                if !self.decoder.supports_frames() {
+                    return self.decode().map(|image| Frames::new(SingleFrame::new(image)));
+                }
+
                 // TODO: try to remove BufferedFrame, it exists only because of DICOM and PNG now,
                 // because they produce all frames at once.
-                match &mut self.decoder {
-                    Decoders::Png(png) => png.decode_frames().map(|frames| Frames::new(BufferedFrames::new(frames))),
-                    // TODO: a multi-frame DICOM object is a cine loop or a volume of
-                    // slices rather than an animation
-                    Decoders::Dicom(dicom) => {
-                        dicom.decode_frames().map(|frames| Frames::new(BufferedFrames::new(frames)))
-                    }
-                    _ => self.decode().map(|image| Frames::new(SingleFrame::new(image))),
-                }
+                // TODO: a multi-frame DICOM object is a cine loop or a volume of
+                // slices rather than an animation
+                let decoder = &mut self.decoder;
+
+                catch_decoder_panic(move || match decoder.as_dyn() {
+                    Some(decoder) => decoder.decode_frames(),
+                    None => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
+                })
+                .map(|frames| Frames::new(BufferedFrames::new(frames)))
             }
         }
     }
@@ -286,73 +236,23 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     /// Same as [`decode`](Self::decode); decoding fails only if no page could
     /// be decoded at all.
     pub fn decode_pages(&mut self) -> VexelResult<Vec<Image>> {
-        macro_rules! dispatch_pages {
-            () => {
-                match &mut self.decoder {
-                    Decoders::Ico(decoder) => decoder.decode_pages(),
-                    Decoders::Tiff(decoder) => decoder.decode_pages(),
-                    Decoders::Netpbm(decoder) => decoder.decode_pages(),
-                    Decoders::Exr(decoder) => decoder.decode_pages(),
-                    _ => unreachable!(),
-                }
-            };
-        }
+        let decoder = &mut self.decoder;
 
-        if !matches!(self.decoder, Decoders::Ico(_) | Decoders::Tiff(_) | Decoders::Netpbm(_) | Decoders::Exr(_)) {
-            return self.decode().map(|image| vec![image]);
-        }
-
-        #[cfg(fuzzing)]
-        {
-            return dispatch_pages!();
-        }
-
-        #[cfg(not(fuzzing))]
-        {
-            let result = panic::catch_unwind(AssertUnwindSafe(|| dispatch_pages!()));
-
-            result.unwrap_or_else(|payload| {
-                let msg = payload
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| payload.downcast_ref::<&str>().copied())
-                    .unwrap_or("unknown panic");
-
-                Err(VexelError::Panic(msg.to_string()))
-            })
-        }
+        catch_decoder_panic(move || match decoder.as_dyn() {
+            Some(decoder) => decoder.decode_pages(),
+            None => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
+        })
     }
 
     /// Decodes all embedded thumbnails and preview images found in the file.
     /// Formats without thumbnail support, and files that contain none,
     /// return an empty vector.
     pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
-        macro_rules! dispatch_thumbnails {
-            () => {
-                match &mut self.decoder {
-                    Decoders::Jpeg(decoder) => decoder.decode_thumbnails(),
-                    Decoders::JpegLs(decoder) => decoder.decode_thumbnails(),
-                    Decoders::Tiff(decoder) => decoder.decode_thumbnails(),
-                    Decoders::Dng(decoder) => decoder.decode_thumbnails(),
-                    Decoders::Tga(decoder) => decoder.decode_thumbnails(),
-                    Decoders::Dicom(decoder) => decoder.decode_thumbnails(),
-                    _ => Ok(Vec::new()),
-                }
-            };
-        }
+        let decoder = &mut self.decoder;
 
-        #[cfg(fuzzing)]
-        let result = dispatch_thumbnails!();
-
-        #[cfg(not(fuzzing))]
-        let result = panic::catch_unwind(AssertUnwindSafe(|| dispatch_thumbnails!())).unwrap_or_else(|payload| {
-            let msg = payload
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| payload.downcast_ref::<&str>().copied())
-                .unwrap_or("unknown panic");
-
-            Err(VexelError::Panic(msg.to_string()))
+        let result = catch_decoder_panic(move || match decoder.as_dyn() {
+            Some(decoder) => decoder.decode_thumbnails(),
+            None => Ok(Vec::new()),
         });
 
         result.map(|mut thumbnails| {
@@ -375,72 +275,35 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     /// called first. Calling `get_info` before `decode` returns an empty or zeroed struct.
     /// The returned [`ImageInfo`] variant matches the detected format.
     pub fn get_info(&mut self) -> ImageInfo {
-        match &mut self.decoder {
-            Decoders::Jpeg(jpeg_decoder) => {
-                let image_data = jpeg_decoder.get_info();
-
-                ImageInfo::Jpeg(image_data)
-            }
-            Decoders::Png(png_decoder) => {
-                let image_data = png_decoder.get_info();
-
-                ImageInfo::Png(image_data)
-            }
-            Decoders::Bmp(bmp_decoder) => {
-                let image_data = bmp_decoder.get_info();
-
-                ImageInfo::Bmp(image_data)
-            }
-            Decoders::Gif(gif_decoder) => {
-                let image_data = gif_decoder.get_info();
-
-                ImageInfo::Gif(image_data)
-            }
-            Decoders::Netpbm(netpbm_decoder) => {
-                let image_data = netpbm_decoder.get_info();
-
-                ImageInfo::Netpbm(image_data)
-            }
-            Decoders::Hdr(hdr_decoder) => {
-                let image_data = hdr_decoder.get_info();
-
-                ImageInfo::Hdr(image_data)
-            }
-            Decoders::JpegLs(jpeg_ls_decoder) => {
-                let image_data = jpeg_ls_decoder.get_info();
-                ImageInfo::JpegLs(image_data)
-            }
-            Decoders::Jbig1(jbig1_decoder) => {
-                let image_data = jbig1_decoder.get_info();
-                ImageInfo::Jbig1(image_data)
-            }
-            Decoders::Ico(ico_decoder) => {
-                let image_data = ico_decoder.get_info();
-                ImageInfo::Ico(image_data)
-            }
-            Decoders::Tga(tga_decoder) => {
-                let image_data = tga_decoder.get_info();
-                ImageInfo::Tga(image_data)
-            }
-            Decoders::Tiff(tiff_decoder) => {
-                let image_data = tiff_decoder.get_info();
-                ImageInfo::Tiff(image_data)
-            }
-            Decoders::Dicom(dicom_decoder) => {
-                let image_data = dicom_decoder.get_info();
-                ImageInfo::Dicom(image_data)
-            }
-            Decoders::Exr(exr_decoder) => {
-                let image_data = exr_decoder.get_info();
-                ImageInfo::Exr(image_data)
-            }
-            Decoders::Jpeg2000(jpeg2000_decoder) => {
-                let image_data = jpeg2000_decoder.get_info();
-                ImageInfo::Jpeg2000(image_data)
-            }
-            Decoders::Dng(_) => ImageInfo::Unknown,
-            Decoders::Unknown => ImageInfo::Unknown,
+        match self.decoder.as_dyn() {
+            Some(decoder) => decoder.get_info(),
+            None => ImageInfo::Unknown,
         }
+    }
+
+    /// Returns `true` if the detected format can contain multiple pages and the
+    /// decoder decodes each of them through [`decode_pages`](Self::decode_pages).
+    ///
+    /// For every other format `decode_pages` still succeeds, returning a single
+    /// page equal to [`decode`](Self::decode).
+    pub fn supports_pages(&self) -> bool {
+        self.decoder.supports_pages()
+    }
+
+    /// Returns `true` if the decoder can extract embedded thumbnails through
+    /// [`decode_thumbnails`](Self::decode_thumbnails).
+    ///
+    /// For every other format `decode_thumbnails` returns an empty vector.
+    pub fn supports_thumbnails(&self) -> bool {
+        self.decoder.supports_thumbnails()
+    }
+
+    /// Returns `true` if the detected format can hold multiple animation frames.
+    ///
+    /// For every other format [`decode_frames`](Self::decode_frames) yields
+    /// exactly one frame with a delay of `0`.
+    pub fn supports_frames(&self) -> bool {
+        self.decoder.supports_frames()
     }
 
     fn try_guess_format(reader: &mut R) -> VexelResult<ImageFormat> {
