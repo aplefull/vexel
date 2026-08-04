@@ -12,5 +12,6 @@ pub mod jpeg2000;
 pub mod jpeg_ls;
 pub mod netpbm;
 pub mod png;
+pub mod rpgmvp;
 pub mod tga;
 pub mod tiff;

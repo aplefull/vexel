@@ -152,6 +152,11 @@ fn test_farbfeld() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_rpgmvp() -> Result<(), Box<dyn std::error::Error>> {
+    run_test_cases(formats::rpgmvp::test_cases())
+}
+
+#[test]
 fn test_dicom() -> Result<(), Box<dyn std::error::Error>> {
     run_test_cases(formats::dicom::test_cases())
 }

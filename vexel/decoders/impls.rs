@@ -14,6 +14,7 @@ use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;
+use crate::decoders::rpgmvp::RpgmvpDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
 use crate::decoders::traits::ImageDecoder;
@@ -90,6 +91,31 @@ impl_decoder!(DicomDecoder, Dicom, thumbnails = true, frames = true);
 impl_decoder!(ExrDecoder, Exr, pages = true);
 impl_decoder!(Jpeg2000Decoder, Jpeg2000);
 impl_decoder!(FarbfeldDecoder, Farbfeld);
+
+impl<R: Read + Seek + Sync> ImageDecoder<R> for RpgmvpDecoder<R> {
+    fn set_limits(&mut self, limits: Limits) {
+        RpgmvpDecoder::set_limits(self, limits);
+    }
+
+    fn decode(&mut self) -> VexelResult<Image> {
+        RpgmvpDecoder::decode(self)
+    }
+
+    fn get_info(&mut self) -> ImageInfo {
+        match RpgmvpDecoder::get_info(self) {
+            Ok(info) => ImageInfo::Png(info),
+            Err(_) => ImageInfo::Unknown,
+        }
+    }
+
+    fn supports_frames() -> bool {
+        true
+    }
+
+    fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
+        RpgmvpDecoder::decode_frames(self)
+    }
+}
 
 impl<R: Read + Seek + Sync> ImageDecoder<R> for GifDecoder<R> {
     fn set_limits(&mut self, limits: Limits) {

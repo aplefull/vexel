@@ -111,6 +111,7 @@ pub enum ImageFormat {
     Exr,
     Jpeg2000,
     Farbfeld,
+    Rpgmvp,
     Unknown,
 }
 

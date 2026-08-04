@@ -36,6 +36,7 @@ use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::png::PngDecoder;
+use crate::decoders::rpgmvp::RpgmvpDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
 pub(crate) use crate::decoders::Decoders;
@@ -129,6 +130,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Exr => Decoders::Exr(ExrDecoder::new(reader)),
             ImageFormat::Jpeg2000 => Decoders::Jpeg2000(Jpeg2000Decoder::new(reader)),
             ImageFormat::Farbfeld => Decoders::Farbfeld(FarbfeldDecoder::new(reader)),
+            ImageFormat::Rpgmvp => Decoders::Rpgmvp(RpgmvpDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -402,6 +404,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         // farbfeld
         if header.starts_with(decoders::farbfeld::decoder::MAGIC) {
             return Ok(ImageFormat::Farbfeld);
+        }
+
+        // RPGMVP
+        if header.starts_with(decoders::rpgmvp::decoder::MAGIC) {
+            return Ok(ImageFormat::Rpgmvp);
         }
 
         // JPEG 2000

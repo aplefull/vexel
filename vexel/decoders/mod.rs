@@ -13,6 +13,7 @@ pub mod jpeg2000;
 pub mod jpeg_ls;
 pub mod netpbm;
 pub mod png;
+pub mod rpgmvp;
 pub mod tga;
 pub mod tiff;
 pub mod traits;
@@ -73,4 +74,5 @@ define_decoders! {
     Exr => crate::decoders::exr::ExrDecoder<R>,
     Jpeg2000 => crate::decoders::jpeg2000::Jpeg2000Decoder<R>,
     Farbfeld => crate::decoders::farbfeld::FarbfeldDecoder<R>,
+    Rpgmvp => crate::decoders::rpgmvp::RpgmvpDecoder<R>,
 }
