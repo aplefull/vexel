@@ -10,6 +10,7 @@ use crate::decoders::dicom::types::{
     tag_element, tag_group, tag_name, tags, DicomElementInfo, Photometric, TransferSyntax, VoiFunction, Vr,
 };
 use crate::decoders::jpeg::decoder::JpegDecoder;
+use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::utils::deflate::DeflateDecoder;
 use crate::utils::error::{VexelError, VexelResult};
@@ -403,9 +404,6 @@ impl<R: Read + Seek> DicomDecoder<R> {
         }
 
         match transfer_syntax {
-            TransferSyntax::Jpeg2000 => {
-                return Err(VexelError::UnsupportedFormat("DICOM: JPEG 2000 transfer syntax".to_string()))
-            }
             TransferSyntax::JpegXl => {
                 return Err(VexelError::UnsupportedFormat("DICOM: JPEG XL transfer syntax".to_string()))
             }
@@ -468,7 +466,33 @@ impl<R: Read + Seek> DicomDecoder<R> {
                     decoder.set_limits(self.limits.clone());
                     let image = decoder.decode()?;
                     let precision = decoder.precision();
-                    absorb_codec_frame(image, params, palette, false, precision, &mut mono_stored, &mut color_frames)?;
+                    absorb_codec_frame(
+                        image,
+                        params,
+                        palette,
+                        false,
+                        precision,
+                        false,
+                        &mut mono_stored,
+                        &mut color_frames,
+                    )?;
+                }
+                TransferSyntax::Jpeg2000 => {
+                    let mut decoder = Jpeg2000Decoder::new(Cursor::new(frame_bytes.clone()));
+                    decoder.set_limits(self.limits.clone());
+                    let image = decoder.decode()?;
+                    let precision = decoder.precision();
+                    let signed = decoder.is_signed();
+                    absorb_codec_frame(
+                        image,
+                        params,
+                        palette,
+                        true,
+                        precision,
+                        signed,
+                        &mut mono_stored,
+                        &mut color_frames,
+                    )?;
                 }
                 _ => {
                     let mut decoder = JpegDecoder::new(Cursor::new(frame_bytes.clone()));
@@ -476,7 +500,16 @@ impl<R: Read + Seek> DicomDecoder<R> {
                     let image = decoder.decode()?;
                     let dct = transfer_syntax == TransferSyntax::JpegDct;
                     let precision = decoder.precision();
-                    absorb_codec_frame(image, params, palette, dct, precision, &mut mono_stored, &mut color_frames)?;
+                    absorb_codec_frame(
+                        image,
+                        params,
+                        palette,
+                        dct,
+                        precision,
+                        false,
+                        &mut mono_stored,
+                        &mut color_frames,
+                    )?;
                 }
             }
         }
@@ -532,12 +565,27 @@ impl<R: Read + Seek> DicomDecoder<R> {
     }
 }
 
+fn rebase_signed_samples(samples: Vec<u16>, precision: u16, shift: u32, params: &PixelParams) -> Vec<u16> {
+    let bias = 1i32 << (precision.clamp(1, 16) - 1);
+    let stored_bits = params.bits_stored.clamp(1, 16) as u32;
+    let container_mask = if stored_bits >= 16 { u16::MAX } else { (1u16 << stored_bits) - 1 };
+
+    samples
+        .into_iter()
+        .map(|s| {
+            let value = ((s >> shift) as i32) - bias;
+            (value as u16) & container_mask
+        })
+        .collect()
+}
+
 fn absorb_codec_frame(
     image: Image,
     params: &PixelParams,
     palette: Option<&[Lut; 3]>,
     dct: bool,
     codec_precision: u8,
+    codec_signed: bool,
     mono_stored: &mut Vec<StoredFrame>,
     color_frames: &mut Vec<PixelData>,
 ) -> VexelResult<()> {
@@ -554,7 +602,12 @@ fn absorb_codec_frame(
                     params.bits_stored
                 };
                 let shift = if precision > 8 && precision < 16 { 16 - precision as u32 } else { 0 };
-                StoredFrame::U16(v.into_iter().map(|s| s >> shift).collect())
+
+                if codec_signed {
+                    StoredFrame::U16(rebase_signed_samples(v, precision, shift, params))
+                } else {
+                    StoredFrame::U16(v.into_iter().map(|s| s >> shift).collect())
+                }
             }
             PixelData::RGB8(v) => StoredFrame::U8(v.chunks_exact(3).map(|c| c[0]).collect()),
             PixelData::RGB16(v) => StoredFrame::U16(v.chunks_exact(3).map(|c| c[0]).collect()),

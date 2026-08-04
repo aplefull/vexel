@@ -639,5 +639,47 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::ExactFrames { reference_path: "dicom/lossyJPEG-RGB.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "DICOM JPEG 2000 lossless signed CT",
+            path: "dicom/693_J2KR.dcm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dicom/693_J2KR.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "DICOM JPEG 2000 lossless MR2",
+            path: "dicom/MR2_J2KR.dcm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dicom/MR2_J2KR.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "DICOM JPEG 2000 lossy MR2",
+            path: "dicom/MR2_J2KI.dcm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dicom/MR2_J2KI.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "DICOM JPEG 2000 lossless signed NM1",
+            path: "dicom/NM1_J2KR.dcm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dicom/NM1_J2KR.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "DICOM JPEG 2000 lossy signed NM1",
+            path: "dicom/NM1_J2KI.dcm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dicom/NM1_J2KI.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "DICOM JPEG 2000 lossless truncated multiframe",
+            path: "dicom/emri_small_jpeg_2k_lossless_too_short.dcm",
+            validation: None,
+            comparison: Comparison::ExactFrames { reference_path: "dicom/emri_small_jpeg_2k_lossless_too_short.jxl" },
+            ..Default::default()
+        },
     ]
 }

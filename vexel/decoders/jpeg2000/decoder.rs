@@ -29,6 +29,14 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
         self.info.clone()
     }
 
+    pub fn precision(&self) -> u8 {
+        self.info.components.first().map(|c| c.precision.min(255) as u8).unwrap_or(0)
+    }
+
+    pub fn is_signed(&self) -> bool {
+        self.info.components.first().map(|c| c.signed).unwrap_or(false)
+    }
+
     pub fn decode(&mut self) -> VexelResult<Image> {
         self.reader.seek(SeekFrom::Start(0))?;
         let mut data = Vec::new();
