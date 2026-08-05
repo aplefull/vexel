@@ -35,6 +35,7 @@ use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
+use crate::decoders::pgx::PgxDecoder;
 use crate::decoders::png::PngDecoder;
 use crate::decoders::rpgmvp::RpgmvpDecoder;
 use crate::decoders::tga::TgaDecoder;
@@ -131,6 +132,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Jpeg2000 => Decoders::Jpeg2000(Jpeg2000Decoder::new(reader)),
             ImageFormat::Farbfeld => Decoders::Farbfeld(FarbfeldDecoder::new(reader)),
             ImageFormat::Rpgmvp => Decoders::Rpgmvp(RpgmvpDecoder::new(reader)),
+            ImageFormat::Pgx => Decoders::Pgx(PgxDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -437,6 +439,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         // DICOM
         if decoders::dicom::decoder::looks_like_dicom_dataset(&header) {
             return Ok(ImageFormat::Dicom);
+        }
+
+        // PGX - "PG" magic is weak, so the whole header line is validated
+        if format_detect::looks_like_pgx(&header) {
+            return Ok(ImageFormat::Pgx);
         }
 
         // TGA

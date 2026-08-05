@@ -132,6 +132,46 @@ pub(crate) fn looks_like_headerless_dib(header: &[u8]) -> bool {
     width != 0 && height != 0 && planes == 1 && matches!(bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32 | 64)
 }
 
+pub(crate) fn looks_like_pgx(header: &[u8]) -> bool {
+    if !header.starts_with(b"PG") {
+        return false;
+    }
+
+    let mut pos = 2;
+
+    while matches!(header.get(pos), Some(b' ') | Some(b'\t')) {
+        pos += 1;
+    }
+
+    if pos == 2 {
+        return false;
+    }
+
+    match (header.get(pos), header.get(pos + 1)) {
+        (Some(b'M'), Some(b'L')) | (Some(b'L'), Some(b'M')) => pos += 2,
+        _ => return false,
+    }
+
+    while matches!(header.get(pos), Some(b' ') | Some(b'\t') | Some(b'+') | Some(b'-')) {
+        pos += 1;
+    }
+
+    let mut digits = 0;
+    let mut precision: u32 = 0;
+
+    while let Some(&b) = header.get(pos) {
+        if !b.is_ascii_digit() {
+            break;
+        }
+
+        precision = precision.saturating_mul(10).saturating_add(u32::from(b - b'0'));
+        digits += 1;
+        pos += 1;
+    }
+
+    digits > 0 && (1..=31).contains(&precision) && matches!(header.get(pos), Some(b' ') | Some(b'\t'))
+}
+
 pub(crate) fn try_guess_format_harder<R: Read + Seek>(reader: &mut R) -> VexelResult<ImageFormat> {
     const HEADER_SIZE: usize = 48;
     const FOOTER_SIZE: usize = 12;

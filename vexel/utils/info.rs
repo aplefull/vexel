@@ -15,6 +15,7 @@ use crate::decoders::jbig1::types::Jbig1SectionInfo;
 use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::jpeg_ls::types::JpegLsSectionInfo;
 use crate::decoders::netpbm::NetpbmSectionInfo;
+use crate::decoders::pgx::PgxSectionInfo;
 use crate::decoders::png::PngChunkInfo;
 use crate::decoders::tga::types::TgaSectionInfo;
 use crate::utils::exif::{ExifIfd, ExifValue};
@@ -39,6 +40,7 @@ pub enum ImageInfo {
     Exr(ExrInfo),
     Jpeg2000(Jpeg2000Info),
     Farbfeld(FarbfeldInfo),
+    Pgx(PgxInfo),
     Unknown,
 }
 
@@ -123,6 +125,12 @@ pub struct FarbfeldInfo {
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
+pub struct PgxInfo {
+    pub sections: Vec<PgxSectionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct ExrInfo {
     pub version: i32,
     pub multipart: bool,
@@ -173,6 +181,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Exr(info) => write!(f, "{}", info),
             ImageInfo::Jpeg2000(info) => write!(f, "{}", info),
             ImageInfo::Farbfeld(info) => write!(f, "{}", info),
+            ImageInfo::Pgx(info) => write!(f, "{}", info),
             ImageInfo::Unknown => write!(f, "Unknown format"),
         }
     }
@@ -1434,6 +1443,33 @@ impl fmt::Display for DicomInfo {
                 write!(f, "  [{}]", element.value)?;
             }
             writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for PgxInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use crate::decoders::pgx::PgxSectionData;
+
+        writeln!(f, "PGX Information")?;
+        writeln!(f, "=====================")?;
+
+        for section in &self.sections {
+            match &section.data {
+                PgxSectionData::Header(header) => {
+                    writeln!(f, "Header (offset {}):", section.start_offset)?;
+                    writeln!(f, "  Size: {}x{}", header.width, header.height)?;
+                    writeln!(f, "  Precision: {} bits", header.precision)?;
+                    writeln!(f, "  Signed: {}", header.signed)?;
+                    writeln!(f, "  Byte order: {:?}", header.byte_order)?;
+                }
+                PgxSectionData::PixelData(data) => {
+                    writeln!(f, "Pixel data (offset {}):", section.start_offset)?;
+                    writeln!(f, "  Length: {} bytes", data.length)?;
+                }
+            }
         }
 
         Ok(())

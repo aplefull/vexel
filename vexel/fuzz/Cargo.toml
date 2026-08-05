@@ -141,3 +141,10 @@ path = "fuzz_targets/decode_rpgmvp.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_pgx"
+path = "fuzz_targets/decode_pgx.rs"
+test = false
+doc = false
+bench = false

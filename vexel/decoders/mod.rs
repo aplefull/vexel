@@ -12,6 +12,7 @@ pub mod jpeg;
 pub mod jpeg2000;
 pub mod jpeg_ls;
 pub mod netpbm;
+pub mod pgx;
 pub mod png;
 pub mod rpgmvp;
 pub mod tga;
@@ -75,4 +76,5 @@ define_decoders! {
     Jpeg2000 => crate::decoders::jpeg2000::Jpeg2000Decoder<R>,
     Farbfeld => crate::decoders::farbfeld::FarbfeldDecoder<R>,
     Rpgmvp => crate::decoders::rpgmvp::RpgmvpDecoder<R>,
+    Pgx => crate::decoders::pgx::PgxDecoder<R>,
 }

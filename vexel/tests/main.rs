@@ -157,6 +157,11 @@ fn test_rpgmvp() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_pgx() -> Result<(), Box<dyn std::error::Error>> {
+    run_test_cases(formats::pgx::test_cases())
+}
+
+#[test]
 fn test_dicom() -> Result<(), Box<dyn std::error::Error>> {
     run_test_cases(formats::dicom::test_cases())
 }
