@@ -113,6 +113,7 @@ pub enum ImageFormat {
     Farbfeld,
     Rpgmvp,
     Pgx,
+    JpegXs,
     Unknown,
 }
 

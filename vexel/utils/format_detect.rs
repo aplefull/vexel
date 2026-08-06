@@ -245,3 +245,17 @@ pub(crate) fn try_guess_format_harder<R: Read + Seek>(reader: &mut R) -> VexelRe
     // We tried
     Ok(ImageFormat::Unknown)
 }
+
+pub fn looks_like_jpeg_xs(header: &[u8]) -> bool {
+    if header.len() < 4 {
+        return false;
+    }
+
+    if header[0] != 0xff || header[1] != 0x10 {
+        return false;
+    }
+
+    let next = u16::from_be_bytes([header[2], header[3]]);
+
+    matches!(next, 0xff50 | 0xff12 | 0xff15 | 0xff13 | 0xff14 | 0xff16 | 0xff17 | 0xff18 | 0xff19)
+}

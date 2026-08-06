@@ -162,6 +162,11 @@ fn test_pgx() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_jpeg_xs() -> Result<(), Box<dyn std::error::Error>> {
+    run_test_cases(formats::jpeg_xs::test_cases())
+}
+
+#[test]
 fn test_dicom() -> Result<(), Box<dyn std::error::Error>> {
     run_test_cases(formats::dicom::test_cases())
 }
@@ -184,6 +189,10 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
     test_cases.extend(formats::dicom::test_cases());
     test_cases.extend(formats::exr::test_cases());
     test_cases.extend(formats::jpeg2000::test_cases());
+    test_cases.extend(formats::farbfeld::test_cases());
+    test_cases.extend(formats::rpgmvp::test_cases());
+    test_cases.extend(formats::pgx::test_cases());
+    test_cases.extend(formats::jpeg_xs::test_cases());
 
     run_test_cases(test_cases)
 }

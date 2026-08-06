@@ -14,6 +14,7 @@ use crate::decoders::ico::IcoSectionInfo;
 use crate::decoders::jbig1::types::Jbig1SectionInfo;
 use crate::decoders::jpeg::types::JpegSegmentInfo;
 use crate::decoders::jpeg_ls::types::JpegLsSectionInfo;
+use crate::decoders::jpeg_xs::types::{ColorTransform, JpegXsMarkerInfo, NltType};
 use crate::decoders::netpbm::NetpbmSectionInfo;
 use crate::decoders::pgx::PgxSectionInfo;
 use crate::decoders::png::PngChunkInfo;
@@ -41,6 +42,7 @@ pub enum ImageInfo {
     Jpeg2000(Jpeg2000Info),
     Farbfeld(FarbfeldInfo),
     Pgx(PgxInfo),
+    JpegXs(JpegXsInfo),
     Unknown,
 }
 
@@ -131,6 +133,25 @@ pub struct PgxInfo {
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
+pub struct JpegXsInfo {
+    pub width: u32,
+    pub height: u32,
+    pub components: u8,
+    pub bit_depth: u8,
+    pub profile: u16,
+    pub level: u8,
+    pub sublevel: u8,
+    pub color_transform: ColorTransform,
+    pub nlt: NltType,
+    pub horizontal_decompositions: u8,
+    pub vertical_decompositions: u8,
+    pub slice_height: u32,
+    pub column_width: u16,
+    pub markers: Vec<JpegXsMarkerInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct ExrInfo {
     pub version: i32,
     pub multipart: bool,
@@ -182,6 +203,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Jpeg2000(info) => write!(f, "{}", info),
             ImageInfo::Farbfeld(info) => write!(f, "{}", info),
             ImageInfo::Pgx(info) => write!(f, "{}", info),
+            ImageInfo::JpegXs(info) => write!(f, "{}", info),
             ImageInfo::Unknown => write!(f, "Unknown format"),
         }
     }
@@ -1443,6 +1465,30 @@ impl fmt::Display for DicomInfo {
                 write!(f, "  [{}]", element.value)?;
             }
             writeln!(f)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for JpegXsInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "JPEG XS Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Size: {}x{}", self.width, self.height)?;
+        writeln!(f, "Components: {}", self.components)?;
+        writeln!(f, "Bit depth: {}", self.bit_depth)?;
+        writeln!(f, "Profile: 0x{:04x}", self.profile)?;
+        writeln!(f, "Level: 0x{:02x} (sublevel 0x{:02x})", self.level, self.sublevel)?;
+        writeln!(f, "Color transform: {:?}", self.color_transform)?;
+        writeln!(f, "Non-linear transform: {:?}", self.nlt)?;
+        writeln!(f, "Decompositions: {}h x {}v", self.horizontal_decompositions, self.vertical_decompositions)?;
+        writeln!(f, "Slice height: {}", self.slice_height)?;
+        writeln!(f, "Column width: {}", self.column_width)?;
+
+        writeln!(f, "Markers:")?;
+        for marker in &self.markers {
+            writeln!(f, "  {} (offset {}, length {})", marker.marker, marker.offset, marker.length)?;
         }
 
         Ok(())

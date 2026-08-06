@@ -34,6 +34,7 @@ use crate::decoders::jbig1::Jbig1Decoder;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
+use crate::decoders::jpeg_xs::JpegXsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::pgx::PgxDecoder;
 use crate::decoders::png::PngDecoder;
@@ -133,6 +134,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Farbfeld => Decoders::Farbfeld(FarbfeldDecoder::new(reader)),
             ImageFormat::Rpgmvp => Decoders::Rpgmvp(RpgmvpDecoder::new(reader)),
             ImageFormat::Pgx => Decoders::Pgx(PgxDecoder::new(reader)),
+            ImageFormat::JpegXs => Decoders::JpegXs(JpegXsDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -441,13 +443,18 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             return Ok(ImageFormat::Dicom);
         }
 
-        // PGX - "PG" magic is weak, so the whole header line is validated
+        // JPEG XS
+        if format_detect::looks_like_jpeg_xs(&header) {
+            return Ok(ImageFormat::JpegXs);
+        }
+
+        // PGX
         if format_detect::looks_like_pgx(&header) {
             return Ok(ImageFormat::Pgx);
         }
 
         // TGA
-        // Targa does not have a magic number, so we have to check the header manually.
+        // Targa does not have a magic number, so we have to check the header manually
         let image_type = header[2];
         let color_map_type = header[1];
         let palette_bpp = header[7];
@@ -475,9 +482,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             return Ok(ImageFormat::Tga);
         }
 
-        // JBIG1 - no magic bytes; validate the 20-byte BIH header
-        // Byte 0 (DL) <= byte 1 (D), byte 2 (planes) in 1..=8, byte 3 = 0 (reserved)
-        // XD, YD, L0 (big-endian u32 at offsets 4, 8, 12) must be non-zero and <= 65535
+        // JBIG1 - no magic bytes, so we validate the 20-byte BIH header
         let xd = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
         let yd = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
         let l0 = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);

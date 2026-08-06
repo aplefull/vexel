@@ -29,6 +29,13 @@ Functional means some may not be implemented yet, but vast majority of files wil
 | JBIG1    | Full support |
 | TIFF     | Functional - see notes below |
 | DNG      | Functional - see notes below |
+| DICOM    | Full support |
+| EXR      | Functional |
+| JPEG 2000 | Functional |
+| JPEG XS  | Full support |
+| farbfeld | Full support |
+| RPGMVP   | Full support |
+| PGX      | Full support |
 
 ### JPEG
 
@@ -59,6 +66,18 @@ Color spaces supported: RGB, RGBA, grayscale, palette (color-mapped), YCbCr, CIE
 ### DNG
 
 Builds on the TIFF decoder. Decodes CFA and linear raw data, linearization tables, color matrices, and opcode-based polynomial maps. That's enough to decode most images, but some less common cases are not yet handled.
+
+### JPEG XS
+
+Raw ISO/IEC 21122 codestreams (starting with the `SOC` marker). Every coding tool in the specification is implemented:
+
+- All profiles: Unrestricted, Main, High, Light, Light-Subline, MLS, and the Bayer profiles
+- All color transforms
+- Both quantizers (dead-zone and uniform), joint and separate sign coding, and both run modes
+- Subsampled 4:2:2 and 4:2:0, wavelet decomposition suppression, and multiple precinct columns and slices
+- All bit depths
+
+The BMFF container form (`.jxs` files wrapping a codestream in ISO boxes) is not yet handled - only raw codestreams.
 
 ## Usage
 
