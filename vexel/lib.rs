@@ -34,6 +34,7 @@ use crate::decoders::jbig1::Jbig1Decoder;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
+use crate::decoders::jpeg_xr::JpegXrDecoder;
 use crate::decoders::jpeg_xs::JpegXsDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::pgx::PgxDecoder;
@@ -135,6 +136,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Rpgmvp => Decoders::Rpgmvp(RpgmvpDecoder::new(reader)),
             ImageFormat::Pgx => Decoders::Pgx(PgxDecoder::new(reader)),
             ImageFormat::JpegXs => Decoders::JpegXs(JpegXsDecoder::new(reader)),
+            ImageFormat::JpegXr => Decoders::JpegXr(JpegXrDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -314,6 +316,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         self.decoder.supports_frames()
     }
 
+    // TODO: Maybe move inner logic to format_detect
     fn try_guess_format(reader: &mut R) -> VexelResult<ImageFormat> {
         let mut header = [0u8; 32];
         let mut read_pos = 0;
@@ -420,6 +423,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             || header.starts_with(&[0xFF, 0x4F, 0xFF, 0x51])
         {
             return Ok(ImageFormat::Jpeg2000);
+        }
+
+        // JPEG XR
+        if format_detect::looks_like_jpeg_xr(&header) {
+            return Ok(ImageFormat::JpegXr);
         }
 
         // TIFF / DNG

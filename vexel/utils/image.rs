@@ -114,6 +114,7 @@ pub enum ImageFormat {
     Rpgmvp,
     Pgx,
     JpegXs,
+    JpegXr,
     Unknown,
 }
 

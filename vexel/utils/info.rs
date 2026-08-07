@@ -43,6 +43,7 @@ pub enum ImageInfo {
     Farbfeld(FarbfeldInfo),
     Pgx(PgxInfo),
     JpegXs(JpegXsInfo),
+    JpegXr(JpegXrInfo),
     Unknown,
 }
 
@@ -152,6 +153,28 @@ pub struct JpegXsInfo {
 
 #[derive(Debug, Clone, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
+pub struct JpegXrInfo {
+    pub width: u32,
+    pub height: u32,
+    pub bitstream_format: String,
+    pub source_color_format: String,
+    pub internal_color_format: String,
+    pub source_bit_depth: String,
+    pub pixel_format: String,
+    pub num_channels: u32,
+    pub overlap: String,
+    pub subband: String,
+    pub orientation: String,
+    pub tile_columns: u32,
+    pub tile_rows: u32,
+    pub alpha_channel: bool,
+    pub hard_tile_boundaries: bool,
+    pub scaled_arithmetic: bool,
+    pub trim_flexbits: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
 pub struct ExrInfo {
     pub version: i32,
     pub multipart: bool,
@@ -204,6 +227,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Farbfeld(info) => write!(f, "{}", info),
             ImageInfo::Pgx(info) => write!(f, "{}", info),
             ImageInfo::JpegXs(info) => write!(f, "{}", info),
+            ImageInfo::JpegXr(info) => write!(f, "{}", info),
             ImageInfo::Unknown => write!(f, "Unknown format"),
         }
     }
@@ -1490,6 +1514,30 @@ impl fmt::Display for JpegXsInfo {
         for marker in &self.markers {
             writeln!(f, "  {} (offset {}, length {})", marker.marker, marker.offset, marker.length)?;
         }
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for JpegXrInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "JPEG XR Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Size: {}x{}", self.width, self.height)?;
+        writeln!(f, "Pixel format: {}", self.pixel_format)?;
+        writeln!(f, "Source color format: {}", self.source_color_format)?;
+        writeln!(f, "Internal color format: {}", self.internal_color_format)?;
+        writeln!(f, "Source bit depth: {}", self.source_bit_depth)?;
+        writeln!(f, "Channels: {}", self.num_channels)?;
+        writeln!(f, "Bitstream format: {}", self.bitstream_format)?;
+        writeln!(f, "Subband: {}", self.subband)?;
+        writeln!(f, "Overlap: {}", self.overlap)?;
+        writeln!(f, "Orientation: {}", self.orientation)?;
+        writeln!(f, "Tiles: {}x{}", self.tile_columns, self.tile_rows)?;
+        writeln!(f, "Alpha channel: {}", self.alpha_channel)?;
+        writeln!(f, "Hard tile boundaries: {}", self.hard_tile_boundaries)?;
+        writeln!(f, "Scaled arithmetic: {}", self.scaled_arithmetic)?;
+        writeln!(f, "Trim flexbits: {}", self.trim_flexbits)?;
 
         Ok(())
     }

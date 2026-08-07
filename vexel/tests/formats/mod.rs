@@ -10,6 +10,7 @@ pub mod jbig1;
 pub mod jpeg;
 pub mod jpeg2000;
 pub mod jpeg_ls;
+pub mod jpeg_xr;
 pub mod jpeg_xs;
 pub mod netpbm;
 pub mod pgx;

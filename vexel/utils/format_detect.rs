@@ -259,3 +259,11 @@ pub fn looks_like_jpeg_xs(header: &[u8]) -> bool {
 
     matches!(next, 0xff50 | 0xff12 | 0xff15 | 0xff13 | 0xff14 | 0xff16 | 0xff17 | 0xff18 | 0xff19)
 }
+
+pub fn looks_like_jpeg_xr(header: &[u8]) -> bool {
+    if header.len() >= 8 && &header[..8] == b"WMPHOTO\0" {
+        return true;
+    }
+
+    header.len() >= 4 && header[..4] == [0x49, 0x49, 0xbc, 0x01]
+}

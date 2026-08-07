@@ -33,6 +33,7 @@ Functional means some may not be implemented yet, but vast majority of files wil
 | EXR      | Functional |
 | JPEG 2000 | Functional |
 | JPEG XS  | Full support |
+| JPEG XR  | Functional |
 | farbfeld | Full support |
 | RPGMVP   | Full support |
 | PGX      | Full support |
