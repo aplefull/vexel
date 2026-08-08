@@ -22,17 +22,17 @@ fn d_index(i: i32) -> usize {
     (1 + i * 2) as usize
 }
 
-fn clamp_s(a: &[i32], i: i32, sn: i32) -> i32 {
+fn clamp_s(a: &[i64], i: i32, sn: i32) -> i64 {
     let i = i.clamp(0, sn - 1);
     a[s_index(i)]
 }
 
-fn clamp_d(a: &[i32], i: i32, dn: i32) -> i32 {
+fn clamp_d(a: &[i64], i: i32, dn: i32) -> i64 {
     let i = i.clamp(0, dn - 1);
     a[d_index(i)]
 }
 
-pub fn decode_line_53(a: &mut [i32], line: &Line) {
+pub fn decode_line_53(a: &mut [i64], line: &Line) {
     let (sn, dn, cas) = (line.sn, line.dn, line.cas);
 
     if cas == 0 {
@@ -71,12 +71,12 @@ pub fn decode_line_53(a: &mut [i32], line: &Line) {
     }
 }
 
-fn clamp_ss(a: &[i32], i: i32, dn: i32) -> i32 {
+fn clamp_ss(a: &[i64], i: i32, dn: i32) -> i64 {
     let i = i.clamp(0, dn - 1);
     a[s_index(i)]
 }
 
-fn clamp_dd(a: &[i32], i: i32, sn: i32) -> i32 {
+fn clamp_dd(a: &[i64], i: i32, sn: i32) -> i64 {
     let i = i.clamp(0, sn - 1);
     a[d_index(i)]
 }

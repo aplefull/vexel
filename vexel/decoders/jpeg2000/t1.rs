@@ -59,7 +59,7 @@ impl PassType {
 
 pub struct T1Decoder {
     mqc: MqDecoder,
-    data: Vec<i32>,
+    data: Vec<i64>,
     flags: Vec<u32>,
     w: u32,
     h: u32,
@@ -71,11 +71,11 @@ impl T1Decoder {
         Self { mqc: MqDecoder::new(), data: Vec::new(), flags: Vec::new(), w: 0, h: 0, flags_stride: 0 }
     }
 
-    pub fn data(&self) -> &[i32] {
+    pub fn data(&self) -> &[i64] {
         &self.data
     }
 
-    pub fn data_mut(&mut self) -> &mut [i32] {
+    pub fn data_mut(&mut self) -> &mut [i64] {
         &mut self.data
     }
 
@@ -215,7 +215,7 @@ impl T1Decoder {
                 bit ^ LUT_SPB[lu] as u32
             };
 
-            self.data[data_index] = if sign != 0 { -oneplushalf } else { oneplushalf };
+            self.data[data_index] = if sign != 0 { -(oneplushalf as i64) } else { oneplushalf as i64 };
             self.update_flags(index, ci, sign, vsc);
         }
 
@@ -263,6 +263,7 @@ impl T1Decoder {
 
         let value = self.data[data_index];
         let negative = (value < 0) as u32;
+        let poshalf = poshalf as i64;
         self.data[data_index] = if v ^ negative != 0 { value + poshalf } else { value - poshalf };
 
         self.flags[index] |= T1_MU_THIS << (ci * 3);
@@ -314,7 +315,7 @@ impl T1Decoder {
         self.mqc.set_curctx(LUT_CTXNO_SC[lu] as usize);
         let sign = self.mqc.decode() ^ LUT_SPB[lu] as u32;
 
-        self.data[data_index] = if sign != 0 { -oneplushalf } else { oneplushalf };
+        self.data[data_index] = if sign != 0 { -(oneplushalf as i64) } else { oneplushalf as i64 };
         self.update_flags(index, ci, sign, vsc);
     }
 

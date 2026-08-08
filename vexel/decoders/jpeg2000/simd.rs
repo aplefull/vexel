@@ -5,7 +5,7 @@ use std::arch::x86_64::*;
 
 const I32_MAX_REPRESENTABLE: f32 = 2_147_483_520.0;
 
-pub fn round_half_to_even_row(src: &[f32], dst: &mut [i32]) {
+pub fn round_half_to_even_row(src: &[f32], dst: &mut [i64]) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
         return unsafe { round_half_to_even_row_avx2(src, dst) };
@@ -17,16 +17,16 @@ pub fn round_half_to_even_row(src: &[f32], dst: &mut [i32]) {
     round_half_to_even_row_scalar(src, dst);
 }
 
-pub fn dequantize_row(src: &[i32], dst: &mut [f32], reversible: bool, step_size: f32) {
+pub fn dequantize_row(src: &[i64], dst: &mut [f32], step_size: f32) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
-        return unsafe { dequantize_row_avx2(src, dst, reversible, step_size) };
+        return unsafe { dequantize_row_avx2(src, dst, step_size) };
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return dequantize_row_wasm(src, dst, reversible, step_size);
+    return dequantize_row_wasm(src, dst, step_size);
 
-    dequantize_row_scalar(src, dst, reversible, step_size);
+    dequantize_row_scalar(src, dst, step_size);
 }
 
 pub fn inverse_ict_row(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
@@ -53,7 +53,7 @@ pub fn inverse_rct_row(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
     inverse_rct_row_scalar(y, u, v);
 }
 
-pub fn shift_and_clamp(samples: &mut [i32], shift: i32, min: i32, max: i32) {
+pub fn shift_and_clamp(samples: &mut [i64], shift: i64, min: i64, max: i64) {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
         return unsafe { shift_and_clamp_avx2(samples, shift, min, max) };
@@ -91,7 +91,7 @@ pub fn lift_stride2(a: &mut [f32], write: usize, count: usize, c: f32) {
     lift_stride2_scalar(a, write, count, c);
 }
 
-pub fn replicate_row(src: &[i32], dst: &mut [i32], factor: usize) {
+pub fn replicate_row(src: &[i64], dst: &mut [i64], factor: usize) {
     #[cfg(target_arch = "x86_64")]
     if factor == 2 && is_x86_feature_detected!("avx2") {
         return unsafe { replicate_row_2x_avx2(src, dst) };
@@ -102,25 +102,19 @@ pub fn replicate_row(src: &[i32], dst: &mut [i32], factor: usize) {
 
 // ─── Scalar ───────────────────────────────────────────────────
 
-fn round_half_to_even_row_scalar(src: &[f32], dst: &mut [i32]) {
+fn round_half_to_even_row_scalar(src: &[f32], dst: &mut [i64]) {
     let n = src.len().min(dst.len());
     for i in 0..n {
         let value = src[i];
         dst[i] =
-            if value.is_finite() { value.round_ties_even().clamp(i32::MIN as f32, i32::MAX as f32) as i32 } else { 0 };
+            if value.is_finite() { value.round_ties_even().clamp(i32::MIN as f32, i32::MAX as f32) as i64 } else { 0 };
     }
 }
 
-fn dequantize_row_scalar(src: &[i32], dst: &mut [f32], reversible: bool, step_size: f32) {
+fn dequantize_row_scalar(src: &[i64], dst: &mut [f32], step_size: f32) {
     let n = src.len().min(dst.len());
-    if reversible {
-        for i in 0..n {
-            dst[i] = (src[i] / 2) as f32;
-        }
-    } else {
-        for i in 0..n {
-            dst[i] = (src[i] as f32 / 2.0) * step_size;
-        }
+    for i in 0..n {
+        dst[i] = (src[i] as f32 / 2.0) * step_size;
     }
 }
 
@@ -154,7 +148,7 @@ fn inverse_rct_row_scalar(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
     }
 }
 
-fn shift_and_clamp_scalar(samples: &mut [i32], shift: i32, min: i32, max: i32) {
+fn shift_and_clamp_scalar(samples: &mut [i64], shift: i64, min: i64, max: i64) {
     for sample in samples.iter_mut() {
         *sample = sample.saturating_add(shift).clamp(min, max);
     }
@@ -173,7 +167,7 @@ fn lift_stride2_scalar(a: &mut [f32], write: usize, count: usize, c: f32) {
     }
 }
 
-fn replicate_row_scalar(src: &[i32], dst: &mut [i32], factor: usize) {
+fn replicate_row_scalar(src: &[i64], dst: &mut [i64], factor: usize) {
     if src.is_empty() {
         dst.fill(0);
         return;
@@ -231,7 +225,7 @@ fn scatter_column_f32_scalar(src: &[f32], dst: &mut [f32], start: usize, stride:
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn round_half_to_even_row_avx2(src: &[f32], dst: &mut [i32]) {
+unsafe fn round_half_to_even_row_avx2(src: &[f32], dst: &mut [i64]) {
     let n = src.len().min(dst.len());
     let mut i = 0;
 
@@ -251,48 +245,50 @@ unsafe fn round_half_to_even_row_avx2(src: &[f32], dst: &mut [i32]) {
         let overflows = _mm256_cmp_ps(safe, saturation_point, _CMP_GT_OQ);
         let result = _mm256_blendv_epi8(converted, i32_max, _mm256_castps_si256(overflows));
 
-        _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, result);
+        let low = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(result));
+        let high = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(result, 1));
+
+        _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, low);
+        _mm256_storeu_si256(dst.as_mut_ptr().add(i + 4) as *mut __m256i, high);
         i += 8;
     }
 
     while i < n {
         let value = src[i];
         dst[i] =
-            if value.is_finite() { value.round_ties_even().clamp(i32::MIN as f32, i32::MAX as f32) as i32 } else { 0 };
+            if value.is_finite() { value.round_ties_even().clamp(i32::MIN as f32, i32::MAX as f32) as i64 } else { 0 };
         i += 1;
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn dequantize_row_avx2(src: &[i32], dst: &mut [f32], reversible: bool, step_size: f32) {
+unsafe fn dequantize_row_avx2(src: &[i64], dst: &mut [f32], step_size: f32) {
     let n = src.len().min(dst.len());
+    let scale = _mm256_set1_ps(step_size * 0.5);
     let mut i = 0;
 
-    if reversible {
-        while i + 8 <= n {
-            let value = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+    while i + 8 <= n {
+        let low = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
+        let high = _mm256_loadu_si256(src.as_ptr().add(i + 4) as *const __m256i);
 
-            let negative = _mm256_cmpgt_epi32(_mm256_setzero_si256(), value);
-            let biased = _mm256_add_epi32(value, _mm256_and_si256(negative, _mm256_set1_epi32(1)));
-            let halved = _mm256_srai_epi32(biased, 1);
+        let packed = _mm256_set_epi32(
+            _mm256_extract_epi64(high, 3) as i32,
+            _mm256_extract_epi64(high, 2) as i32,
+            _mm256_extract_epi64(high, 1) as i32,
+            _mm256_extract_epi64(high, 0) as i32,
+            _mm256_extract_epi64(low, 3) as i32,
+            _mm256_extract_epi64(low, 2) as i32,
+            _mm256_extract_epi64(low, 1) as i32,
+            _mm256_extract_epi64(low, 0) as i32,
+        );
 
-            _mm256_storeu_ps(dst.as_mut_ptr().add(i), _mm256_cvtepi32_ps(halved));
-            i += 8;
-        }
-    } else {
-        let scale = _mm256_set1_ps(step_size * 0.5);
-        while i + 8 <= n {
-            let value = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
-            let converted = _mm256_cvtepi32_ps(value);
-
-            _mm256_storeu_ps(dst.as_mut_ptr().add(i), _mm256_mul_ps(converted, scale));
-            i += 8;
-        }
+        _mm256_storeu_ps(dst.as_mut_ptr().add(i), _mm256_mul_ps(_mm256_cvtepi32_ps(packed), scale));
+        i += 8;
     }
 
     while i < n {
-        dst[i] = if reversible { (src[i] / 2) as f32 } else { (src[i] as f32 / 2.0) * step_size };
+        dst[i] = (src[i] as f32 / 2.0) * step_size;
         i += 1;
     }
 }
@@ -372,21 +368,26 @@ unsafe fn inverse_rct_row_avx2(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn shift_and_clamp_avx2(samples: &mut [i32], shift: i32, min: i32, max: i32) {
+unsafe fn shift_and_clamp_avx2(samples: &mut [i64], shift: i64, min: i64, max: i64) {
     let n = samples.len();
     let mut i = 0;
 
-    let offset = _mm256_set1_epi32(shift);
-    let lower = _mm256_set1_epi32(min);
-    let upper = _mm256_set1_epi32(max);
+    let offset = _mm256_set1_epi64x(shift);
+    let lower = _mm256_set1_epi64x(min);
+    let upper = _mm256_set1_epi64x(max);
 
-    while i + 8 <= n {
+    while i + 4 <= n {
         let value = _mm256_loadu_si256(samples.as_ptr().add(i) as *const __m256i);
-        let shifted = _mm256_add_epi32(value, offset);
-        let clamped = _mm256_min_epi32(_mm256_max_epi32(shifted, lower), upper);
+        let shifted = _mm256_add_epi64(value, offset);
+
+        let below = _mm256_cmpgt_epi64(lower, shifted);
+        let raised = _mm256_blendv_epi8(shifted, lower, below);
+
+        let above = _mm256_cmpgt_epi64(raised, upper);
+        let clamped = _mm256_blendv_epi8(raised, upper, above);
 
         _mm256_storeu_si256(samples.as_mut_ptr().add(i) as *mut __m256i, clamped);
-        i += 8;
+        i += 4;
     }
 
     while i < n {
@@ -476,7 +477,7 @@ unsafe fn lift_stride2_avx2(a: &mut [f32], write: usize, count: usize, c: f32) {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn replicate_row_2x_avx2(src: &[i32], dst: &mut [i32]) {
+unsafe fn replicate_row_2x_avx2(src: &[i64], dst: &mut [i64]) {
     if src.is_empty() {
         dst.fill(0);
         return;
@@ -485,18 +486,18 @@ unsafe fn replicate_row_2x_avx2(src: &[i32], dst: &mut [i32]) {
     let pairs = (dst.len() / 2).min(src.len());
     let mut i = 0;
 
-    while i + 8 <= pairs {
+    while i + 4 <= pairs {
         let values = _mm256_loadu_si256(src.as_ptr().add(i) as *const __m256i);
 
-        let lo = _mm256_unpacklo_epi32(values, values);
-        let hi = _mm256_unpackhi_epi32(values, values);
+        let lo = _mm256_unpacklo_epi64(values, values);
+        let hi = _mm256_unpackhi_epi64(values, values);
 
         let first = _mm256_permute2x128_si256(lo, hi, 0x20);
         let second = _mm256_permute2x128_si256(lo, hi, 0x31);
 
         _mm256_storeu_si256(dst.as_mut_ptr().add(2 * i) as *mut __m256i, first);
-        _mm256_storeu_si256(dst.as_mut_ptr().add(2 * i + 8) as *mut __m256i, second);
-        i += 8;
+        _mm256_storeu_si256(dst.as_mut_ptr().add(2 * i + 4) as *mut __m256i, second);
+        i += 4;
     }
 
     while i < pairs {
@@ -514,7 +515,7 @@ unsafe fn replicate_row_2x_avx2(src: &[i32], dst: &mut [i32]) {
 // ─── WASM SIMD128 ─────────────────────────────────────────────
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn round_half_to_even_row_wasm(src: &[f32], dst: &mut [i32]) {
+fn round_half_to_even_row_wasm(src: &[f32], dst: &mut [i64]) {
     let n = src.len().min(dst.len());
     let mut i = 0;
 
@@ -524,44 +525,36 @@ fn round_half_to_even_row_wasm(src: &[f32], dst: &mut [i32]) {
         let rounded = f32x4_nearest(value);
 
         let safe = v128_and(rounded, finite);
-        v128_store(dst.as_mut_ptr().add(i) as *mut v128, i32x4_trunc_sat_f32x4(safe));
+        let narrow = i32x4_trunc_sat_f32x4(safe);
+
+        v128_store(dst.as_mut_ptr().add(i) as *mut v128, i64x2_extend_low_i32x4(narrow));
+        v128_store(dst.as_mut_ptr().add(i + 2) as *mut v128, i64x2_extend_high_i32x4(narrow));
         i += 4;
     }
 
     while i < n {
         let value = src[i];
         dst[i] =
-            if value.is_finite() { value.round_ties_even().clamp(i32::MIN as f32, i32::MAX as f32) as i32 } else { 0 };
+            if value.is_finite() { value.round_ties_even().clamp(i32::MIN as f32, i32::MAX as f32) as i64 } else { 0 };
         i += 1;
     }
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn dequantize_row_wasm(src: &[i32], dst: &mut [f32], reversible: bool, step_size: f32) {
+fn dequantize_row_wasm(src: &[i64], dst: &mut [f32], step_size: f32) {
     let n = src.len().min(dst.len());
+    let scale = f32x4_splat(step_size * 0.5);
     let mut i = 0;
 
-    if reversible {
-        while i + 4 <= n {
-            let value = v128_load(src.as_ptr().add(i) as *const v128);
-            let negative = i32x4_lt(value, i32x4_splat(0));
-            let biased = i32x4_add(value, v128_and(negative, i32x4_splat(1)));
+    while i + 4 <= n {
+        let packed = i32x4(src[i] as i32, src[i + 1] as i32, src[i + 2] as i32, src[i + 3] as i32);
 
-            v128_store(dst.as_mut_ptr().add(i) as *mut v128, f32x4_convert_i32x4(i32x4_shr(biased, 1)));
-            i += 4;
-        }
-    } else {
-        let scale = f32x4_splat(step_size * 0.5);
-        while i + 4 <= n {
-            let value = v128_load(src.as_ptr().add(i) as *const v128);
-
-            v128_store(dst.as_mut_ptr().add(i) as *mut v128, f32x4_mul(f32x4_convert_i32x4(value), scale));
-            i += 4;
-        }
+        v128_store(dst.as_mut_ptr().add(i) as *mut v128, f32x4_mul(f32x4_convert_i32x4(packed), scale));
+        i += 4;
     }
 
     while i < n {
-        dst[i] = if reversible { (src[i] / 2) as f32 } else { (src[i] as f32 / 2.0) * step_size };
+        dst[i] = (src[i] as f32 / 2.0) * step_size;
         i += 1;
     }
 }
@@ -638,21 +631,23 @@ fn inverse_rct_row_wasm(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn shift_and_clamp_wasm(samples: &mut [i32], shift: i32, min: i32, max: i32) {
+fn shift_and_clamp_wasm(samples: &mut [i64], shift: i64, min: i64, max: i64) {
     let n = samples.len();
     let mut i = 0;
 
-    let offset = i32x4_splat(shift);
-    let lower = i32x4_splat(min);
-    let upper = i32x4_splat(max);
+    let offset = i64x2_splat(shift);
+    let lower = i64x2_splat(min);
+    let upper = i64x2_splat(max);
 
-    while i + 4 <= n {
+    while i + 2 <= n {
         let value = v128_load(samples.as_ptr().add(i) as *const v128);
-        let shifted = i32x4_add(value, offset);
-        let clamped = i32x4_min(i32x4_max(shifted, lower), upper);
+        let shifted = i64x2_add(value, offset);
+
+        let raised = v128_bitselect(lower, shifted, i64x2_gt(lower, shifted));
+        let clamped = v128_bitselect(upper, raised, i64x2_gt(raised, upper));
 
         v128_store(samples.as_mut_ptr().add(i) as *mut v128, clamped);
-        i += 4;
+        i += 2;
     }
 
     while i < n {

@@ -67,6 +67,8 @@ struct TileComponent {
     y1: i32,
     resolutions: Vec<Resolution>,
     data: Vec<f32>,
+    samples: Vec<i64>,
+    reversible: bool,
 }
 
 impl TileComponent {
@@ -84,7 +86,21 @@ pub struct DecodedTile {
     pub y0: i32,
     pub x1: i32,
     pub y1: i32,
-    pub components: Vec<Vec<f32>>,
+    pub components: Vec<TilePlane>,
+}
+
+pub enum TilePlane {
+    Exact(Vec<i64>),
+    Approximate(Vec<f32>),
+}
+
+impl TilePlane {
+    pub fn len(&self) -> usize {
+        match self {
+            TilePlane::Exact(samples) => samples.len(),
+            TilePlane::Approximate(samples) => samples.len(),
+        }
+    }
 }
 
 #[cfg(feature = "rayon")]
@@ -157,9 +173,13 @@ impl<'a> TileDecoder<'a> {
             inverse_dwt(tilec, &params)?;
         }
 
-        let mut planes = Vec::with_capacity(components.len());
+        let mut planes: Vec<TilePlane> = Vec::with_capacity(components.len());
         for tilec in components {
-            planes.push(tilec.data);
+            if tilec.reversible {
+                planes.push(TilePlane::Exact(tilec.samples));
+            } else {
+                planes.push(TilePlane::Approximate(tilec.data));
+            }
         }
 
         let use_mct = self
@@ -283,9 +303,13 @@ impl<'a> TileDecoder<'a> {
             resolutions.push(Resolution { x0: rx0, y0: ry0, x1: rx1, y1: ry1, pw, ph, pdx, pdy, bands });
         }
 
-        let data = vec![0f32; (width as usize) * (height as usize)];
+        let pixel_count = (width as usize) * (height as usize);
+        let reversible = params.coding.reversible;
 
-        Ok(TileComponent { x0, y0, x1, y1, resolutions, data })
+        let data = if reversible { Vec::new() } else { vec![0f32; pixel_count] };
+        let samples = if reversible { vec![0i64; pixel_count] } else { Vec::new() };
+
+        Ok(TileComponent { x0, y0, x1, y1, resolutions, data, samples, reversible })
     }
 
     fn read_packets(
@@ -767,7 +791,7 @@ fn decode_ht_block(
     block: &CodeBlock,
     mb: u32,
     cblk_style: CodeBlockStyle,
-    samples: &mut Vec<i32>,
+    samples: &mut Vec<i64>,
 ) -> bool {
     let width = block.width() as usize;
     let height = block.height() as usize;
@@ -808,7 +832,7 @@ fn decode_ht_block(
     }
 
     samples.clear();
-    samples.extend(ht.data().iter().map(|&value| value as i32));
+    samples.extend_from_slice(ht.data());
     true
 }
 
@@ -822,7 +846,7 @@ struct BlockTask<'a> {
 }
 
 struct DecodedBlock {
-    samples: Vec<i32>,
+    samples: Vec<i64>,
     cw: usize,
     ch: usize,
     step_size: f32,
@@ -833,7 +857,7 @@ struct DecodedBlock {
 struct BlockScratch {
     t1: T1Decoder,
     ht: HtDecoder,
-    ht_samples: Vec<i32>,
+    ht_samples: Vec<i64>,
 }
 
 impl BlockScratch {
@@ -904,13 +928,13 @@ fn decode_block(scratch: &mut BlockScratch, task: &BlockTask<'_>, params: &Block
         return None;
     }
 
-    let samples: &mut [i32] = if decoded_ht { &mut scratch.ht_samples } else { scratch.t1.data_mut() };
+    let samples: &mut [i64] = if decoded_ht { &mut scratch.ht_samples } else { scratch.t1.data_mut() };
 
     if params.roi_shift > 0 {
         if params.roi_shift >= 31 {
             samples.iter_mut().for_each(|value| *value = 0);
         } else {
-            let threshold = 1i32 << params.roi_shift;
+            let threshold = 1i64 << params.roi_shift;
             for value in samples.iter_mut() {
                 let magnitude = value.abs();
                 if magnitude >= threshold {
@@ -954,11 +978,23 @@ fn write_block(tilec: &mut TileComponent, block: &DecodedBlock, width: usize, re
             continue;
         };
 
+        if reversible {
+            let Some(dest) = tilec.samples.get_mut(row_start..row_end) else {
+                continue;
+            };
+
+            for (slot, &value) in dest.iter_mut().zip(source.iter()) {
+                *slot = value / 2;
+            }
+
+            continue;
+        }
+
         let Some(dest) = tilec.data.get_mut(row_start..row_end) else {
             continue;
         };
 
-        simd::dequantize_row(source, dest, reversible, block.step_size);
+        simd::dequantize_row(source, dest, block.step_size);
     }
 }
 
@@ -1070,24 +1106,18 @@ fn inverse_dwt_53(tilec: &mut TileComponent, width: usize, height: usize) {
         let num_rows = rh.min(height);
         let num_columns = rw.min(width);
 
-        dwt_rows::<i32, _>(&mut tilec.data, width, num_rows, rw, |scratch, row, data| {
-            for (slot, x) in scratch[..rw].iter_mut().zip(0..rw) {
-                *slot = data.get(x).copied().unwrap_or(0.0) as i32;
-            }
+        dwt_rows::<i64, _, _>(&mut tilec.samples, width, num_rows, rw, |scratch, row, data| {
+            scratch[..rw].copy_from_slice(&data[..rw]);
 
             dwt::interleave_h(&mut row[..rw], &scratch[..rw], prev_w, rw - prev_w, cas_x);
             dwt::decode_line_53(&mut row[..rw], &row_line);
 
-            for (x, &value) in row[..rw].iter().enumerate() {
-                if let Some(slot) = data.get_mut(x) {
-                    *slot = value as f32;
-                }
-            }
+            data[..rw].copy_from_slice(&row[..rw]);
         });
 
-        dwt_columns::<i32, _>(&mut tilec.data, width, num_columns, rh, |scratch, column, data, x| {
+        dwt_columns::<i64, _, _>(&mut tilec.samples, width, num_columns, rh, |scratch, column, data, x| {
             for (slot, y) in scratch[..rh].iter_mut().zip(0..rh) {
-                *slot = data.get(y * width + x).copied().unwrap_or(0.0) as i32;
+                *slot = data.get(y * width + x).copied().unwrap_or(0);
             }
 
             dwt::interleave_v(&mut column[..rh], &scratch[..rh], 1, prev_h, rh - prev_h, cas_y);
@@ -1095,7 +1125,7 @@ fn inverse_dwt_53(tilec: &mut TileComponent, width: usize, height: usize) {
 
             for (y, &value) in column[..rh].iter().enumerate() {
                 if let Some(slot) = data.get_mut(y * width + x) {
-                    *slot = value as f32;
+                    *slot = value;
                 }
             }
         });
@@ -1126,7 +1156,7 @@ fn inverse_dwt_97(tilec: &mut TileComponent, width: usize, height: usize) {
         let num_rows = rh.min(height);
         let num_columns = rw.min(width);
 
-        dwt_rows::<f32, _>(&mut tilec.data, width, num_rows, rw, |scratch, row, data| {
+        dwt_rows::<f32, _, _>(&mut tilec.data, width, num_rows, rw, |scratch, row, data| {
             let available = rw.min(data.len());
 
             scratch[..rw].fill(0.0);
@@ -1138,7 +1168,7 @@ fn inverse_dwt_97(tilec: &mut TileComponent, width: usize, height: usize) {
             data[..available].copy_from_slice(&row[..available]);
         });
 
-        dwt_columns::<f32, _>(&mut tilec.data, width, num_columns, rh, |scratch, column, data, x| {
+        dwt_columns::<f32, _, _>(&mut tilec.data, width, num_columns, rh, |scratch, column, data, x| {
             simd::gather_column_f32(data, scratch, x, width, rh);
             dwt::interleave_v(&mut column[..rh], &scratch[..rh], 1, prev_h, rh - prev_h, cas_y);
 
@@ -1170,10 +1200,11 @@ fn worth_parallel_lines(num_lines: usize, line_len: usize) -> bool {
         && inner_parallelism_allowed()
 }
 
-fn dwt_rows<T, F>(data: &mut [f32], width: usize, num_rows: usize, line_len: usize, apply: F)
+fn dwt_rows<T, S, F>(data: &mut [S], width: usize, num_rows: usize, line_len: usize, apply: F)
 where
     T: Default + Clone + Send,
-    F: Fn(&mut [T], &mut [T], &mut [f32]) + Sync + Send,
+    S: Send + Sync,
+    F: Fn(&mut [T], &mut [T], &mut [S]) + Sync + Send,
 {
     if num_rows == 0 || width == 0 {
         return;
@@ -1197,25 +1228,26 @@ where
     }
 }
 
-struct ColumnView {
-    data: *mut f32,
+struct ColumnView<S> {
+    data: *mut S,
     len: usize,
 }
 
-unsafe impl Send for ColumnView {}
-unsafe impl Sync for ColumnView {}
+unsafe impl<S> Send for ColumnView<S> {}
+unsafe impl<S> Sync for ColumnView<S> {}
 
-impl ColumnView {
+impl<S> ColumnView<S> {
     #[allow(clippy::mut_from_ref)]
-    unsafe fn columns_of<'a>(&self) -> &'a mut [f32] {
+    unsafe fn columns_of<'a>(&self) -> &'a mut [S] {
         std::slice::from_raw_parts_mut(self.data, self.len)
     }
 }
 
-fn dwt_columns<T, F>(data: &mut [f32], width: usize, num_columns: usize, line_len: usize, apply: F)
+fn dwt_columns<T, S, F>(data: &mut [S], width: usize, num_columns: usize, line_len: usize, apply: F)
 where
     T: Default + Clone + Send,
-    F: Fn(&mut [T], &mut [T], &mut [f32], usize) + Sync + Send,
+    S: Send + Sync,
+    F: Fn(&mut [T], &mut [T], &mut [S], usize) + Sync + Send,
 {
     if num_columns == 0 || width == 0 {
         return;
@@ -1244,28 +1276,52 @@ where
     }
 }
 
-fn split_color_planes(planes: &mut [Vec<f32>]) -> Option<(&mut [f32], &mut [f32], &mut [f32])> {
+fn split_color_tile_planes(planes: &mut [TilePlane]) -> Option<(&mut TilePlane, &mut TilePlane, &mut TilePlane)> {
     if planes.len() < 3 {
         return None;
     }
 
-    let len = planes[0].len().min(planes[1].len()).min(planes[2].len());
-
     let (first, rest) = planes.split_at_mut(1);
     let (second, third) = rest.split_at_mut(1);
 
-    Some((&mut first[0][..len], &mut second[0][..len], &mut third[0][..len]))
+    Some((&mut first[0], &mut second[0], &mut third[0]))
 }
 
-fn inverse_rct_tile(planes: &mut [Vec<f32>]) {
-    if let Some((y, u, v)) = split_color_planes(planes) {
-        simd::inverse_rct_row(y, u, v);
+fn inverse_rct_tile(planes: &mut [TilePlane]) {
+    let Some((y, u, v)) = split_color_tile_planes(planes) else {
+        return;
+    };
+
+    match (y, u, v) {
+        (TilePlane::Exact(y), TilePlane::Exact(u), TilePlane::Exact(v)) => {
+            let len = y.len().min(u.len()).min(v.len());
+
+            for index in 0..len {
+                let green = y[index] - ((u[index] + v[index]) >> 2);
+                let red = v[index] + green;
+                let blue = u[index] + green;
+
+                y[index] = red;
+                u[index] = green;
+                v[index] = blue;
+            }
+        }
+        (TilePlane::Approximate(y), TilePlane::Approximate(u), TilePlane::Approximate(v)) => {
+            let len = y.len().min(u.len()).min(v.len());
+            simd::inverse_rct_row(&mut y[..len], &mut u[..len], &mut v[..len]);
+        }
+        _ => {}
     }
 }
 
-fn inverse_ict_tile(planes: &mut [Vec<f32>]) {
-    if let Some((y, u, v)) = split_color_planes(planes) {
-        simd::inverse_ict_row(y, u, v);
+fn inverse_ict_tile(planes: &mut [TilePlane]) {
+    let Some((y, u, v)) = split_color_tile_planes(planes) else {
+        return;
+    };
+
+    if let (TilePlane::Approximate(y), TilePlane::Approximate(u), TilePlane::Approximate(v)) = (y, u, v) {
+        let len = y.len().min(u.len()).min(v.len());
+        simd::inverse_ict_row(&mut y[..len], &mut u[..len], &mut v[..len]);
     }
 }
 

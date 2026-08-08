@@ -37,47 +37,74 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "exr/comp_b44_piz.jxl" },
             ..Default::default()
         },
-        // TODO: DWA compression is not yet supported
         TestCase {
             name: "EXR comp_dwaa_piz",
             path: "exr/comp_dwaa_piz.exr",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact { reference_path: "exr/comp_dwaa_piz.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "EXR comp_dwaa_v1",
             path: "exr/comp_dwaa_v1.exr",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact { reference_path: "exr/comp_dwaa_v1.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "EXR comp_dwaa_v2",
             path: "exr/comp_dwaa_v2.exr",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact { reference_path: "exr/comp_dwaa_v2.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "EXR comp_dwab_piz",
             path: "exr/comp_dwab_piz.exr",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact { reference_path: "exr/comp_dwab_piz.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "EXR comp_dwab_v1",
             path: "exr/comp_dwab_v1.exr",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact { reference_path: "exr/comp_dwab_v1.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "EXR comp_dwab_v2",
             path: "exr/comp_dwab_v2.exr",
             validation: None,
-            comparison: Comparison::None,
+            comparison: Comparison::Exact { reference_path: "exr/comp_dwab_v2.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "EXR ht256_rgb_half",
+            path: "exr/ht256_rgb_half.exr",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "exr/ht256_rgb_half.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "EXR ht256_square_half",
+            path: "exr/ht256_square_half.exr",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "exr/ht256_square_half.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "EXR ht32_rgb_float",
+            path: "exr/ht32_rgb_float.exr",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "exr/ht32_rgb_float.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "EXR ht32_gray_float",
+            path: "exr/ht32_gray_float.exr",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "exr/ht32_gray_float.jxl" },
             ..Default::default()
         },
         TestCase {

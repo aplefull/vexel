@@ -72,133 +72,139 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
         Ok(Image::from_pixels(width, height, pixels))
     }
 
-    fn decode_all_tiles(&mut self, parsed: &Codestream, data: &[u8]) -> VexelResult<Vec<Vec<i32>>> {
-        let siz = &parsed.siz;
-        let num_components = siz.components.len();
+    fn decode_all_tiles(&mut self, parsed: &Codestream, data: &[u8]) -> VexelResult<Vec<Vec<i64>>> {
+        decode_codestream_planes(parsed, data, &mut self.limits)
+    }
+}
 
-        let mut planes: Vec<Vec<i32>> = Vec::with_capacity(num_components);
-        for component in &siz.components {
-            let (cw, ch) = component_dimensions(siz, component);
-            self.limits.reserve_usize(cw.saturating_mul(ch).saturating_mul(4))?;
-            planes.push(vec![0i32; cw * ch]);
-        }
+pub fn decode_codestream_planes(parsed: &Codestream, data: &[u8], limits: &mut Limits) -> VexelResult<Vec<Vec<i64>>> {
+    let siz = &parsed.siz;
+    let num_components = siz.components.len();
 
-        let mut tile_data: Vec<Vec<u8>> = vec![Vec::new(); (siz.num_tiles_x() * siz.num_tiles_y()).max(1) as usize];
-
-        for part in &parsed.tile_parts {
-            let start = part.data_start.min(data.len());
-            let end = (start + part.data_len).min(data.len());
-
-            if let Some(slot) = tile_data.get_mut(part.tile_index as usize) {
-                slot.extend_from_slice(&data[start..end]);
-            }
-        }
-
-        let mut decoded_any = false;
-        let mut ppm_cursor = 0usize;
-
-        let occupied = tile_data.iter().filter(|bytes| !bytes.is_empty()).count();
-        let sequential_headers = !parsed.ppm_data.is_empty();
-
-        if self.can_decode_tiles_in_parallel(occupied, sequential_headers) {
-            return self.decode_tiles_parallel(parsed, &tile_data, planes);
-        }
-
-        for (tile_index, bytes) in tile_data.iter().enumerate() {
-            if bytes.is_empty() {
-                continue;
-            }
-
-            let mut decoder = TileDecoder::new(parsed, &mut self.limits, &mut ppm_cursor);
-
-            match decoder.decode_tile(tile_index as u32, bytes) {
-                Ok(decoded) => {
-                    tile::log_tile_summary(tile_index as u32, &decoded);
-                    compose_tile(&mut planes, &decoded, siz);
-                    decoded_any = true;
-                }
-                Err(error) => {
-                    log_warn!("JPEG 2000: failed to decode tile {}: {}", tile_index, error);
-                }
-            }
-        }
-
-        if !decoded_any {
-            return Err(VexelError::Custom("JPEG 2000: no tile could be decoded".to_string()));
-        }
-
-        Ok(planes)
+    let mut planes: Vec<Vec<i64>> = Vec::with_capacity(num_components);
+    for component in &siz.components {
+        let (cw, ch) = component_dimensions(siz, component);
+        limits.reserve_usize(cw.saturating_mul(ch).saturating_mul(8))?;
+        planes.push(vec![0i64; cw * ch]);
     }
 
-    #[cfg(feature = "rayon")]
-    fn can_decode_tiles_in_parallel(&self, occupied_tiles: usize, sequential_headers: bool) -> bool {
-        occupied_tiles >= PARALLEL_TILE_THRESHOLD && !sequential_headers
+    let mut tile_data: Vec<Vec<u8>> = vec![Vec::new(); (siz.num_tiles_x() * siz.num_tiles_y()).max(1) as usize];
+
+    for part in &parsed.tile_parts {
+        let start = part.data_start.min(data.len());
+        let end = (start + part.data_len).min(data.len());
+
+        if let Some(slot) = tile_data.get_mut(part.tile_index as usize) {
+            slot.extend_from_slice(&data[start..end]);
+        }
     }
 
-    #[cfg(not(feature = "rayon"))]
-    fn can_decode_tiles_in_parallel(&self, _occupied_tiles: usize, _sequential_headers: bool) -> bool {
-        false
+    let mut decoded_any = false;
+    let mut ppm_cursor = 0usize;
+
+    let occupied = tile_data.iter().filter(|bytes| !bytes.is_empty()).count();
+    let sequential_headers = !parsed.ppm_data.is_empty();
+
+    if can_decode_tiles_in_parallel(occupied, sequential_headers) {
+        return decode_tiles_parallel(parsed, &tile_data, planes, limits);
     }
 
-    #[cfg(feature = "rayon")]
-    fn decode_tiles_parallel(
-        &mut self,
-        parsed: &Codestream,
-        tile_data: &[Vec<u8>],
-        mut planes: Vec<Vec<i32>>,
-    ) -> VexelResult<Vec<Vec<i32>>> {
-        use rayon::prelude::*;
+    for (tile_index, bytes) in tile_data.iter().enumerate() {
+        if bytes.is_empty() {
+            continue;
+        }
 
-        let siz = &parsed.siz;
-        let budget = self.limits.clone();
+        let mut decoder = TileDecoder::new(parsed, limits, &mut ppm_cursor);
 
-        let decoded: Vec<(usize, VexelResult<tile::DecodedTile>)> = tile_data
-            .par_iter()
-            .enumerate()
-            .filter(|(_, bytes)| !bytes.is_empty())
-            .map(|(tile_index, bytes)| {
-                let mut limits = budget.clone();
-                let mut ppm_cursor = 0usize;
-                let mut decoder = TileDecoder::new(parsed, &mut limits, &mut ppm_cursor);
-
-                let result = tile::with_parallel_tile(|| decoder.decode_tile(tile_index as u32, bytes));
-
-                (tile_index, result)
-            })
-            .collect();
-
-        let mut decoded_any = false;
-
-        for (tile_index, result) in decoded {
-            match result {
-                Ok(tile) => {
-                    tile::log_tile_summary(tile_index as u32, &tile);
-
-                    let footprint: usize = tile.components.iter().map(|c| c.len() * 4).sum();
-                    self.limits.reserve_usize(footprint)?;
-
-                    compose_tile(&mut planes, &tile, siz);
-                    decoded_any = true;
-
-                    self.limits.free_usize(footprint);
-                }
-                Err(error) => {
-                    log_warn!("JPEG 2000: failed to decode tile {}: {}", tile_index, error);
-                }
+        match decoder.decode_tile(tile_index as u32, bytes) {
+            Ok(decoded) => {
+                tile::log_tile_summary(tile_index as u32, &decoded);
+                compose_tile(&mut planes, &decoded, siz);
+                decoded_any = true;
+            }
+            Err(error) => {
+                log_warn!("JPEG 2000: failed to decode tile {}: {}", tile_index, error);
             }
         }
-
-        if !decoded_any {
-            return Err(VexelError::Custom("JPEG 2000: no tile could be decoded".to_string()));
-        }
-
-        Ok(planes)
     }
 
+    if !decoded_any {
+        return Err(VexelError::Custom("JPEG 2000: no tile could be decoded".to_string()));
+    }
+
+    Ok(planes)
+}
+
+#[cfg(feature = "rayon")]
+fn can_decode_tiles_in_parallel(occupied_tiles: usize, sequential_headers: bool) -> bool {
+    occupied_tiles >= PARALLEL_TILE_THRESHOLD && !sequential_headers
+}
+
+#[cfg(not(feature = "rayon"))]
+fn can_decode_tiles_in_parallel(_occupied_tiles: usize, _sequential_headers: bool) -> bool {
+    false
+}
+
+#[cfg(feature = "rayon")]
+fn decode_tiles_parallel(
+    parsed: &Codestream,
+    tile_data: &[Vec<u8>],
+    mut planes: Vec<Vec<i64>>,
+    limits: &mut Limits,
+) -> VexelResult<Vec<Vec<i64>>> {
+    use rayon::prelude::*;
+
+    let siz = &parsed.siz;
+    let budget = limits.clone();
+
+    let decoded: Vec<(usize, VexelResult<tile::DecodedTile>)> = tile_data
+        .par_iter()
+        .enumerate()
+        .filter(|(_, bytes)| !bytes.is_empty())
+        .map(|(tile_index, bytes)| {
+            let mut limits = budget.clone();
+            let mut ppm_cursor = 0usize;
+            let mut decoder = TileDecoder::new(parsed, &mut limits, &mut ppm_cursor);
+
+            let result = tile::with_parallel_tile(|| decoder.decode_tile(tile_index as u32, bytes));
+
+            (tile_index, result)
+        })
+        .collect();
+
+    let mut decoded_any = false;
+
+    for (tile_index, result) in decoded {
+        match result {
+            Ok(tile) => {
+                tile::log_tile_summary(tile_index as u32, &tile);
+
+                let footprint: usize = tile.components.iter().map(|c| c.len() * 8).sum();
+                limits.reserve_usize(footprint)?;
+
+                compose_tile(&mut planes, &tile, siz);
+                decoded_any = true;
+
+                limits.free_usize(footprint);
+            }
+            Err(error) => {
+                log_warn!("JPEG 2000: failed to decode tile {}: {}", tile_index, error);
+            }
+        }
+    }
+
+    if !decoded_any {
+        return Err(VexelError::Custom("JPEG 2000: no tile could be decoded".to_string()));
+    }
+
+    Ok(planes)
+}
+
+impl<R: Read + Seek> Jpeg2000Decoder<R> {
     fn assemble(
         &mut self,
         parsed: &Codestream,
-        mut planes: Vec<Vec<i32>>,
+        mut planes: Vec<Vec<i64>>,
         container: Option<&codestream::Jp2Container>,
     ) -> VexelResult<PixelData> {
         let siz = &parsed.siz;
@@ -210,19 +216,19 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
             let precision = component.prec.clamp(1, 32);
             precisions.push(precision);
 
-            let shift = if component.signed { 0 } else { 1i32 << (precision - 1) };
+            let shift = if component.signed { 0 } else { 1i64 << (precision - 1) };
             let (min, max) = if component.signed {
-                (-(1i32 << (precision - 1)), (1i32 << (precision - 1)) - 1)
+                (-(1i64 << (precision - 1)), (1i64 << (precision - 1)) - 1)
             } else {
-                (0, ((1i64 << precision) - 1).min(i32::MAX as i64) as i32)
+                (0, (1i64 << precision) - 1)
             };
 
             if let Some(plane) = planes.get_mut(index) {
                 simd::shift_and_clamp(plane, shift, min, max);
 
                 if component.signed {
-                    let bias = 1i32 << (precision - 1);
-                    simd::shift_and_clamp(plane, bias, i32::MIN, i32::MAX);
+                    let bias = 1i64 << (precision - 1);
+                    simd::shift_and_clamp(plane, bias, i64::MIN, i64::MAX);
                 }
             }
         }
@@ -260,10 +266,10 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
     fn upsample(
         &mut self,
         siz: &SizInfo,
-        planes: Vec<Vec<i32>>,
+        planes: Vec<Vec<i64>>,
         width: usize,
         height: usize,
-    ) -> VexelResult<Vec<Vec<i32>>> {
+    ) -> VexelResult<Vec<Vec<i64>>> {
         let mut result = Vec::with_capacity(planes.len());
 
         for (index, plane) in planes.into_iter().enumerate() {
@@ -279,8 +285,8 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
 
             let (cw, ch) = component_dimensions(siz, component);
 
-            self.limits.reserve_usize(width.saturating_mul(height).saturating_mul(4))?;
-            let mut expanded = vec![0i32; width * height];
+            self.limits.reserve_usize(width.saturating_mul(height).saturating_mul(8))?;
+            let mut expanded = vec![0i64; width * height];
 
             if cw == 0 || ch == 0 {
                 result.push(expanded);
@@ -357,25 +363,25 @@ fn is_convertible_ycc_layout(siz: &SizInfo) -> bool {
     matches!(chroma, (1, 1, 1, 1) | (2, 1, 2, 1) | (2, 2, 2, 2))
 }
 
-fn sycc_to_rgb(offset: i32, upb: i32, y: i32, cb: i32, cr: i32) -> (i32, i32, i32) {
+fn sycc_to_rgb(offset: i64, upb: i64, y: i64, cb: i64, cr: i64) -> (i64, i64, i64) {
     let cb = cb - offset;
     let cr = cr - offset;
 
-    let r = y + (1.402 * cr as f32) as i32;
-    let g = y - (0.344 * cb as f32 + 0.714 * cr as f32) as i32;
-    let b = y + (1.772 * cb as f32) as i32;
+    let r = y + (1.402 * cr as f32) as i64;
+    let g = y - (0.344 * cb as f32 + 0.714 * cr as f32) as i64;
+    let b = y + (1.772 * cb as f32) as i64;
 
     (r.clamp(0, upb), g.clamp(0, upb), b.clamp(0, upb))
 }
 
 #[allow(clippy::needless_range_loop)]
-fn convert_sycc_to_rgb(planes: &mut [Vec<i32>], precision: u32) {
+fn convert_sycc_to_rgb(planes: &mut [Vec<i64>], precision: u32) {
     if planes.len() < 3 {
         return;
     }
 
-    let offset = 1i32 << (precision - 1);
-    let upb = ((1i64 << precision) - 1).min(i32::MAX as i64) as i32;
+    let offset = 1i64 << (precision - 1);
+    let upb = (1i64 << precision) - 1;
     let len = planes[0].len().min(planes[1].len()).min(planes[2].len());
 
     for i in 0..len {
@@ -387,13 +393,13 @@ fn convert_sycc_to_rgb(planes: &mut [Vec<i32>], precision: u32) {
 }
 
 #[allow(clippy::needless_range_loop)]
-fn convert_esycc_to_rgb(planes: &mut [Vec<i32>], precision: u32, signed: &[bool]) {
+fn convert_esycc_to_rgb(planes: &mut [Vec<i64>], precision: u32, signed: &[bool]) {
     if planes.len() < 3 {
         return;
     }
 
-    let flip = 1i32 << (precision - 1);
-    let max_value = ((1i64 << precision) - 1).min(i32::MAX as i64) as i32;
+    let flip = 1i64 << (precision - 1);
+    let max_value = (1i64 << precision) - 1;
     let len = planes[0].len().min(planes[1].len()).min(planes[2].len());
 
     for i in 0..len {
@@ -410,14 +416,14 @@ fn convert_esycc_to_rgb(planes: &mut [Vec<i32>], precision: u32, signed: &[bool]
 
         let (cb, cr) = (cb as f32, cr as f32);
 
-        planes[0][i] = ((y - 0.000_036_8 * cb + 1.401_99 * cr + 0.5) as i32).clamp(0, max_value);
-        planes[1][i] = ((1.0003 * y - 0.344_125 * cb - 0.714_112_8 * cr + 0.5) as i32).clamp(0, max_value);
-        planes[2][i] = ((0.999_823 * y + 1.772_04 * cb - 0.000_008 * cr + 0.5) as i32).clamp(0, max_value);
+        planes[0][i] = ((y - 0.000_036_8 * cb + 1.401_99 * cr + 0.5) as i64).clamp(0, max_value);
+        planes[1][i] = ((1.0003 * y - 0.344_125 * cb - 0.714_112_8 * cr + 0.5) as i64).clamp(0, max_value);
+        planes[2][i] = ((0.999_823 * y + 1.772_04 * cb - 0.000_008 * cr + 0.5) as i64).clamp(0, max_value);
     }
 }
 
 #[allow(clippy::needless_range_loop)]
-fn convert_cmyk_to_rgb(planes: &mut Vec<Vec<i32>>, precisions: &mut Vec<u32>) {
+fn convert_cmyk_to_rgb(planes: &mut Vec<Vec<i64>>, precisions: &mut Vec<u32>) {
     if planes.len() < 4 {
         return;
     }
@@ -436,9 +442,9 @@ fn convert_cmyk_to_rgb(planes: &mut Vec<Vec<i32>>, precisions: &mut Vec<u32>) {
         let y = 1.0 - planes[2][i] as f32 * sy;
         let k = 1.0 - planes[3][i] as f32 * sk;
 
-        planes[0][i] = (255.0 * c * k) as i32;
-        planes[1][i] = (255.0 * m * k) as i32;
-        planes[2][i] = (255.0 * y * k) as i32;
+        planes[0][i] = (255.0 * c * k) as i64;
+        planes[1][i] = (255.0 * m * k) as i64;
+        planes[2][i] = (255.0 * y * k) as i64;
     }
 
     planes.truncate(3);
@@ -454,7 +460,7 @@ fn lab_to_srgb_channel(value: f64) -> f64 {
     }
 }
 
-fn convert_cielab_to_rgb(planes: &mut [Vec<i32>], precisions: &mut [u32], range: Option<codestream::CielabRange>) {
+fn convert_cielab_to_rgb(planes: &mut [Vec<i64>], precisions: &mut [u32], range: Option<codestream::CielabRange>) {
     if planes.len() < 3 {
         return;
     }
@@ -530,15 +536,15 @@ fn convert_cielab_to_rgb(planes: &mut [Vec<i32>], precisions: &mut [u32], range:
         let green = -0.9787684 * x + 1.9161415 * y + 0.0334540 * z;
         let blue = 0.0719453 * x - 0.2289914 * y + 1.4052427 * z;
 
-        *sample_l = (lab_to_srgb_channel(red).clamp(0.0, 1.0) * 65535.0).round() as i32;
-        *sample_a = (lab_to_srgb_channel(green).clamp(0.0, 1.0) * 65535.0).round() as i32;
-        *sample_b = (lab_to_srgb_channel(blue).clamp(0.0, 1.0) * 65535.0).round() as i32;
+        *sample_l = (lab_to_srgb_channel(red).clamp(0.0, 1.0) * 65535.0).round() as i64;
+        *sample_a = (lab_to_srgb_channel(green).clamp(0.0, 1.0) * 65535.0).round() as i64;
+        *sample_b = (lab_to_srgb_channel(blue).clamp(0.0, 1.0) * 65535.0).round() as i64;
     }
 
     precisions.iter_mut().take(3).for_each(|precision| *precision = 16);
 }
 
-fn component_dimensions(siz: &SizInfo, component: &ComponentInfo) -> (usize, usize) {
+pub fn component_dimensions(siz: &SizInfo, component: &ComponentInfo) -> (usize, usize) {
     let x0 = siz.x0siz.div_ceil(component.dx);
     let y0 = siz.y0siz.div_ceil(component.dy);
     let x1 = siz.xsiz.div_ceil(component.dx);
@@ -547,7 +553,7 @@ fn component_dimensions(siz: &SizInfo, component: &ComponentInfo) -> (usize, usi
     (x1.saturating_sub(x0) as usize, y1.saturating_sub(y0) as usize)
 }
 
-fn compose_tile(planes: &mut [Vec<i32>], tile: &tile::DecodedTile, siz: &SizInfo) {
+fn compose_tile(planes: &mut [Vec<i64>], tile: &tile::DecodedTile, siz: &SizInfo) {
     for (index, samples) in tile.components.iter().enumerate() {
         let component = match siz.components.get(index) {
             Some(component) => component,
@@ -597,13 +603,26 @@ fn compose_tile(planes: &mut [Vec<i32>], tile: &tile::DecodedTile, siz: &SizInfo
             let dest_start = dest_y as usize * plane_w + (base_x + x_start as isize) as usize;
             let dest_end = dest_start + (x_end - x_start);
 
-            let (Some(source), Some(dest)) =
-                (samples.get(source_start..source_end), plane.get_mut(dest_start..dest_end))
-            else {
+            let Some(dest) = plane.get_mut(dest_start..dest_end) else {
                 continue;
             };
 
-            simd::round_half_to_even_row(source, dest);
+            match samples {
+                tile::TilePlane::Exact(samples) => {
+                    let Some(source) = samples.get(source_start..source_end) else {
+                        continue;
+                    };
+
+                    dest.copy_from_slice(source);
+                }
+                tile::TilePlane::Approximate(samples) => {
+                    let Some(source) = samples.get(source_start..source_end) else {
+                        continue;
+                    };
+
+                    simd::round_half_to_even_row(source, dest);
+                }
+            }
         }
     }
 }
@@ -624,9 +643,9 @@ fn maps_every_column(mapping: &[codestream::ComponentMapping], num_columns: usiz
 
 fn apply_palette(
     palette: &codestream::Palette,
-    planes: &[Vec<i32>],
+    planes: &[Vec<i64>],
     source_precision: u32,
-) -> Option<(Vec<Vec<i32>>, Vec<u32>)> {
+) -> Option<(Vec<Vec<i64>>, Vec<u32>)> {
     if palette.entries.is_empty() {
         return None;
     }
@@ -659,9 +678,9 @@ fn apply_palette(
         return None;
     }
 
-    let top = palette.entries.len() as i32 - 1;
+    let top = palette.entries.len() as i64 - 1;
 
-    let mut channels: Vec<(Vec<i32>, u32, bool)> = Vec::with_capacity(mapping.len());
+    let mut channels: Vec<(Vec<i64>, u32, bool)> = Vec::with_capacity(mapping.len());
 
     for entry in &mapping {
         let source = planes.get(entry.component as usize)?;
@@ -682,7 +701,7 @@ fn apply_palette(
         let mut channel = Vec::with_capacity(source.len());
         for &index in source.iter() {
             let entry = index.clamp(0, top) as usize;
-            channel.push(palette.entries[entry][column]);
+            channel.push(palette.entries[entry][column] as i64);
         }
 
         channels.push((channel, depth, signed));
@@ -694,13 +713,13 @@ fn apply_palette(
         .into_iter()
         .map(|(mut samples, depth, signed)| {
             if signed {
-                let shift = 1i32 << (depth - 1);
+                let shift = 1i64 << (depth - 1);
                 for sample in samples.iter_mut() {
                     *sample += shift;
                 }
             }
 
-            let max = ((1i64 << depth) - 1).min(i32::MAX as i64) as i32;
+            let max = (1i64 << depth) - 1;
             for sample in samples.iter_mut() {
                 *sample = (*sample).clamp(0, max);
             }
@@ -720,13 +739,13 @@ enum ChannelKind {
 
 #[derive(Clone, Copy)]
 struct Channel<'a> {
-    samples: &'a [i32],
+    samples: &'a [i64],
     plane_index: usize,
 }
 
 fn apply_channel_definitions(
     container: Option<&codestream::Jp2Container>,
-    planes: &mut [Vec<i32>],
+    planes: &mut [Vec<i64>],
     precisions: &mut [u32],
 ) -> Vec<ChannelKind> {
     let mut kinds = vec![ChannelKind::Color; planes.len()];
@@ -787,7 +806,7 @@ fn apply_channel_definitions(
 }
 
 fn pack_pixels(
-    planes: Vec<Vec<i32>>,
+    planes: Vec<Vec<i64>>,
     width: usize,
     height: usize,
     precisions: &[u32],
@@ -809,10 +828,10 @@ fn pack_pixels(
     let precision = precisions.iter().copied().max().unwrap_or(8).clamp(1, 32);
     let use_16bit = precision > 8;
 
-    let scale = |value: i32, precision: u32| -> u32 {
+    let scale = |value: i64, precision: u32| -> u32 {
         let precision = precision.clamp(1, 32);
         let max_in = if precision >= 32 { u32::MAX } else { (1u32 << precision) - 1 };
-        let value = value.clamp(0, max_in.min(i32::MAX as u32) as i32) as u32;
+        let value = value.clamp(0, max_in as i64) as u32;
         let target = if use_16bit { 16 } else { 8 };
 
         if precision >= target {

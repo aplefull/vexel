@@ -198,6 +198,29 @@ impl<'a> RevReader<'a> {
         reader
     }
 
+    fn new_vlc8(data: &'a [u8], lcup: usize, scup: usize) -> Self {
+        let mut reader = Self {
+            data,
+            pos: lcup as i64 - 2,
+            tmp: 0,
+            bits: 0,
+            size: scup as i32 - 2,
+            unstuff: false,
+            zero_fill: false,
+        };
+
+        let val = reader.byte_at(reader.pos) >> 4;
+        reader.pos -= 1;
+
+        let stuffed = ((val & 0x7) == 0x7) as u32;
+        let val = val & (0xFu8 >> stuffed);
+        reader.tmp = val as u64;
+        reader.bits = 4 - stuffed;
+        reader.unstuff = val > 0x8;
+
+        reader
+    }
+
     fn new_mrp(data: &'a [u8], lcup: usize, len2: usize) -> Self {
         let mut reader = Self {
             data,
@@ -301,6 +324,51 @@ impl<'a> RevReader<'a> {
         self.tmp >>= num_bits;
         self.bits -= num_bits;
         self.tmp as u32
+    }
+
+    fn read8(&mut self) {
+        let mut val = 0u8;
+        if self.size > 0 {
+            val = self.byte_at(self.pos);
+            self.pos -= 1;
+            self.size -= 1;
+        }
+
+        let stuffed = (self.unstuff && (val & 0x7F) == 0x7F) as u32;
+        let val = val & (0xFFu8 >> stuffed);
+        self.tmp |= (val as u64) << self.bits;
+        self.bits += 8 - stuffed;
+        self.unstuff = val > 0x8F;
+    }
+
+    fn fetch64(&mut self) -> u64 {
+        while self.bits <= 56 {
+            self.read8();
+        }
+        self.tmp
+    }
+
+    fn advance64(&mut self, num_bits: u32) -> u64 {
+        let num_bits = num_bits.min(self.bits);
+        self.tmp >>= num_bits;
+        self.bits -= num_bits;
+        self.tmp
+    }
+
+    fn fetch_bits(&mut self, wide: bool) -> u64 {
+        if wide {
+            self.fetch64()
+        } else {
+            self.fetch() as u64
+        }
+    }
+
+    fn advance_bits(&mut self, num_bits: u32, wide: bool) -> u64 {
+        if wide {
+            self.advance64(num_bits)
+        } else {
+            self.advance(num_bits) as u64
+        }
     }
 }
 
@@ -409,6 +477,34 @@ impl<'a> FrwdReader<'a> {
         self.tmp >>= num_bits;
         self.bits -= num_bits;
     }
+
+    fn new8(data: &'a [u8], start: usize, size: usize, fill: u8) -> Self {
+        let mut reader = Self { data, pos: start, tmp: 0, bits: 0, unstuff: false, size: size as i32, fill };
+        reader.read8();
+        reader
+    }
+
+    fn read8(&mut self) {
+        let mut val = self.fill;
+        if self.size > 0 {
+            val = self.byte_at(self.pos);
+            self.pos += 1;
+            self.size -= 1;
+        }
+
+        let stuffed = self.unstuff as u32;
+        let val = val & (0xFFu8 >> stuffed);
+        self.unstuff = val == 0xFF;
+        self.tmp |= (val as u64) << self.bits;
+        self.bits += 8 - stuffed;
+    }
+
+    fn fetch64(&mut self) -> u64 {
+        while self.bits <= 56 {
+            self.read8();
+        }
+        self.tmp
+    }
 }
 
 const UVLC_DEC: [u8; 8] = [
@@ -427,8 +523,26 @@ struct UvlcResult {
     consumed: u32,
 }
 
-fn decode_init_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
+const U_EXT_THRESHOLD: u32 = 32;
+const U_EXT_BITS: u32 = 4;
+
+fn apply_u_extensions(u: &mut [u32; 2], bias: &[u32; 2], vlc: &mut u64, consumed: &mut u32) {
+    for quad in 0..2 {
+        let encoded = u[quad] - 1;
+        if encoded.saturating_sub(bias[quad]) <= U_EXT_THRESHOLD {
+            continue;
+        }
+
+        let ext = (*vlc & ((1u64 << U_EXT_BITS) - 1)) as u32;
+        *vlc >>= U_EXT_BITS;
+        *consumed += U_EXT_BITS;
+        u[quad] += ext << 2;
+    }
+}
+
+fn decode_init_uvlc(mut vlc: u64, mode: u32, wide: bool) -> UvlcResult {
     let mut u = [0u32; 2];
+    let mut bias = [0u32; 2];
     let mut consumed = 0u32;
 
     match mode {
@@ -444,7 +558,7 @@ fn decode_init_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
             let suffix_len = (d >> 2) & 0x7;
             consumed += suffix_len;
 
-            let value = (d >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+            let value = (d >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
             u[0] = if mode == 1 { value + 1 } else { 1 };
             u[1] = if mode == 1 { 1 } else { value + 1 };
         }
@@ -454,13 +568,14 @@ fn decode_init_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
             consumed += d1 & 0x3;
 
             if (d1 & 0x3) > 2 {
-                u[1] = (vlc & 1) + 2;
+                u[1] = (vlc & 1) as u32 + 2;
+                bias[1] = 1;
                 consumed += 1;
                 vlc >>= 1;
 
                 let suffix_len = (d1 >> 2) & 0x7;
                 consumed += suffix_len;
-                d1 = (d1 >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+                d1 = (d1 >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
                 u[0] = d1 + 1;
             } else {
                 let mut d2 = UVLC_DEC[(vlc & 0x7) as usize] as u32;
@@ -469,13 +584,13 @@ fn decode_init_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
 
                 let suffix_len = (d1 >> 2) & 0x7;
                 consumed += suffix_len;
-                d1 = (d1 >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+                d1 = (d1 >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
                 u[0] = d1 + 1;
                 vlc >>= suffix_len;
 
                 let suffix_len = (d2 >> 2) & 0x7;
                 consumed += suffix_len;
-                d2 = (d2 >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+                d2 = (d2 >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
                 u[1] = d2 + 1;
             }
         }
@@ -490,21 +605,27 @@ fn decode_init_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
 
             let suffix_len = (d1 >> 2) & 0x7;
             consumed += suffix_len;
-            d1 = (d1 >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+            d1 = (d1 >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
             u[0] = d1 + 3;
             vlc >>= suffix_len;
 
             let suffix_len = (d2 >> 2) & 0x7;
             consumed += suffix_len;
-            d2 = (d2 >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+            d2 = (d2 >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
             u[1] = d2 + 3;
+
+            bias = [2, 2];
         }
+    }
+
+    if wide && mode != 0 {
+        apply_u_extensions(&mut u, &bias, &mut vlc, &mut consumed);
     }
 
     UvlcResult { u, consumed }
 }
 
-fn decode_noninit_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
+fn decode_noninit_uvlc(mut vlc: u64, mode: u32, wide: bool) -> UvlcResult {
     let mut u = [0u32; 2];
     let mut consumed = 0u32;
 
@@ -521,7 +642,7 @@ fn decode_noninit_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
             let suffix_len = (d >> 2) & 0x7;
             consumed += suffix_len;
 
-            let value = (d >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+            let value = (d >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
             u[0] = if mode == 1 { value + 1 } else { 1 };
             u[1] = if mode == 1 { 1 } else { value + 1 };
         }
@@ -536,15 +657,19 @@ fn decode_noninit_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
 
             let suffix_len = (d1 >> 2) & 0x7;
             consumed += suffix_len;
-            d1 = (d1 >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+            d1 = (d1 >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
             u[0] = d1 + 1;
             vlc >>= suffix_len;
 
             let suffix_len = (d2 >> 2) & 0x7;
             consumed += suffix_len;
-            d2 = (d2 >> 5) + (vlc & ((1u32 << suffix_len) - 1));
+            d2 = (d2 >> 5) + (vlc & ((1u64 << suffix_len) - 1)) as u32;
             u[1] = d2 + 1;
         }
+    }
+
+    if wide && mode != 0 {
+        apply_u_extensions(&mut u, &[0, 0], &mut vlc, &mut consumed);
     }
 
     UvlcResult { u, consumed }
@@ -553,7 +678,8 @@ fn decode_noninit_uvlc(mut vlc: u32, mode: u32) -> UvlcResult {
 const SIG_WORDS: usize = 132;
 
 pub struct HtDecoder {
-    data: Vec<u32>,
+    data: Vec<u64>,
+    samples: Vec<i64>,
     sigma1: Vec<u32>,
     sigma2: Vec<u32>,
     mbr1: Vec<u32>,
@@ -561,6 +687,7 @@ pub struct HtDecoder {
     line_state: Vec<u8>,
     w: usize,
     h: usize,
+    wide: bool,
 }
 
 pub struct HtCodeBlock<'a> {
@@ -579,6 +706,7 @@ impl HtDecoder {
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
+            samples: Vec::new(),
             sigma1: Vec::new(),
             sigma2: Vec::new(),
             mbr1: Vec::new(),
@@ -586,11 +714,12 @@ impl HtDecoder {
             line_state: Vec::new(),
             w: 0,
             h: 0,
+            wide: false,
         }
     }
 
-    pub fn data(&self) -> &[u32] {
-        &self.data
+    pub fn data(&self) -> &[i64] {
+        &self.samples
     }
 
     fn allocate(&mut self, w: usize, h: usize) {
@@ -599,6 +728,8 @@ impl HtDecoder {
 
         self.data.clear();
         self.data.resize(w * h, 0);
+        self.samples.clear();
+        self.samples.resize(w * h, 0);
 
         let words = (w.div_ceil(8) + 2).max(SIG_WORDS.min(w.div_ceil(8) + 2));
 
@@ -621,7 +752,9 @@ impl HtDecoder {
             return true;
         }
 
-        if cblk.mb > 30 {
+        self.wide = cblk.mb > 30;
+
+        if cblk.mb > 62 {
             return false;
         }
 
@@ -653,40 +786,58 @@ impl HtDecoder {
             Some(mel) => mel,
             None => return false,
         };
-        let mut vlc = RevReader::new_vlc(cblk.data, lcup, scup);
-        let mut magsgn = FrwdReader::new(cblk.data, 0, lcup - scup, 0xFF);
+        let mut vlc = if self.wide {
+            RevReader::new_vlc8(cblk.data, lcup, scup)
+        } else {
+            RevReader::new_vlc(cblk.data, lcup, scup)
+        };
+        let mut magsgn = if self.wide {
+            FrwdReader::new8(cblk.data, 0, lcup - scup, 0xFF)
+        } else {
+            FrwdReader::new(cblk.data, 0, lcup - scup, 0xFF)
+        };
 
         let mut sigprop = FrwdReader::new(cblk.data, lcup, cblk.refine_len, 0);
         let mut magref = RevReader::new_mrp(cblk.data, lcup, cblk.refine_len);
+
+        let p = cblk.num_bps;
 
         if !self.decode_cleanup(
             &mut mel,
             &mut vlc,
             &mut magsgn,
-            cblk.num_bps,
+            p,
             zero_bplanes + 1,
             num_passes,
             cblk.stripe_causal,
             &mut sigprop,
             &mut magref,
         ) {
-            self.apply_twos_complement();
+            self.finalize_samples();
             return false;
         }
 
         if num_passes > 1 {
-            self.finish_refinement(&mut sigprop, &mut magref, cblk.num_bps, num_passes, cblk.stripe_causal);
+            self.finish_refinement(&mut sigprop, &mut magref, p, num_passes, cblk.stripe_causal);
         }
 
-        self.apply_twos_complement();
+        self.finalize_samples();
         true
     }
 
-    fn apply_twos_complement(&mut self) {
-        for sample in self.data.iter_mut() {
-            let magnitude = *sample & 0x7FFF_FFFF;
-            *sample = if *sample & 0x8000_0000 != 0 { magnitude.wrapping_neg() } else { magnitude };
-        }
+    fn finalize_samples(&mut self) {
+        let sign_bit = if self.wide { 1u64 << 63 } else { 1u64 << 31 };
+        let magnitude_mask = sign_bit - 1;
+
+        self.samples.clear();
+        self.samples.extend(self.data.iter().map(|&sample| {
+            let magnitude = (sample & magnitude_mask) as i64;
+            if sample & sign_bit != 0 {
+                -magnitude
+            } else {
+                magnitude
+            }
+        }));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -704,6 +855,7 @@ impl HtDecoder {
     ) -> bool {
         let width = self.w;
         let height = self.h;
+        let wide = self.wide;
 
         let mut run = mel.get_run();
         let mut sip_index = 0usize;
@@ -719,8 +871,8 @@ impl HtDecoder {
             while x < width {
                 let mut qinf = [0u32; 2];
 
-                let vlc_val = vlc.fetch();
-                qinf[0] = VLC_TABLE_0[((c_q << 7) | (vlc_val & 0x7F)) as usize] as u32;
+                let vlc_val = vlc.fetch_bits(wide);
+                qinf[0] = VLC_TABLE_0[((c_q << 7) | (vlc_val as u32 & 0x7F)) as usize] as u32;
 
                 if c_q == 0 {
                     run -= 2;
@@ -733,14 +885,14 @@ impl HtDecoder {
                 }
 
                 c_q = ((qinf[0] & 0x10) >> 4) | ((qinf[0] & 0xE0) >> 5);
-                let mut vlc_val = vlc.advance(qinf[0] & 0x7);
+                let mut vlc_val = vlc.advance_bits(qinf[0] & 0x7, wide);
 
                 self.set_sigma(sip_use_sigma1, sip_index, {
                     (((qinf[0] & 0x30) >> 4) | ((qinf[0] & 0xC0) >> 2)) << sip_shift
                 });
 
                 if x + 2 < width {
-                    qinf[1] = VLC_TABLE_0[((c_q << 7) | (vlc_val & 0x7F)) as usize] as u32;
+                    qinf[1] = VLC_TABLE_0[((c_q << 7) | (vlc_val as u32 & 0x7F)) as usize] as u32;
 
                     if c_q == 0 {
                         run -= 2;
@@ -753,7 +905,7 @@ impl HtDecoder {
                     }
 
                     c_q = ((qinf[1] & 0x10) >> 4) | ((qinf[1] & 0xE0) >> 5);
-                    vlc_val = vlc.advance(qinf[1] & 0x7);
+                    vlc_val = vlc.advance_bits(qinf[1] & 0x7, wide);
                 }
 
                 self.set_sigma(sip_use_sigma1, sip_index, {
@@ -776,11 +928,11 @@ impl HtDecoder {
                     }
                 }
 
-                let UvlcResult { u: u_q, consumed } = decode_init_uvlc(vlc_val, uvlc_mode);
+                let UvlcResult { u: u_q, consumed } = decode_init_uvlc(vlc_val, uvlc_mode, wide);
                 if u_q[0] > zero_bplanes_p1 || u_q[1] > zero_bplanes_p1 {
                     return false;
                 }
-                vlc.advance(consumed);
+                vlc.advance_bits(consumed, wide);
 
                 let mut locs = 0xFFu32;
                 if x + 4 > width {
@@ -820,8 +972,8 @@ impl HtDecoder {
                 c_q |= (ls0 >> 7) as u32;
                 c_q |= ((self.line_state[lsp + 1] >> 5) & 0x4) as u32;
 
-                let vlc_val = vlc.fetch();
-                qinf[0] = VLC_TABLE_1[((c_q << 7) | (vlc_val & 0x7F)) as usize] as u32;
+                let vlc_val = vlc.fetch_bits(wide);
+                qinf[0] = VLC_TABLE_1[((c_q << 7) | (vlc_val as u32 & 0x7F)) as usize] as u32;
 
                 if c_q == 0 {
                     run -= 2;
@@ -834,7 +986,7 @@ impl HtDecoder {
                 }
 
                 c_q = ((qinf[0] & 0x40) >> 5) | ((qinf[0] & 0x80) >> 6);
-                let mut vlc_val = vlc.advance(qinf[0] & 0x7);
+                let mut vlc_val = vlc.advance_bits(qinf[0] & 0x7, wide);
 
                 self.set_sigma(sip_use_sigma1, sip_index, {
                     (((qinf[0] & 0x30) >> 4) | ((qinf[0] & 0xC0) >> 2)) << sip_shift
@@ -844,7 +996,7 @@ impl HtDecoder {
                     c_q |= (self.line_state[lsp + 1] >> 7) as u32;
                     c_q |= ((self.line_state[lsp + 2] >> 5) & 0x4) as u32;
 
-                    qinf[1] = VLC_TABLE_1[((c_q << 7) | (vlc_val & 0x7F)) as usize] as u32;
+                    qinf[1] = VLC_TABLE_1[((c_q << 7) | (vlc_val as u32 & 0x7F)) as usize] as u32;
 
                     if c_q == 0 {
                         run -= 2;
@@ -857,7 +1009,7 @@ impl HtDecoder {
                     }
 
                     c_q = ((qinf[1] & 0x40) >> 5) | ((qinf[1] & 0x80) >> 6);
-                    vlc_val = vlc.advance(qinf[1] & 0x7);
+                    vlc_val = vlc.advance_bits(qinf[1] & 0x7, wide);
                 }
 
                 self.set_sigma(sip_use_sigma1, sip_index, {
@@ -870,8 +1022,8 @@ impl HtDecoder {
                 sip_shift ^= 0x10;
 
                 let uvlc_mode = ((qinf[0] & 0x8) >> 3) | ((qinf[1] & 0x8) >> 2);
-                let UvlcResult { u: mut u_q, consumed } = decode_noninit_uvlc(vlc_val, uvlc_mode);
-                vlc.advance(consumed);
+                let UvlcResult { u: mut u_q, consumed } = decode_noninit_uvlc(vlc_val, uvlc_mode, wide);
+                vlc.advance_bits(consumed, wide);
 
                 if (qinf[0] & 0xF0) & ((qinf[0] & 0xF0).wrapping_sub(1)) != 0 {
                     let e = ((ls0 & 0x7F) as u32).max((self.line_state[lsp + 1] & 0x7F) as u32);
@@ -962,27 +1114,27 @@ impl HtDecoder {
                 }
 
                 if qinf[quad] & (0x10 << sample) != 0 {
-                    let ms_val = magsgn.fetch();
+                    let width_bits = if self.wide { 64 } else { 32 };
+                    let ms_val = if self.wide { magsgn.fetch64() } else { magsgn.fetch() as u64 };
                     let m_n = u_q[quad].saturating_sub((qinf[quad] >> (12 + sample)) & 1);
                     magsgn.advance(m_n);
 
-                    let sign = ms_val << 31;
-                    let mut v_n = if m_n >= 32 { ms_val } else { ms_val & ((1u32 << m_n) - 1) };
-                    v_n |= ((qinf[quad] >> (8 + sample)) & 1) << m_n;
+                    let sign = ms_val << (width_bits - 1);
+                    let mut v_n = if m_n >= width_bits { ms_val } else { ms_val & ((1u64 << m_n) - 1) };
+                    v_n |= (((qinf[quad] >> (8 + sample)) & 1) as u64) << m_n;
                     v_n |= 1;
 
                     if col < self.w && row < self.h {
                         self.data[row * self.w + col] = sign | (v_n.wrapping_add(2) << (p - 1));
                     }
 
+                    let exponent = 64 - v_n.leading_zeros();
                     if sample == 1 {
-                        let exponent = 32 - v_n.leading_zeros();
                         if let Some(state) = self.line_state.get_mut(slot) {
                             let previous = (*state & 0x7F) as u32;
                             *state = 0x80 | previous.max(exponent) as u8;
                         }
                     } else if sample == 3 {
-                        let exponent = 32 - v_n.leading_zeros();
                         if let Some(state) = self.line_state.get_mut(slot + 1) {
                             *state = 0x80 | exponent as u8;
                         }
@@ -997,7 +1149,7 @@ impl HtDecoder {
     fn magref_stripe(&mut self, magref: &mut RevReader, y: usize, use_sigma1: bool, p: u32) {
         let width = self.w;
         let stride = self.w;
-        let half = 1u32 << (p - 2);
+        let half = 1u64 << (p - 2);
 
         let mut group = 0usize;
         let mut i = 0usize;
@@ -1024,7 +1176,7 @@ impl HtDecoder {
                             if x < width && sample_y < self.h {
                                 let index = sample_y * stride + x;
                                 let sym = cwd & 1;
-                                self.data[index] ^= (1 - sym) << (p - 1);
+                                self.data[index] ^= ((1 - sym) as u64) << (p - 1);
                                 self.data[index] |= half;
                             }
 
@@ -1117,7 +1269,8 @@ impl HtDecoder {
         let width = self.w;
         let stride = self.w;
         let groups = width.div_ceil(8);
-        let val = 3u32 << (p - 2);
+        let val = 3u64 << (p - 2);
+        let sign_shift = if self.wide { 63 } else { 31 };
 
         for group in 0..groups {
             let i = group * 8;
@@ -1181,7 +1334,7 @@ impl HtDecoder {
                                     let sample_y = y + row;
 
                                     if x < width && sample_y < self.h {
-                                        self.data[sample_y * stride + x] |= ((cwd & 1) << 31) | val;
+                                        self.data[sample_y * stride + x] |= (((cwd & 1) as u64) << sign_shift) | val;
                                     }
 
                                     cwd >>= 1;

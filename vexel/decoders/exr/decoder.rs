@@ -2,6 +2,8 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::decoders::exr::compression::{b44_decompress, pxr24_reconstruct, rle_decompress, unpredict_and_reorder};
 use crate::decoders::exr::deep::{self, DeepChunkPixels};
+use crate::decoders::exr::dwa::dwa_decompress;
+use crate::decoders::exr::htj2k::htj2k_decompress;
 use crate::decoders::exr::parser::{self, ByteCursor, ExrFile, ExrPart};
 use crate::decoders::exr::piz::piz_decompress;
 use crate::decoders::exr::types::{
@@ -32,6 +34,7 @@ struct Plane {
 
 struct ChunkLayout {
     channels: Vec<ChunkChannel>,
+    names: Vec<String>,
     rows: Vec<(i64, Vec<bool>)>,
     unpacked_size: usize,
 }
@@ -435,8 +438,9 @@ fn read_tile_chunk<'a>(
     }
 
     let unpacked_size = channels.iter().map(|c| c.width * c.rows * c.bpe).sum();
+    let names = header.channels.iter().map(|c| c.name.clone()).collect();
 
-    Ok(Some((ChunkLayout { channels, rows, unpacked_size }, x0, data)))
+    Ok(Some((ChunkLayout { channels, names, rows, unpacked_size }, x0, data)))
 }
 
 fn decompress_chunk(
@@ -448,17 +452,28 @@ fn decompress_chunk(
     let unpacked = layout.unpacked_size;
 
     limits.reserve_usize(unpacked)?;
-    let result = decompress_chunk_inner(compression, layout, data, unpacked);
+    let result = decompress_chunk_inner(limits, compression, layout, data, unpacked);
     limits.free_usize(unpacked);
     result
 }
 
 fn decompress_chunk_inner(
+    limits: &mut Limits,
     compression: ExrCompression,
     layout: &ChunkLayout,
     data: &[u8],
     unpacked: usize,
 ) -> VexelResult<Vec<u8>> {
+    if matches!(compression, ExrCompression::Dwaa | ExrCompression::Dwab) {
+        let planar = dwa_decompress(limits, data, &layout.channels, &layout.names, unpacked)?;
+        return Ok(repack_planar(&planar, layout));
+    }
+
+    if matches!(compression, ExrCompression::Htj2k256 | ExrCompression::Htj2k32) {
+        let planar = htj2k_decompress(limits, data, &layout.channels, unpacked)?;
+        return Ok(repack_planar(&planar, layout));
+    }
+
     if data.len() == unpacked {
         return Ok(data.to_vec());
     }
@@ -565,8 +580,9 @@ fn build_scanline_layout(header: &PartHeader, y0: i64, y1: i64) -> ChunkLayout {
         .collect();
 
     let unpacked_size = channels.iter().map(|c| c.width * c.rows * c.bpe).sum();
+    let names = header.channels.iter().map(|c| c.name.clone()).collect();
 
-    ChunkLayout { channels, rows, unpacked_size }
+    ChunkLayout { channels, names, rows, unpacked_size }
 }
 
 fn repack_planar(planar: &[u8], layout: &ChunkLayout) -> Vec<u8> {

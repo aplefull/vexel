@@ -120,6 +120,10 @@ impl ExrCompression {
                 | ExrCompression::Pxr24
                 | ExrCompression::B44
                 | ExrCompression::B44a
+                | ExrCompression::Dwaa
+                | ExrCompression::Dwab
+                | ExrCompression::Htj2k256
+                | ExrCompression::Htj2k32
         )
     }
 }
