@@ -7,6 +7,18 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::Jbig1Info;
 use crate::{log_warn, Image, Limits, PixelData};
 
+fn at_pixel(plane_data: &[u8], row_offset: usize, x: usize, tx: i32) -> u32 {
+    let o = (x as i32 - tx) - (x as i32 & !7);
+    let byte_idx = (row_offset + x / 8) as i32 + (o >> 3);
+    if byte_idx < 0 {
+        return 0;
+    }
+    match plane_data.get(byte_idx as usize) {
+        Some(byte) => ((byte >> (7 - (o & 7))) as u32) & 1,
+        None => 0,
+    }
+}
+
 fn ceil_half(x: u32, n: u32) -> u32 {
     (x + (1 << n) - 1) >> n
 }
@@ -275,6 +287,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     if is_reset {
                         self.tx[plane][layer_idx] = 0;
                         self.ty[plane][layer_idx] = 0;
+                        self.lntp[plane][layer_idx] = true;
                     }
 
                     self.advance_stripe();
@@ -306,6 +319,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                         data: Jbig1SectionData::AtMove(Jbig1AtMoveData { line, tx, ty }),
                     });
                     pos += 8;
+                    sde_start = pos;
                 }
                 MARKER_NEWLEN => {
                     if pos + 5 >= data.len() {
@@ -323,6 +337,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                         self.allocate_layer_buffers();
                     }
                     pos += 6;
+                    sde_start = pos;
                 }
                 MARKER_COMMENT => {
                     if pos + 5 >= data.len() {
@@ -361,6 +376,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                         data: Jbig1SectionData::Unknown(Jbig1UnknownMarkerData { marker }),
                     });
                     pos += 2;
+                    sde_start = pos;
                 }
             }
         }
@@ -651,8 +667,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
 
                     let pix = self.decode_diff_pixel(
-                        plane, layer_idx, data, &mut pos, x, y, tx, row_off, byte_idx, hbpl, lhp_hi, line_h1, line_h2,
-                        line_h3, line_l1, line_l2, line_l3, use_dpon, dppriv,
+                        plane, layer_idx, data, &mut pos, x, y, tx, line_h1, line_h2, line_h3, line_l1, line_l2,
+                        line_l3, use_dpon, dppriv,
                     );
 
                     line_h1 = (line_h1 << 1) | pix as u32;
@@ -679,8 +695,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
 
                     let pix2 = self.decode_diff_pixel(
-                        plane, layer_idx, data, &mut pos, x, y, tx, row_off, byte_idx, hbpl, lhp_hi, line_h1, line_h2,
-                        line_h3, line_l1, line_l2, line_l3, use_dpon, dppriv,
+                        plane, layer_idx, data, &mut pos, x, y, tx, line_h1, line_h2, line_h3, line_l1, line_l2,
+                        line_l3, use_dpon, dppriv,
                     );
 
                     line_h1 = (line_h1 << 1) | pix2 as u32;
@@ -735,10 +751,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         x: usize,
         y: usize,
         tx: i32,
-        row_off: usize,
-        byte_idx: usize,
-        _hbpl: usize,
-        lhp_hi: usize,
         line_h1: u32,
         line_h2: u32,
         line_h3: u32,
@@ -785,25 +797,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         }
 
         let cx = if tx != 0 {
-            let a = if tx as usize > x {
-                0u32
-            } else if tx < 8 {
-                ((line_h1 << 2) >> (tx as u32).saturating_sub(3)) & 0x010
-            } else {
-                let o = (x as i32 - tx) & !7i32;
-                if o >= 0 {
-                    0
-                } else {
-                    let byte_off = ((-o) >> 3) as usize;
-                    let bit_off = 7 - ((-o) & 7);
-                    let b_idx = row_off + byte_idx.saturating_sub(byte_off);
-                    if b_idx < self.lhp[lhp_hi][plane].len() {
-                        ((self.lhp[lhp_hi][plane][b_idx] >> bit_off) as u32 & 1) << 4
-                    } else {
-                        0
-                    }
-                }
-            };
+            let a = ((line_h1 << 2) >> (tx as u32).wrapping_sub(3)) & 0x010;
             (line_h1 & 0x003) | a | ((line_h2 >> 12) & 0x00c) | ((line_h3 >> 10) & 0x020)
         } else {
             (line_h1 & 0x003) | ((line_h2 >> 12) & 0x01c) | ((line_h3 >> 10) & 0x020)
@@ -947,19 +941,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                         } else if tx < 8 {
                             (line_h1 >> (tx as u32).wrapping_sub(5)) & 0x010
                         } else {
-                            let o = (x as i32 - tx) & !7;
-                            let byte_off = (-o / 8) as usize;
-                            let bit_off = (7 - ((-o) & 7)) as u32;
-                            if byte_off < hbpl {
-                                let b_idx = row_offset + byte_idx.saturating_sub(byte_off);
-                                if b_idx < self.lhp[lhp_idx][plane].len() {
-                                    ((self.lhp[lhp_idx][plane][b_idx] >> bit_off) as u32 & 1) << 4
-                                } else {
-                                    0
-                                }
-                            } else {
-                                0
-                            }
+                            at_pixel(&self.lhp[lhp_idx][plane], row_offset, x, tx) << 4
                         };
                         ((line_h2 >> 9) & 0x3e0) | a | (line_h1 & 0x00f)
                     } else {
@@ -971,19 +953,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     } else if tx < 8 {
                         (line_h1 >> (tx as u32).wrapping_sub(3)) & 0x004
                     } else {
-                        let o = (x as i32 - tx) & !7;
-                        let byte_off = (-o / 8) as usize;
-                        let bit_off = (7 - ((-o) & 7)) as u32;
-                        if byte_off < hbpl {
-                            let b_idx = row_offset + byte_idx.saturating_sub(byte_off);
-                            if b_idx < self.lhp[lhp_idx][plane].len() {
-                                ((self.lhp[lhp_idx][plane][b_idx] >> bit_off) as u32 & 1) << 2
-                            } else {
-                                0
-                            }
-                        } else {
-                            0
-                        }
+                        at_pixel(&self.lhp[lhp_idx][plane], row_offset, x, tx) << 2
                     };
                     ((line_h3 >> 7) & 0x380) | ((line_h2 >> 11) & 0x078) | a | (line_h1 & 0x003)
                 } else {

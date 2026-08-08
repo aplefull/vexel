@@ -1919,6 +1919,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     restart_offsets.push(scan_data.len());
                     cursor += 2;
                 }
+                b if matches!(JpegMarker::from_u16(0xFF00 | b as u16), None | Some(JpegMarker::RES(_))) => {
+                    log_warn!("Skipping invalid marker 0xFF{:02X} inside scan data", b);
+                    cursor += 2;
+                }
                 _ => {
                     end_marker = Some(block_origin + cursor as u64);
                     break;

@@ -291,5 +291,15 @@ pub fn test_cases() -> Vec<TestCase> {
             },
             ..Default::default()
         },
+        TestCase {
+            name: "JPEG corrupted scan with invalid marker",
+            path: "jpeg/corrupted/corrupted.jpg",
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/corrupted/corrupted.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+            ..Default::default()
+        },
     ]
 }
