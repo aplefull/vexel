@@ -1751,5 +1751,89 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "tiff/rgb_f8_zstd.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "TIFF rgb_u1_lerc",
+            path: "tiff/rgb_u1_lerc.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_lerc.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u1_lerc_deflate",
+            path: "tiff/rgb_u1_lerc_deflate.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_lerc_deflate.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u1_lerc_zstd",
+            path: "tiff/rgb_u1_lerc_zstd.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_lerc_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u2_lerc",
+            path: "tiff/rgb_u2_lerc.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_lerc.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u2_lerc_deflate",
+            path: "tiff/rgb_u2_lerc_deflate.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_lerc_deflate.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u2_lerc_zstd",
+            path: "tiff/rgb_u2_lerc_zstd.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_lerc_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF LERC grayscale",
+            path: "tiff/lerc_gray.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/lerc_gray.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF LERC rgb 8-bit",
+            path: "tiff/lerc_rgb3.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/lerc_rgb3.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF LERC uint16",
+            path: "tiff/lerc_u16.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/lerc_u16.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF LERC int16",
+            path: "tiff/lerc_i16.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/lerc_i16.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF LERC float32",
+            path: "tiff/lerc_f32.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/lerc_f32.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF LERC float64",
+            path: "tiff/lerc_f64.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/lerc_f64.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF LERC tiled",
+            path: "tiff/lerc_tiled.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/lerc_tiled.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF LERC lossy",
+            path: "tiff/lerc_lossy.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/lerc_lossy.jxl" },
+            ..Default::default()
+        },
     ]
 }

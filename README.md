@@ -37,6 +37,7 @@ Functional means some may not be implemented yet, but vast majority of files wil
 | farbfeld | Full support |
 | RPGMVP   | Full support |
 | PGX      | Full support |
+| LERC     | Full support |
 
 ### JPEG
 
@@ -60,7 +61,7 @@ TIFF is a beast, nothing supports every feature it has. We support most of the c
 
 Strips and tiles are supported, including volumetric tiled images. Multi-page files decode each IFD as a separate page via `decode_pages()`. Both chunky and planar configurations are supported.
 
-Supported compression: none, LZW, PackBits, Deflate/AdobeDeflate, JPEG (old and new), PNG, CCITT Group 3/4 fax (RLE, T4, T6), ThunderScan, NeXT, SGILog/SGILog24.
+Supported compression: none, LZW, PackBits, Deflate/AdobeDeflate, JPEG (old and new), PNG, CCITT Group 3/4 fax (RLE, T4, T6), ThunderScan, NeXT, SGILog/SGILog24, LERC, LZMA, ZSTD.
 
 Color spaces supported: RGB, RGBA, grayscale, palette (color-mapped), YCbCr, CIELab, CMYK, LogL/LogLuv.
 

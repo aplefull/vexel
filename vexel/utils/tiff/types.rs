@@ -269,6 +269,7 @@ pub enum TiffTags {
     OceIdentificationNumber = 50217,
     OceImageLogicCharacteristics = 50218,
     PrintImageMatching = 50341,
+    LercParameters = 50674,
     DNGVersion = 50706,
     DNGBackwardVersion = 50707,
     UniqueCameraModel = 50708,
@@ -626,6 +627,26 @@ pub struct TiffHeader {
     pub orientation: u16,
     pub t4_options: u32,
     pub t6_options: u32,
+    pub lerc_additional_compression: LercAdditionalCompression,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum LercAdditionalCompression {
+    #[default]
+    None,
+    Deflate,
+    Zstd,
+}
+
+impl LercAdditionalCompression {
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::None),
+            1 => Some(Self::Deflate),
+            2 => Some(Self::Zstd),
+            _ => None,
+        }
+    }
 }
 
 impl Default for TiffHeader {
@@ -668,6 +689,7 @@ impl Default for TiffHeader {
             orientation: 1,
             t4_options: 0,
             t6_options: 0,
+            lerc_additional_compression: LercAdditionalCompression::None,
         }
     }
 }

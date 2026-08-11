@@ -1,7 +1,9 @@
+use crate::decoders::lerc::decode_blob;
+use crate::log_warn;
 use crate::utils::deflate::ZlibDecoder;
 use crate::utils::lzma::XzDecoder;
 use crate::utils::tiff::pixels::{read_msb_bits64, write_msb_bits};
-use crate::utils::tiff::types::Predictor;
+use crate::utils::tiff::types::{Predictor, SampleFormat};
 use crate::utils::zstd::ZstdDecoder;
 
 pub fn predictor_x_factor(predictor: Predictor) -> u32 {
@@ -317,6 +319,85 @@ pub fn decompress_lzma(data: &[u8]) -> Vec<u8> {
 
 pub fn decompress_zstd(data: &[u8]) -> Vec<u8> {
     ZstdDecoder::from_slice(data).decode()
+}
+
+pub fn decompress_lerc(
+    data: &[u8],
+    chunk_width: usize,
+    chunk_rows: usize,
+    samples_per_pixel: usize,
+    bits_per_sample: u16,
+    sample_format: SampleFormat,
+) -> Vec<u8> {
+    let expected_values = chunk_width * chunk_rows * samples_per_pixel;
+    let bytes_per_sample = (bits_per_sample as usize).div_ceil(8).max(1);
+    let expected_bytes = expected_values * bytes_per_sample;
+
+    let raster = match decode_blob(data) {
+        Ok(raster) => raster,
+        Err(e) => {
+            log_warn!("Failed to decode LERC-compressed TIFF chunk: {}, filling with zeros", e);
+            return vec![0; expected_bytes];
+        }
+    };
+
+    let channels = raster.channels();
+
+    if channels != samples_per_pixel {
+        log_warn!("LERC chunk has {} channels but the TIFF declares {} samples per pixel", channels, samples_per_pixel);
+    }
+
+    if raster.width as usize != chunk_width || raster.height as usize != chunk_rows {
+        log_warn!(
+            "LERC chunk is {}x{} but the TIFF expects {}x{}",
+            raster.width,
+            raster.height,
+            chunk_width,
+            chunk_rows
+        );
+    }
+
+    let values = raster.interleaved();
+    let pixels = (raster.width as usize * raster.height as usize).min(chunk_width * chunk_rows);
+
+    let mut out = vec![0u8; expected_bytes];
+
+    for pixel in 0..pixels {
+        for sample in 0..samples_per_pixel.min(channels) {
+            let value = values.get(pixel * channels + sample).copied().unwrap_or(0.0);
+            let index = pixel * samples_per_pixel + sample;
+            let start = index * bytes_per_sample;
+
+            if start + bytes_per_sample > out.len() {
+                break;
+            }
+
+            write_sample(&mut out[start..start + bytes_per_sample], value, bits_per_sample, sample_format);
+        }
+    }
+
+    out
+}
+
+fn write_sample(out: &mut [u8], value: f64, bits_per_sample: u16, sample_format: SampleFormat) {
+    match (sample_format, bits_per_sample) {
+        (SampleFormat::Float, 32) => out.copy_from_slice(&(value as f32).to_le_bytes()),
+        (SampleFormat::Float, 64) => out.copy_from_slice(&value.to_le_bytes()),
+        (SampleFormat::SignedInt, 8) => out[0] = (value.clamp(-128.0, 127.0) as i8) as u8,
+        (SampleFormat::SignedInt, 16) => out.copy_from_slice(&(value.clamp(-32768.0, 32767.0) as i16).to_le_bytes()),
+        (SampleFormat::SignedInt, 32) => {
+            out.copy_from_slice(&(value.clamp(i32::MIN as f64, i32::MAX as f64) as i32).to_le_bytes())
+        }
+        (_, 8) => out[0] = value.clamp(0.0, 255.0) as u8,
+        (_, 16) => out.copy_from_slice(&(value.clamp(0.0, 65535.0) as u16).to_le_bytes()),
+        (_, 32) => out.copy_from_slice(&(value.clamp(0.0, u32::MAX as f64) as u32).to_le_bytes()),
+        (_, 64) => out.copy_from_slice(&(value.max(0.0) as u64).to_le_bytes()),
+        _ => {
+            if let Some(first) = out.first_mut() {
+                *first = value.clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
 }
 
 fn sgilog_decode_row(bp: &[u8], offset: &mut usize, tp: &mut [u32], npixels: usize, shifts: &[u32]) {

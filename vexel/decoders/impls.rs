@@ -14,6 +14,7 @@ use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::jpeg_xr::JpegXrDecoder;
 use crate::decoders::jpeg_xs::JpegXsDecoder;
+use crate::decoders::lerc::LercDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::pgx::PgxDecoder;
 use crate::decoders::png::PngDecoder;
@@ -97,6 +98,7 @@ impl_decoder!(FarbfeldDecoder, Farbfeld);
 impl_decoder!(PgxDecoder, Pgx);
 impl_decoder!(JpegXsDecoder, JpegXs);
 impl_decoder!(JpegXrDecoder, JpegXr);
+impl_decoder!(LercDecoder, Lerc);
 
 impl<R: Read + Seek + Sync> ImageDecoder<R> for RpgmvpDecoder<R> {
     fn set_limits(&mut self, limits: Limits) {

@@ -44,6 +44,7 @@ pub enum ImageInfo {
     Pgx(PgxInfo),
     JpegXs(JpegXsInfo),
     JpegXr(JpegXrInfo),
+    Lerc(LercInfo),
     Unknown,
 }
 
@@ -130,6 +131,19 @@ pub struct FarbfeldInfo {
 #[tsify(into_wasm_abi)]
 pub struct PgxInfo {
     pub sections: Vec<PgxSectionInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct LercInfo {
+    pub width: u32,
+    pub height: u32,
+    pub version: i32,
+    pub bands: u32,
+    pub depth: u32,
+    pub data_type: String,
+    pub max_z_error: f64,
+    pub has_mask: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -226,6 +240,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Jpeg2000(info) => write!(f, "{}", info),
             ImageInfo::Farbfeld(info) => write!(f, "{}", info),
             ImageInfo::Pgx(info) => write!(f, "{}", info),
+            ImageInfo::Lerc(info) => write!(f, "{}", info),
             ImageInfo::JpegXs(info) => write!(f, "{}", info),
             ImageInfo::JpegXr(info) => write!(f, "{}", info),
             ImageInfo::Unknown => write!(f, "Unknown format"),
@@ -1538,6 +1553,22 @@ impl fmt::Display for JpegXrInfo {
         writeln!(f, "Hard tile boundaries: {}", self.hard_tile_boundaries)?;
         writeln!(f, "Scaled arithmetic: {}", self.scaled_arithmetic)?;
         writeln!(f, "Trim flexbits: {}", self.trim_flexbits)?;
+
+        Ok(())
+    }
+}
+
+impl fmt::Display for LercInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "LERC Information")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Size: {}x{}", self.width, self.height)?;
+        writeln!(f, "Codec version: {}", self.version)?;
+        writeln!(f, "Bands: {}", self.bands)?;
+        writeln!(f, "Values per pixel: {}", self.depth)?;
+        writeln!(f, "Data type: {}", self.data_type)?;
+        writeln!(f, "Max Z error: {}", self.max_z_error)?;
+        writeln!(f, "Has valid/invalid mask: {}", self.has_mask)?;
 
         Ok(())
     }

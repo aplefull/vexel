@@ -115,6 +115,7 @@ pub enum ImageFormat {
     Pgx,
     JpegXs,
     JpegXr,
+    Lerc,
     Unknown,
 }
 

@@ -36,6 +36,7 @@ use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::decoders::jpeg_xr::JpegXrDecoder;
 use crate::decoders::jpeg_xs::JpegXsDecoder;
+use crate::decoders::lerc::LercDecoder;
 use crate::decoders::netpbm::NetPbmDecoder;
 use crate::decoders::pgx::PgxDecoder;
 use crate::decoders::png::PngDecoder;
@@ -137,6 +138,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Pgx => Decoders::Pgx(PgxDecoder::new(reader)),
             ImageFormat::JpegXs => Decoders::JpegXs(JpegXsDecoder::new(reader)),
             ImageFormat::JpegXr => Decoders::JpegXr(JpegXrDecoder::new(reader)),
+            ImageFormat::Lerc => Decoders::Lerc(LercDecoder::new(reader)),
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
@@ -428,6 +430,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         // JPEG XR
         if format_detect::looks_like_jpeg_xr(&header) {
             return Ok(ImageFormat::JpegXr);
+        }
+
+        // LERC
+        if header.starts_with(decoders::lerc::LERC2_MAGIC) || header.starts_with(decoders::lerc::LERC1_MAGIC) {
+            return Ok(ImageFormat::Lerc);
         }
 
         // TIFF / DNG

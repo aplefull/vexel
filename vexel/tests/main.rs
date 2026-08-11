@@ -167,6 +167,11 @@ fn test_jpeg_xs() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_lerc() -> Result<(), Box<dyn std::error::Error>> {
+    run_test_cases(formats::lerc::test_cases())
+}
+
+#[test]
 fn test_jpeg_xr() -> Result<(), Box<dyn std::error::Error>> {
     run_test_cases(formats::jpeg_xr::test_cases())
 }
@@ -199,6 +204,7 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
     test_cases.extend(formats::pgx::test_cases());
     test_cases.extend(formats::jpeg_xs::test_cases());
     test_cases.extend(formats::jpeg_xr::test_cases());
+    test_cases.extend(formats::lerc::test_cases());
 
     run_test_cases(test_cases)
 }

@@ -7,17 +7,17 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::ImageFrame;
 use crate::utils::info::TiffInfo;
 use crate::utils::tiff::compression::{
-    apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_lzma, decompress_lzw,
-    decompress_next, decompress_packbits, decompress_sgilog, decompress_sgilog24, decompress_sgilog_l16,
-    decompress_thunderscan, decompress_zstd, predictor_x_factor,
+    apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_lerc, decompress_lzma,
+    decompress_lzw, decompress_next, decompress_packbits, decompress_sgilog, decompress_sgilog24,
+    decompress_sgilog_l16, decompress_thunderscan, decompress_zstd, predictor_x_factor,
 };
 use crate::utils::tiff::fax::decompress_ccitt;
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
 use crate::utils::tiff::pixels::PixelReader;
 use crate::utils::tiff::types::{
-    Compression, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat, TiffFileHeaderData,
-    TiffHeader, TiffIfdData, TiffPixelData, TiffSectionData, TiffSectionInfo, TiffTags,
+    Compression, LercAdditionalCompression, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat,
+    TiffFileHeaderData, TiffHeader, TiffIfdData, TiffPixelData, TiffSectionData, TiffSectionInfo, TiffTags,
 };
 use crate::utils::types::ByteOrder;
 use crate::{log_warn, Image, Limits, PixelData};
@@ -410,6 +410,15 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 })
                 .collect();
         }
+        if let Some(v) = ifd.values::<u32, _>(TiffTags::LercParameters, &mut self.reader, &mut self.limits) {
+            if let Some(&code) = v.get(1) {
+                self.header.lerc_additional_compression =
+                    LercAdditionalCompression::from_code(code).unwrap_or_else(|| {
+                        log_warn!("Unknown LERC additional compression {}, assuming none", code);
+                        LercAdditionalCompression::None
+                    });
+            }
+        }
         if let Some(v) = ifd.value::<u32, _>(TiffTags::FillOrder, &mut self.reader) {
             self.header.fill_order = v as u16;
         }
@@ -632,7 +641,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         Ok(data)
     }
 
-    fn decompress_chunk(&self, data: Vec<u8>, chunk_width: usize, chunk_rows: usize) -> Vec<u8> {
+    fn decompress_chunk(&self, data: Vec<u8>, chunk_width: usize, chunk_rows: usize, chunk_spp: usize) -> Vec<u8> {
         match self.header.compression {
             Compression::None => data,
             Compression::LZW => decompress_lzw(&data),
@@ -654,6 +663,22 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
             }
             Compression::PNG => self.decompress_png_chunk(data),
+            Compression::LERC => {
+                let blob = match self.header.lerc_additional_compression {
+                    LercAdditionalCompression::None => data,
+                    LercAdditionalCompression::Deflate => decompress_deflate(&data),
+                    LercAdditionalCompression::Zstd => decompress_zstd(&data),
+                };
+
+                decompress_lerc(
+                    &blob,
+                    chunk_width,
+                    chunk_rows,
+                    chunk_spp,
+                    self.bits_for(0),
+                    self.header.sample_format.first().copied().unwrap_or_default(),
+                )
+            }
             _ => {
                 log_warn!(
                     "Unsupported compression method {:?}, using raw data, image will be incorrect",
@@ -825,7 +850,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
             let chunk_rows = if is_tiled { chunk_h * chunk_d } else { asm.rows_in_chunk(chunk_idx) };
 
-            let mut data = self.decompress_chunk(raw, chunk_w, chunk_rows);
+            let mut data = self.decompress_chunk(raw, chunk_w, chunk_rows, chunk_spp);
             self.limits.reserve_usize(data.len())?;
 
             if has_predictor {

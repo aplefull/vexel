@@ -13,6 +13,7 @@ pub mod jpeg2000;
 pub mod jpeg_ls;
 pub mod jpeg_xr;
 pub mod jpeg_xs;
+pub mod lerc;
 pub mod netpbm;
 pub mod pgx;
 pub mod png;
@@ -81,4 +82,5 @@ define_decoders! {
     Pgx => crate::decoders::pgx::PgxDecoder<R>,
     JpegXs => crate::decoders::jpeg_xs::JpegXsDecoder<R>,
     JpegXr => crate::decoders::jpeg_xr::JpegXrDecoder<R>,
+    Lerc => crate::decoders::lerc::LercDecoder<R>,
 }
