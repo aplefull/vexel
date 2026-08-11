@@ -9,7 +9,7 @@ use crate::utils::info::TiffInfo;
 use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_lzma, decompress_lzw,
     decompress_next, decompress_packbits, decompress_sgilog, decompress_sgilog24, decompress_sgilog_l16,
-    decompress_thunderscan, predictor_x_factor,
+    decompress_thunderscan, decompress_zstd, predictor_x_factor,
 };
 use crate::utils::tiff::fax::decompress_ccitt;
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
@@ -639,6 +639,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             Compression::PackBits => decompress_packbits(&data),
             Compression::AdobeDeflate | Compression::Deflate => decompress_deflate(&data),
             Compression::LZMA => decompress_lzma(&data),
+            Compression::ZSTD => decompress_zstd(&data),
             Compression::CCITTRLE | Compression::CCITTRLEWord | Compression::CCITTFax3 | Compression::CCITTFax4 => {
                 decompress_ccitt(&data, chunk_width as u32, chunk_rows, self.header.compression, self.header.t4_options)
             }

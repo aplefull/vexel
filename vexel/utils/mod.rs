@@ -14,3 +14,4 @@ pub mod lzma;
 pub mod marker;
 pub mod tiff;
 pub mod types;
+pub mod zstd;

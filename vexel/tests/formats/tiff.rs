@@ -1674,5 +1674,82 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "tiff/rgb_f8_lzma.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "TIFF rgb_u1_zstd",
+            path: "tiff/rgb_u1_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u2_zstd",
+            path: "tiff/rgb_u2_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u4_zstd",
+            path: "tiff/rgb_u4_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u4_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u8_zstd",
+            path: "tiff/rgb_u8_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u8_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_i1_zstd",
+            path: "tiff/rgb_i1_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_i1_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_i2_zstd",
+            path: "tiff/rgb_i2_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_i2_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_i4_zstd",
+            path: "tiff/rgb_i4_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_i4_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_i8_zstd",
+            path: "tiff/rgb_i8_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_i8_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_f2_zstd",
+            path: "tiff/rgb_f2_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_f2_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_f4_zstd",
+            path: "tiff/rgb_f4_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_f4_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_f8_zstd",
+            path: "tiff/rgb_f8_zstd.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_f8_zstd.jxl" },
+            ..Default::default()
+        },
     ]
 }

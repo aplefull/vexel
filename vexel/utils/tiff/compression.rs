@@ -2,6 +2,7 @@ use crate::utils::deflate::ZlibDecoder;
 use crate::utils::lzma::XzDecoder;
 use crate::utils::tiff::pixels::{read_msb_bits64, write_msb_bits};
 use crate::utils::tiff::types::Predictor;
+use crate::utils::zstd::ZstdDecoder;
 
 pub fn predictor_x_factor(predictor: Predictor) -> u32 {
     match predictor {
@@ -312,6 +313,10 @@ pub fn decompress_deflate(data: &[u8]) -> Vec<u8> {
 
 pub fn decompress_lzma(data: &[u8]) -> Vec<u8> {
     XzDecoder::from_slice(data).decode()
+}
+
+pub fn decompress_zstd(data: &[u8]) -> Vec<u8> {
+    ZstdDecoder::from_slice(data).decode()
 }
 
 fn sgilog_decode_row(bp: &[u8], offset: &mut usize, tp: &mut [u32], npixels: usize, shifts: &[u32]) {
