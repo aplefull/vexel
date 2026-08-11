@@ -10,6 +10,7 @@ use crate::utils::error::VexelResult;
 use crate::utils::image::{Image, PixelData};
 use crate::utils::limits::Limits;
 use crate::utils::lzma::XzDecoder;
+use crate::utils::tiff::logluv::{decode_sgilog16, decode_sgilog24, decode_sgilog32, words_to_bytes};
 use crate::utils::tiff::pixels::{read_msb_bits64, write_msb_bits};
 use crate::utils::tiff::types::{Predictor, SampleFormat};
 use crate::utils::types::ByteOrder;
@@ -592,101 +593,23 @@ fn decompress_embedded(codec: &str, decoded: VexelResult<Image>, layout: ChunkLa
     serialize_chunk(chunk, layout)
 }
 
-fn sgilog_decode_row(bp: &[u8], offset: &mut usize, tp: &mut [u32], npixels: usize, shifts: &[u32]) {
-    for &shft in shifts {
-        let mut i = 0;
-        while i < npixels && *offset < bp.len() {
-            let b = bp[*offset];
-            if b >= 128 {
-                if *offset + 1 >= bp.len() {
-                    break;
-                }
-                let rc = (b as usize) + 2 - 128;
-                let val = (bp[*offset + 1] as u32) << shft;
-                *offset += 2;
-                let end = (i + rc).min(npixels);
-                for slot in &mut tp[i..end] {
-                    *slot |= val;
-                }
-                i += rc;
-            } else {
-                let rc = b as usize;
-                *offset += 1;
-                let available = (bp.len() - *offset).min(rc).min(npixels - i);
-                for slot in &mut tp[i..i + available] {
-                    *slot |= (bp[*offset] as u32) << shft;
-                    *offset += 1;
-                }
-                i += available;
-                if i < npixels && rc > available {
-                    i += rc - available;
-                }
-            }
-        }
-    }
-}
-
 pub fn decompress_sgilog(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
-    let npixels_total = width * rows;
-    let mut raw = vec![0u32; npixels_total];
-    let mut offset = 0;
-
-    for row in 0..rows {
-        let row_start = row * width;
-        let tp = &mut raw[row_start..row_start + width];
-        for v in tp.iter_mut() {
-            *v = 0;
-        }
-        sgilog_decode_row(data, &mut offset, tp, width, &[24, 16, 8, 0]);
-    }
-
-    let mut out = Vec::with_capacity(npixels_total * 4);
-    for v in raw {
-        out.extend_from_slice(&v.to_be_bytes());
-    }
-    out
+    words_to_bytes(&decode_sgilog32(data, width, rows), ByteOrder::BigEndian)
 }
 
 pub fn decompress_sgilog_l16(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
-    let npixels_total = width * rows;
-    let mut raw = vec![0u32; npixels_total];
-    let mut offset = 0;
+    let raw = decode_sgilog16(data, width, rows);
+    let mut out = Vec::with_capacity(raw.len() * 2);
 
-    for row in 0..rows {
-        let row_start = row * width;
-        let tp = &mut raw[row_start..row_start + width];
-        for v in tp.iter_mut() {
-            *v = 0;
-        }
-        sgilog_decode_row(data, &mut offset, tp, width, &[8, 0]);
-    }
-
-    let mut out = Vec::with_capacity(npixels_total * 2);
     for v in raw {
         out.extend_from_slice(&(v as u16).to_be_bytes());
     }
+
     out
 }
 
 pub fn decompress_sgilog24(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
-    let npixels_total = width * rows;
-    let mut raw = vec![0u16; npixels_total];
-    let mut offset = 0;
-
-    for row in 0..rows {
-        let row_start = row * width;
-        let mut tp32 = vec![0u32; width];
-        sgilog_decode_row(data, &mut offset, &mut tp32, width, &[8, 0]);
-        for (i, v) in tp32.iter().enumerate() {
-            raw[row_start + i] = *v as u16;
-        }
-    }
-
-    let mut out = Vec::with_capacity(npixels_total * 2);
-    for v in raw {
-        out.extend_from_slice(&v.to_be_bytes());
-    }
-    out
+    words_to_bytes(&decode_sgilog24(data, width, rows), ByteOrder::BigEndian)
 }
 
 fn read_uint(bytes: &[u8], big_endian: bool) -> u64 {

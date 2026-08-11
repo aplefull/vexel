@@ -17,9 +17,10 @@
 //! is read at its own width, and the widest channel decides the output type.
 
 use super::color::{
-    cmyk_to_rgb_f32, float24_to_f32, float_bits_to_f64, half_to_f32, lab_to_xyz, logluv32_to_rgb, u16_from_bytes,
-    xyz_to_srgb_f32, ycbcr_to_rgb_f32, YCbCrTables, D50_WHITE, D65_WHITE,
+    cmyk_to_rgb_f32, float24_to_f32, float_bits_to_f64, half_to_f32, lab_to_xyz, u16_from_bytes, xyz_to_srgb_f32,
+    ycbcr_to_rgb_f32, YCbCrTables, D50_WHITE, D65_WHITE,
 };
+use super::logluv::{logl16_to_y, logluv24_to_xyz, logluv32_to_xyz, luv_to_xyz, xyz_to_rgb};
 use super::types::{
     Compression, ExtraSampleType, PhotometricInterpretation, PlanarConfiguration, SampleFormat, TiffHeader,
 };
@@ -387,6 +388,53 @@ impl PixelReader {
             (OutClass::F64, false) => Ok(PixelData::RGB64F(src.gather(&channels, |ch, raw| src.to_f64(ch, raw)))),
             (OutClass::F64, true) => Ok(PixelData::RGBA64F(src.gather(&channels, |ch, raw| src.to_f64(ch, raw)))),
         }
+    }
+
+    fn read_logluv(&self, data: &[u8], header: &TiffHeader) -> VexelResult<PixelData> {
+        let npixels = self.width as usize * self.height as usize;
+        let mut pixels = Vec::with_capacity(npixels * 3);
+
+        match header.compression {
+            Compression::SGILog | Compression::SGILog24 => {
+                let to_xyz =
+                    if header.compression == Compression::SGILog24 { logluv24_to_xyz } else { logluv32_to_xyz };
+
+                for chunk in data.chunks_exact(4).take(npixels) {
+                    let p = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    pixels.extend_from_slice(&xyz_to_rgb(to_xyz(p)));
+                }
+            }
+            _ => {
+                for chunk in data.chunks_exact(6).take(npixels) {
+                    let le = u16_from_bytes(&chunk[0..2], self.byte_order) as i16;
+                    let u = u16_from_bytes(&chunk[2..4], self.byte_order) as i16 as f64 / 32768.0;
+                    let v = u16_from_bytes(&chunk[4..6], self.byte_order) as i16 as f64 / 32768.0;
+                    let l = logl16_to_y(le as i32);
+
+                    let xyz = if l <= 0.0 { [0.0; 3] } else { luv_to_xyz(l, u, v) };
+                    pixels.extend_from_slice(&xyz_to_rgb(xyz));
+                }
+            }
+        }
+
+        pixels.resize(npixels * 3, 0.0);
+
+        Ok(PixelData::RGB32F(pixels))
+    }
+
+    fn read_logl(&self, data: &[u8], header: &TiffHeader) -> VexelResult<PixelData> {
+        let npixels = self.width as usize * self.height as usize;
+        let order = if header.compression == Compression::SGILog { ByteOrder::BigEndian } else { self.byte_order };
+
+        let mut pixels: Vec<f32> = data
+            .chunks_exact(2)
+            .take(npixels)
+            .map(|chunk| logl16_to_y(u16_from_bytes(chunk, order) as i16 as i32) as f32)
+            .collect();
+
+        pixels.resize(npixels, 0.0);
+
+        Ok(PixelData::L32F(pixels))
     }
 
     pub fn read_palette(&self, data: &[u8], header: &TiffHeader) -> VexelResult<PixelData> {
@@ -891,49 +939,8 @@ impl PixelReader {
             PhotometricInterpretation::CIELab => self.read_lab(&data, header, D50_WHITE, true),
             PhotometricInterpretation::ICCLab => self.read_lab(&data, header, D50_WHITE, false),
             PhotometricInterpretation::ITULab => self.read_lab(&data, header, D65_WHITE, false),
-            PhotometricInterpretation::LogLuv => {
-                let order = if matches!(header.compression, Compression::SGILog | Compression::SGILog24) {
-                    ByteOrder::BigEndian
-                } else {
-                    self.byte_order
-                };
-                let pixels: Vec<u8> = data
-                    .chunks_exact(4)
-                    .flat_map(|chunk| {
-                        let bits = match order {
-                            ByteOrder::BigEndian => u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-                            ByteOrder::LittleEndian => u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-                        };
-                        let (r, g, b) = logluv32_to_rgb(bits);
-                        [r, g, b]
-                    })
-                    .collect();
-                Ok(PixelData::RGB8(pixels))
-            }
-            PhotometricInterpretation::LogL => {
-                let order =
-                    if header.compression == Compression::SGILog { ByteOrder::BigEndian } else { self.byte_order };
-                let pixels: Vec<u8> = data
-                    .chunks_exact(2)
-                    .map(|chunk| {
-                        let p = u16_from_bytes(chunk, order) as u32;
-                        let le = p & 0x7fff;
-                        if le == 0 {
-                            return 0u8;
-                        }
-                        let y =
-                            (std::f64::consts::LN_2 / 256.0 * (le as f64 + 0.5) - std::f64::consts::LN_2 * 64.0).exp();
-                        if y <= 0.0 {
-                            0
-                        } else if y >= 1.0 {
-                            255
-                        } else {
-                            (256.0 * y.sqrt()) as u8
-                        }
-                    })
-                    .collect();
-                Ok(PixelData::L8(pixels))
-            }
+            PhotometricInterpretation::LogLuv => self.read_logluv(&data, header),
+            PhotometricInterpretation::LogL => self.read_logl(&data, header),
         }
     }
 }

@@ -744,8 +744,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         let (asm_spp, asm_bps) = match self.header.compression {
             Compression::SGILog if self.header.photometric_interpretation == PhotometricInterpretation::LogL => (1, 16),
-            Compression::SGILog => (1, 32),
-            Compression::SGILog24 => (1, 16),
+            Compression::SGILog | Compression::SGILog24 => (1, 32),
             _ if !uniform_bits && !is_planar => (1, pixel_bits),
             _ => (chunk_spp, bps),
         };

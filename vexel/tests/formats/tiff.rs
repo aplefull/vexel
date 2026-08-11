@@ -34,7 +34,35 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "TIFF memorial_luv32",
             path: "tiff/memorial_luv32.tif",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "tiff/memorial_luv32.avif" },
+            comparison: Comparison::Exact { reference_path: "tiff/memorial_luv32.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF off_luv32",
+            path: "tiff/off_luv32.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/off_luv32.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF off_luv24",
+            path: "tiff/off_luv24.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/off_luv24.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF off_l16",
+            path: "tiff/off_l16.tif",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/off_l16.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF logluv-3c-16b",
+            path: "tiff/logluv-3c-16b.tiff",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "tiff/logluv-3c-16b.jxl" },
             ..Default::default()
         },
         TestCase {
