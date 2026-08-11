@@ -1,9 +1,18 @@
+use std::io::Cursor;
+
+use crate::decoders::jpeg2000::Jpeg2000Decoder;
+use crate::decoders::jpeg_xr::JpegXrDecoder;
 use crate::decoders::lerc::decode_blob;
+use crate::decoders::png::PngDecoder;
 use crate::log_warn;
 use crate::utils::deflate::ZlibDecoder;
+use crate::utils::error::VexelResult;
+use crate::utils::image::{Image, PixelData};
+use crate::utils::limits::Limits;
 use crate::utils::lzma::XzDecoder;
 use crate::utils::tiff::pixels::{read_msb_bits64, write_msb_bits};
 use crate::utils::tiff::types::{Predictor, SampleFormat};
+use crate::utils::types::ByteOrder;
 use crate::utils::zstd::ZstdDecoder;
 
 pub fn predictor_x_factor(predictor: Predictor) -> u32 {
@@ -398,6 +407,189 @@ fn write_sample(out: &mut [u8], value: f64, bits_per_sample: u16, sample_format:
             }
         }
     }
+}
+
+struct DecodedChunk {
+    samples: Vec<f64>,
+    channels: usize,
+    width: usize,
+    height: usize,
+}
+
+impl DecodedChunk {
+    fn from_image(image: Image) -> Self {
+        let width = image.width() as usize;
+        let height = image.height() as usize;
+        let pixels = image.into_pixels();
+        let channels = pixel_data_channels(&pixels);
+        let samples = normalized_samples(pixels);
+
+        DecodedChunk { samples, channels, width, height }
+    }
+}
+
+fn pixel_data_channels(pixels: &PixelData) -> usize {
+    match pixels {
+        PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) | PixelData::RGB64F(_) => 3,
+        PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::RGBA64F(_) => 4,
+        PixelData::LA8(_) | PixelData::LA16(_) | PixelData::LA32F(_) | PixelData::LA64F(_) => 2,
+        _ => 1,
+    }
+}
+
+fn normalized_samples(pixels: PixelData) -> Vec<f64> {
+    match pixels {
+        PixelData::RGB8(v) | PixelData::RGBA8(v) | PixelData::L8(v) | PixelData::LA8(v) => {
+            v.into_iter().map(|s| s as f64 / 255.0).collect()
+        }
+        PixelData::L1(v) => v.into_iter().map(|s| if s != 0 { 1.0 } else { 0.0 }).collect(),
+        PixelData::RGB16(v) | PixelData::RGBA16(v) | PixelData::L16(v) | PixelData::LA16(v) => {
+            v.into_iter().map(|s| s as f64 / 65535.0).collect()
+        }
+        PixelData::RGB32F(v) | PixelData::RGBA32F(v) | PixelData::L32F(v) | PixelData::LA32F(v) => {
+            v.into_iter().map(|s| s as f64).collect()
+        }
+        PixelData::RGB64F(v) | PixelData::RGBA64F(v) | PixelData::L64F(v) | PixelData::LA64F(v) => v,
+    }
+}
+
+fn serialize_chunk(chunk: DecodedChunk, layout: ChunkLayout) -> Vec<u8> {
+    let spp = layout.samples_per_pixel;
+    let bps = layout.bits_per_sample.clamp(1, 64);
+    let row_stride = (layout.width * spp * bps as usize).div_ceil(8);
+    let mut out = vec![0u8; row_stride * layout.rows];
+
+    if chunk.channels == 0 {
+        return out;
+    }
+
+    let big_endian = layout.byte_order == ByteOrder::BigEndian;
+    let rows = layout.rows.min(chunk.height);
+    let cols = layout.width.min(chunk.width);
+
+    for row in 0..rows {
+        let row_data = &mut out[row * row_stride..(row + 1) * row_stride];
+
+        for col in 0..cols {
+            let src = (row * chunk.width + col) * chunk.channels;
+
+            for sample in 0..spp {
+                let value = chunk.samples.get(src + sample.min(chunk.channels - 1)).copied().unwrap_or(0.0);
+                let index = col * spp + sample;
+
+                if bps.is_multiple_of(8) {
+                    let bytes = bps as usize / 8;
+                    let start = index * bytes;
+                    if start + bytes > row_data.len() {
+                        break;
+                    }
+                    write_normalized_sample(
+                        &mut row_data[start..start + bytes],
+                        value,
+                        bps,
+                        layout.sample_format,
+                        big_endian,
+                    );
+                } else {
+                    write_msb_bits(row_data, index * bps as usize, bps, quantize_sample(value, bps));
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn quantize_sample(value: f64, bits_per_sample: u16) -> u64 {
+    let max = ((1u128 << bits_per_sample) - 1) as f64;
+    (value.clamp(0.0, 1.0) * max).round() as u64
+}
+
+fn write_normalized_sample(
+    out: &mut [u8],
+    value: f64,
+    bits_per_sample: u16,
+    sample_format: SampleFormat,
+    big_endian: bool,
+) {
+    match (sample_format, bits_per_sample) {
+        (SampleFormat::Float, 32) => {
+            let bytes = (value as f32).to_bits();
+            write_uint(out, bytes as u64, big_endian);
+        }
+        (SampleFormat::Float, 64) => write_uint(out, value.to_bits(), big_endian),
+        (SampleFormat::SignedInt, _) => {
+            let max = ((1u128 << (bits_per_sample - 1)) - 1) as f64;
+            let scaled = (value.clamp(0.0, 1.0) * 2.0 - 1.0) * max;
+            let signed = scaled.round() as i64;
+            let mask = if bits_per_sample >= 64 { u64::MAX } else { (1u64 << bits_per_sample) - 1 };
+            write_uint(out, (signed as u64) & mask, big_endian);
+        }
+        _ => write_uint(out, quantize_sample(value, bits_per_sample), big_endian),
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ChunkLayout {
+    pub width: usize,
+    pub rows: usize,
+    pub samples_per_pixel: usize,
+    pub bits_per_sample: u16,
+    pub sample_format: SampleFormat,
+    pub byte_order: ByteOrder,
+}
+
+pub fn decompress_jpeg2000(data: &[u8], layout: ChunkLayout, limits: &Limits) -> Vec<u8> {
+    let mut decoder = Jpeg2000Decoder::new(Cursor::new(data));
+    decoder.set_limits(limits.clone());
+    decompress_embedded("JPEG 2000", decoder.decode(), layout)
+}
+
+pub fn decompress_png(data: &[u8], layout: ChunkLayout, limits: &Limits) -> Vec<u8> {
+    let mut decoder = PngDecoder::new(Cursor::new(data));
+    decoder.set_limits(limits.clone());
+    decompress_embedded("PNG", decoder.decode(), layout)
+}
+
+pub fn decompress_jpeg_xr(data: &[u8], layout: ChunkLayout, limits: &Limits) -> Vec<u8> {
+    let mut decoder = JpegXrDecoder::new(Cursor::new(data));
+    decoder.set_limits(limits.clone());
+    decompress_embedded("JPEG XR", decoder.decode(), layout)
+}
+
+fn decompress_embedded(codec: &str, decoded: VexelResult<Image>, layout: ChunkLayout) -> Vec<u8> {
+    let image = match decoded {
+        Ok(image) => image,
+        Err(e) => {
+            log_warn!("Failed to decode {}-compressed TIFF chunk: {}, filling with zeros", codec, e);
+            let bytes_per_sample = (layout.bits_per_sample as usize).div_ceil(8);
+            return vec![0; layout.width * layout.rows * layout.samples_per_pixel * bytes_per_sample];
+        }
+    };
+
+    let chunk = DecodedChunk::from_image(image);
+
+    if chunk.width != layout.width || chunk.height != layout.rows {
+        log_warn!(
+            "{} chunk is {}x{} but the TIFF expects {}x{}",
+            codec,
+            chunk.width,
+            chunk.height,
+            layout.width,
+            layout.rows
+        );
+    }
+
+    if chunk.channels < layout.samples_per_pixel {
+        log_warn!(
+            "{} chunk has {} channels but the TIFF declares {} samples per pixel",
+            codec,
+            chunk.channels,
+            layout.samples_per_pixel
+        );
+    }
+
+    serialize_chunk(chunk, layout)
 }
 
 fn sgilog_decode_row(bp: &[u8], offset: &mut usize, tp: &mut [u32], npixels: usize, shifts: &[u32]) {

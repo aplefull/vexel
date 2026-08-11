@@ -2,18 +2,18 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
-use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::ImageFrame;
 use crate::utils::info::TiffInfo;
 use crate::utils::tiff::compression::{
-    apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_lerc, decompress_lzma,
-    decompress_lzw, decompress_next, decompress_packbits, decompress_sgilog, decompress_sgilog24,
-    decompress_sgilog_l16, decompress_thunderscan, decompress_zstd, predictor_x_factor,
+    apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_jpeg2000, decompress_jpeg_xr,
+    decompress_lerc, decompress_lzma, decompress_lzw, decompress_next, decompress_packbits, decompress_png,
+    decompress_sgilog, decompress_sgilog24, decompress_sgilog_l16, decompress_thunderscan, decompress_zstd,
+    predictor_x_factor, ChunkLayout,
 };
 use crate::utils::tiff::fax::decompress_ccitt;
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
-use crate::utils::tiff::jpeg::splice_jpeg_tables;
+use crate::utils::tiff::jpeg::{jpeg_pixel_data, jpeg_rgb_bytes, splice_jpeg_tables};
 use crate::utils::tiff::pixels::PixelReader;
 use crate::utils::tiff::types::{
     Compression, LercAdditionalCompression, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat,
@@ -606,6 +606,17 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.header.bits_per_sample.get(channel).or_else(|| self.header.bits_per_sample.first()).copied().unwrap_or(8)
     }
 
+    fn chunk_layout(&self, width: usize, rows: usize, samples_per_pixel: usize) -> ChunkLayout {
+        ChunkLayout {
+            width,
+            rows,
+            samples_per_pixel,
+            bits_per_sample: self.bits_for(0),
+            sample_format: self.header.sample_format.first().copied().unwrap_or_default(),
+            byte_order: self.byte_order,
+        }
+    }
+
     fn stream_len(&mut self) -> u64 {
         let pos = self.reader.stream_position().unwrap_or(0);
         let len = self.reader.seek(SeekFrom::End(0)).unwrap_or(0);
@@ -662,7 +673,15 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     decompress_sgilog(&data, chunk_width, chunk_rows)
                 }
             }
-            Compression::PNG => self.decompress_png_chunk(data),
+            Compression::PNG => {
+                decompress_png(&data, self.chunk_layout(chunk_width, chunk_rows, chunk_spp), &self.limits)
+            }
+            Compression::JPEG2000 => {
+                decompress_jpeg2000(&data, self.chunk_layout(chunk_width, chunk_rows, chunk_spp), &self.limits)
+            }
+            Compression::JPEGXR => {
+                decompress_jpeg_xr(&data, self.chunk_layout(chunk_width, chunk_rows, chunk_spp), &self.limits)
+            }
             Compression::LERC => {
                 let blob = match self.header.lerc_additional_compression {
                     LercAdditionalCompression::None => data,
@@ -685,23 +704,6 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     self.header.compression
                 );
                 data
-            }
-        }
-    }
-
-    fn decompress_png_chunk(&self, chunk_data: Vec<u8>) -> Vec<u8> {
-        if self.bits_for(0) != 8 || self.header.samples_per_pixel < 3 {
-            log_warn!("PNG-compressed TIFF data is decoded as 8-bit RGB, which does not match the declared format");
-        }
-
-        let cursor = Cursor::new(chunk_data);
-        let mut png_decoder = PngDecoder::new(cursor);
-
-        match png_decoder.decode() {
-            Ok(image) => image.into_pixels().into_rgb8_bytes(),
-            Err(e) => {
-                log_warn!("Failed to decode PNG-compressed TIFF chunk: {}", e);
-                Vec::new()
             }
         }
     }
@@ -868,11 +870,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
         Ok(asm.slices)
     }
 
-    fn decode_jpeg_bytes(&self, jpeg_data: Vec<u8>) -> Option<Vec<u8>> {
+    fn decode_jpeg_bytes(&self, jpeg_data: Vec<u8>, wide: bool) -> Option<Vec<u8>> {
         let cursor = Cursor::new(jpeg_data);
         let mut jpeg_decoder = JpegDecoder::new(cursor);
         match jpeg_decoder.decode() {
-            Ok(image) => Some(image.into_pixels().into_rgb8_bytes()),
+            Ok(image) => Some(jpeg_rgb_bytes(image.into_pixels(), wide, self.byte_order)),
             Err(e) => {
                 log_warn!("Failed to decode JPEG-compressed TIFF chunk: {}", e);
                 None
@@ -893,7 +895,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
             log_warn!("JPEG-compressed CMYK TIFF is decoded as RGB, colors may be incorrect");
         }
 
-        let image_len = width * height * 3;
+        let wide = self.bits_for(0) > 8;
+        let bytes_per_sample = if wide { 2 } else { 1 };
+        let image_len = width * height * 3 * bytes_per_sample;
         self.limits.reserve_usize(image_len)?;
         let stream_len = self.stream_len();
 
@@ -911,12 +915,12 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 if let Ok(raw) = self.read_chunk_bytes(offset, len, stream_len) {
                     let has_scan = raw.windows(2).any(|w| w == [0xFF, 0xDA]);
                     if raw.starts_with(&[0xFF, 0xD8]) && has_scan {
-                        if let Some(pixels) = self.decode_jpeg_bytes(raw) {
+                        if let Some(pixels) = self.decode_jpeg_bytes(raw, wide) {
                             let mut image_data = vec![0u8; image_len];
                             let n = pixels.len().min(image_len);
                             image_data[..n].copy_from_slice(&pixels[..n]);
                             self.limits.free_usize(image_len);
-                            return Ok(PixelData::RGB8(image_data));
+                            return Ok(jpeg_pixel_data(image_data, wide, self.byte_order));
                         }
                     } else {
                         log_warn!(
@@ -966,15 +970,16 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
             let jpeg_data = self.build_ojpeg_stream(&scan_data, self.width, self.height, restart_interval);
             let mut image_data = vec![0u8; image_len];
-            if let Some(pixels) = self.decode_jpeg_bytes(jpeg_data) {
+            if let Some(pixels) = self.decode_jpeg_bytes(jpeg_data, wide) {
                 let n = pixels.len().min(image_len);
                 image_data[..n].copy_from_slice(&pixels[..n]);
             }
             self.limits.free_usize(image_len);
-            return Ok(PixelData::RGB8(image_data));
+            return Ok(jpeg_pixel_data(image_data, wide, self.byte_order));
         }
 
-        let mut asm = ChunkAssembler::new(width, height, 1, 3, 8, 1, chunk_w, chunk_h, 1, &mut self.limits)?;
+        let mut asm =
+            ChunkAssembler::new(width, height, 1, 3, bytes_per_sample * 8, 1, chunk_w, chunk_h, 1, &mut self.limits)?;
         let jpeg_tables = self.header.jpeg_tables.clone();
 
         for (chunk_idx, &offset) in offsets.iter().enumerate() {
@@ -995,7 +1000,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 raw
             };
 
-            if let Some(pixels) = self.decode_jpeg_bytes(jpeg_data) {
+            if let Some(pixels) = self.decode_jpeg_bytes(jpeg_data, wide) {
                 asm.place(chunk_idx, &pixels);
             }
         }
@@ -1004,7 +1009,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.limits.free_usize(total);
         self.limits.free_usize(image_len);
 
-        Ok(PixelData::RGB8(asm.slices.into_iter().next().unwrap_or_default()))
+        Ok(jpeg_pixel_data(asm.slices.into_iter().next().unwrap_or_default(), wide, self.byte_order))
     }
 
     fn read_ojpeg_dqt_segments(&mut self) -> (Vec<u8>, Vec<u8>) {
@@ -1167,9 +1172,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
             self.sections.push(TiffSectionInfo {
                 start_offset: pixel_data_offset,
-                data: TiffSectionData::PixelData(TiffPixelData {
-                    length: self.width as usize * self.height as usize * 3,
-                }),
+                data: TiffSectionData::PixelData(TiffPixelData { length: pixel_data.as_bytes().len() }),
             });
 
             return Ok(vec![ImageFrame::new(self.width, self.height, pixel_data, 0)]);

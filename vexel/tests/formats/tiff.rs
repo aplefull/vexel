@@ -55,17 +55,28 @@ pub fn test_cases() -> Vec<TestCase> {
             },
             ..Default::default()
         },
-        // TODO: I generated reference with some python library and it's probably lossy, so we are not matching
-        // it exactly. Reference needs to be regenerated with known correct values.
+        TestCase {
+            name: "TIFF rgb_u2_jpeg",
+            path: "tiff/rgb_u2_jpeg.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_jpeg.jxl" },
+            ..Default::default()
+        },
         TestCase {
             name: "TIFF rgb_u1_png",
             path: "tiff/rgb_u1_png.tif",
-            validation: None,
-            comparison: Comparison::Fuzzy {
-                reference_path: "tiff/rgb_u1_png.avif",
-                mse_threshold: 10.0,
-                ssim_threshold: 0.99,
-            },
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_png.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u2_png",
+            path: "tiff/rgb_u2_png.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_png.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u1_tiled_png",
+            path: "tiff/rgb_u1_tiled_png.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_tiled_png.jxl" },
             ..Default::default()
         },
         TestCase {
@@ -87,6 +98,12 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "tiff/rgb_u1_deflate.tif",
             validation: None,
             comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_deflate.avif" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u2_deflate",
+            path: "tiff/rgb_u2_deflate.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_deflate.jxl" },
             ..Default::default()
         },
         TestCase {
@@ -1749,6 +1766,42 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "tiff/rgb_f8_zstd.tif",
             validation: None,
             comparison: Comparison::Exact { reference_path: "tiff/rgb_f8_zstd.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u1_jpeg2000",
+            path: "tiff/rgb_u1_jpeg2000.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_jpeg2000.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u2_jpeg2000",
+            path: "tiff/rgb_u2_jpeg2000.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_jpeg2000.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u1_tiled_jpeg2000",
+            path: "tiff/rgb_u1_tiled_jpeg2000.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_tiled_jpeg2000.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u1_jpegxr",
+            path: "tiff/rgb_u1_jpegxr.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_jpegxr.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u2_jpegxr",
+            path: "tiff/rgb_u2_jpegxr.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u2_jpegxr.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF rgb_u1_tiled_jpegxr",
+            path: "tiff/rgb_u1_tiled_jpegxr.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/rgb_u1_tiled_jpegxr.jxl" },
             ..Default::default()
         },
         TestCase {
