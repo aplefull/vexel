@@ -1,4 +1,5 @@
 use crate::utils::deflate::ZlibDecoder;
+use crate::utils::lzma::XzDecoder;
 use crate::utils::tiff::pixels::{read_msb_bits64, write_msb_bits};
 use crate::utils::tiff::types::Predictor;
 
@@ -307,6 +308,10 @@ pub fn decompress_packbits(data: &[u8]) -> Vec<u8> {
 
 pub fn decompress_deflate(data: &[u8]) -> Vec<u8> {
     ZlibDecoder::from_slice(data).decode()
+}
+
+pub fn decompress_lzma(data: &[u8]) -> Vec<u8> {
+    XzDecoder::from_slice(data).decode()
 }
 
 fn sgilog_decode_row(bp: &[u8], offset: &mut usize, tp: &mut [u32], npixels: usize, shifts: &[u32]) {

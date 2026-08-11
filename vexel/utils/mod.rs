@@ -10,6 +10,7 @@ pub mod image;
 pub mod info;
 pub mod limits;
 pub mod logger;
+pub mod lzma;
 pub mod marker;
 pub mod tiff;
 pub mod types;
