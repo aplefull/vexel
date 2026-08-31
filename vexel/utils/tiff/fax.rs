@@ -494,6 +494,38 @@ pub fn decompress_ccitt(data: &[u8], width: u32, rows: usize, compression: Compr
     decompress_ccitt_counted(data, width, rows, compression, t4_options).0
 }
 
+pub fn decode_mmr(data: &[u8], width: u32, rows: usize) -> (Vec<u8>, usize) {
+    let row_bytes = (width as usize).div_ceil(8);
+    let mut out = vec![0u8; row_bytes * rows];
+    if width == 0 || rows == 0 {
+        return (out, 0);
+    }
+
+    let mut bits = FaxBits::new(data);
+    let mut reference: Vec<u32> = Vec::new();
+
+    for row in 0..rows {
+        if bits.bits_left() >= 24 && bits.peek(24) == 0x001001 {
+            break;
+        }
+        let transitions = match decode_row_2d(&mut bits, &reference, width) {
+            Some(t) => t,
+            None => {
+                log_warn!("JBIG2 MMR decode error at row {}, remaining rows left blank", row);
+                break;
+            }
+        };
+        render_row(&transitions, width, &mut out[row * row_bytes..(row + 1) * row_bytes]);
+        reference = transitions;
+    }
+
+    if bits.bits_left() >= 24 && bits.peek(24) == 0x001001 {
+        bits.skip(24);
+    }
+
+    (out, bits.pos.div_ceil(8))
+}
+
 pub fn decompress_ccitt_counted(
     data: &[u8],
     width: u32,

@@ -8,6 +8,7 @@ pub mod hdr;
 pub mod ico;
 mod impls;
 pub mod jbig1;
+pub mod jbig2;
 pub mod jpeg;
 pub mod jpeg2000;
 pub mod jpeg_ls;
@@ -73,6 +74,7 @@ define_decoders! {
     Dng => crate::decoders::dng::DngDecoder<R>,
     Tga => crate::decoders::tga::TgaDecoder<R>,
     Jbig1 => crate::decoders::jbig1::Jbig1Decoder<R>,
+    Jbig2 => crate::decoders::jbig2::Jbig2Decoder<R>,
     Ico => crate::decoders::ico::IcoDecoder<R>,
     Dicom => crate::decoders::dicom::DicomDecoder<R>,
     Exr => crate::decoders::exr::ExrDecoder<R>,

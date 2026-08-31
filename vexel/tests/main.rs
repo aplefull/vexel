@@ -112,6 +112,11 @@ fn test_jbig1() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_jbig2() -> Result<(), Box<dyn std::error::Error>> {
+    run_test_cases(formats::jbig2::test_cases())
+}
+
+#[test]
 fn test_jpeg_ls() -> Result<(), Box<dyn std::error::Error>> {
     run_test_cases(formats::jpeg_ls::test_cases())
 }
@@ -192,6 +197,7 @@ fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
     test_cases.extend(formats::ico::test_cases());
     test_cases.extend(formats::tga::test_cases());
     test_cases.extend(formats::jbig1::test_cases());
+    test_cases.extend(formats::jbig2::test_cases());
     test_cases.extend(formats::netpbm::test_cases());
     test_cases.extend(formats::hdr::test_cases());
     test_cases.extend(formats::tiff::test_cases());

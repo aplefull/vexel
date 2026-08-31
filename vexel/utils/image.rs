@@ -105,6 +105,7 @@ pub enum ImageFormat {
     Dng,
     Tga,
     Jbig1,
+    Jbig2,
     Ico,
     Cur,
     Dicom,

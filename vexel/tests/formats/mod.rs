@@ -7,6 +7,7 @@ pub mod gif;
 pub mod hdr;
 pub mod ico;
 pub mod jbig1;
+pub mod jbig2;
 pub mod jpeg;
 pub mod jpeg2000;
 pub mod jpeg_ls;

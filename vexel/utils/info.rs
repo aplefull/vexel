@@ -34,6 +34,7 @@ pub enum ImageInfo {
     Netpbm(NetpbmInfo),
     Hdr(HdrInfo),
     Jbig1(Jbig1Info),
+    Jbig2(Jbig2Info),
     Ico(IcoInfo),
     Tga(TgaInfo),
     Tiff(TiffInfo),
@@ -89,6 +90,14 @@ pub struct HdrInfo {
 #[tsify(into_wasm_abi)]
 pub struct Jbig1Info {
     pub sections: Vec<Jbig1SectionInfo>,
+}
+
+#[derive(Debug, Serialize, Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct Jbig2Info {
+    pub width: u32,
+    pub height: u32,
+    pub pages: u32,
 }
 
 #[derive(Debug, Serialize, Tsify)]
@@ -232,6 +241,7 @@ impl fmt::Display for ImageInfo {
             ImageInfo::Netpbm(info) => write!(f, "{}", info),
             ImageInfo::Hdr(info) => write!(f, "{}", info),
             ImageInfo::Jbig1(info) => write!(f, "{}", info),
+            ImageInfo::Jbig2(info) => write!(f, "{}", info),
             ImageInfo::Ico(info) => write!(f, "{}", info),
             ImageInfo::Tga(info) => write!(f, "{}", info),
             ImageInfo::Tiff(info) => write!(f, "{}", info),
@@ -1010,6 +1020,15 @@ impl fmt::Display for HdrInfo {
             writeln!(f)?;
         }
 
+        Ok(())
+    }
+}
+
+impl fmt::Display for Jbig2Info {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "JBIG2 Image")?;
+        writeln!(f, "  Dimensions: {}x{}", self.width, self.height)?;
+        writeln!(f, "  Pages: {}", self.pages)?;
         Ok(())
     }
 }

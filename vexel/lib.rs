@@ -31,6 +31,7 @@ use crate::decoders::gif::GifDecoder;
 use crate::decoders::hdr::HdrDecoder;
 use crate::decoders::ico::IcoDecoder;
 use crate::decoders::jbig1::Jbig1Decoder;
+use crate::decoders::jbig2::Jbig2Decoder;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
@@ -129,6 +130,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Dng => Decoders::Dng(DngDecoder::new(reader)),
             ImageFormat::Tga => Decoders::Tga(TgaDecoder::new(reader)),
             ImageFormat::Jbig1 => Decoders::Jbig1(Jbig1Decoder::new(reader)),
+            ImageFormat::Jbig2 => Decoders::Jbig2(Jbig2Decoder::new(reader)),
             ImageFormat::Ico | ImageFormat::Cur => Decoders::Ico(IcoDecoder::new(reader)),
             ImageFormat::Dicom => Decoders::Dicom(DicomDecoder::new(reader)),
             ImageFormat::Exr => Decoders::Exr(ExrDecoder::new(reader)),
@@ -408,6 +410,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         // OpenEXR
         if header.starts_with(&[0x76, 0x2F, 0x31, 0x01]) {
             return Ok(ImageFormat::Exr);
+        }
+
+        // JBIG2
+        if header.starts_with(&[0x97, 0x4A, 0x42, 0x32, 0x0D, 0x0A, 0x1A, 0x0A]) {
+            return Ok(ImageFormat::Jbig2);
         }
 
         // farbfeld
