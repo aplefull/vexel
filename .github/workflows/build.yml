@@ -38,13 +38,15 @@ jobs:
             ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       - name: Build
-        run: cargo build --profile dist --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: -Cprofile-use=${{ github.workspace }}/pgo/vexel.profdata
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: vexel-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/dist/vexel
-            target/${{ matrix.target }}/dist/vexel.exe
+            target/${{ matrix.target }}/release/vexel
+            target/${{ matrix.target }}/release/vexel.exe
           if-no-files-found: ignore

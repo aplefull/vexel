@@ -553,7 +553,7 @@ impl App {
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped_paths: Vec<PathBuf> =
-            ctx.input(|input| input.raw.dropped_files.iter().filter_map(|file| file.path.clone()).collect());
+            ctx.input(|input| input.raw.dropped_files.iter().map(|file| file.path().to_path_buf()).collect());
 
         if dropped_paths.is_empty() {
             return;
@@ -637,7 +637,9 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = root.ctx().clone();
+        let ctx = &ctx;
         let panel_bg = egui::Color32::from_rgb(0x1e, 0x22, 0x27);
         let separator_color = egui::Color32::from_rgb(0x3a, 0x3f, 0x4b);
         let label_color = egui::Color32::from_rgb(0x7a, 0x84, 0x96);
@@ -665,174 +667,169 @@ impl eframe::App for App {
         if self.panel_open {
             let panel_frame = egui::Frame {
                 fill: panel_bg,
-                inner_margin: egui::Margin { left: 20.0, right: 16.0, top: 16.0, bottom: 16.0 },
+                inner_margin: egui::Margin { left: 20, right: 16, top: 16, bottom: 16 },
                 ..Default::default()
             };
 
-            egui::SidePanel::right("info_panel").resizable(false).exact_width(220.0).frame(panel_frame).show(
-                ctx,
-                |ui| {
-                    let add_row = |ui: &mut egui::Ui, label: &str, value: &str| {
-                        ui.label(egui::RichText::new(label).color(label_color).size(11.0));
-                        ui.add_space(2.0);
-                        ui.label(egui::RichText::new(value).color(value_color).size(13.0));
-                        ui.add_space(10.0);
-                    };
+            egui::Panel::right("info_panel").resizable(false).exact_size(220.0).frame(panel_frame).show(root, |ui| {
+                let add_row = |ui: &mut egui::Ui, label: &str, value: &str| {
+                    ui.label(egui::RichText::new(label).color(label_color).size(11.0));
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new(value).color(value_color).size(13.0));
+                    ui.add_space(10.0);
+                };
 
-                    add_row(ui, "FILENAME", &file_name);
+                add_row(ui, "FILENAME", &file_name);
 
-                    if self.files.len() > 1 {
-                        add_row(ui, "FILE", &format!("{} / {}", self.current_file_index + 1, self.files.len()));
-                    }
+                if self.files.len() > 1 {
+                    add_row(ui, "FILE", &format!("{} / {}", self.current_file_index + 1, self.files.len()));
+                }
 
-                    let [w, h] = match self.viewing_thumbnail {
-                        Some(index) => self.thumbnails[index].size,
-                        None => self.page().map(|page| page.size).unwrap_or([0, 0]),
-                    };
-                    add_row(ui, "DIMENSIONS", &format!("{w} × {h}"));
+                let [w, h] = match self.viewing_thumbnail {
+                    Some(index) => self.thumbnails[index].size,
+                    None => self.page().map(|page| page.size).unwrap_or([0, 0]),
+                };
+                add_row(ui, "DIMENSIONS", &format!("{w} × {h}"));
 
-                    if self.pages.len() > 1 {
-                        add_row(ui, "PAGES", &self.pages.len().to_string());
-                    }
+                if self.pages.len() > 1 {
+                    add_row(ui, "PAGES", &self.pages.len().to_string());
+                }
 
-                    let frame_count = self.page().map(|page| page.frames.len()).unwrap_or(0);
-                    if frame_count > 1 {
-                        add_row(ui, "FRAMES", &frame_count.to_string());
-                    }
+                let frame_count = self.page().map(|page| page.frames.len()).unwrap_or(0);
+                if frame_count > 1 {
+                    add_row(ui, "FRAMES", &frame_count.to_string());
+                }
 
-                    let add_separator = |ui: &mut egui::Ui| {
-                        ui.add_space(4.0);
-                        ui.painter().hline(
-                            ui.available_rect_before_wrap().x_range(),
-                            ui.cursor().top(),
-                            egui::Stroke::new(1.0_f32, separator_color),
-                        );
-                        ui.add_space(12.0);
-                    };
+                let add_separator = |ui: &mut egui::Ui| {
+                    ui.add_space(4.0);
+                    ui.painter().hline(
+                        ui.available_rect_before_wrap().x_range(),
+                        ui.cursor().top(),
+                        egui::Stroke::new(1.0_f32, separator_color),
+                    );
+                    ui.add_space(12.0);
+                };
 
-                    if self.pages.len() > 1 {
-                        add_separator(ui);
-
-                        ui.label(egui::RichText::new("PAGES").color(label_color).size(11.0));
-                        ui.add_space(6.0);
-
-                        let mut selected_page = None;
-
-                        for (index, page) in self.pages.iter().enumerate() {
-                            let [pw, ph] = page.size;
-                            let selected = self.viewing_thumbnail.is_none() && self.current_page == index;
-                            let text = format!("Page {} · {} × {}", index + 1, pw, ph);
-                            let label = egui::RichText::new(text).color(value_color).size(13.0);
-                            if ui.selectable_label(selected, label).clicked() {
-                                selected_page = Some(index);
-                            }
-                            ui.add_space(2.0);
-                        }
-
-                        if let Some(index) = selected_page {
-                            self.select_page(index);
-                        }
-
-                        ui.add_space(8.0);
-                    }
-
-                    if !self.thumbnails.is_empty() {
-                        add_separator(ui);
-
-                        ui.label(egui::RichText::new("THUMBNAILS").color(label_color).size(11.0));
-                        ui.add_space(6.0);
-
-                        let mut selection = None;
-
-                        if !self.pages.is_empty() {
-                            let selected = self.viewing_thumbnail.is_none();
-                            let label = egui::RichText::new("Main image").color(value_color).size(13.0);
-                            if ui.selectable_label(selected, label).clicked() {
-                                selection = Some(None);
-                            }
-                            ui.add_space(2.0);
-                        }
-
-                        for (index, thumbnail) in self.thumbnails.iter().enumerate() {
-                            let [tw, th] = thumbnail.size;
-                            let selected = self.viewing_thumbnail == Some(index);
-                            let text = format!("Thumbnail {} × {}", tw, th);
-                            let label = egui::RichText::new(text).color(value_color).size(13.0);
-                            if ui.selectable_label(selected, label).clicked() {
-                                selection = Some(Some(index));
-                            }
-                            ui.add_space(2.0);
-                        }
-
-                        if let Some(view) = selection {
-                            self.select_view(view);
-                        }
-
-                        ui.add_space(8.0);
-                    }
-
+                if self.pages.len() > 1 {
                     add_separator(ui);
 
-                    ui.label(egui::RichText::new("DISPLAY").color(label_color).size(11.0));
+                    ui.label(egui::RichText::new("PAGES").color(label_color).size(11.0));
                     ui.add_space(6.0);
 
-                    let pixelated_changed = ui
-                        .checkbox(&mut self.pixelated, egui::RichText::new("Pixelated").color(value_color).size(13.0))
-                        .changed();
+                    let mut selected_page = None;
 
-                    if pixelated_changed {
-                        let options = self.texture_options();
-                        let image = self.current_display_image();
-                        if let (Some(texture), Some(image)) = (&mut self.texture, image) {
-                            texture.set(image, options);
+                    for (index, page) in self.pages.iter().enumerate() {
+                        let [pw, ph] = page.size;
+                        let selected = self.viewing_thumbnail.is_none() && self.current_page == index;
+                        let text = format!("Page {} · {} × {}", index + 1, pw, ph);
+                        let label = egui::RichText::new(text).color(value_color).size(13.0);
+                        if ui.selectable_label(selected, label).clicked() {
+                            selected_page = Some(index);
                         }
+                        ui.add_space(2.0);
                     }
 
-                    ui.add_space(4.0);
-                    ui.checkbox(
-                        &mut self.checkered_bg,
-                        egui::RichText::new("Checkered background").color(value_color).size(13.0),
-                    );
-
-                    ui.add_space(4.0);
-                    let normalize_changed = ui
-                        .checkbox(&mut self.normalize, egui::RichText::new("Normalize").color(value_color).size(13.0))
-                        .changed();
-
-                    if normalize_changed {
-                        self.load_current_file();
+                    if let Some(index) = selected_page {
+                        self.select_page(index);
                     }
 
-                    let panel_rect = ui.min_rect();
-                    let handle_width = 4.0;
-                    let handle_rect = egui::Rect::from_min_size(
-                        egui::pos2(panel_rect.left() - 20.0, panel_rect.top()),
-                        egui::vec2(handle_width, panel_rect.height()),
-                    );
-                    let handle_id = ui.id().with("panel_handle");
-                    let handle_resp = ui.interact(handle_rect, handle_id, egui::Sense::click());
-                    let bar_color = if handle_resp.hovered() { handle_hover_color } else { handle_color };
-                    let grip_h = 32.0;
-                    let grip_y = handle_rect.center().y - grip_h / 2.0;
-                    let bar_rect = egui::Rect::from_min_size(
-                        egui::pos2(handle_rect.left(), grip_y),
-                        egui::vec2(handle_width, grip_h),
-                    );
-                    ui.painter().rect_filled(bar_rect, egui::Rounding::same(2.0), bar_color);
-                    if handle_resp.clicked() {
-                        self.panel_open = false;
+                    ui.add_space(8.0);
+                }
+
+                if !self.thumbnails.is_empty() {
+                    add_separator(ui);
+
+                    ui.label(egui::RichText::new("THUMBNAILS").color(label_color).size(11.0));
+                    ui.add_space(6.0);
+
+                    let mut selection = None;
+
+                    if !self.pages.is_empty() {
+                        let selected = self.viewing_thumbnail.is_none();
+                        let label = egui::RichText::new("Main image").color(value_color).size(13.0);
+                        if ui.selectable_label(selected, label).clicked() {
+                            selection = Some(None);
+                        }
+                        ui.add_space(2.0);
                     }
-                    if handle_resp.hovered() {
-                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+
+                    for (index, thumbnail) in self.thumbnails.iter().enumerate() {
+                        let [tw, th] = thumbnail.size;
+                        let selected = self.viewing_thumbnail == Some(index);
+                        let text = format!("Thumbnail {} × {}", tw, th);
+                        let label = egui::RichText::new(text).color(value_color).size(13.0);
+                        if ui.selectable_label(selected, label).clicked() {
+                            selection = Some(Some(index));
+                        }
+                        ui.add_space(2.0);
                     }
-                },
-            );
+
+                    if let Some(view) = selection {
+                        self.select_view(view);
+                    }
+
+                    ui.add_space(8.0);
+                }
+
+                add_separator(ui);
+
+                ui.label(egui::RichText::new("DISPLAY").color(label_color).size(11.0));
+                ui.add_space(6.0);
+
+                let pixelated_changed = ui
+                    .checkbox(&mut self.pixelated, egui::RichText::new("Pixelated").color(value_color).size(13.0))
+                    .changed();
+
+                if pixelated_changed {
+                    let options = self.texture_options();
+                    let image = self.current_display_image();
+                    if let (Some(texture), Some(image)) = (&mut self.texture, image) {
+                        texture.set(image, options);
+                    }
+                }
+
+                ui.add_space(4.0);
+                ui.checkbox(
+                    &mut self.checkered_bg,
+                    egui::RichText::new("Checkered background").color(value_color).size(13.0),
+                );
+
+                ui.add_space(4.0);
+                let normalize_changed = ui
+                    .checkbox(&mut self.normalize, egui::RichText::new("Normalize").color(value_color).size(13.0))
+                    .changed();
+
+                if normalize_changed {
+                    self.load_current_file();
+                }
+
+                let panel_rect = ui.min_rect();
+                let handle_width = 4.0;
+                let handle_rect = egui::Rect::from_min_size(
+                    egui::pos2(panel_rect.left() - 20.0, panel_rect.top()),
+                    egui::vec2(handle_width, panel_rect.height()),
+                );
+                let handle_id = ui.id().with("panel_handle");
+                let handle_resp = ui.interact(handle_rect, handle_id, egui::Sense::click());
+                let bar_color = if handle_resp.hovered() { handle_hover_color } else { handle_color };
+                let grip_h = 32.0;
+                let grip_y = handle_rect.center().y - grip_h / 2.0;
+                let bar_rect =
+                    egui::Rect::from_min_size(egui::pos2(handle_rect.left(), grip_y), egui::vec2(handle_width, grip_h));
+                ui.painter().rect_filled(bar_rect, egui::CornerRadius::same(2), bar_color);
+                if handle_resp.clicked() {
+                    self.panel_open = false;
+                }
+                if handle_resp.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+            });
         } else {
-            egui::SidePanel::right("handle_panel")
+            egui::Panel::right("handle_panel")
                 .resizable(false)
-                .exact_width(12.0)
+                .exact_size(12.0)
                 .frame(egui::Frame { fill: panel_bg, inner_margin: egui::Margin::ZERO, ..Default::default() })
-                .show(ctx, |ui| {
+                .show(root, |ui| {
                     let rect = ui.available_rect_before_wrap();
                     let handle_width = 4.0;
                     let handle_x = rect.left() + (rect.width() - handle_width) / 2.0;
@@ -843,7 +840,7 @@ impl eframe::App for App {
                     let handle_id = ui.id().with("collapsed_handle");
                     let handle_resp = ui.interact(rect, handle_id, egui::Sense::click());
                     let bar_color = if handle_resp.hovered() { handle_hover_color } else { handle_color };
-                    ui.painter().rect_filled(bar_rect, egui::Rounding::same(2.0), bar_color);
+                    ui.painter().rect_filled(bar_rect, egui::CornerRadius::same(2), bar_color);
                     if handle_resp.clicked() {
                         self.panel_open = true;
                     }
@@ -854,7 +851,7 @@ impl eframe::App for App {
         }
 
         let checkered_bg = self.checkered_bg;
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default_margins().show(root, |ui| {
             if let Some(texture) = &self.texture {
                 let available_size = ui.available_size();
                 let image_aspect = texture.aspect_ratio();
@@ -878,7 +875,7 @@ impl eframe::App for App {
                         let light = egui::Color32::from_rgb(0xcc, 0xcc, 0xcc);
                         let dark = egui::Color32::from_rgb(0x88, 0x88, 0x88);
                         let size = tile * 2;
-                        let mut checker_image = egui::ColorImage::new([size, size], light);
+                        let mut checker_image = egui::ColorImage::filled([size, size], light);
                         for y in 0..size {
                             for x in 0..size {
                                 if (x / tile + y / tile) % 2 == 1 {
@@ -915,12 +912,12 @@ impl eframe::App for App {
                 let max_width = (available.width() * 0.8).min(520.0);
                 let center = available.center();
 
-                ui.painter().rect_filled(available, egui::Rounding::ZERO, egui::Color32::TRANSPARENT);
+                ui.painter().rect_filled(available, egui::CornerRadius::ZERO, egui::Color32::TRANSPARENT);
 
                 let content_height = 13.0 + 6.0 + 15.0 + 20.0;
                 let top = center.y - content_height / 2.0;
 
-                ui.allocate_new_ui(
+                ui.scope_builder(
                     egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
                         egui::pos2(center.x - max_width / 2.0, top),
                         egui::vec2(max_width, available.height()),
@@ -992,7 +989,7 @@ fn install_system_fonts(ctx: &egui::Context) {
         };
 
         let name = (*family).to_string();
-        fonts.font_data.insert(name.clone(), egui::FontData::from_owned((*data).clone()));
+        fonts.font_data.insert(name.clone(), Arc::new(egui::FontData::from_owned((*data).clone())));
         added.push(name);
     }
 
@@ -1029,7 +1026,7 @@ pub fn display_image(
         Box::new(move |cc| {
             install_system_fonts(&cc.egui_ctx);
 
-            let mut visuals = cc.egui_ctx.style().visuals.clone();
+            let mut visuals = cc.egui_ctx.global_style().visuals.clone();
             visuals.panel_fill = egui::Color32::from_rgb(0x28, 0x2c, 0x34);
             visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x3a, 0x3f, 0x4b);
             visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x4a, 0x50, 0x5e);

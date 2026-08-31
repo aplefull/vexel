@@ -14,13 +14,18 @@ too_many_arguments = "allow"
 large_enum_variant = "allow"
 chunks_exact_to_as_chunks = "allow"
 
-[profile.release]
-debug=1
+[profile.dev]
 opt-level = 3
+debug = "line-tables-only"
 
-[profile.dist]
-inherits = "release"
+[profile.release]
 debug = false
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true
+
+[profile.bench]
+debug = "line-tables-only"
+lto = false
+strip = false
+incremental = true

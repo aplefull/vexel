@@ -5,14 +5,12 @@ use crate::decoders::jpeg::types::{APP14AdobeData, JFIFData};
 use crate::utils::exif::ExifData;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsSectionInfo {
     pub start_offset: u64,
     pub data: JpegLsSectionData,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum JpegLsSectionData {
     Soi,
     Eoi,
@@ -26,14 +24,12 @@ pub enum JpegLsSectionData {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsDnlData {
     pub length: u16,
     pub number_of_lines: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsSofData {
     pub length: u16,
     pub precision: u8,
@@ -44,7 +40,6 @@ pub struct JpegLsSofData {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsComponentInfo {
     pub id: u8,
     pub horizontal_sampling: u8,
@@ -53,7 +48,6 @@ pub struct JpegLsComponentInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsSosData {
     pub length: u16,
     pub component_count: u8,
@@ -65,14 +59,12 @@ pub struct JpegLsSosData {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsSosComponentInfo {
     pub id: u8,
     pub mapping_table_selector: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum JpegLsLseData {
     PresetParameters { length: u16, maxval: u16, t1: u16, t2: u16, t3: u16, reset: u16 },
     MappingTable { length: u16, table_id: u8, entry_count: u16, entries: Vec<u16> },
@@ -81,14 +73,12 @@ pub enum JpegLsLseData {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsDriData {
     pub length: u16,
     pub restart_interval: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsAppData {
     pub marker: u16,
     pub length: u16,
@@ -101,7 +91,6 @@ pub struct JpegLsAppData {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsComData {
     pub length: u16,
     pub text: String,

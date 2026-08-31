@@ -38,7 +38,6 @@ pub const PKT_HDR_ALIGNMENT: u32 = 8;
 pub const SUBPKT_ALIGNMENT: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum ColorTransform {
     None,
     Rct,
@@ -56,7 +55,6 @@ impl ColorTransform {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum NltType {
     None,
     Quadratic,
@@ -64,7 +62,6 @@ pub enum NltType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum CfaPattern {
     Rggb,
     Bggr,
@@ -73,21 +70,18 @@ pub enum CfaPattern {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum TetrixMode {
     Full,
     Inline,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct QuadraticNlt {
     pub sigma: u16,
     pub alpha: u16,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct ExtendedNlt {
     pub t1: u32,
     pub t2: u32,
@@ -95,7 +89,6 @@ pub struct ExtendedNlt {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct TetrixParams {
     pub cf: TetrixMode,
     pub e1: u8,
@@ -250,7 +243,6 @@ impl GcliMethod {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegXsMarkerInfo {
     pub offset: u64,
     pub marker: String,

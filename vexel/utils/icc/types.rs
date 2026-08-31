@@ -4,7 +4,6 @@ use serde::Serialize;
 use tsify::Tsify;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct ICCProfile {
     pub header: ProfileHeader,
     pub tag_table: TagTable,

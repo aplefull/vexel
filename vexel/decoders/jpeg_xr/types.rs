@@ -33,7 +33,6 @@ pub const TAG_ALPHA_BYTE_COUNT: u16 = 0xbcc3;
 pub const TAG_ICC_PROFILE: u16 = 0x8773;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum ColorFormat {
     YOnly,
     Yuv420,
@@ -66,7 +65,6 @@ impl ColorFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum BitDepth {
     Bd1White,
     Bd8,
@@ -243,7 +241,6 @@ impl Quantizer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum PixelFormatKind {
     BlackWhite1,
     Gray8,

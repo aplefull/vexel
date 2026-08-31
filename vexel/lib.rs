@@ -7,7 +7,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 use serde::Serialize;
-use tsify::Tsify;
+use tsify::{Ts, Tsify};
 pub(crate) use utils::bitreader;
 pub use utils::error::{VexelError, VexelResult};
 pub use utils::frames::Frames;
@@ -582,15 +582,17 @@ impl WasmDecoder {
     /// [`nextFrame`](WasmDecoder::next_frame) to walk the whole animation.
     /// Pixel data is a flat byte vector of length `width * height * 4`.
     #[wasm_bindgen(js_name = decode)]
-    pub fn decode(&mut self) -> Result<JsImage, String> {
+    pub fn decode(&mut self) -> Result<Ts<JsImage>, String> {
         let image = self.decoder.decode().map_err(|e| e.to_string())?;
 
-        Ok(JsImage {
+        JsImage {
             width: image.width(),
             height: image.height(),
             image_format: self.decoder.get_format(),
             pixels: image.to_rgba8(),
-        })
+        }
+        .into_ts()
+        .map_err(|e| e.to_string())
     }
 
     /// Returns the next animation frame as RGBA8, or `null` once the animation
@@ -600,7 +602,7 @@ impl WasmDecoder {
     /// drops it, so long animations can be painted without retaining them all.
     /// Images without animation yield exactly one frame.
     #[wasm_bindgen(js_name = nextFrame)]
-    pub fn next_frame(&mut self) -> Result<Option<JsImageFrame>, String> {
+    pub fn next_frame(&mut self) -> Result<Option<Ts<JsImageFrame>>, String> {
         if self.pending_frames.is_none() {
             let frames = self
                 .decoder
@@ -614,23 +616,29 @@ impl WasmDecoder {
 
         let frame = self.pending_frames.as_mut().and_then(|frames| frames.next());
 
-        Ok(frame.map(|frame| JsImageFrame {
-            width: frame.width(),
-            height: frame.height(),
-            pixels: frame.to_rgba8(),
-            delay: frame.delay(),
-        }))
+        frame
+            .map(|frame| {
+                JsImageFrame {
+                    width: frame.width(),
+                    height: frame.height(),
+                    pixels: frame.to_rgba8(),
+                    delay: frame.delay(),
+                }
+                .into_ts()
+            })
+            .transpose()
+            .map_err(|e| e.to_string())
     }
 
     /// Decodes every page contained in the file, returning one [`JsImage`] per page.
     ///
     /// Multi-page formats yield one entry per contained image; all other formats yield a single entry.
     #[wasm_bindgen(js_name = decodePages)]
-    pub fn decode_pages(&mut self) -> Result<JsPages, String> {
+    pub fn decode_pages(&mut self) -> Result<Ts<JsPages>, String> {
         let format = self.decoder.get_format();
         let pages = self.decoder.decode_pages().map_err(|e| e.to_string())?;
 
-        Ok(JsPages {
+        JsPages {
             pages: pages
                 .into_iter()
                 .map(|image| JsImage {
@@ -640,16 +648,18 @@ impl WasmDecoder {
                     pixels: image.to_rgba8(),
                 })
                 .collect(),
-        })
+        }
+        .into_ts()
+        .map_err(|e| e.to_string())
     }
 
     /// Decodes all embedded thumbnails and preview images found in the file.
     #[wasm_bindgen(js_name = decodeThumbnails)]
-    pub fn decode_thumbnails(&mut self) -> Result<JsThumbnails, String> {
+    pub fn decode_thumbnails(&mut self) -> Result<Ts<JsThumbnails>, String> {
         let format = self.decoder.get_format();
         let thumbnails = self.decoder.decode_thumbnails().map_err(|e| e.to_string())?;
 
-        Ok(JsThumbnails {
+        JsThumbnails {
             thumbnails: thumbnails
                 .into_iter()
                 .map(|image| JsImage {
@@ -659,15 +669,17 @@ impl WasmDecoder {
                     pixels: image.to_rgba8(),
                 })
                 .collect(),
-        })
+        }
+        .into_ts()
+        .map_err(|e| e.to_string())
     }
 
     /// Returns format-specific metadata collected during the last `decode` call.
     ///
     /// `decode` must be called first; calling `getInfo` before it returns an empty struct.
     #[wasm_bindgen(js_name = getInfo)]
-    pub fn get_info(&mut self) -> ImageInfo {
-        self.decoder.get_info()
+    pub fn get_info(&mut self) -> Result<Ts<ImageInfo>, String> {
+        self.decoder.get_info().into_ts().map_err(|e| e.to_string())
     }
 
     /// Detects the image format from `data` without decoding it.
@@ -687,7 +699,6 @@ impl WasmDecoder {
 /// `pixels` is always RGBA8, regardless of the source format, and is a flat
 /// byte vector with length `width * height * 4`.
 #[derive(Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JsImage {
     pub width: u32,
     pub height: u32,
@@ -700,7 +711,6 @@ pub struct JsImage {
 /// `pixels` is a flat RGBA8 byte vector with length `width * height * 4`.
 /// `delay` is the display duration in milliseconds; `0` for non-animated images.
 #[derive(Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JsImageFrame {
     pub width: u32,
     pub height: u32,
@@ -711,7 +721,6 @@ pub struct JsImageFrame {
 /// Pages returned by [`WasmDecoder::decode_pages`], one [`JsImage`] per
 /// image contained in the file, in file order.
 #[derive(Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JsPages {
     pub pages: Vec<JsImage>,
 }
@@ -719,7 +728,6 @@ pub struct JsPages {
 /// Embedded thumbnails returned by [`WasmDecoder::decode_thumbnails`], sorted
 /// from smallest to largest by pixel count.
 #[derive(Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JsThumbnails {
     pub thumbnails: Vec<JsImage>,
 }
@@ -729,8 +737,8 @@ pub struct JsThumbnails {
 /// Returns a structured representation of the profile header, tag table, and
 /// all recognized tag data.
 #[wasm_bindgen(js_name = parseIcc)]
-pub fn wasm_parse_icc(data: &[u8]) -> Result<ICCProfile, String> {
-    parse_icc(data).map_err(|e| e.to_string())
+pub fn wasm_parse_icc(data: &[u8]) -> Result<Ts<ICCProfile>, String> {
+    parse_icc(data).map_err(|e| e.to_string())?.into_ts().map_err(|e| e.to_string())
 }
 
 /// Sets the minimum log level for all decoders.

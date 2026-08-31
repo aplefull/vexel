@@ -24,7 +24,6 @@ use crate::utils::icc::ICCProfile;
 use crate::utils::tiff::types::TiffSectionInfo;
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub enum ImageInfo {
     Jpeg(JpegInfo),
     JpegLs(JpegLsInfo),
@@ -50,50 +49,42 @@ pub enum ImageInfo {
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegInfo {
     pub sections: Vec<JpegSegmentInfo>,
     pub icc_profile: Option<ICCProfile>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct PngInfo {
     pub sections: Vec<PngChunkInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct BmpInfo {
     pub sections: Vec<BmpSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct GifInfo {
     pub sections: Vec<GifSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct NetpbmInfo {
     pub sections: Vec<NetpbmSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct HdrInfo {
     pub sections: Vec<HdrSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Jbig1Info {
     pub sections: Vec<Jbig1SectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Jbig2Info {
     pub width: u32,
     pub height: u32,
@@ -101,49 +92,41 @@ pub struct Jbig2Info {
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegLsInfo {
     pub sections: Vec<JpegLsSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct IcoInfo {
     pub sections: Vec<IcoSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct TgaInfo {
     pub sections: Vec<TgaSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct TiffInfo {
     pub sections: Vec<TiffSectionInfo>,
 }
 
 #[derive(Debug, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct DicomInfo {
     pub sections: Vec<DicomElementInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct FarbfeldInfo {
     pub sections: Vec<FarbfeldSectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct PgxInfo {
     pub sections: Vec<PgxSectionInfo>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct LercInfo {
     pub width: u32,
     pub height: u32,
@@ -156,7 +139,6 @@ pub struct LercInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegXsInfo {
     pub width: u32,
     pub height: u32,
@@ -175,7 +157,6 @@ pub struct JpegXsInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct JpegXrInfo {
     pub width: u32,
     pub height: u32,
@@ -197,7 +178,6 @@ pub struct JpegXrInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct ExrInfo {
     pub version: i32,
     pub multipart: bool,
@@ -205,7 +185,6 @@ pub struct ExrInfo {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Jpeg2000ComponentInfo {
     pub precision: u32,
     pub signed: bool,
@@ -214,7 +193,6 @@ pub struct Jpeg2000ComponentInfo {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Jpeg2000Info {
     pub width: u32,
     pub height: u32,
