@@ -5,7 +5,7 @@ pub fn decode_be_u16(src: &[u8], dst: &mut [u16]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return decode_be_u16_wasm(src, dst);
+    return unsafe { decode_be_u16_wasm(src, dst) };
 
     #[allow(unreachable_code)]
     decode_be_u16_scalar(src, dst);
@@ -18,7 +18,7 @@ pub fn drop_alpha_u16(src: &[u16], dst: &mut [u16]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return drop_alpha_u16_wasm(src, dst);
+    return unsafe { drop_alpha_u16_wasm(src, dst) };
 
     #[allow(unreachable_code)]
     drop_alpha_u16_scalar(src, dst);
@@ -31,7 +31,7 @@ pub fn is_opaque_u16(samples: &[u16]) -> bool {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return is_opaque_u16_wasm(samples);
+    return unsafe { is_opaque_u16_wasm(samples) };
 
     #[allow(unreachable_code)]
     is_opaque_u16_scalar(samples)
@@ -178,7 +178,7 @@ unsafe fn is_opaque_u16_avx2(samples: &[u16]) -> bool {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn decode_be_u16_wasm(src: &[u8], dst: &mut [u16]) {
+unsafe fn decode_be_u16_wasm(src: &[u8], dst: &mut [u16]) {
     use std::arch::wasm32::*;
 
     let n = (src.len() / 2).min(dst.len());
@@ -197,7 +197,7 @@ fn decode_be_u16_wasm(src: &[u8], dst: &mut [u16]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn drop_alpha_u16_wasm(src: &[u16], dst: &mut [u16]) {
+unsafe fn drop_alpha_u16_wasm(src: &[u16], dst: &mut [u16]) {
     use std::arch::wasm32::*;
 
     let pixels = (src.len() / 4).min(dst.len() / 3);
@@ -217,7 +217,7 @@ fn drop_alpha_u16_wasm(src: &[u16], dst: &mut [u16]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn is_opaque_u16_wasm(samples: &[u16]) -> bool {
+unsafe fn is_opaque_u16_wasm(samples: &[u16]) -> bool {
     use std::arch::wasm32::*;
 
     let pixels = samples.len() / 4;

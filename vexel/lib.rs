@@ -20,6 +20,7 @@ pub use utils::limits::Limits;
 pub(crate) use utils::logger::{log_debug, log_error, log_warn};
 pub use utils::logger::{set_log_level, LogLevel};
 use wasm_bindgen::prelude::wasm_bindgen;
+#[cfg(all(target_arch = "wasm32", feature = "rayon"))]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
 use crate::decoders::bmp::BmpDecoder;

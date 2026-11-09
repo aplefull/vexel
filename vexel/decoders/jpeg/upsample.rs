@@ -7,6 +7,7 @@ pub fn widen_i16_row(src: &[i16], dst: &mut [i32]) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return widen_i16_row_wasm(src, dst);
 
+    #[allow(unreachable_code)]
     widen_i16_row_scalar(src, dst);
 }
 
@@ -19,6 +20,7 @@ pub fn upsample_h2v1_row(src: &[i16], dst: &mut [i32], sw: usize, tw: usize) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return upsample_h2v1_row_wasm(src, dst, sw, tw);
 
+    #[allow(unreachable_code)]
     upsample_h2v1_row_scalar(src, dst, sw, tw);
 }
 
@@ -31,6 +33,7 @@ pub fn upsample_h1v2_row(src: &[i16], neighbor: &[i16], bias: i32, dst: &mut [i3
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return upsample_h1v2_row_wasm(src, neighbor, bias, dst, sw);
 
+    #[allow(unreachable_code)]
     upsample_h1v2_row_scalar(src, neighbor, bias, dst, sw);
 }
 
@@ -43,6 +46,7 @@ pub fn compute_col_sums(src: &[i16], neighbor: &[i16], col_sums: &mut [i32], sw:
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return compute_col_sums_wasm(src, neighbor, col_sums, sw);
 
+    #[allow(unreachable_code)]
     compute_col_sums_scalar(src, neighbor, col_sums, sw);
 }
 
@@ -55,6 +59,7 @@ pub fn upsample_h2v2_row(col_sums: &[i32], prev_col_sums: &[i32], dst: &mut [i32
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return upsample_h2v2_row_wasm(col_sums, prev_col_sums, dst, sw, tw);
 
+    #[allow(unreachable_code)]
     upsample_h2v2_row_scalar(col_sums, prev_col_sums, dst, sw, tw);
 }
 

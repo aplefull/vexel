@@ -13,7 +13,7 @@ pub fn unpack_u16(src: &[u8], dst: &mut [u16], signed: bool, big_endian: bool, s
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return unpack_u16_wasm(src, dst, signed, big_endian, shift);
+    return unsafe { unpack_u16_wasm(src, dst, signed, big_endian, shift) };
 
     #[allow(unreachable_code)]
     unpack_u16_scalar(src, dst, signed, big_endian, shift);
@@ -209,7 +209,7 @@ unsafe fn unpack_u16_avx2(src: &[u8], dst: &mut [u16], signed: bool, big_endian:
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn unpack_u16_wasm(src: &[u8], dst: &mut [u16], signed: bool, big_endian: bool, shift: u8) {
+unsafe fn unpack_u16_wasm(src: &[u8], dst: &mut [u16], signed: bool, big_endian: bool, shift: u8) {
     use std::arch::wasm32::*;
 
     let n = (src.len() / 2).min(dst.len());

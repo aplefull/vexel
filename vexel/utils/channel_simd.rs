@@ -9,6 +9,7 @@ pub fn scale_u16_to_u8(src: &[u16], dst: &mut [u8]) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return scale_u16_to_u8_wasm(src, dst);
 
+    #[allow(unreachable_code)]
     scale_u16_to_u8_scalar(src, dst);
 }
 
@@ -23,6 +24,7 @@ pub fn scale_f32_to_u8(src: &[f32], dst: &mut [u8]) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return scale_f32_to_u8_wasm(src, dst);
 
+    #[allow(unreachable_code)]
     scale_f32_to_u8_scalar(src, dst);
 }
 
@@ -38,6 +40,7 @@ pub fn rgb_to_rgba(src: &[u8], dst: &mut [u8]) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return rgb_to_rgba_wasm(src, dst);
 
+    #[allow(unreachable_code)]
     rgb_to_rgba_scalar(src, dst);
 }
 
@@ -53,6 +56,7 @@ pub fn rgba_to_rgb(src: &[u8], dst: &mut [u8]) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return rgba_to_rgb_wasm(src, dst);
 
+    #[allow(unreachable_code)]
     rgba_to_rgb_scalar(src, dst);
 }
 

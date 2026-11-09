@@ -11,12 +11,14 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 rayon = { version = "1.10.0", optional = true }
 wasm-bindgen = "0.2"
-wasm-bindgen-rayon = "1.2"
 web-sys = { version = "0.3.76", features = ["console"] }
 js-sys = "0.3.76"
 serde = { version = "1.0.217", features = ["derive"] }
 serde-wasm-bindgen = "0.6.5"
 tsify = "0.5.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-rayon = { version = "1.2", optional = true }
 
 [dev-dependencies]
 libavif = "0.14.0"
@@ -26,12 +28,26 @@ criterion = { version = "0.8", features = ["html_reports"] }
 walkdir = "2"
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "-O",
+    "--enable-threads",
+    "--enable-bulk-memory",
+    "--enable-mutable-globals",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-reference-types",
+    "--enable-multivalue",
+    "--enable-simd",
+]
+
 [[bench]]
 name = "decode"
 harness = false
 
 [features]
 default = ["rayon"]
+rayon = ["dep:rayon", "dep:wasm-bindgen-rayon"]
 
 [lints]
 workspace = true

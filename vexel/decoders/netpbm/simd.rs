@@ -9,6 +9,7 @@ pub fn scale_u32_to_u8(src: &[u32], dst: &mut [u8], max_value: u32) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return scale_u32_to_u8_wasm(src, dst, max_value);
 
+    #[allow(unreachable_code)]
     scale_u32_to_u8_scalar(src, dst, max_value);
 }
 
@@ -23,6 +24,7 @@ pub fn scale_u32_to_u16(src: &[u32], dst: &mut [u16], max_value: u32) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return scale_u32_to_u16_wasm(src, dst, max_value);
 
+    #[allow(unreachable_code)]
     scale_u32_to_u16_scalar(src, dst, max_value);
 }
 
@@ -42,6 +44,7 @@ pub fn scale_u8(src: &[u8], dst: &mut [u8], max_value: u8) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return scale_u8_wasm(src, dst, max_value);
 
+    #[allow(unreachable_code)]
     scale_u8_scalar(src, dst, max_value);
 }
 
@@ -56,6 +59,7 @@ pub fn scale_u16_be(src: &[u8], dst: &mut [u16], max_value: u16) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return scale_u16_be_wasm(src, dst, max_value);
 
+    #[allow(unreachable_code)]
     scale_u16_be_scalar(src, dst, max_value);
 }
 
@@ -70,6 +74,7 @@ pub fn unpack_bits(src: &[u8], dst: &mut [u8], width: u32, height: u32) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return unpack_bits_wasm(src, dst, width, height);
 
+    #[allow(unreachable_code)]
     unpack_bits_scalar(src, dst, width, height);
 }
 

@@ -17,10 +17,12 @@ pub fn dequantize_and_idct(blocks: &mut [i16], quant: &[u16], level_shift: i32) 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return dequantize_and_idct_wasm(blocks, &scaled, level_shift);
 
+    #[allow(unreachable_code)]
     dequantize_and_idct_scalar(blocks, &scaled, level_shift);
 }
 
 #[inline(always)]
+#[allow(unreachable_code)]
 pub fn nonzero_mask(block: &[i16; 64]) -> u64 {
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {

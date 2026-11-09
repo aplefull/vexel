@@ -3,6 +3,7 @@ use std::arch::wasm32::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(target_arch = "x86_64")]
 const I32_MAX_REPRESENTABLE: f32 = 2_147_483_520.0;
 
 pub fn round_half_to_even_row(src: &[f32], dst: &mut [i64]) {
@@ -12,8 +13,9 @@ pub fn round_half_to_even_row(src: &[f32], dst: &mut [i64]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return round_half_to_even_row_wasm(src, dst);
+    return unsafe { round_half_to_even_row_wasm(src, dst) };
 
+    #[allow(unreachable_code)]
     round_half_to_even_row_scalar(src, dst);
 }
 
@@ -24,8 +26,9 @@ pub fn dequantize_row(src: &[i64], dst: &mut [f32], step_size: f32) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return dequantize_row_wasm(src, dst, step_size);
+    return unsafe { dequantize_row_wasm(src, dst, step_size) };
 
+    #[allow(unreachable_code)]
     dequantize_row_scalar(src, dst, step_size);
 }
 
@@ -36,8 +39,9 @@ pub fn inverse_ict_row(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return inverse_ict_row_wasm(y, u, v);
+    return unsafe { inverse_ict_row_wasm(y, u, v) };
 
+    #[allow(unreachable_code)]
     inverse_ict_row_scalar(y, u, v);
 }
 
@@ -48,8 +52,9 @@ pub fn inverse_rct_row(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return inverse_rct_row_wasm(y, u, v);
+    return unsafe { inverse_rct_row_wasm(y, u, v) };
 
+    #[allow(unreachable_code)]
     inverse_rct_row_scalar(y, u, v);
 }
 
@@ -60,8 +65,9 @@ pub fn shift_and_clamp(samples: &mut [i64], shift: i64, min: i64, max: i64) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return shift_and_clamp_wasm(samples, shift, min, max);
+    return unsafe { shift_and_clamp_wasm(samples, shift, min, max) };
 
+    #[allow(unreachable_code)]
     shift_and_clamp_scalar(samples, shift, min, max);
 }
 
@@ -515,7 +521,7 @@ unsafe fn replicate_row_2x_avx2(src: &[i64], dst: &mut [i64]) {
 // ─── WASM SIMD128 ─────────────────────────────────────────────
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn round_half_to_even_row_wasm(src: &[f32], dst: &mut [i64]) {
+unsafe fn round_half_to_even_row_wasm(src: &[f32], dst: &mut [i64]) {
     let n = src.len().min(dst.len());
     let mut i = 0;
 
@@ -541,7 +547,7 @@ fn round_half_to_even_row_wasm(src: &[f32], dst: &mut [i64]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn dequantize_row_wasm(src: &[i64], dst: &mut [f32], step_size: f32) {
+unsafe fn dequantize_row_wasm(src: &[i64], dst: &mut [f32], step_size: f32) {
     let n = src.len().min(dst.len());
     let scale = f32x4_splat(step_size * 0.5);
     let mut i = 0;
@@ -560,7 +566,7 @@ fn dequantize_row_wasm(src: &[i64], dst: &mut [f32], step_size: f32) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn inverse_ict_row_wasm(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
+unsafe fn inverse_ict_row_wasm(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
     let n = y.len().min(u.len()).min(v.len());
     let mut i = 0;
 
@@ -597,7 +603,7 @@ fn inverse_ict_row_wasm(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn inverse_rct_row_wasm(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
+unsafe fn inverse_rct_row_wasm(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
     let n = y.len().min(u.len()).min(v.len());
     let mut i = 0;
 
@@ -631,7 +637,7 @@ fn inverse_rct_row_wasm(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn shift_and_clamp_wasm(samples: &mut [i64], shift: i64, min: i64, max: i64) {
+unsafe fn shift_and_clamp_wasm(samples: &mut [i64], shift: i64, min: i64, max: i64) {
     let n = samples.len();
     let mut i = 0;
 

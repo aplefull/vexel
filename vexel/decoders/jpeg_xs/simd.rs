@@ -5,7 +5,7 @@ pub fn dwt_predict_interior(evens: &mut [i32], odds: &[i32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return dwt_predict_interior_wasm(evens, odds);
+    return unsafe { dwt_predict_interior_wasm(evens, odds) };
 
     #[allow(unreachable_code)]
     dwt_predict_interior_scalar(evens, odds);
@@ -18,7 +18,7 @@ pub fn dwt_update_interior(odds: &mut [i32], evens: &[i32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return dwt_update_interior_wasm(odds, evens);
+    return unsafe { dwt_update_interior_wasm(odds, evens) };
 
     #[allow(unreachable_code)]
     dwt_update_interior_scalar(odds, evens);
@@ -31,7 +31,7 @@ pub fn dwt_predict_lines(cur: &mut [i32], top: &[i32], bottom: &[i32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return dwt_predict_lines_wasm(cur, top, bottom);
+    return unsafe { dwt_predict_lines_wasm(cur, top, bottom) };
 
     #[allow(unreachable_code)]
     dwt_predict_lines_scalar(cur, top, bottom);
@@ -44,7 +44,7 @@ pub fn dwt_update_lines(cur: &mut [i32], top: &[i32], bottom: &[i32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return dwt_update_lines_wasm(cur, top, bottom);
+    return unsafe { dwt_update_lines_wasm(cur, top, bottom) };
 
     #[allow(unreachable_code)]
     dwt_update_lines_scalar(cur, top, bottom);
@@ -75,7 +75,7 @@ pub fn deinterleave_i32(src: &[i32], evens: &mut [i32], odds: &mut [i32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return deinterleave_i32_wasm(src, evens, odds);
+    return unsafe { deinterleave_i32_wasm(src, evens, odds) };
 
     #[allow(unreachable_code)]
     deinterleave_i32_scalar(src, evens, odds);
@@ -88,7 +88,7 @@ pub fn interleave_i32(evens: &[i32], odds: &[i32], dst: &mut [i32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return interleave_i32_wasm(evens, odds, dst);
+    return unsafe { interleave_i32_wasm(evens, odds, dst) };
 
     #[allow(unreachable_code)]
     interleave_i32_scalar(evens, odds, dst);
@@ -101,7 +101,7 @@ pub fn nlt_linear(values: &mut [i32], dclev_and_rounding: i64, s: u32, max_val: 
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return nlt_linear_wasm(values, dclev_and_rounding, s, max_val);
+    return unsafe { nlt_linear_wasm(values, dclev_and_rounding, s, max_val) };
 
     #[allow(unreachable_code)]
     nlt_linear_scalar(values, dclev_and_rounding, s, max_val);
@@ -114,7 +114,7 @@ pub fn mct_rct(c0: &mut [i32], c1: &mut [i32], c2: &mut [i32]) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return mct_rct_wasm(c0, c1, c2);
+    return unsafe { mct_rct_wasm(c0, c1, c2) };
 
     #[allow(unreachable_code)]
     mct_rct_scalar(c0, c1, c2);
@@ -127,7 +127,7 @@ pub fn deadzone_dequant(values: &mut [u32], gtli: i32) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return deadzone_dequant_wasm(values, gtli);
+    return unsafe { deadzone_dequant_wasm(values, gtli) };
 
     #[allow(unreachable_code)]
     deadzone_dequant_scalar(values, gtli);
@@ -140,7 +140,7 @@ pub fn sign_magnitude_row(src: &[u32], dst: &mut [i32], shift: u32) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return sign_magnitude_row_wasm(src, dst, shift);
+    return unsafe { sign_magnitude_row_wasm(src, dst, shift) };
 
     #[allow(unreachable_code)]
     sign_magnitude_row_scalar(src, dst, shift);
@@ -153,7 +153,7 @@ pub fn pack_clamped_u16(src: &[i32], dst: &mut [u16], max_val: i32) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return pack_clamped_u16_wasm(src, dst, max_val);
+    return unsafe { pack_clamped_u16_wasm(src, dst, max_val) };
 
     #[allow(unreachable_code)]
     pack_clamped_u16_scalar(src, dst, max_val);
@@ -166,7 +166,7 @@ pub fn pack_clamped_u8(src: &[i32], dst: &mut [u8], max_val: i32) {
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return pack_clamped_u8_wasm(src, dst, max_val);
+    return unsafe { pack_clamped_u8_wasm(src, dst, max_val) };
 
     #[allow(unreachable_code)]
     pack_clamped_u8_scalar(src, dst, max_val);
@@ -608,7 +608,7 @@ unsafe fn deadzone_dequant_avx2(values: &mut [u32], gtli: i32) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn deadzone_dequant_wasm(values: &mut [u32], gtli: i32) {
+unsafe fn deadzone_dequant_wasm(values: &mut [u32], gtli: i32) {
     use std::arch::wasm32::*;
 
     let n = values.len();
@@ -786,7 +786,7 @@ unsafe fn interleave_rgb_u8_avx2(r: &[i32], g: &[i32], b: &[i32], dst: &mut [u8]
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn dwt_predict_interior_wasm(evens: &mut [i32], odds: &[i32]) {
+unsafe fn dwt_predict_interior_wasm(evens: &mut [i32], odds: &[i32]) {
     use std::arch::wasm32::*;
 
     let n = evens.len().min(odds.len().saturating_sub(1));
@@ -811,7 +811,7 @@ fn dwt_predict_interior_wasm(evens: &mut [i32], odds: &[i32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn dwt_update_interior_wasm(odds: &mut [i32], evens: &[i32]) {
+unsafe fn dwt_update_interior_wasm(odds: &mut [i32], evens: &[i32]) {
     use std::arch::wasm32::*;
 
     let n = odds.len().min(evens.len().saturating_sub(1));
@@ -835,7 +835,7 @@ fn dwt_update_interior_wasm(odds: &mut [i32], evens: &[i32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn dwt_predict_lines_wasm(cur: &mut [i32], top: &[i32], bottom: &[i32]) {
+unsafe fn dwt_predict_lines_wasm(cur: &mut [i32], top: &[i32], bottom: &[i32]) {
     use std::arch::wasm32::*;
 
     let n = cur.len().min(top.len()).min(bottom.len());
@@ -860,7 +860,7 @@ fn dwt_predict_lines_wasm(cur: &mut [i32], top: &[i32], bottom: &[i32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn dwt_update_lines_wasm(cur: &mut [i32], top: &[i32], bottom: &[i32]) {
+unsafe fn dwt_update_lines_wasm(cur: &mut [i32], top: &[i32], bottom: &[i32]) {
     use std::arch::wasm32::*;
 
     let n = cur.len().min(top.len()).min(bottom.len());
@@ -884,7 +884,7 @@ fn dwt_update_lines_wasm(cur: &mut [i32], top: &[i32], bottom: &[i32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn deinterleave_i32_wasm(src: &[i32], evens: &mut [i32], odds: &mut [i32]) {
+unsafe fn deinterleave_i32_wasm(src: &[i32], evens: &mut [i32], odds: &mut [i32]) {
     use std::arch::wasm32::*;
 
     let n = evens.len().min(odds.len()).min(src.len() / 2);
@@ -909,7 +909,7 @@ fn deinterleave_i32_wasm(src: &[i32], evens: &mut [i32], odds: &mut [i32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn interleave_i32_wasm(evens: &[i32], odds: &[i32], dst: &mut [i32]) {
+unsafe fn interleave_i32_wasm(evens: &[i32], odds: &[i32], dst: &mut [i32]) {
     use std::arch::wasm32::*;
 
     let n = evens.len().min(odds.len()).min(dst.len() / 2);
@@ -934,12 +934,12 @@ fn interleave_i32_wasm(evens: &[i32], odds: &[i32], dst: &mut [i32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn nlt_linear_wasm(values: &mut [i32], dclev_and_rounding: i64, s: u32, max_val: i32) {
+unsafe fn nlt_linear_wasm(values: &mut [i32], dclev_and_rounding: i64, s: u32, max_val: i32) {
     nlt_linear_scalar(values, dclev_and_rounding, s, max_val);
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn mct_rct_wasm(c0: &mut [i32], c1: &mut [i32], c2: &mut [i32]) {
+unsafe fn mct_rct_wasm(c0: &mut [i32], c1: &mut [i32], c2: &mut [i32]) {
     use std::arch::wasm32::*;
 
     let n = c0.len().min(c1.len()).min(c2.len());
@@ -973,7 +973,7 @@ fn mct_rct_wasm(c0: &mut [i32], c1: &mut [i32], c2: &mut [i32]) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn sign_magnitude_row_wasm(src: &[u32], dst: &mut [i32], shift: u32) {
+unsafe fn sign_magnitude_row_wasm(src: &[u32], dst: &mut [i32], shift: u32) {
     use std::arch::wasm32::*;
 
     let n = src.len().min(dst.len());
@@ -996,7 +996,7 @@ fn sign_magnitude_row_wasm(src: &[u32], dst: &mut [i32], shift: u32) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn pack_clamped_u16_wasm(src: &[i32], dst: &mut [u16], max_val: i32) {
+unsafe fn pack_clamped_u16_wasm(src: &[i32], dst: &mut [u16], max_val: i32) {
     use std::arch::wasm32::*;
 
     let n = src.len().min(dst.len());
@@ -1020,7 +1020,7 @@ fn pack_clamped_u16_wasm(src: &[i32], dst: &mut [u16], max_val: i32) {
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn pack_clamped_u8_wasm(src: &[i32], dst: &mut [u8], max_val: i32) {
+unsafe fn pack_clamped_u8_wasm(src: &[i32], dst: &mut [u8], max_val: i32) {
     use std::arch::wasm32::*;
 
     let n = src.len().min(dst.len());

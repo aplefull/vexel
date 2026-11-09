@@ -9,6 +9,7 @@ pub fn bgr_to_rgb_row(src: &[u8], dst: &mut [u8], width: usize) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return bgr_to_rgb_row_wasm(src, dst, width);
 
+    #[allow(unreachable_code)]
     bgr_to_rgb_row_scalar(src, dst, width);
 }
 
@@ -21,6 +22,7 @@ pub fn apply_palette_row(indices: &[u8], palette: &[ColorEntry], dst: &mut [u8],
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return apply_palette_row_wasm(indices, palette, dst, width);
 
+    #[allow(unreachable_code)]
     apply_palette_row_scalar(indices, palette, dst, width);
 }
 
@@ -52,6 +54,7 @@ pub fn expand_rgb555_row(src: &[u8], dst: &mut [u8], width: usize) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return expand_rgb555_row_wasm(src, dst, width);
 
+    #[allow(unreachable_code)]
     expand_rgb555_row_scalar(src, dst, width);
 }
 
@@ -120,6 +123,7 @@ pub fn fill_bytes(dst: &mut [u8], value: u8) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     return fill_bytes_wasm(dst, value);
 
+    #[allow(unreachable_code)]
     dst.fill(value);
 }
 
@@ -571,8 +575,6 @@ fn bgr_to_rgb_row_wasm(src: &[u8], dst: &mut [u8], width: usize) {
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 fn apply_palette_row_wasm(indices: &[u8], palette: &[ColorEntry], dst: &mut [u8], width: usize) {
-    use std::arch::wasm32::*;
-
     let mut flat = [0u8; 256 * 3];
     let max = palette.len().min(256);
     for i in 0..max {
