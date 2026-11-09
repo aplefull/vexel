@@ -111,7 +111,7 @@ fn decode_powerpc(data: &mut [u8], start_offset: u32) {
             | (u32::from(chunk[2]) << 8)
             | u32::from(chunk[3] & !3);
 
-        let dest = src.wrapping_sub(start_offset.wrapping_add(index as u32 * 4));
+        let dest = src.wrapping_sub(start_offset.wrapping_add((index as u32).wrapping_mul(4)));
 
         chunk[0] = 0x48 | ((dest >> 24) & 0x03) as u8;
         chunk[1] = (dest >> 16) as u8;
@@ -127,7 +127,7 @@ fn decode_arm(data: &mut [u8], start_offset: u32) {
         }
 
         let src = ((u32::from(chunk[2]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[0])) << 2;
-        let dest = src.wrapping_sub(start_offset.wrapping_add(index as u32 * 4).wrapping_add(8)) >> 2;
+        let dest = src.wrapping_sub(start_offset.wrapping_add((index as u32).wrapping_mul(4)).wrapping_add(8)) >> 2;
 
         chunk[2] = (dest >> 16) as u8;
         chunk[1] = (dest >> 8) as u8;
@@ -178,7 +178,7 @@ fn decode_sparc(data: &mut [u8], start_offset: u32) {
             | u32::from(chunk[3]))
             << 2;
 
-        let dest = src.wrapping_sub(start_offset.wrapping_add(index as u32 * 4)) >> 2;
+        let dest = src.wrapping_sub(start_offset.wrapping_add((index as u32).wrapping_mul(4))) >> 2;
         let dest = ((0u32.wrapping_sub((dest >> 22) & 1) << 22) & 0x3fff_ffff) | (dest & 0x3f_ffff) | 0x4000_0000;
 
         chunk[0] = (dest >> 24) as u8;
@@ -219,7 +219,7 @@ fn decode_ia64(data: &mut [u8], start_offset: u32) {
             let mut src = (((norm >> 13) & 0xf_ffff) | (((norm >> 36) & 1) << 20)) as u32;
             src <<= 4;
 
-            let dest = src.wrapping_sub(start_offset.wrapping_add(index as u32 * 16)) >> 4;
+            let dest = src.wrapping_sub(start_offset.wrapping_add((index as u32).wrapping_mul(16))) >> 4;
 
             let mut norm = norm;
             norm &= !(0x8f_ffff << 13);

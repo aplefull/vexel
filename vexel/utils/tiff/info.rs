@@ -21,6 +21,7 @@ const MAX_STORED_VALUE_COST: usize = 16 << 20;
 const SMALL_VALUE_BYTES: u64 = 128;
 const SMALL_VALUE_RESERVE: usize = 4 << 20;
 const ASCII_STRING_COST: usize = 64;
+const MAX_CHUNK_TABLE_VALUES: u64 = 1 << 24;
 
 const TIFF_MAGIC: u16 = 42;
 const JPEG_XR_MAGIC: u16 = 0x01BC;
@@ -164,6 +165,7 @@ struct Walker<'a, R: Read + Seek> {
     total_entries: usize,
     value_budget: usize,
     value_budget_warned: bool,
+    chunk_table_budget: u64,
     structure: TiffStructure,
 }
 
@@ -197,6 +199,7 @@ pub fn walk_structure<R: Read + Seek>(reader: &mut BitReader<R>, limits: &mut Li
         total_entries: 0,
         value_budget: MAX_STORED_VALUE_COST,
         value_budget_warned: false,
+        chunk_table_budget: MAX_CHUNK_TABLE_VALUES,
         structure: TiffStructure { sections: Vec::new(), image_ifds: Vec::new() },
     };
 
@@ -416,6 +419,20 @@ impl<R: Read + Seek> Walker<'_, R> {
         } else {
             (TiffTags::StripOffsets, TiffTags::StripByteCounts)
         };
+        let stream_len = self.stream_len;
+        let table_values = |tag: TiffTags| {
+            ifd.entry(tag)
+                .map_or(0, |e| u64::from(e.count).min(stream_len / type_size(e.field_type).unwrap_or(4) as u64))
+        };
+        let wanted = table_values(offsets_tag) + table_values(counts_tag);
+        if wanted > self.chunk_table_budget {
+            log_warn!(
+                "TIFF strip/tile tables exceed {} values in total, not summarizing the rest",
+                MAX_CHUNK_TABLE_VALUES
+            );
+            return None;
+        }
+        self.chunk_table_budget -= wanted;
         let offsets = ifd.values::<u32, _>(offsets_tag, self.reader, self.limits)?;
         let counts = ifd.values::<u32, _>(counts_tag, self.reader, self.limits).unwrap_or_default();
         Some((tiled, offsets, counts))

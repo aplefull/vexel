@@ -212,17 +212,13 @@ impl Ifd {
             return Some(self.inline_bytes(entry)[..len].to_vec());
         }
 
+        reader.seek(SeekFrom::Start(entry.value_offset as u64)).ok()?;
+        let len = len.min(usize::try_from(reader.bytes_left().ok()?).unwrap_or(usize::MAX));
         limits.reserve_usize(len).ok()?;
-        let mut data = vec![0u8; len];
-        let failed =
-            reader.seek(SeekFrom::Start(entry.value_offset as u64)).is_err() || reader.read_exact(&mut data).is_err();
+        let data = reader.read_bytes(len);
         limits.free_usize(len);
 
-        if failed {
-            None
-        } else {
-            Some(data)
-        }
+        data.ok().filter(|data| data.len() == entry.count as usize)
     }
 
     pub(crate) fn inline_bytes(&self, entry: &IfdEntry) -> [u8; 4] {
@@ -272,15 +268,8 @@ fn read_multiple_values<T, R: Read + Seek>(
 where
     T: TryFrom<u32>,
 {
-    let item_size = std::mem::size_of::<T>();
-    let vec_bytes = (count as usize).saturating_mul(item_size);
-    limits.reserve_usize(vec_bytes)?;
-    let mut values = Vec::with_capacity(count as usize);
-
     if count == 1 {
-        values.push(read_single_value(type_, value_offset, byte_order, reader)?);
-        limits.free_usize(vec_bytes);
-        return Ok(values);
+        return Ok(vec![read_single_value(type_, value_offset, byte_order, reader)?]);
     }
 
     let bytes_per_value = type_size(type_).unwrap_or(4) as u32;
@@ -294,6 +283,7 @@ where
         let mut cursor = std::io::Cursor::new(val_bytes);
         let mut inline_reader = BitReader::new(&mut cursor);
         inline_reader.set_endianness(byte_order);
+        let mut values = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let value = match type_ {
                 1 | 2 | 6 | 7 => inline_reader.read_u8()? as u32,
@@ -303,25 +293,31 @@ where
             };
             values.push(T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
         }
-        limits.free_usize(vec_bytes);
         return Ok(values);
     }
 
     reader.seek(SeekFrom::Start(value_offset as u64))?;
+    let capacity = (count as u64).min(reader.bytes_left()? / bytes_per_value as u64) as usize;
+    let vec_bytes = capacity.saturating_mul(std::mem::size_of::<T>());
+    limits.reserve_usize(vec_bytes)?;
 
-    for _ in 0..count {
-        let value = match type_ {
-            1 | 2 | 6 | 7 => reader.read_u8()? as u32,
-            3 | 8 => reader.read_u16()? as u32,
-            4 | 9 | 13 => reader.read_u32()?,
-            _ => return Err(VexelError::Custom("Unsupported type".to_string())),
-        };
+    let result = (|| {
+        let mut values = Vec::with_capacity(capacity);
+        for _ in 0..count {
+            let value = match type_ {
+                1 | 2 | 6 | 7 => reader.read_u8()? as u32,
+                3 | 8 => reader.read_u16()? as u32,
+                4 | 9 | 13 => reader.read_u32()?,
+                _ => return Err(VexelError::Custom("Unsupported type".to_string())),
+            };
 
-        values.push(T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
-    }
+            values.push(T::try_from(value).map_err(|_| VexelError::Custom("Value conversion error".to_string()))?);
+        }
+        Ok(values)
+    })();
 
     limits.free_usize(vec_bytes);
-    Ok(values)
+    result
 }
 
 fn read_rational<R: Read + Seek>(value_offset: u32, reader: &mut BitReader<R>) -> VexelResult<f32> {
@@ -344,20 +340,24 @@ fn read_rationals<R: Read + Seek>(
     signed: bool,
 ) -> VexelResult<Vec<f32>> {
     reader.seek(SeekFrom::Start(value_offset as u64))?;
-    let vec_bytes = (count as usize).saturating_mul(std::mem::size_of::<f32>());
+    let capacity = (count as u64).min(reader.bytes_left()? / 8) as usize;
+    let vec_bytes = capacity.saturating_mul(std::mem::size_of::<f32>());
     limits.reserve_usize(vec_bytes)?;
-    let mut values = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let numerator = reader.read_u32()?;
-        let denominator = reader.read_u32()?;
-        if denominator == 0 {
-            values.push(0.0);
-        } else if signed {
-            values.push(numerator as i32 as f32 / denominator as i32 as f32);
-        } else {
-            values.push(numerator as f32 / denominator as f32);
+    let result = (|| {
+        let mut values = Vec::with_capacity(capacity);
+        for _ in 0..count {
+            let numerator = reader.read_u32()?;
+            let denominator = reader.read_u32()?;
+            if denominator == 0 {
+                values.push(0.0);
+            } else if signed {
+                values.push(numerator as i32 as f32 / denominator as i32 as f32);
+            } else {
+                values.push(numerator as f32 / denominator as f32);
+            }
         }
-    }
+        Ok::<_, VexelError>(values)
+    })();
     limits.free_usize(vec_bytes);
-    Ok(values)
+    result
 }

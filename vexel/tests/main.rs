@@ -376,6 +376,66 @@ pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
+    use std::cell::{Cell, RefCell};
+    use std::io::Cursor;
+
+    thread_local! {
+        static PANIC_COUNT: Cell<usize> = const { Cell::new(0) };
+        static LAST_PANIC: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    static INSTALL_PANIC_COUNTER: std::sync::Once = std::sync::Once::new();
+
+    INSTALL_PANIC_COUNTER.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            PANIC_COUNT.with(|count| count.set(count.get() + 1));
+            LAST_PANIC.with(|last| *last.borrow_mut() = panic_info.to_string());
+            previous(panic_info);
+        }));
+    });
+
+    type ArtifactStage = (&'static str, fn(&[u8]) -> bool);
+
+    let stages: [ArtifactStage; 5] = [
+        ("get_info", |data| {
+            if let Ok(mut decoder) = Vexel::new(Cursor::new(data)) {
+                let info = decoder.get_info();
+                let _ = info.summary();
+                let _ = info.to_tree();
+                let _ = info.to_string();
+            }
+            false
+        }),
+        ("decode", |data| match Vexel::new(Cursor::new(data)) {
+            Ok(mut decoder) => matches!(decoder.decode(), Err(VexelError::Panic(_))),
+            Err(error) => matches!(error, VexelError::Panic(_)),
+        }),
+        ("decode_pages", |data| match Vexel::new(Cursor::new(data)) {
+            Ok(mut decoder) => matches!(decoder.decode_pages(), Err(VexelError::Panic(_))),
+            Err(error) => matches!(error, VexelError::Panic(_)),
+        }),
+        ("decode_thumbnails", |data| match Vexel::new(Cursor::new(data)) {
+            Ok(mut decoder) => matches!(decoder.decode_thumbnails(), Err(VexelError::Panic(_))),
+            Err(error) => matches!(error, VexelError::Panic(_)),
+        }),
+        ("decode_frames", |data| {
+            let Ok(mut decoder) = Vexel::new(Cursor::new(data)) else {
+                return false;
+            };
+            let mut frames = match decoder.decode_frames() {
+                Ok(frames) => frames,
+                Err(error) => return matches!(error, VexelError::Panic(_)),
+            };
+            loop {
+                match frames.next_frame() {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return false,
+                    Err(error) => return matches!(error, VexelError::Panic(_)),
+                }
+            }
+        }),
+    ];
+
     let artifacts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/artifacts");
 
     if !artifacts_dir.exists() {
@@ -396,19 +456,30 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
 
         checked += 1;
 
-        let cursor = std::io::Cursor::new(data);
         let start = std::time::Instant::now();
-        if let Ok(mut decoder) = Vexel::new(cursor) {
-            if let Err(VexelError::Panic(msg)) = decoder.decode() {
-                let elapsed = start.elapsed();
-                println!("  FAIL  {}  (panic: {})  [{:.1}ms]", name, msg, elapsed.as_secs_f64() * 1000.0);
-                failures.push(name);
-                continue;
+        let mut failed_stages = Vec::new();
+
+        for (stage, run) in &stages {
+            let panics_before = PANIC_COUNT.with(Cell::get);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&data)));
+
+            if !matches!(outcome, Ok(false)) || PANIC_COUNT.with(Cell::get) != panics_before {
+                let message = LAST_PANIC.with(|last| last.borrow().clone());
+                failed_stages.push(format!("{}: {}", stage, message));
             }
         }
+
         let elapsed = start.elapsed();
 
-        println!("  OK    {}  [{:.1}ms]", name, elapsed.as_secs_f64() * 1000.0);
+        if failed_stages.is_empty() {
+            println!("  OK    {}  [{:.1}ms]", name, elapsed.as_secs_f64() * 1000.0);
+        } else {
+            println!("  FAIL  {}  [{:.1}ms]", name, elapsed.as_secs_f64() * 1000.0);
+            for failure in &failed_stages {
+                println!("          {}", failure);
+            }
+            failures.push(name);
+        }
     }
 
     println!();

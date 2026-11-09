@@ -1,7 +1,6 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use std::io::Cursor;
 
 fuzz_target!(|data: &[u8]| {
     let input = if data.starts_with(&[0xFF, 0x4F, 0xFF, 0x51]) {
@@ -11,10 +10,5 @@ fuzz_target!(|data: &[u8]| {
         v.extend_from_slice(data);
         v
     };
-    if let Ok(mut decoder) = vexel::Vexel::new(Cursor::new(&input[..])) {
-        let _ = decoder.get_info();
-    }
-    if let Ok(mut decoder) = vexel::Vexel::new(Cursor::new(input)) {
-        let _ = decoder.decode();
-    }
+    vexel_fuzz::exercise(&input);
 });

@@ -193,10 +193,19 @@ impl Writer {
 
         for frame in frames {
             let frame = frame.map_err(Error::other)?;
-            let (_, _, has_alpha) = *canvas.get_or_insert((frame.width(), frame.height(), frame.has_alpha()));
+            let delay = frame.delay();
+            let frame = frame.into_image();
+            Writer::validate_image(&frame)?;
+            let (width, height, has_alpha) = *canvas.get_or_insert((frame.width(), frame.height(), frame.has_alpha()));
+            if (frame.width(), frame.height()) != (width, height) {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("frame is {}x{}, animation canvas is {}x{}", frame.width(), frame.height(), width, height),
+                ));
+            }
 
-            let delta = if frame.delay() == 0 { 1 } else { frame.delay() as i32 };
-            timestamp_ms += delta;
+            let delta = if delay == 0 { 1 } else { i32::try_from(delay).unwrap_or(i32::MAX) };
+            timestamp_ms = timestamp_ms.saturating_add(delta);
 
             let pixels =
                 if has_alpha { frame.into_pixels().into_rgba8_bytes() } else { frame.into_pixels().into_rgb8_bytes() };
@@ -414,7 +423,7 @@ impl Writer {
 
         let width = image.width();
         let height = image.height();
-        let expected_pixels = (width * height) as usize;
+        let expected_pixels = u64::from(width) * u64::from(height);
 
         let (channels, bytes_per_element) = match image.pixel_format() {
             PixelFormat::RGB8 => (3usize, 1usize),
@@ -436,8 +445,8 @@ impl Writer {
             PixelFormat::LA64F => (2, 8),
         };
 
-        let expected_bytes = expected_pixels * channels * bytes_per_element;
-        let actual_bytes = image.pixels().as_bytes().len();
+        let expected_bytes = expected_pixels.saturating_mul((channels * bytes_per_element) as u64);
+        let actual_bytes = image.pixels().as_bytes().len() as u64;
 
         if actual_bytes != expected_bytes {
             let msg = format!(

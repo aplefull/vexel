@@ -3,7 +3,6 @@ mod utils;
 
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 use js_sys::Uint8ClampedArray;
@@ -58,7 +57,7 @@ fn catch_decoder_panic<T>(decode: impl FnOnce() -> VexelResult<T>) -> VexelResul
 
     #[cfg(not(fuzzing))]
     {
-        panic::catch_unwind(AssertUnwindSafe(decode)).unwrap_or_else(|payload| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode)).unwrap_or_else(|payload| {
             let msg = payload
                 .downcast_ref::<String>()
                 .map(|s| s.as_str())
@@ -110,7 +109,11 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     /// reader. Use [`open`](Vexel::open) when decoding a file on disk; use this
     /// constructor when working with an in-memory buffer or a custom reader.
     /// Returns an error if the format cannot be identified.
-    pub fn new(mut reader: R) -> VexelResult<Vexel<R>> {
+    pub fn new(reader: R) -> VexelResult<Vexel<R>> {
+        catch_decoder_panic(move || Vexel::detect_and_construct(reader))
+    }
+
+    fn detect_and_construct(mut reader: R) -> VexelResult<Vexel<R>> {
         let format = Vexel::try_guess_format(&mut reader)?;
 
         log_debug!("Detected image format: {:?}", format);
@@ -218,7 +221,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         let decoder = std::mem::replace(&mut self.decoder, Decoders::Unknown);
 
         match decoder {
-            Decoders::Gif(gif) => Ok(Frames::new(gif.into_frame_source()?)),
+            Decoders::Gif(gif) => catch_decoder_panic(move || gif.into_frame_source()).map(Frames::new),
             other => {
                 self.decoder = other;
 
@@ -552,7 +555,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn parse_icc(data: &[u8]) -> VexelResult<ICCProfile> {
-    ICCProfile::new(data)
+    catch_decoder_panic(|| ICCProfile::new(data))
 }
 
 #[wasm_bindgen]
@@ -740,7 +743,7 @@ impl WasmDecoder {
     #[wasm_bindgen(js_name = tryGuessFormat)]
     pub fn try_guess_format(data: &[u8]) -> Result<String, String> {
         let mut cursor = Cursor::new(data);
-        let format = Vexel::try_guess_format(&mut cursor).map_err(|e| e.to_string())?;
+        let format = catch_decoder_panic(|| Vexel::try_guess_format(&mut cursor)).map_err(|e| e.to_string())?;
 
         Ok(format!("{:?}", format))
     }

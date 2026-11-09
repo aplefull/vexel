@@ -316,7 +316,11 @@ fn decode_rle_plane(data: &[u8], offset: &mut usize, tp: &mut [u32], shift: u32)
 }
 
 fn decode_rle_rows(data: &[u8], width: usize, rows: usize, shifts: &[u32]) -> Vec<u32> {
-    let mut raw = vec![0u32; width * rows];
+    let Some(npixels) = width.checked_mul(rows) else {
+        log_warn!("LogLuv chunk dimensions {}x{} overflow, skipping chunk", width, rows);
+        return Vec::new();
+    };
+    let mut raw = vec![0u32; npixels];
     let mut offset = 0;
 
     for row in 0..rows {
@@ -338,7 +342,10 @@ pub fn decode_sgilog16(data: &[u8], width: usize, rows: usize) -> Vec<u32> {
 }
 
 pub fn decode_sgilog24(data: &[u8], width: usize, rows: usize) -> Vec<u32> {
-    let npixels = width * rows;
+    let Some(npixels) = width.checked_mul(rows) else {
+        log_warn!("LogLuv24 chunk dimensions {}x{} overflow, skipping chunk", width, rows);
+        return Vec::new();
+    };
     let mut raw = vec![0u32; npixels];
 
     for (i, slot) in raw.iter_mut().enumerate() {

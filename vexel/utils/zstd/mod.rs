@@ -15,10 +15,6 @@ impl<'a> ZstdDecoder<'a> {
         ZstdDecoder { data }
     }
 
-    pub fn decode(&self) -> Vec<u8> {
-        self.decode_with_capacity(0)
-    }
-
     pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
         let max_output = if capacity_hint > 0 { capacity_hint.saturating_mul(4) } else { DEFAULT_MAX_OUTPUT };
 

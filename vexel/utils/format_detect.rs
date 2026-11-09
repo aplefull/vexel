@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::decoders::bmp::headers::HeaderReader;
 use crate::utils::error::VexelResult;
 use crate::utils::image::ImageFormat;
+use crate::utils::read::read_vec_up_to;
 
 // Walk the IFD tree and try to figure out if a TIFF file is a camera raw
 pub(crate) fn tiff_is_camera_raw<R: Read + Seek>(reader: &mut R, first_ifd_offset: u32, is_le: bool) -> bool {
@@ -38,10 +39,9 @@ pub(crate) fn tiff_is_camera_raw<R: Read + Seek>(reader: &mut R, first_ifd_offse
         }
         let num_entries = (read_u16(&count_buf) as usize).min(MAX_ENTRIES);
 
-        let mut entries = vec![0u8; num_entries * 12];
-        if reader.read_exact(&mut entries).is_err() {
+        let Ok(entries) = read_vec_up_to(reader, num_entries * 12) else {
             continue;
-        }
+        };
         let mut next_buf = [0u8; 4];
         if reader.read_exact(&mut next_buf).is_ok() {
             queue.push(read_u32(&next_buf));
@@ -73,13 +73,13 @@ pub(crate) fn tiff_is_camera_raw<R: Read + Seek>(reader: &mut R, first_ifd_offse
                     let bytes = if len <= 4 {
                         value[..len].to_vec()
                     } else {
-                        let mut buf = vec![0u8; len];
-                        if reader.seek(SeekFrom::Start(read_u32(value) as u64)).is_err()
-                            || reader.read_exact(&mut buf).is_err()
-                        {
+                        if reader.seek(SeekFrom::Start(read_u32(value) as u64)).is_err() {
                             continue;
                         }
-                        buf
+                        match read_vec_up_to(reader, len) {
+                            Ok(buf) => buf,
+                            Err(_) => continue,
+                        }
                     };
                     let text = String::from_utf8_lossy(&bytes).trim_end_matches('\0').trim().to_uppercase();
                     if tag == 271 {
@@ -94,12 +94,11 @@ pub(crate) fn tiff_is_camera_raw<R: Read + Seek>(reader: &mut R, first_ifd_offse
                         queue.push(read_u32(value));
                     } else {
                         let sub_count = (count as usize).min(8);
-                        let mut buf = vec![0u8; sub_count * 4];
-                        if reader.seek(SeekFrom::Start(read_u32(value) as u64)).is_ok()
-                            && reader.read_exact(&mut buf).is_ok()
-                        {
-                            for chunk in buf.chunks_exact(4) {
-                                queue.push(read_u32(chunk));
+                        if reader.seek(SeekFrom::Start(read_u32(value) as u64)).is_ok() {
+                            if let Ok(buf) = read_vec_up_to(reader, sub_count * 4) {
+                                for chunk in buf.chunks_exact(4) {
+                                    queue.push(read_u32(chunk));
+                                }
                             }
                         }
                     }
@@ -220,7 +219,7 @@ pub(crate) fn try_guess_format_harder<R: Read + Seek>(reader: &mut R) -> VexelRe
     let file_len = reader.seek(SeekFrom::End(0))?;
     reader.seek(SeekFrom::Start(0))?;
 
-    let mut wide_header = vec![0u8; PREFIX_SCAN_LIMIT.min(file_len as usize)];
+    let mut wide_header = vec![0u8; file_len.min(PREFIX_SCAN_LIMIT as u64) as usize];
     let mut read_pos = 0;
     while read_pos < wide_header.len() {
         match reader.read(&mut wide_header[read_pos..]) {

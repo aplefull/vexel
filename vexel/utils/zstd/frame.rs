@@ -41,7 +41,7 @@ pub fn decode(input: &[u8], max_output: usize) -> Vec<u8> {
             }
 
             let size = u32::from_le_bytes([input[pos + 4], input[pos + 5], input[pos + 6], input[pos + 7]]) as usize;
-            let next = pos + 8 + size;
+            let next = (pos + 8).saturating_add(size);
 
             if next > input.len() {
                 log_warn!("zstd skippable frame extends past end of input");
@@ -110,7 +110,10 @@ fn decode_frame(input: &[u8], pos: &mut usize, output: &mut Vec<u8>, max_output:
                 };
 
                 *pos += 1;
-                let count = block_size.min(max_output.saturating_sub(output.len()));
+                if block_size > BLOCK_SIZE_MAX {
+                    log_warn!("zstd RLE block size {} exceeds maximum, clamping", block_size);
+                }
+                let count = block_size.min(BLOCK_SIZE_MAX).min(max_output.saturating_sub(output.len()));
                 output.resize(output.len() + count, byte);
             }
             2 => {
@@ -120,7 +123,8 @@ fn decode_frame(input: &[u8], pos: &mut usize, output: &mut Vec<u8>, max_output:
                 }
 
                 let frame_output = output.len() - frame_start;
-                decompress_block(&mut ctx, &input[*pos..end], output, max_output, frame_output);
+                let block_limit = max_output.min(output.len().saturating_add(BLOCK_SIZE_MAX));
+                decompress_block(&mut ctx, &input[*pos..end], output, block_limit, frame_output);
                 *pos = end;
             }
             _ => {
@@ -236,9 +240,10 @@ fn parse_frame_header(input: &[u8], pos: &mut usize, header: &mut FrameHeader) -
     Some(())
 }
 
-fn append_limited(output: &mut Vec<u8>, data: &[u8], max_output: usize) {
+fn append_limited(output: &mut Vec<u8>, data: &[u8], max_output: usize) -> usize {
     let count = data.len().min(max_output.saturating_sub(output.len()));
     output.extend_from_slice(&data[..count]);
+    count
 }
 
 fn decompress_block(ctx: &mut FrameContext, data: &[u8], output: &mut Vec<u8>, max_output: usize, frame_output: usize) {
@@ -448,9 +453,13 @@ fn execute_sequences(
             log_warn!("zstd sequence requests more literals than available");
         }
 
-        append_limited(output, &literals[literal_pos..literal_pos + literal_length], max_output);
+        let appended = append_limited(output, &literals[literal_pos..literal_pos + literal_length], max_output);
         literal_pos += literal_length;
-        total_output += literal_length;
+        total_output += appended;
+
+        if output.len() >= max_output {
+            break;
+        }
 
         let offset = compute_offset(sequence, &mut history) as usize;
         let match_length = sequence.match_length as usize;

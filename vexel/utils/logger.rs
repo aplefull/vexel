@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
@@ -136,6 +137,14 @@ impl Logger {
         #[cfg(target_arch = "wasm32")]
         console::log_1(&format!("{} [{}] {}", Self::get_timestamp(), level_str, message).into());
 
-        println!("{} [{}{}{}] {}", Self::get_timestamp(), color, level_str, RESET, message);
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "{} [{}{}{}] {}",
+            Self::get_timestamp(),
+            color,
+            level_str,
+            RESET,
+            message
+        );
     }
 }

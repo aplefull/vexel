@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::utils::marker::Marker;
+use crate::utils::read::read_vec;
 use crate::utils::types::ByteOrder;
 
 pub struct BitReader<R: Read + Seek> {
@@ -76,7 +77,7 @@ impl<R: Read + Seek> BitReader<R> {
         let mut result = 0;
         if self.little_endian {
             for i in 0..n {
-                result |= (self.read_bit()? as u32) << i;
+                result |= (self.read_bit()? as u32).checked_shl(u32::from(i)).unwrap_or(0);
             }
         } else {
             for _ in 0..n {
@@ -227,8 +228,7 @@ impl<R: Read + Seek> BitReader<R> {
     // TODO: use this in places where we read bytes and go back
     #[allow(dead_code)]
     pub fn peek_bytes(&mut self, n: usize) -> Result<Vec<u8>, std::io::Error> {
-        let mut bytes = vec![0; n];
-        self.reader.read_exact(&mut bytes)?;
+        let bytes = read_vec(&mut self.reader, n)?;
         self.reader.seek(SeekFrom::Current(-(n as i64)))?;
 
         Ok(bytes)
@@ -274,8 +274,7 @@ impl<R: Read + Seek> BitReader<R> {
     /// - A vector of bytes containing the specified number of bytes in the bitstream
     /// - `std::io::Error` if an I/O error occurs
     pub fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>, std::io::Error> {
-        let mut bytes = vec![0; n];
-        self.reader.read_exact(&mut bytes)?;
+        let bytes = read_vec(&mut self.reader, n)?;
         self.clear_buffer();
 
         Ok(bytes)

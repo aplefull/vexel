@@ -67,7 +67,7 @@ impl<S: InfoSection> FormatInfo<S> {
 
     pub fn shift_offsets(&mut self, base: u64) {
         for section in &mut self.sections {
-            section.offset += base;
+            section.offset = section.offset.saturating_add(base);
         }
     }
 }

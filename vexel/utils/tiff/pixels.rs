@@ -118,7 +118,7 @@ impl<'a> PixelSource<'a> {
         byte_order: ByteOrder,
     ) -> Self {
         let pixel_bits: usize = channels.iter().map(|c| c.bps as usize).sum();
-        let row_bytes = (width * pixel_bits).div_ceil(8);
+        let row_bytes = width.saturating_mul(pixel_bits).div_ceil(8);
 
         PixelSource { data, width, height, channels, pixel_bits, byte_order, row_bytes }
     }
@@ -139,8 +139,8 @@ impl<'a> PixelSource<'a> {
     }
 
     fn row(&self, y: usize) -> &'a [u8] {
-        let start = y * self.row_bytes;
-        let end = (start + self.row_bytes).min(self.data.len());
+        let start = y.saturating_mul(self.row_bytes);
+        let end = start.saturating_add(self.row_bytes).min(self.data.len());
         self.data.get(start..end).unwrap_or(&[])
     }
 
@@ -190,7 +190,11 @@ impl<'a> PixelSource<'a> {
 
     fn to_u8(&self, ch: usize, raw: u64) -> u8 {
         let max = self.max_value(ch);
-        ((self.biased(ch, raw) * 255 + max / 2) / max) as u8
+        if max <= u32::MAX as u64 {
+            ((self.biased(ch, raw) * 255 + max / 2) / max) as u8
+        } else {
+            ((self.biased(ch, raw) as u128 * 255 + max as u128 / 2) / max as u128) as u8
+        }
     }
 
     fn to_u16(&self, ch: usize, raw: u64) -> u16 {
@@ -971,7 +975,7 @@ pub(crate) fn write_msb_bits(row: &mut [u8], bit_pos: usize, bps: u16, value: u6
         if byte_idx >= row.len() {
             break;
         }
-        let bit = (value >> (bps as usize - 1 - i)) & 1;
+        let bit = value.checked_shr((bps as usize - 1 - i) as u32).unwrap_or(0) & 1;
         let shift = 7 - (bit_idx % 8);
         row[byte_idx] = (row[byte_idx] & !(1 << shift)) | ((bit as u8) << shift);
     }

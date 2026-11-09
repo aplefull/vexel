@@ -72,7 +72,9 @@ impl LzwTable {
             self.prefix[idx] = prefix_code;
             self.suffix[idx] = suffix_byte;
         }
-        self.free += 1;
+        if idx < LZW_MAX_ENTRIES {
+            self.free += 1;
+        }
         if self.free > self.max_code && self.nbits < LZW_MAX_BITS {
             self.nbits += 1;
             self.max_code = (1u16 << self.nbits) - 1 - self.early_change;
@@ -161,26 +163,40 @@ impl<'a> BitReaderLsb<'a> {
     }
 }
 
+const DEFAULT_MAX_OUTPUT: usize = 256 * 1024 * 1024;
+
+fn max_output_for(capacity_hint: usize) -> usize {
+    if capacity_hint > 0 {
+        capacity_hint.saturating_mul(4)
+    } else {
+        DEFAULT_MAX_OUTPUT
+    }
+}
+
 pub fn decompress_lzw(data: &[u8]) -> Vec<u8> {
+    decompress_lzw_with_capacity(data, 0)
+}
+
+pub fn decompress_lzw_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
+    let max_output = max_output_for(capacity_hint);
     if data.is_empty() {
         return Vec::new();
     }
     let is_old_style = data.len() >= 2 && data[0] == 0 && (data[1] & 0x1) != 0;
-    if is_old_style {
-        decompress_lzw_lsb(data)
-    } else {
-        decompress_lzw_msb(data)
-    }
+    let mut output =
+        if is_old_style { decompress_lzw_lsb(data, max_output) } else { decompress_lzw_msb(data, max_output) };
+    output.truncate(max_output);
+    output
 }
 
-fn decompress_lzw_msb(data: &[u8]) -> Vec<u8> {
+fn decompress_lzw_msb(data: &[u8], max_output: usize) -> Vec<u8> {
     let mut output = Vec::new();
     let mut table = LzwTable::new(true);
     let mut reader = BitReaderMsb::new(data);
     let mut old_code: Option<u16> = None;
 
     while let Some(code) = reader.read(table.nbits) {
-        if code == LZW_EOI_CODE {
+        if code == LZW_EOI_CODE || output.len() >= max_output {
             break;
         }
 
@@ -232,14 +248,14 @@ fn decompress_lzw_msb(data: &[u8]) -> Vec<u8> {
     output
 }
 
-fn decompress_lzw_lsb(data: &[u8]) -> Vec<u8> {
+fn decompress_lzw_lsb(data: &[u8], max_output: usize) -> Vec<u8> {
     let mut output = Vec::new();
     let mut table = LzwTable::new(false);
     let mut reader = BitReaderLsb::new(data);
     let mut old_code: Option<u16> = None;
 
     while let Some(code) = reader.read(table.nbits) {
-        if code == LZW_EOI_CODE {
+        if code == LZW_EOI_CODE || output.len() >= max_output {
             break;
         }
 
@@ -292,10 +308,15 @@ fn decompress_lzw_lsb(data: &[u8]) -> Vec<u8> {
 }
 
 pub fn decompress_packbits(data: &[u8]) -> Vec<u8> {
+    decompress_packbits_with_capacity(data, 0)
+}
+
+pub fn decompress_packbits_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
+    let max_output = max_output_for(capacity_hint);
     let mut output = Vec::new();
     let mut i = 0;
 
-    while i < data.len() {
+    while i < data.len() && output.len() < max_output {
         let header = data[i] as i8;
         i += 1;
 
@@ -309,26 +330,37 @@ pub fn decompress_packbits(data: &[u8]) -> Vec<u8> {
             if i < data.len() {
                 let byte = data[i];
                 i += 1;
-                for _ in 0..count {
-                    output.push(byte);
-                }
+                output.resize(output.len() + count, byte);
             }
         }
     }
 
+    output.truncate(max_output);
     output
 }
 
 pub fn decompress_deflate(data: &[u8]) -> Vec<u8> {
-    ZlibDecoder::from_slice(data).decode()
+    decompress_deflate_with_capacity(data, 0)
+}
+
+pub fn decompress_deflate_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
+    ZlibDecoder::from_slice(data).decode_with_capacity(capacity_hint)
 }
 
 pub fn decompress_lzma(data: &[u8]) -> Vec<u8> {
-    XzDecoder::from_slice(data).decode()
+    decompress_lzma_with_capacity(data, 0)
+}
+
+pub fn decompress_lzma_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
+    XzDecoder::from_slice(data).decode_with_capacity(capacity_hint)
 }
 
 pub fn decompress_zstd(data: &[u8]) -> Vec<u8> {
-    ZstdDecoder::from_slice(data).decode()
+    decompress_zstd_with_capacity(data, 0)
+}
+
+pub fn decompress_zstd_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
+    ZstdDecoder::from_slice(data).decode_with_capacity(capacity_hint)
 }
 
 pub fn decompress_lerc(
@@ -339,9 +371,15 @@ pub fn decompress_lerc(
     bits_per_sample: u16,
     sample_format: SampleFormat,
 ) -> Vec<u8> {
-    let expected_values = chunk_width * chunk_rows * samples_per_pixel;
     let bytes_per_sample = (bits_per_sample as usize).div_ceil(8).max(1);
-    let expected_bytes = expected_values * bytes_per_sample;
+    let Some(expected_bytes) = chunk_width
+        .checked_mul(chunk_rows)
+        .and_then(|n| n.checked_mul(samples_per_pixel))
+        .and_then(|n| n.checked_mul(bytes_per_sample))
+    else {
+        log_warn!("LERC chunk dimensions {}x{} overflow, skipping chunk", chunk_width, chunk_rows);
+        return Vec::new();
+    };
 
     let raster = match decode_blob(data) {
         Ok(raster) => raster,
@@ -368,7 +406,7 @@ pub fn decompress_lerc(
     }
 
     let values = raster.interleaved();
-    let pixels = (raster.width as usize * raster.height as usize).min(chunk_width * chunk_rows);
+    let pixels = (raster.width as usize).saturating_mul(raster.height as usize).min(chunk_width * chunk_rows);
 
     let mut out = vec![0u8; expected_bytes];
 
@@ -457,8 +495,17 @@ fn normalized_samples(pixels: PixelData) -> Vec<f64> {
 fn serialize_chunk(chunk: DecodedChunk, layout: ChunkLayout) -> Vec<u8> {
     let spp = layout.samples_per_pixel;
     let bps = layout.bits_per_sample.clamp(1, 64);
-    let row_stride = (layout.width * spp * bps as usize).div_ceil(8);
-    let mut out = vec![0u8; row_stride * layout.rows];
+    let Some((row_stride, total)) = layout
+        .width
+        .checked_mul(spp)
+        .and_then(|n| n.checked_mul(bps as usize))
+        .map(|bits| bits.div_ceil(8))
+        .and_then(|row_stride| Some((row_stride, row_stride.checked_mul(layout.rows)?)))
+    else {
+        log_warn!("Chunk dimensions {}x{} overflow, skipping chunk", layout.width, layout.rows);
+        return Vec::new();
+    };
+    let mut out = vec![0u8; total];
 
     if chunk.channels == 0 {
         return out;
@@ -564,7 +611,13 @@ fn decompress_embedded(codec: &str, decoded: VexelResult<Image>, layout: ChunkLa
         Err(e) => {
             log_warn!("Failed to decode {}-compressed TIFF chunk: {}, filling with zeros", codec, e);
             let bytes_per_sample = (layout.bits_per_sample as usize).div_ceil(8);
-            return vec![0; layout.width * layout.rows * layout.samples_per_pixel * bytes_per_sample];
+            let len = layout
+                .width
+                .checked_mul(layout.rows)
+                .and_then(|n| n.checked_mul(layout.samples_per_pixel))
+                .and_then(|n| n.checked_mul(bytes_per_sample))
+                .unwrap_or(0);
+            return vec![0; len];
         }
     };
 
@@ -648,8 +701,12 @@ pub fn apply_predictor_horizontal(
 
     if !bits_per_sample.is_multiple_of(8) {
         let bps = bits_per_sample as usize;
-        let samples = width as usize * spp;
-        let row_stride = (samples * bps).div_ceil(8);
+        let Some(samples) = (width as usize).checked_mul(spp) else {
+            return;
+        };
+        let Some(row_stride) = samples.checked_mul(bps).map(|bits| bits.div_ceil(8)) else {
+            return;
+        };
         if row_stride == 0 {
             return;
         }
@@ -668,7 +725,9 @@ pub fn apply_predictor_horizontal(
     }
 
     let bytes_per_sample = (bits_per_sample as usize) / 8;
-    let row_stride = width as usize * spp * bytes_per_sample;
+    let Some(row_stride) = (width as usize).checked_mul(spp).and_then(|n| n.checked_mul(bytes_per_sample)) else {
+        return;
+    };
     if bytes_per_sample > 8 || row_stride == 0 {
         return;
     }
@@ -703,7 +762,10 @@ const THUNDER_3BIT_DELTAS: [i32; 8] = [0, 1, 2, 3, 0, -3, -2, -1];
 
 pub fn decompress_thunderscan(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
     let row_bytes = width.div_ceil(2);
-    let mut out = vec![0u8; row_bytes * rows];
+    let Some(total) = row_bytes.checked_mul(rows).filter(|&total| total > 0) else {
+        return Vec::new();
+    };
+    let mut out = vec![0u8; total];
     let mut ip = 0usize;
 
     for row_data in out.chunks_exact_mut(row_bytes) {
@@ -760,8 +822,11 @@ pub fn decompress_thunderscan(data: &[u8], width: usize, rows: usize) -> Vec<u8>
 }
 
 pub fn decompress_next(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
-    let row_bytes = (width * 2).div_ceil(8);
-    let mut out = vec![0xffu8; row_bytes * rows];
+    let row_bytes = width.div_ceil(4);
+    let Some(total) = row_bytes.checked_mul(rows).filter(|&total| total > 0) else {
+        return Vec::new();
+    };
+    let mut out = vec![0xffu8; total];
     let mut ip = 0usize;
 
     for row_data in out.chunks_exact_mut(row_bytes) {
@@ -825,7 +890,9 @@ pub fn apply_predictor_float(
 ) {
     let bps = (bits_per_sample as usize) / 8;
     let spp = samples_per_pixel as usize;
-    let row_stride = width as usize * spp * bps;
+    let Some(row_stride) = (width as usize).checked_mul(spp).and_then(|n| n.checked_mul(bps)) else {
+        return;
+    };
     let stride = spp;
 
     if row_stride == 0 || bps == 0 || stride == 0 {

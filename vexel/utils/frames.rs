@@ -87,7 +87,9 @@ impl<'a> Frames<'a> {
             return Ok(None);
         }
 
-        match self.source.next_frame() {
+        let source = &mut self.source;
+
+        match crate::catch_decoder_panic(move || source.next_frame()) {
             Ok(Some(frame)) => Ok(Some(frame)),
             Ok(None) => {
                 self.finished = true;

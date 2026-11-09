@@ -1,5 +1,6 @@
 pub fn scale_u16_to_u8(src: &[u16], dst: &mut [u8]) {
-    debug_assert_eq!(src.len(), dst.len());
+    let len = src.len().min(dst.len());
+    let (src, dst) = (&src[..len], &mut dst[..len]);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
@@ -14,7 +15,8 @@ pub fn scale_u16_to_u8(src: &[u16], dst: &mut [u8]) {
 }
 
 pub fn scale_f32_to_u8(src: &[f32], dst: &mut [u8]) {
-    debug_assert_eq!(src.len(), dst.len());
+    let len = src.len().min(dst.len());
+    let (src, dst) = (&src[..len], &mut dst[..len]);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
@@ -29,8 +31,8 @@ pub fn scale_f32_to_u8(src: &[f32], dst: &mut [u8]) {
 }
 
 pub fn rgb_to_rgba(src: &[u8], dst: &mut [u8]) {
-    debug_assert_eq!(src.len() % 3, 0);
-    debug_assert_eq!(dst.len(), src.len() / 3 * 4);
+    let pixels = (src.len() / 3).min(dst.len() / 4);
+    let (src, dst) = (&src[..pixels * 3], &mut dst[..pixels * 4]);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
@@ -45,8 +47,8 @@ pub fn rgb_to_rgba(src: &[u8], dst: &mut [u8]) {
 }
 
 pub fn rgba_to_rgb(src: &[u8], dst: &mut [u8]) {
-    debug_assert_eq!(src.len() % 4, 0);
-    debug_assert_eq!(dst.len(), src.len() / 4 * 3);
+    let pixels = (src.len() / 4).min(dst.len() / 3);
+    let (src, dst) = (&src[..pixels * 4], &mut dst[..pixels * 3]);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {

@@ -297,7 +297,12 @@ impl App {
             pixels = normalize_pixels(pixels);
         }
 
-        let buffer = pixels.into_rgba8_bytes();
+        if src_width == 0 || src_height == 0 {
+            return Arc::new(egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT));
+        }
+
+        let mut buffer = pixels.into_rgba8_bytes();
+        buffer.resize(src_width.saturating_mul(src_height).saturating_mul(4), 0);
 
         let scale =
             (MAX_TEXTURE_SIZE as f32 / src_width as f32).min(MAX_TEXTURE_SIZE as f32 / src_height as f32).min(1.0);

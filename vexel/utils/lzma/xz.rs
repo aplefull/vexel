@@ -75,7 +75,7 @@ fn parse_block_header(data: &[u8]) -> Option<BlockHeader> {
         let id = read_multibyte(header, &mut pos)?;
         let props_size = read_multibyte(header, &mut pos)? as usize;
 
-        if pos + props_size > header.len() {
+        if pos.checked_add(props_size).is_none_or(|end| end > header.len()) {
             return None;
         }
 

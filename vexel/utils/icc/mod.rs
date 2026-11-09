@@ -13,12 +13,12 @@ pub(crate) fn read_u8(data: &[u8], offset: usize) -> Option<u8> {
 }
 
 pub(crate) fn read_u16_be(data: &[u8], offset: usize) -> Option<u16> {
-    let bytes = data.get(offset..offset + 2)?;
+    let bytes = data.get(offset..offset.checked_add(2)?)?;
     Some(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
 pub(crate) fn read_u32_be(data: &[u8], offset: usize) -> Option<u32> {
-    let bytes = data.get(offset..offset + 4)?;
+    let bytes = data.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
@@ -57,8 +57,8 @@ pub(crate) fn read_f16_be(data: &[u8], offset: usize) -> Option<f32> {
 pub(crate) fn read_spectral_range(data: &[u8], offset: usize) -> Option<SpectralRange> {
     Some(SpectralRange {
         start: read_f16_be(data, offset)?,
-        end: read_f16_be(data, offset + 2)?,
-        steps: read_u16_be(data, offset + 4)?,
+        end: read_f16_be(data, offset.checked_add(2)?)?,
+        steps: read_u16_be(data, offset.checked_add(4)?)?,
     })
 }
 
@@ -73,7 +73,7 @@ pub(crate) fn sig_to_string(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn sig_at(data: &[u8], offset: usize) -> String {
-    match data.get(offset..offset + 4) {
+    match offset.checked_add(4).and_then(|end| data.get(offset..end)) {
         Some(bytes) => sig_to_string(bytes),
         None => String::new(),
     }
@@ -87,8 +87,8 @@ pub(crate) fn decode_utf16_be(data: &[u8]) -> String {
 pub(crate) fn parse_xyz_number(data: &[u8], offset: usize) -> Option<XYZNumber> {
     Some(XYZNumber {
         x: read_s15_fixed16(data, offset)?,
-        y: read_s15_fixed16(data, offset + 4)?,
-        z: read_s15_fixed16(data, offset + 8)?,
+        y: read_s15_fixed16(data, offset.checked_add(4)?)?,
+        z: read_s15_fixed16(data, offset.checked_add(8)?)?,
     })
 }
 
@@ -179,10 +179,11 @@ const MAX_TAG_COUNT: u32 = 1024;
 
 impl ICCProfile {
     pub fn new(data: &[u8]) -> VexelResult<ICCProfile> {
-        Self::parse_with_depth(data, 0)
+        let mut budget = tags::TagBudget::for_profile(data.len());
+        Self::parse_with_depth(data, 0, &mut budget)
     }
 
-    pub(crate) fn parse_with_depth(data: &[u8], depth: u8) -> VexelResult<ICCProfile> {
+    fn parse_with_depth(data: &[u8], depth: u8, budget: &mut tags::TagBudget) -> VexelResult<ICCProfile> {
         if data.len() < HEADER_SIZE {
             return Err(VexelError::Custom(format!(
                 "ICC profile data too small: {} bytes, at least {} required",
@@ -198,7 +199,7 @@ impl ICCProfile {
         }
 
         let tag_table = ICCProfile::parse_tag_table(data);
-        let tags = ICCProfile::parse_tags(data, &tag_table, depth);
+        let tags = ICCProfile::parse_tags(data, &tag_table, depth, budget);
 
         Ok(ICCProfile { header, tag_table, tags })
     }
@@ -330,8 +331,13 @@ impl ICCProfile {
         TagTable { tag_count: raw_count, entries }
     }
 
-    fn parse_tags(data: &[u8], tag_table: &TagTable, depth: u8) -> HashMap<String, ICCTagData> {
-        let mut tags = HashMap::new();
+    fn parse_tags(
+        data: &[u8],
+        tag_table: &TagTable,
+        depth: u8,
+        budget: &mut tags::TagBudget,
+    ) -> HashMap<String, ICCTagData> {
+        let mut tags: HashMap<String, ICCTagData> = HashMap::new();
         let mut seen_offsets: HashMap<u32, String> = HashMap::new();
 
         for entry in &tag_table.entries {
@@ -349,7 +355,12 @@ impl ICCProfile {
             }
 
             if let Some(existing_sig) = seen_offsets.get(&entry.offset) {
-                if let Some(existing) = tags.get(existing_sig).cloned() {
+                if let Some(existing) = tags.get(existing_sig) {
+                    if !budget.charge(end - start) {
+                        log_warn!("ICC tag '{}' exceeds the profile parse budget, skipping", entry.signature);
+                        continue;
+                    }
+                    let existing = existing.clone();
                     tags.insert(entry.signature.clone(), existing);
                     continue;
                 }
@@ -357,7 +368,10 @@ impl ICCProfile {
 
             let tag_data = &data[start..end];
             let type_sig = sig_to_string(&tag_data[0..4]);
-            let parsed = tags::parse_tag(&type_sig, tag_data, depth);
+            let Some(parsed) = tags::parse_tag(&type_sig, tag_data, depth, budget) else {
+                log_warn!("ICC tag '{}' exceeds the profile parse budget, skipping", entry.signature);
+                continue;
+            };
             seen_offsets.insert(entry.offset, entry.signature.clone());
             tags.insert(entry.signature.clone(), parsed);
         }

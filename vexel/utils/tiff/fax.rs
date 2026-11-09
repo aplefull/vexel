@@ -266,7 +266,7 @@ impl<'a> FaxBits<'a> {
     }
 
     fn bits_left(&self) -> usize {
-        (self.data.len() * 8).saturating_sub(self.pos)
+        self.data.len().saturating_mul(8).saturating_sub(self.pos)
     }
 
     fn peek(&self, nbits: u32) -> u32 {
@@ -316,7 +316,7 @@ fn decode_run(bits: &mut FaxBits, is_white: bool) -> i16 {
             return if total == 0 { EOL_RUN } else { INVALID_RUN };
         }
         bits.skip(entry.len as u32);
-        total += entry.run as i32;
+        total = total.saturating_add(entry.run as i32);
         if entry.run < 64 {
             return total.min(i16::MAX as i32) as i16;
         }
@@ -333,7 +333,7 @@ fn decode_row_1d(bits: &mut FaxBits, width: u32) -> Option<Vec<u32>> {
         if run < 0 {
             return None;
         }
-        pos = (pos + run as u32).min(width);
+        pos = pos.saturating_add(run as u32).min(width);
         transitions.push(pos);
         is_white = !is_white;
     }
@@ -405,10 +405,7 @@ fn decode_mode(bits: &mut FaxBits) -> Mode2D {
 }
 
 fn find_b1(reference: &[u32], a0: i64, a0_color_white: bool) -> usize {
-    let mut idx = 0;
-    while idx < reference.len() && (reference[idx] as i64) <= a0 {
-        idx += 1;
-    }
+    let mut idx = reference.partition_point(|&t| (t as i64) <= a0);
     let want_even = a0_color_white;
     if idx < reference.len() && (idx % 2 == 0) != want_even {
         idx += 1;
@@ -437,8 +434,8 @@ fn decode_row_2d(bits: &mut FaxBits, reference: &[u32], width: u32) -> Option<Ve
                     return None;
                 }
                 let start = a0.max(0) as u32;
-                let a1 = (start + run1 as u32).min(width);
-                let a2 = (a1 + run2 as u32).min(width);
+                let a1 = start.saturating_add(run1 as u32).min(width);
+                let a2 = a1.saturating_add(run2 as u32).min(width);
                 transitions.push(a1);
                 transitions.push(a2);
                 a0 = a2 as i64;
@@ -447,7 +444,8 @@ fn decode_row_2d(bits: &mut FaxBits, reference: &[u32], width: u32) -> Option<Ve
                 }
             }
             Mode2D::Vertical(d) => {
-                let a1 = ((b1 as i64 + d as i64).max(0) as u32).min(width);
+                let last = transitions.last().copied().unwrap_or(0);
+                let a1 = ((b1 as i64 + d as i64).max(0) as u32).min(width).max(last);
                 transitions.push(a1);
                 is_white = !is_white;
                 a0 = a1 as i64;
@@ -496,7 +494,10 @@ pub fn decompress_ccitt(data: &[u8], width: u32, rows: usize, compression: Compr
 
 pub fn decode_mmr(data: &[u8], width: u32, rows: usize) -> (Vec<u8>, usize) {
     let row_bytes = (width as usize).div_ceil(8);
-    let mut out = vec![0u8; row_bytes * rows];
+    let Some(total) = row_bytes.checked_mul(rows) else {
+        return (Vec::new(), 0);
+    };
+    let mut out = vec![0u8; total];
     if width == 0 || rows == 0 {
         return (out, 0);
     }
@@ -534,7 +535,10 @@ pub fn decompress_ccitt_counted(
     t4_options: u32,
 ) -> (Vec<u8>, usize) {
     let row_bytes = (width as usize).div_ceil(8);
-    let mut out = vec![0u8; row_bytes * rows];
+    let Some(total) = row_bytes.checked_mul(rows) else {
+        return (Vec::new(), 0);
+    };
+    let mut out = vec![0u8; total];
     let mut clean_rows = 0usize;
     if width == 0 || rows == 0 {
         return (out, clean_rows);

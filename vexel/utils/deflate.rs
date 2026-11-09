@@ -760,10 +760,6 @@ impl<'a> ZlibDecoder<'a> {
         ZlibDecoder { data }
     }
 
-    pub fn decode(&self) -> Vec<u8> {
-        self.decode_with_capacity(0)
-    }
-
     pub fn decode_with_max(&self, max_output: usize) -> Vec<u8> {
         if let Some(inner) = self.inner() {
             inner.decode_with_max(max_output)

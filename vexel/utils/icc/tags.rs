@@ -3,10 +3,31 @@ use super::{
     decode_utf16_be, parse_xyz_number, read_f16_be, read_f32_be, read_s15_fixed16, read_spectral_range, read_u16_be,
     read_u32_be, read_u8, sig_at, sig_to_string,
 };
+use crate::log_warn;
 use crate::utils::deflate::ZlibDecoder;
 
 const MAX_RECURSION_DEPTH: u8 = 6;
 const MAX_DECOMPRESSED_TEXT: usize = 16 * 1024 * 1024;
+const BUDGET_INPUT_MULTIPLIER: usize = 4;
+const BUDGET_BASE: usize = 1 << 20;
+
+pub(super) struct TagBudget {
+    remaining: usize,
+}
+
+impl TagBudget {
+    pub(super) fn for_profile(len: usize) -> Self {
+        Self { remaining: len.saturating_mul(BUDGET_INPUT_MULTIPLIER).saturating_add(BUDGET_BASE) }
+    }
+
+    pub(super) fn charge(&mut self, bytes: usize) -> bool {
+        if bytes > self.remaining {
+            return false;
+        }
+        self.remaining -= bytes;
+        true
+    }
+}
 
 fn unknown_tag(data: &[u8]) -> ICCTagData {
     let type_signature = if data.len() >= 4 { sig_to_string(&data[0..4]) } else { String::new() };
@@ -129,11 +150,18 @@ fn parse_utf16_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::Utf16(decode_utf16_be(&data[8..]))
 }
 
-fn parse_zip_utf8_tag(data: &[u8]) -> ICCTagData {
+fn decompress_text(data: &[u8], budget: &mut TagBudget) -> Vec<u8> {
+    let max_output = MAX_DECOMPRESSED_TEXT.min(budget.remaining);
+    let decompressed = ZlibDecoder::from_slice(data).decode_with_max(max_output);
+    budget.charge(decompressed.len());
+    decompressed
+}
+
+fn parse_zip_utf8_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 8 {
         return unknown_tag(data);
     }
-    let decompressed = ZlibDecoder::from_slice(&data[8..]).decode_with_max(MAX_DECOMPRESSED_TEXT);
+    let decompressed = decompress_text(&data[8..], budget);
     if decompressed.is_empty() {
         return unknown_tag(data);
     }
@@ -141,11 +169,11 @@ fn parse_zip_utf8_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::ZipUtf8(text)
 }
 
-fn parse_zip_xml_tag(data: &[u8]) -> ICCTagData {
+fn parse_zip_xml_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 8 {
         return unknown_tag(data);
     }
-    let decompressed = ZlibDecoder::from_slice(&data[8..]).decode_with_max(MAX_DECOMPRESSED_TEXT);
+    let decompressed = decompress_text(&data[8..], budget);
     if decompressed.is_empty() {
         return unknown_tag(data);
     }
@@ -153,7 +181,7 @@ fn parse_zip_xml_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::ZipXml(text)
 }
 
-fn parse_mluc_strings(data: &[u8]) -> Option<Vec<LocalizedString>> {
+fn parse_mluc_strings(data: &[u8], budget: &mut TagBudget) -> Option<Vec<LocalizedString>> {
     let count = read_u32_be(data, 8)?;
     let record_size = read_u32_be(data, 12)?;
     if record_size < 12 {
@@ -177,17 +205,21 @@ fn parse_mluc_strings(data: &[u8]) -> Option<Vec<LocalizedString>> {
         if end > data.len() {
             continue;
         }
+        if !budget.charge(end - start) {
+            log_warn!("ICC mluc record {} exceeds the profile parse budget, stopping", i);
+            break;
+        }
 
         strings.push(LocalizedString { language, country, text: decode_utf16_be(&data[start..end]) });
     }
     Some(strings)
 }
 
-fn parse_mluc_tag(data: &[u8]) -> ICCTagData {
+fn parse_mluc_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
-    match parse_mluc_strings(data) {
+    match parse_mluc_strings(data, budget) {
         Some(strings) => ICCTagData::MultiLocalizedUnicode(strings),
         None => unknown_tag(data),
     }
@@ -364,9 +396,9 @@ fn parse_lut8_tag(data: &[u8]) -> ICCTagData {
 
     let mut output_tables = Vec::with_capacity(output_channels as usize);
     for _ in 0..output_channels {
-        let end = (pos + 256).min(data.len());
+        let end = pos.saturating_add(256).min(data.len());
         output_tables.push(data[pos.min(data.len())..end].to_vec());
-        pos += 256;
+        pos = pos.saturating_add(256);
     }
 
     ICCTagData::Lut8(Lut8Data {
@@ -383,7 +415,7 @@ fn parse_lut8_tag(data: &[u8]) -> ICCTagData {
 fn read_u16_table(data: &[u8], offset: usize, count: usize) -> Vec<u16> {
     let mut table = Vec::with_capacity(count.min((data.len().saturating_sub(offset)) / 2));
     for i in 0..count {
-        match read_u16_be(data, offset + i * 2) {
+        match read_u16_be(data, offset.saturating_add(i * 2)) {
             Some(v) => table.push(v),
             None => break,
         }
@@ -413,12 +445,12 @@ fn parse_lut16_tag(data: &[u8]) -> ICCTagData {
 
     let clut_len = clut_entry_count(clut_grid_points, input_channels, output_channels);
     let clut = read_u16_table(data, pos, clut_len);
-    pos += clut_len * 2;
+    pos = pos.saturating_add(clut_len.saturating_mul(2));
 
     let mut output_tables = Vec::with_capacity(output_channels as usize);
     for _ in 0..output_channels {
         output_tables.push(read_u16_table(data, pos, output_entries));
-        pos += output_entries * 2;
+        pos = pos.saturating_add(output_entries * 2);
     }
 
     ICCTagData::Lut16(Lut16Data {
@@ -583,7 +615,7 @@ fn parse_ncl2_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::NamedColors(NamedColorsData { vendor_flag, prefix, suffix, device_coord_count, colors })
 }
 
-fn parse_embedded_text(data: &[u8], pos: usize) -> Option<(String, usize)> {
+fn parse_embedded_text(data: &[u8], pos: usize, budget: &mut TagBudget) -> Option<(String, usize)> {
     if pos + 12 > data.len() {
         return None;
     }
@@ -609,14 +641,18 @@ fn parse_embedded_text(data: &[u8], pos: usize) -> Option<(String, usize)> {
             let mut end = 16usize.checked_add(count.checked_mul(record_size)?)?;
             for i in 0..count {
                 let record_offset = 16 + i * record_size;
+                if record_offset >= sub.len() {
+                    break;
+                }
                 let Some(len) = read_u32_be(sub, record_offset + 4) else { continue };
                 let Some(off) = read_u32_be(sub, record_offset + 8) else { continue };
                 if let Some(record_end) = (off as usize).checked_add(len as usize) {
                     end = end.max(record_end);
                 }
             }
-            let text =
-                parse_mluc_strings(sub).and_then(|strings| strings.first().map(|s| s.text.clone())).unwrap_or_default();
+            let text = parse_mluc_strings(sub, budget)
+                .and_then(|strings| strings.first().map(|s| s.text.clone()))
+                .unwrap_or_default();
             Some((text, end))
         }
         _ => None,
@@ -636,7 +672,7 @@ fn parse_device_attributes(bytes: &[u8]) -> DeviceAttributes {
     }
 }
 
-fn parse_pseq_tag(data: &[u8]) -> ICCTagData {
+fn parse_pseq_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
@@ -654,10 +690,10 @@ fn parse_pseq_tag(data: &[u8]) -> ICCTagData {
         let technology = sig_at(data, pos + 16);
         pos += 20;
 
-        let Some((manufacturer_description, consumed)) = parse_embedded_text(data, pos) else { break };
-        pos += consumed;
-        let Some((model_description, consumed)) = parse_embedded_text(data, pos) else { break };
-        pos += consumed;
+        let Some((manufacturer_description, consumed)) = parse_embedded_text(data, pos, budget) else { break };
+        pos = pos.saturating_add(consumed);
+        let Some((model_description, consumed)) = parse_embedded_text(data, pos, budget) else { break };
+        pos = pos.saturating_add(consumed);
 
         descriptions.push(ProfileDescription {
             device_manufacturer,
@@ -672,7 +708,7 @@ fn parse_pseq_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::ProfileSequence(descriptions)
 }
 
-fn parse_psid_tag(data: &[u8]) -> ICCTagData {
+fn parse_psid_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
@@ -690,7 +726,7 @@ fn parse_psid_tag(data: &[u8]) -> ICCTagData {
         }
         let profile_id = data[start..start + 16].to_vec();
         let description = if data.get(start + 16..start + 20) == Some(b"mluc") {
-            parse_mluc_strings(&data[start + 16..end]).unwrap_or_default()
+            parse_mluc_strings(&data[start + 16..end], budget).unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -700,7 +736,7 @@ fn parse_psid_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::ProfileSequenceId(entries)
 }
 
-fn parse_rcs2_tag(data: &[u8]) -> ICCTagData {
+fn parse_rcs2_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
@@ -744,12 +780,16 @@ fn parse_rcs2_tag(data: &[u8]) -> ICCTagData {
         }
 
         measurements.push(ResponseCurveMeasurement { unit, max_colorants, channel_responses });
+        if !budget.charge(pos - base) {
+            log_warn!("ICC rcs2 measurement {} exceeds the profile parse budget, stopping", i);
+            break;
+        }
     }
 
     ICCTagData::ResponseCurveSet(ResponseCurveSetData { channels, measurements })
 }
 
-fn parse_dict_tag(data: &[u8]) -> ICCTagData {
+fn parse_dict_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
@@ -759,16 +799,16 @@ fn parse_dict_tag(data: &[u8]) -> ICCTagData {
         return unknown_tag(data);
     }
 
-    let read_string = |offset: u32, size: u32| -> String {
+    let read_string = |offset: u32, size: u32, budget: &mut TagBudget| -> String {
         let start = offset as usize;
         let end = start.saturating_add(size as usize);
-        if offset == 0 || end > data.len() || start >= end {
+        if offset == 0 || end > data.len() || start >= end || !budget.charge(end - start) {
             return String::new();
         }
         decode_utf16_be(&data[start..end])
     };
 
-    let read_localized = |offset: u32, size: u32| -> Vec<LocalizedString> {
+    let read_localized = |offset: u32, size: u32, budget: &mut TagBudget| -> Vec<LocalizedString> {
         let start = offset as usize;
         let end = start.saturating_add(size as usize);
         if offset == 0 || end > data.len() || start + 16 > end {
@@ -777,7 +817,7 @@ fn parse_dict_tag(data: &[u8]) -> ICCTagData {
         if &data[start..start + 4] != b"mluc" {
             return Vec::new();
         }
-        parse_mluc_strings(&data[start..end]).unwrap_or_default()
+        parse_mluc_strings(&data[start..end], budget).unwrap_or_default()
     };
 
     let mut entries = Vec::new();
@@ -796,17 +836,17 @@ fn parse_dict_tag(data: &[u8]) -> ICCTagData {
         if record_size >= 24 {
             let offset = read_u32_be(data, record + 16).unwrap_or(0);
             let size = read_u32_be(data, record + 20).unwrap_or(0);
-            display_name = read_localized(offset, size);
+            display_name = read_localized(offset, size, budget);
         }
         if record_size >= 32 {
             let offset = read_u32_be(data, record + 24).unwrap_or(0);
             let size = read_u32_be(data, record + 28).unwrap_or(0);
-            display_value = read_localized(offset, size);
+            display_value = read_localized(offset, size, budget);
         }
 
         entries.push(DictEntry {
-            name: read_string(name_offset, name_size),
-            value: read_string(value_offset, value_size),
+            name: read_string(name_offset, name_size, budget),
+            value: read_string(value_offset, value_size, budget),
             display_name,
             display_value,
         });
@@ -815,7 +855,7 @@ fn parse_dict_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::Dictionary(entries)
 }
 
-fn parse_mpe_curve_set(data: &[u8]) -> CurveSetElement {
+fn parse_mpe_curve_set(data: &[u8], budget: &mut TagBudget) -> CurveSetElement {
     let input_channels = read_u16_be(data, 8).unwrap_or(0);
     let output_channels = read_u16_be(data, 10).unwrap_or(0);
 
@@ -827,6 +867,10 @@ fn parse_mpe_curve_set(data: &[u8]) -> CurveSetElement {
         let Some(end) = start.checked_add(size as usize) else { continue };
         if end > data.len() || start >= end {
             continue;
+        }
+        if !budget.charge(end - start) {
+            log_warn!("ICC curve set element curve {} exceeds the profile parse budget, stopping", i);
+            break;
         }
         if let Some(curve) = parse_segmented_curve(&data[start..end]) {
             curves.push(curve);
@@ -885,12 +929,12 @@ fn parse_mpe_clut(data: &[u8]) -> Option<ClutElement> {
     Some(ClutElement { input_channels, output_channels, grid_points, values })
 }
 
-fn parse_mpe_element(data: &[u8]) -> Option<ProcessingElement> {
+fn parse_mpe_element(data: &[u8], budget: &mut TagBudget) -> Option<ProcessingElement> {
     if data.len() < 12 {
         return None;
     }
     let element = match &data[0..4] {
-        b"cvst" => ProcessingElement::CurveSet(parse_mpe_curve_set(data)),
+        b"cvst" => ProcessingElement::CurveSet(parse_mpe_curve_set(data, budget)),
         b"matf" => ProcessingElement::Matrix(parse_mpe_matrix(data)),
         b"clut" => match parse_mpe_clut(data) {
             Some(clut) => ProcessingElement::Clut(clut),
@@ -911,7 +955,7 @@ fn parse_mpe_element(data: &[u8]) -> Option<ProcessingElement> {
     Some(element)
 }
 
-fn parse_mpet_tag(data: &[u8]) -> ICCTagData {
+fn parse_mpet_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
@@ -929,7 +973,11 @@ fn parse_mpet_tag(data: &[u8]) -> ICCTagData {
         if end > data.len() || start >= end {
             continue;
         }
-        if let Some(element) = parse_mpe_element(&data[start..end]) {
+        if !budget.charge(end - start) {
+            log_warn!("ICC multiProcessElements element {} exceeds the profile parse budget, stopping", i);
+            break;
+        }
+        if let Some(element) = parse_mpe_element(&data[start..end], budget) {
             elements.push(element);
         }
     }
@@ -1012,7 +1060,7 @@ fn parse_sdin_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::SpectralDataInfo(SpectralDataInfoData { color_signature, spectral_range, bi_spectral_range })
 }
 
-fn parse_tstr_tag(data: &[u8], depth: u8) -> ICCTagData {
+fn parse_tstr_tag(data: &[u8], depth: u8, budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
@@ -1035,13 +1083,17 @@ fn parse_tstr_tag(data: &[u8], depth: u8) -> ICCTagData {
         }
         let member_data = &data[start..end];
         let member_type = sig_to_string(&member_data[0..4]);
-        members.push(TagStructMember { signature, data: parse_tag(&member_type, member_data, depth + 1) });
+        let Some(member) = parse_tag(&member_type, member_data, depth + 1, budget) else {
+            log_warn!("ICC tag struct member {} exceeds the profile parse budget, stopping", i);
+            break;
+        };
+        members.push(TagStructMember { signature, data: member });
     }
 
     ICCTagData::TagStruct(TagStructData { struct_type, members })
 }
 
-fn parse_tary_tag(data: &[u8], depth: u8) -> ICCTagData {
+fn parse_tary_tag(data: &[u8], depth: u8, budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
@@ -1060,7 +1112,11 @@ fn parse_tary_tag(data: &[u8], depth: u8) -> ICCTagData {
         }
         let element_data = &data[start..end];
         let element_type = sig_to_string(&element_data[0..4]);
-        elements.push(parse_tag(&element_type, element_data, depth + 1));
+        let Some(element) = parse_tag(&element_type, element_data, depth + 1, budget) else {
+            log_warn!("ICC tag array element {} exceeds the profile parse budget, stopping", i);
+            break;
+        };
+        elements.push(element);
     }
 
     ICCTagData::TagArray(TagArrayData { array_type, elements })
@@ -1542,11 +1598,11 @@ fn parse_smat_tag(data: &[u8]) -> ICCTagData {
     ICCTagData::SparseMatrixArray(SparseMatrixArrayData { channels, matrix_type, matrices })
 }
 
-fn parse_embedded_profile_tag(data: &[u8], depth: u8) -> ICCTagData {
+fn parse_embedded_profile_tag(data: &[u8], depth: u8, budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 8 + 128 {
         return unknown_tag(data);
     }
-    match super::ICCProfile::parse_with_depth(&data[8..], depth + 1) {
+    match super::ICCProfile::parse_with_depth(&data[8..], depth + 1, budget) {
         Ok(profile) => ICCTagData::EmbeddedProfile(Box::new(profile)),
         Err(_) => unknown_tag(data),
     }
@@ -1578,17 +1634,20 @@ fn parse_embedded_image_tag(data: &[u8], is_height_map: bool) -> ICCTagData {
     })
 }
 
-pub(super) fn parse_tag(type_sig: &str, data: &[u8], depth: u8) -> ICCTagData {
-    if depth > MAX_RECURSION_DEPTH {
-        return unknown_tag(data);
+pub(super) fn parse_tag(type_sig: &str, data: &[u8], depth: u8, budget: &mut TagBudget) -> Option<ICCTagData> {
+    if !budget.charge(data.len()) {
+        return None;
     }
-    match type_sig.trim_end_matches('\0') {
+    if depth > MAX_RECURSION_DEPTH {
+        return Some(unknown_tag(data));
+    }
+    let parsed = match type_sig.trim_end_matches('\0') {
         "text" => parse_text_tag(data),
         "utf8" => parse_utf8_tag(data),
         "ut16" => parse_utf16_tag(data),
-        "zut8" => parse_zip_utf8_tag(data),
-        "zxml" | "ZXML" => parse_zip_xml_tag(data),
-        "mluc" => parse_mluc_tag(data),
+        "zut8" => parse_zip_utf8_tag(data, budget),
+        "zxml" | "ZXML" => parse_zip_xml_tag(data, budget),
+        "mluc" => parse_mluc_tag(data, budget),
         "XYZ " => parse_xyz_tag(data),
         "curv" => parse_curve_tag(data),
         "para" => parse_para_tag(data),
@@ -1598,15 +1657,15 @@ pub(super) fn parse_tag(type_sig: &str, data: &[u8], depth: u8) -> ICCTagData {
         "mAB " => parse_lut_ab_tag(data, true),
         "mBA " => parse_lut_ab_tag(data, false),
         "ncl2" => parse_ncl2_tag(data),
-        "pseq" => parse_pseq_tag(data),
-        "psid" => parse_psid_tag(data),
-        "rcs2" => parse_rcs2_tag(data),
-        "dict" => parse_dict_tag(data),
-        "mpet" => parse_mpet_tag(data),
+        "pseq" => parse_pseq_tag(data, budget),
+        "psid" => parse_psid_tag(data, budget),
+        "rcs2" => parse_rcs2_tag(data, budget),
+        "dict" => parse_dict_tag(data, budget),
+        "mpet" => parse_mpet_tag(data, budget),
         "svcn" => parse_svcn_tag(data),
         "sdin" => parse_sdin_tag(data),
-        "tstr" => parse_tstr_tag(data, depth),
-        "tary" => parse_tary_tag(data, depth),
+        "tstr" => parse_tstr_tag(data, depth, budget),
+        "tary" => parse_tary_tag(data, depth, budget),
         "meas" => parse_meas_tag(data),
         "dtim" => parse_dtim_tag(data),
         "sig " => parse_sig_tag(data),
@@ -1631,9 +1690,10 @@ pub(super) fn parse_tag(type_sig: &str, data: &[u8], depth: u8) -> ICCTagData {
         "desc" => parse_desc_tag(data),
         "gbd" | "gbd " => parse_gbd_tag(data),
         "smat" => parse_smat_tag(data),
-        "ICCp" => parse_embedded_profile_tag(data, depth),
+        "ICCp" => parse_embedded_profile_tag(data, depth, budget),
         "ehim" => parse_embedded_image_tag(data, true),
         "enim" => parse_embedded_image_tag(data, false),
         _ => unknown_tag(data),
-    }
+    };
+    Some(parsed)
 }

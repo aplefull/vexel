@@ -626,7 +626,14 @@ impl PixelData {
             PixelData::LA8(_) | PixelData::LA16(_) | PixelData::LA32F(_) | PixelData::LA64F(_) => 2,
         };
 
-        let expected_len = (width * height) as usize * components_per_pixel;
+        let Some(expected_len) = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(components_per_pixel as u64))
+            .and_then(|len| usize::try_from(len).ok())
+        else {
+            log_warn!("Cannot correct pixel count: {}x{} image size overflows", width, height);
+            return;
+        };
 
         match self {
             PixelData::RGB8(pixels) => correct_vec(pixels, expected_len, 3),
