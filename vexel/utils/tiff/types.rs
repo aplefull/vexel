@@ -697,6 +697,7 @@ impl Default for TiffHeader {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct TiffIfdData {
     pub ifd_index: usize,
     pub image_width: u32,

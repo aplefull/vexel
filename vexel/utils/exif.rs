@@ -25,6 +25,7 @@ pub enum ExifValue {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct ExifEntry {
     pub tag: u16,
     pub tag_name: Option<String>,
@@ -37,6 +38,7 @@ pub struct ExifIfd {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct ExifData {
     pub byte_order: ByteOrder,
     pub ifd0: ExifIfd,

@@ -11,6 +11,7 @@ pub struct JpegSegmentInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub enum JpegSegmentData {
     SOI,
     EOI,
@@ -45,6 +46,7 @@ pub struct JFIFData {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct APP2Data {
     pub length: u16,
     pub identifier: String,

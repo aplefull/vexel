@@ -28,6 +28,7 @@ pub enum TupleType {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct NetpbmHeaderData {
     pub format: NetpbmFormat,
     pub width: u32,

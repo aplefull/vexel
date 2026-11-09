@@ -6,6 +6,7 @@ use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
+use js_sys::Uint8ClampedArray;
 use serde::Serialize;
 use tsify::{Ts, Tsify};
 pub(crate) use utils::bitreader;
@@ -542,11 +543,25 @@ pub fn parse_icc(data: &[u8]) -> VexelResult<ICCProfile> {
     ICCProfile::new(data)
 }
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn performance_now() -> f64;
+}
+
+fn pixels_to_js(pixels: PixelData) -> Uint8ClampedArray {
+    let bytes = pixels.into_rgba8_bytes();
+    let array = Uint8ClampedArray::new_with_length(bytes.len() as u32);
+    array.copy_from(&bytes);
+    array
+}
+
 /// WebAssembly entry point that mirrors the native [`Vexel`] API.
 #[wasm_bindgen(js_name = Decoder)]
 pub struct WasmDecoder {
     decoder: Vexel<Cursor<Vec<u8>>>,
     pending_frames: Option<std::vec::IntoIter<ImageFrame>>,
+    timings: JsTimings,
 }
 
 #[wasm_bindgen(js_class = Decoder)]
@@ -556,10 +571,9 @@ impl WasmDecoder {
     /// The image format is detected automatically from the magic bytes in `data`.
     /// Returns an error if the format cannot be identified.
     #[wasm_bindgen(constructor)]
-    pub fn new(data: &[u8]) -> Result<WasmDecoder, String> {
-        let cursor = Cursor::new(data.to_vec());
-        let decoder = Vexel::new(cursor).map_err(|e| e.to_string())?;
-        Ok(WasmDecoder { decoder, pending_frames: None })
+    pub fn new(data: Vec<u8>) -> Result<WasmDecoder, String> {
+        let decoder = Vexel::new(Cursor::new(data)).map_err(|e| e.to_string())?;
+        Ok(WasmDecoder { decoder, pending_frames: None, timings: JsTimings::default() })
     }
 
     /// Sets resource limits that the decoder will enforce during decoding.
@@ -581,19 +595,24 @@ impl WasmDecoder {
     ///
     /// For animated images this is the first frame. Use
     /// [`nextFrame`](WasmDecoder::next_frame) to walk the whole animation.
-    /// Pixel data is a flat byte vector of length `width * height * 4`.
+    /// Pixel data is a `Uint8ClampedArray` of length `width * height * 4`.
     #[wasm_bindgen(js_name = decode)]
     pub fn decode(&mut self) -> Result<Ts<JsImage>, String> {
+        let start = performance_now();
         let image = self.decoder.decode().map_err(|e| e.to_string())?;
+        let decoded = performance_now();
 
-        JsImage {
+        let result = JsImage {
             width: image.width(),
             height: image.height(),
             image_format: self.decoder.get_format(),
-            pixels: image.to_rgba8(),
+            pixels: pixels_to_js(image.into_pixels()),
         }
         .into_ts()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+
+        self.timings = JsTimings { decode_ms: decoded - start, convert_ms: performance_now() - decoded };
+        result
     }
 
     /// Returns the next animation frame as RGBA8, or `null` once the animation
@@ -604,6 +623,8 @@ impl WasmDecoder {
     /// Images without animation yield exactly one frame.
     #[wasm_bindgen(js_name = nextFrame)]
     pub fn next_frame(&mut self) -> Result<Option<Ts<JsImageFrame>>, String> {
+        let start = performance_now();
+
         if self.pending_frames.is_none() {
             let frames = self
                 .decoder
@@ -615,20 +636,19 @@ impl WasmDecoder {
             self.pending_frames = Some(frames.into_iter());
         }
 
+        let decoded = performance_now();
         let frame = self.pending_frames.as_mut().and_then(|frames| frames.next());
 
-        frame
+        let result = frame
             .map(|frame| {
-                JsImageFrame {
-                    width: frame.width(),
-                    height: frame.height(),
-                    pixels: frame.to_rgba8(),
-                    delay: frame.delay(),
-                }
-                .into_ts()
+                let (width, height, delay) = (frame.width(), frame.height(), frame.delay());
+                JsImageFrame { width, height, pixels: pixels_to_js(frame.into_pixels()), delay }.into_ts()
             })
             .transpose()
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+
+        self.timings = JsTimings { decode_ms: decoded - start, convert_ms: performance_now() - decoded };
+        result
     }
 
     /// Decodes every page contained in the file, returning one [`JsImage`] per page.
@@ -637,42 +657,34 @@ impl WasmDecoder {
     #[wasm_bindgen(js_name = decodePages)]
     pub fn decode_pages(&mut self) -> Result<Ts<JsPages>, String> {
         let format = self.decoder.get_format();
+        let start = performance_now();
         let pages = self.decoder.decode_pages().map_err(|e| e.to_string())?;
+        let decoded = performance_now();
 
-        JsPages {
-            pages: pages
-                .into_iter()
-                .map(|image| JsImage {
-                    width: image.width(),
-                    height: image.height(),
-                    image_format: format.clone(),
-                    pixels: image.to_rgba8(),
-                })
-                .collect(),
-        }
-        .into_ts()
-        .map_err(|e| e.to_string())
+        let result = JsPages { pages: Self::images_to_js(pages, &format) }.into_ts().map_err(|e| e.to_string());
+
+        self.timings = JsTimings { decode_ms: decoded - start, convert_ms: performance_now() - decoded };
+        result
     }
 
     /// Decodes all embedded thumbnails and preview images found in the file.
     #[wasm_bindgen(js_name = decodeThumbnails)]
     pub fn decode_thumbnails(&mut self) -> Result<Ts<JsThumbnails>, String> {
         let format = self.decoder.get_format();
+        let start = performance_now();
         let thumbnails = self.decoder.decode_thumbnails().map_err(|e| e.to_string())?;
+        let decoded = performance_now();
 
-        JsThumbnails {
-            thumbnails: thumbnails
-                .into_iter()
-                .map(|image| JsImage {
-                    width: image.width(),
-                    height: image.height(),
-                    image_format: format.clone(),
-                    pixels: image.to_rgba8(),
-                })
-                .collect(),
-        }
-        .into_ts()
-        .map_err(|e| e.to_string())
+        let result =
+            JsThumbnails { thumbnails: Self::images_to_js(thumbnails, &format) }.into_ts().map_err(|e| e.to_string());
+
+        self.timings = JsTimings { decode_ms: decoded - start, convert_ms: performance_now() - decoded };
+        result
+    }
+
+    #[wasm_bindgen(js_name = lastTimings)]
+    pub fn last_timings(&self) -> Result<Ts<JsTimings>, String> {
+        self.timings.into_ts().map_err(|e| e.to_string())
     }
 
     /// Returns format-specific metadata collected during the last `decode` call.
@@ -695,28 +707,52 @@ impl WasmDecoder {
     }
 }
 
+impl WasmDecoder {
+    fn images_to_js(images: Vec<Image>, format: &ImageFormat) -> Vec<JsImage> {
+        images
+            .into_iter()
+            .map(|image| JsImage {
+                width: image.width(),
+                height: image.height(),
+                image_format: format.clone(),
+                pixels: pixels_to_js(image.into_pixels()),
+            })
+            .collect()
+    }
+}
+
 /// WebAssembly-compatible image returned by [`WasmDecoder::decode`].
 ///
-/// `pixels` is always RGBA8, regardless of the source format, and is a flat
-/// byte vector with length `width * height * 4`.
+/// `pixels` is always RGBA8, regardless of the source format, and is a
+/// `Uint8ClampedArray` with length `width * height * 4`.
 #[derive(Serialize, Tsify)]
 pub struct JsImage {
     pub width: u32,
     pub height: u32,
     pub image_format: ImageFormat,
-    pub pixels: Vec<u8>,
+    #[serde(with = "tsify::serde_wasm_bindgen::preserve")]
+    #[tsify(type = "Uint8ClampedArray")]
+    pub pixels: Uint8ClampedArray,
 }
 
 /// A single animation frame returned by [`WasmDecoder::next_frame`].
 ///
-/// `pixels` is a flat RGBA8 byte vector with length `width * height * 4`.
+/// `pixels` is an RGBA8 `Uint8ClampedArray` with length `width * height * 4`.
 /// `delay` is the display duration in milliseconds; `0` for non-animated images.
 #[derive(Serialize, Tsify)]
 pub struct JsImageFrame {
     pub width: u32,
     pub height: u32,
-    pub pixels: Vec<u8>,
+    #[serde(with = "tsify::serde_wasm_bindgen::preserve")]
+    #[tsify(type = "Uint8ClampedArray")]
+    pub pixels: Uint8ClampedArray,
     pub delay: u32,
+}
+
+#[derive(Serialize, Tsify, Clone, Copy, Default)]
+pub struct JsTimings {
+    pub decode_ms: f64,
+    pub convert_ms: f64,
 }
 
 /// Pages returned by [`WasmDecoder::decode_pages`], one [`JsImage`] per

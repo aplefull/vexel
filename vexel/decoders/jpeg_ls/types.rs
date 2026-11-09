@@ -79,6 +79,7 @@ pub struct JpegLsDriData {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct JpegLsAppData {
     pub marker: u16,
     pub length: u16,

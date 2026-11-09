@@ -24,6 +24,7 @@ use crate::utils::icc::ICCProfile;
 use crate::utils::tiff::types::TiffSectionInfo;
 
 #[derive(Debug, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub enum ImageInfo {
     Jpeg(JpegInfo),
     JpegLs(JpegLsInfo),
@@ -49,6 +50,7 @@ pub enum ImageInfo {
 }
 
 #[derive(Debug, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct JpegInfo {
     pub sections: Vec<JpegSegmentInfo>,
     pub icc_profile: Option<ICCProfile>,

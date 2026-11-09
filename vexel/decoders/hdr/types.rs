@@ -8,6 +8,7 @@ pub enum HdrFormat {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct HdrHeaderData {
     pub width: u32,
     pub height: u32,

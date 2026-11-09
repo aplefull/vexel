@@ -4,6 +4,7 @@ use serde::Serialize;
 use tsify::Tsify;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null, hashmap_as_object)]
 pub struct ICCProfile {
     pub header: ProfileHeader,
     pub tag_table: TagTable,
@@ -11,6 +12,7 @@ pub struct ICCProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct ProfileHeader {
     pub size: u32,
     pub preferred_cmm_type: String,
@@ -171,6 +173,7 @@ pub struct SparseMatrix {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct EmbeddedImageData {
     pub is_height_map: bool,
     pub seamless: bool,
@@ -249,6 +252,7 @@ pub struct Lut16Data {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct LutABData {
     pub input_channels: u8,
     pub output_channels: u8,

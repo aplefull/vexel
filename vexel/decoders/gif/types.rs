@@ -27,6 +27,7 @@ pub struct GifColorTableInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct GifGraphicsControlData {
     pub disposal_method: DisposalMethod,
     pub user_input: bool,
@@ -58,6 +59,7 @@ pub struct GifCommentData {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct GifApplicationExtensionData {
     pub identifier: String,
     pub auth_code: String,
@@ -100,6 +102,7 @@ pub struct GifSectionInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct GifFrameInfo {
     pub left: u32,
     pub top: u32,
@@ -141,6 +144,7 @@ pub struct GifDecoder<R: Read + Seek> {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct ApplicationExtension {
     pub loop_count: Option<u16>,
     pub buffer_size: Option<u8>,

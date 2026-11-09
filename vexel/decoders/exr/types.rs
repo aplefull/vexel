@@ -273,6 +273,7 @@ pub struct ExrChannelInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
 pub struct ExrPartInfo {
     pub name: Option<String>,
     pub part_type: String,
