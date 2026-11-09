@@ -358,6 +358,14 @@ impl<R: Read + Seek> JpegXsDecoder<R> {
         let (width, height) =
             if is_bayer { (width.saturating_mul(2), height.saturating_mul(2)) } else { (width, height) };
 
+        let channels = match self.image.ncomps {
+            3 => 3,
+            4 if !is_bayer => 4,
+            _ => 1,
+        };
+        let sample_bytes = if depth <= 8 { 1 } else { 2 };
+        self.limits.reserve_buffer(width, height, channels * sample_bytes)?;
+
         let pixels = match self.image.ncomps {
             1 => self.build_gray(&planes, ids, depth),
             3 => self.build_rgb(&planes, ids, depth, subsampled),

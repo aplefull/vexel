@@ -55,14 +55,15 @@ impl<R: Read + Seek> JpegXrDecoder<R> {
     pub fn decode(&mut self) -> VexelResult<Image> {
         let data = self.read_all()?;
         let (container, codestream_offset) = locate_codestream(&data)?;
+        let mut limits = self.limits.clone();
 
-        let primary = decode_plane_group(&data, codestream_offset, &self.limits, None)?;
+        let primary = decode_plane_group(&data, codestream_offset, &mut limits, None)?;
 
         let alpha = container.as_ref().and_then(|c| {
             if c.alpha_byte_count == 0 || c.alpha_offset == 0 {
                 return None;
             }
-            decode_plane_group(&data, c.alpha_offset, &self.limits, None).ok()
+            decode_plane_group(&data, c.alpha_offset, &mut limits, None).ok()
         });
 
         let image_header = &primary.image;
@@ -92,6 +93,18 @@ impl<R: Read + Seek> JpegXrDecoder<R> {
 
         let alpha_planes = primary.alpha_planes.as_deref().or(alpha.as_ref().map(|group| group.planes.as_slice()));
 
+        let macroblocks = (primary.mb_width as u64).saturating_mul(primary.mb_height as u64);
+        if params.internal_color_format.is_chroma_subsampled() && primary.planes.len() >= 3 {
+            limits.reserve(macroblocks.saturating_mul(2 * COEFFS_PER_PLANE as u64 * 4))?;
+        }
+        let output_bytes = u64::from(image_header.width)
+            .saturating_mul(u64::from(image_header.height))
+            .saturating_mul(output_bytes_per_pixel(&params));
+        limits.reserve(output_bytes)?;
+        if orientation != Orientation::None {
+            limits.reserve(output_bytes)?;
+        }
+
         let pixels = build_image_data(&primary.planes, alpha_planes, &params, primary.mb_width, primary.mb_height);
         let pixels = apply_orientation(pixels, params.width, params.height, orientation);
 
@@ -114,7 +127,12 @@ struct PlaneGroup {
     mb_height: usize,
 }
 
-fn decode_plane_group(data: &[u8], offset: usize, limits: &Limits, _reserved: Option<()>) -> VexelResult<PlaneGroup> {
+fn decode_plane_group(
+    data: &[u8],
+    offset: usize,
+    limits: &mut Limits,
+    _reserved: Option<()>,
+) -> VexelResult<PlaneGroup> {
     let stream =
         data.get(offset..).ok_or_else(|| VexelError::Custom("JPEG XR: codestream offset out of range".to_string()))?;
 
@@ -124,10 +142,26 @@ fn decode_plane_group(data: &[u8], offset: usize, limits: &Limits, _reserved: Op
 
     let alpha_plane = if image.alpha_channel { Some(parse_plane_header(&mut reader, &image)?) } else { None };
 
+    if image.width == 0 || image.height == 0 {
+        return Err(VexelError::Custom("JPEG XR: image has zero width or height".to_string()));
+    }
+
     limits.check_dimensions(image.width, image.height)?;
 
     let layout = TileLayout::new(&image);
     let header_end = reader.byte_pos();
+
+    let macroblocks = (layout.mb_width as u64).saturating_mul(layout.mb_height as u64);
+    let coefficient_bytes = coefficient_bytes(macroblocks, &plane)
+        .saturating_add(alpha_plane.as_ref().map_or(0, |header| coefficient_bytes(macroblocks, header)));
+    let reconstruction_bytes = reconstruction_bytes(macroblocks, &plane)
+        .saturating_add(alpha_plane.as_ref().map_or(0, |header| reconstruction_bytes(macroblocks, header)));
+
+    if coefficient_bytes.saturating_add(reconstruction_bytes) > isize::MAX as u64 {
+        return Err(VexelError::LimitExceeded("JPEG XR: coefficient planes exceed addressable memory".to_string()));
+    }
+    limits.reserve(coefficient_bytes)?;
+    limits.reserve(reconstruction_bytes)?;
 
     let (coeffs, alpha_coeffs) = decode_coefficients(
         stream,
@@ -145,6 +179,9 @@ fn decode_plane_group(data: &[u8], offset: usize, limits: &Limits, _reserved: Op
         (Some(coeffs), Some(header)) => Some(reconstruct_planes(&coeffs, &image, header, &layout)),
         _ => None,
     };
+
+    drop(coeffs);
+    limits.free(coefficient_bytes);
 
     Ok(PlaneGroup { image, plane, planes, alpha_planes, mb_width: layout.mb_width, mb_height: layout.mb_height })
 }
@@ -312,6 +349,33 @@ impl TileBoundaries {
         position.horizontal_tile_boundary = self.horizontal;
         position.one_mb_left_vertical_tb = one_mb_left;
         position.one_mb_right_vertical_tb = one_mb_right;
+    }
+}
+
+fn coefficient_bytes(macroblocks: u64, header: &PlaneHeader) -> u64 {
+    let per_macroblock = (header.num_channels.max(1) * COEFFS_PER_PLANE + MAX_CHANNELS) * 4;
+    macroblocks.saturating_mul(per_macroblock as u64)
+}
+
+fn reconstruction_bytes(macroblocks: u64, header: &PlaneHeader) -> u64 {
+    let samples: usize =
+        (0..header.num_channels.max(1)).map(|channel| macroblock_stride(header.internal_color_format, channel)).sum();
+    macroblocks.saturating_mul(samples as u64 * 4)
+}
+
+fn output_bytes_per_pixel(params: &OutputParams) -> u64 {
+    let gray = params.source_color_format == ColorFormat::YOnly
+        || (params.source_color_format == ColorFormat::NComponent && params.channels < 3);
+    let sample_bytes = match params.bit_depth {
+        BitDepth::Bd1White | BitDepth::Bd1Black => return 1,
+        BitDepth::Bd8 | BitDepth::Bd5 | BitDepth::Bd565 => 1,
+        BitDepth::Bd16 | BitDepth::Bd16S | BitDepth::Bd10 => 2,
+        BitDepth::Bd16F | BitDepth::Bd32 | BitDepth::Bd32S | BitDepth::Bd32F => 4,
+    };
+    if gray {
+        sample_bytes
+    } else {
+        sample_bytes * 4
     }
 }
 

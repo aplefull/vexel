@@ -126,10 +126,20 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     break;
                 }
             };
+            let horizontal_sampling = (sampling >> 4) & 0xF;
+            let vertical_sampling = sampling & 0xF;
+            if horizontal_sampling == 0 || vertical_sampling == 0 {
+                log_warn!(
+                    "JPEG-LS: component {} has invalid sampling {}x{}, using 1",
+                    id,
+                    horizontal_sampling,
+                    vertical_sampling
+                );
+            }
             components.push(ComponentInfo {
                 id,
-                horizontal_sampling: (sampling >> 4) & 0xF,
-                vertical_sampling: sampling & 0xF,
+                horizontal_sampling: horizontal_sampling.max(1),
+                vertical_sampling: vertical_sampling.max(1),
             });
             info_components.push(JpegLsFrameComponent {
                 id,
@@ -187,7 +197,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 scan.t1 = t1 as i32;
                 scan.t2 = t2 as i32;
                 scan.t3 = t3 as i32;
-                scan.reset = reset as i32;
+                scan.reset = if reset == 0 { DEFAULT_RESET } else { reset as i32 };
 
                 self.record(
                     marker_start,
@@ -197,15 +207,25 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             }
             2 => {
                 let table_id = self.read_u8()?;
-                let entry_count = self.read_u16()?;
-                let entry_bytes = (entry_count as usize + 1).saturating_mul(2);
-                if self.walk_mode == WalkMode::Decode {
-                    self.limits.reserve_usize(entry_bytes)?;
+                let entry_width = usize::from(self.read_u8()?);
+                let table_len = usize::from(marker_len).saturating_sub(5);
+                let mut table = Vec::with_capacity(table_len);
+                for _ in 0..table_len {
+                    match self.read_u8() {
+                        Ok(byte) => table.push(byte),
+                        Err(_) => break,
+                    }
                 }
-                let mut entries = Vec::with_capacity(entry_count as usize + 1);
-                for _ in 0..=entry_count {
-                    entries.push(self.read_u16()?);
-                }
+                let entries: Vec<u32> = if (1..=3).contains(&entry_width) {
+                    table
+                        .chunks_exact(entry_width)
+                        .map(|entry| entry.iter().fold(0u32, |acc, &byte| (acc << 8) | u32::from(byte)))
+                        .collect()
+                } else {
+                    log_warn!("JPEG-LS: invalid mapping table entry width {}", entry_width);
+                    Vec::new()
+                };
+                let entry_count = u16::try_from(entries.len()).unwrap_or(u16::MAX);
                 self.record(
                     marker_start,
                     length,
@@ -550,9 +570,11 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             return Err(VexelError::Custom("No SOS marker found".into()));
         }
 
+        self.limits.check_dimensions(frame.width, frame.height)?;
+
         let width = frame.width as usize;
         let height = frame.height as usize;
-        let components = frame.component_count();
+        let components = frame.component_count().max(1);
 
         let scans = std::mem::take(&mut self.scans);
 
@@ -612,7 +634,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     }
                 };
 
-                let mut state = DecoderState::new();
+                let mut state = DecoderState::new(1);
                 prepare_luts(&mut state, t1, t2, t3, near, lutmax);
                 if lossy {
                     let quant = 2 * near + 1;
@@ -715,7 +737,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             let (t1, t2, t3) = compute_thresholds(alpha, near, scan.t1, scan.t2, scan.t3);
             let reset = scan.reset;
 
-            let mut state = DecoderState::new();
+            let mut state = DecoderState::new(components);
             prepare_luts(&mut state, t1, t2, t3, near, lutmax);
             if lossy {
                 let quant = 2 * near + 1;
@@ -1059,8 +1081,8 @@ fn decode_line_interleaved(
     let max_h = sampling.iter().map(|&(h, _)| h as usize).max().unwrap_or(1);
     let max_v = sampling.iter().map(|&(_, v)| v as usize).max().unwrap_or(1);
 
-    let c_widths: Vec<usize> = sampling.iter().map(|&(h, _)| width * h as usize / max_h).collect();
-    let c_heights: Vec<usize> = sampling.iter().map(|&(_, v)| height * v as usize / max_v).collect();
+    let c_widths: Vec<usize> = sampling.iter().map(|&(h, _)| (width * h as usize / max_h).max(1)).collect();
+    let c_heights: Vec<usize> = sampling.iter().map(|&(_, v)| (height * v as usize / max_v).max(1)).collect();
 
     let mut comp_data: Vec<Vec<i32>> =
         (0..components).map(|c| Vec::with_capacity(c_widths[c] * c_heights[c])).collect();
@@ -1068,7 +1090,7 @@ fn decode_line_interleaved(
     let mut prev_lines: Vec<Vec<i32>> = (0..components).map(|c| vec![0i32; c_widths[c] + 3]).collect();
     let mut curr_lines: Vec<Vec<i32>> = (0..components).map(|c| vec![0i32; c_widths[c] + 3]).collect();
 
-    let num_groups = c_heights.iter().map(|&h| h / sampling[0].1 as usize).max().unwrap_or(height);
+    let num_groups = height.div_ceil(max_v.max(1));
     let mut groups_in_interval = 0usize;
     let interval_in_groups = if restart_interval > 0 {
         let v_samp_max = sampling.iter().map(|&(_, v)| v as usize).max().unwrap_or(1);
@@ -1116,15 +1138,18 @@ fn decode_line_interleaved(
 
                 curr_lines[comp][cw + 2] = curr_lines[comp][cw + 1];
 
-                for &v in curr_lines[comp].iter().take(cw + 2).skip(2) {
-                    comp_data[comp].push(v);
-                }
+                let room = (cw * c_heights[comp]).saturating_sub(comp_data[comp].len());
+                comp_data[comp].extend(curr_lines[comp].iter().take(cw + 2).skip(2).take(room));
 
                 std::mem::swap(&mut prev_lines[comp], &mut curr_lines[comp]);
             }
         }
 
         groups_in_interval += 1;
+    }
+
+    for (comp, data) in comp_data.iter_mut().enumerate() {
+        data.resize(c_widths[comp] * c_heights[comp], 0);
     }
 
     let mut result = Vec::with_capacity(width * height * components);
@@ -1250,7 +1275,7 @@ fn lossless_regular_mode(
     let mut k = 0i32;
     {
         let mut nst = nt;
-        while nst < at {
+        while nst < at && k < MAX_K {
             nst = nst.saturating_mul(2);
             k += 1;
         }
@@ -1338,7 +1363,7 @@ fn lossless_end_of_run(
     let mut k = 0i32;
     {
         let mut nst = nt;
-        while nst < at {
+        while nst < at && k < MAX_K {
             nst = nst.saturating_mul(2);
             k += 1;
         }
@@ -1466,7 +1491,7 @@ fn lossy_regular_mode(
     let mut k = 0i32;
     {
         let mut nst = nt;
-        while nst < at {
+        while nst < at && k < MAX_K {
             nst = nst.saturating_mul(2);
             k += 1;
         }
@@ -1563,7 +1588,7 @@ fn lossy_end_of_run(
     let mut k = 0i32;
     {
         let mut nst = nt;
-        while nst < at {
+        while nst < at && k < MAX_K {
             nst = nst.saturating_mul(2);
             k += 1;
         }

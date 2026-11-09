@@ -87,7 +87,7 @@ impl JlsBitReader {
         let mut count = 0i32;
         loop {
             let temp = self.zero_lut[(self.reg >> 24) as usize] as i32;
-            count += temp;
+            count = count.saturating_add(temp);
             if temp != 8 {
                 self.fill_buffer(temp + 1);
                 break;

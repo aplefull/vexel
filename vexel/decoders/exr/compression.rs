@@ -246,7 +246,8 @@ fn unpack3(b: &[u8]) -> [u16; 16] {
 }
 
 pub fn b44_decompress(data: &[u8], channels: &[ChunkChannel]) -> VexelResult<Vec<u8>> {
-    let total_bytes: usize = channels.iter().map(|c| c.width * c.rows * c.bpe).sum();
+    let total_bytes: usize =
+        channels.iter().map(|c| c.width.saturating_mul(c.rows).saturating_mul(c.bpe)).fold(0, usize::saturating_add);
     let mut out = vec![0u8; total_bytes];
 
     let mut pos = 0usize;
@@ -263,7 +264,10 @@ pub fn b44_decompress(data: &[u8], channels: &[ChunkChannel]) -> VexelResult<Vec
 
         if channel.pixel_type != ExrPixelType::Half {
             if pos + n_bytes > data.len() {
-                return Err(VexelError::Custom("EXR: B44 raw channel data truncated".to_string()));
+                log_warn!("EXR: B44 raw channel data truncated, zero-filling the rest of the chunk");
+                let available = data.len().saturating_sub(pos);
+                out[channel_offset..channel_offset + available].copy_from_slice(&data[pos..pos + available]);
+                return Ok(out);
             }
             out[channel_offset..channel_offset + n_bytes].copy_from_slice(&data[pos..pos + n_bytes]);
             pos += n_bytes;
@@ -276,7 +280,8 @@ pub fn b44_decompress(data: &[u8], channels: &[ChunkChannel]) -> VexelResult<Vec
             let mut x = 0usize;
             while x < nx {
                 if pos + 3 > data.len() {
-                    return Err(VexelError::Custom("EXR: B44 block data truncated".to_string()));
+                    log_warn!("EXR: B44 block data truncated, zero-filling the rest of the chunk");
+                    return Ok(out);
                 }
 
                 let mut s = if data[pos + 2] >= (13 << 2) {
@@ -285,7 +290,8 @@ pub fn b44_decompress(data: &[u8], channels: &[ChunkChannel]) -> VexelResult<Vec
                     block
                 } else {
                     if pos + 14 > data.len() {
-                        return Err(VexelError::Custom("EXR: B44 block data truncated".to_string()));
+                        log_warn!("EXR: B44 block data truncated, zero-filling the rest of the chunk");
+                        return Ok(out);
                     }
                     let block = unpack14(&data[pos..pos + 14]);
                     pos += 14;

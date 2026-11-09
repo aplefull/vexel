@@ -37,18 +37,18 @@ pub fn decode_deep_chunk<'a>(
     let packed_size = cursor.read_u64()?;
     let unpacked_declared = cursor.read_u64()?;
 
-    if table_size as usize > cursor.remaining() {
-        return Err(VexelError::Custom(format!("EXR: deep chunk sample count table size {} is invalid", table_size)));
+    if table_size > cursor.remaining() as u64 {
+        log_warn!("EXR: deep chunk sample count table size {} runs past the end of the file", table_size);
     }
-    let table_data = cursor.read_bytes(table_size as usize)?;
+    let table_data = cursor.read_bytes((table_size.min(cursor.remaining() as u64)) as usize)?;
 
-    if packed_size as usize > cursor.remaining() {
-        return Err(VexelError::Custom(format!("EXR: deep chunk sample data size {} is invalid", packed_size)));
+    if packed_size > cursor.remaining() as u64 {
+        log_warn!("EXR: deep chunk sample data size {} runs past the end of the file", packed_size);
     }
-    let sample_data = cursor.read_bytes(packed_size as usize)?;
+    let sample_data = cursor.read_bytes((packed_size.min(cursor.remaining() as u64)) as usize)?;
 
-    let pixel_count = region.width * region.rows;
-    let table_bytes = pixel_count * 4;
+    let pixel_count = region.width.saturating_mul(region.rows);
+    let table_bytes = pixel_count.saturating_mul(4);
     limits.reserve_usize(table_bytes)?;
     let table = decompress_deep_blob(header.compression, table_data, table_bytes);
     limits.free_usize(table_bytes);
@@ -58,9 +58,20 @@ pub fn decode_deep_chunk<'a>(
 
     let sample_stride: usize = header.channels.iter().map(|c| c.pixel_type.bytes_per_element()).sum();
     let total_samples: u64 = row_totals.iter().sum();
-    let unpacked_size = (total_samples as usize)
-        .checked_mul(sample_stride)
+    let unpacked_size = usize::try_from(total_samples)
+        .ok()
+        .and_then(|samples| samples.checked_mul(sample_stride))
         .ok_or_else(|| VexelError::Custom("EXR: deep chunk sample data size overflow".to_string()))?;
+
+    let producible = max_expanded_size(header.compression, sample_data.len())
+        .saturating_add(pixel_count.saturating_mul(sample_stride));
+    if unpacked_size > producible {
+        return Err(VexelError::Custom(format!(
+            "EXR: deep chunk sample counts require {} bytes but {} packed bytes cannot hold them",
+            unpacked_size,
+            sample_data.len()
+        )));
+    }
 
     if unpacked_declared as usize != unpacked_size {
         log_warn!(
@@ -70,8 +81,9 @@ pub fn decode_deep_chunk<'a>(
         );
     }
 
-    let out_bytes = pixel_count * 4 * header.channels.len();
-    limits.reserve_usize(unpacked_size + out_bytes)?;
+    let out_bytes = pixel_count.saturating_mul(4).saturating_mul(header.channels.len());
+    let working_bytes = unpacked_size.saturating_add(out_bytes);
+    limits.reserve_usize(working_bytes)?;
     let result = flatten_deep_chunk(
         header,
         sample_data,
@@ -83,9 +95,17 @@ pub fn decode_deep_chunk<'a>(
         alpha_index,
         z_index,
     );
-    limits.free_usize(unpacked_size + out_bytes);
+    limits.free_usize(working_bytes);
 
     result.map(Some)
+}
+
+fn max_expanded_size(compression: ExrCompression, packed: usize) -> usize {
+    match compression {
+        ExrCompression::None => packed,
+        ExrCompression::Rle => packed.saturating_mul(64),
+        _ => packed.saturating_mul(1032),
+    }
 }
 
 fn read_deep_region(header: &PartHeader, cursor: &mut ByteCursor) -> VexelResult<Option<DeepRegion>> {

@@ -223,8 +223,10 @@ pub struct TileLayout {
 
 impl TileLayout {
     pub fn new(image: &ImageHeader) -> Self {
-        let mb_width = ((image.width + image.extra_left + image.extra_right) as usize).div_ceil(MB_SIZE);
-        let mb_height = ((image.height + image.extra_top + image.extra_bottom) as usize).div_ceil(MB_SIZE);
+        let padded =
+            |size: u32, before: u32, after: u32| (u64::from(size) + u64::from(before) + u64::from(after)) as usize;
+        let mb_width = padded(image.width, image.extra_left, image.extra_right).div_ceil(MB_SIZE);
+        let mb_height = padded(image.height, image.extra_top, image.extra_bottom).div_ceil(MB_SIZE);
 
         let mut col_starts: Vec<usize> = image.tile_x.iter().map(|&v| v as usize).collect();
         let mut row_starts: Vec<usize> = image.tile_y.iter().map(|&v| v as usize).collect();

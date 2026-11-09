@@ -67,6 +67,7 @@ pub fn read_packet_header(reader: &mut XrBitReader) -> VexelResult<()> {
 pub struct IndexTable {
     pub offsets: Vec<u64>,
     pub header_size: usize,
+    pub packet_starts: Vec<usize>,
 }
 
 pub fn read_index_table(reader: &mut XrBitReader, entries: usize, present: bool) -> VexelResult<IndexTable> {
@@ -77,8 +78,14 @@ pub fn read_index_table(reader: &mut XrBitReader, entries: usize, present: bool)
             return Err(VexelError::Custom("JPEG XR: bad index table marker".to_string()));
         }
 
-        offsets.reserve(entries);
-        for _ in 0..entries {
+        let available = ((reader.total_bits() >> 3) as usize).saturating_sub(reader.byte_pos());
+        let count = entries.min(available);
+        if count < entries {
+            log_warn!("JPEG XR: index table declares {} entries but only {} fit in the stream", entries, count);
+        }
+
+        offsets.reserve(count);
+        for _ in 0..count {
             let (value, _escape) = reader.read_vl_word_esc();
             offsets.push(value);
         }
@@ -87,9 +94,13 @@ pub fn read_index_table(reader: &mut XrBitReader, entries: usize, present: bool)
     let (extra, _) = reader.read_vl_word_esc();
     reader.align_byte();
 
-    let header_size = extra as usize + reader.byte_pos();
+    let header_size = usize::try_from(extra).unwrap_or(usize::MAX).saturating_add(reader.byte_pos());
 
-    Ok(IndexTable { offsets, header_size })
+    let mut packet_starts: Vec<usize> = offsets.iter().filter_map(|&o| header_size.checked_add(o as usize)).collect();
+    packet_starts.sort_unstable();
+    packet_starts.dedup();
+
+    Ok(IndexTable { offsets, header_size, packet_starts })
 }
 
 struct PlaneState {
@@ -438,13 +449,8 @@ fn open_row_streams<'a>(
                     return None;
                 }
 
-                let end = table
-                    .offsets
-                    .iter()
-                    .filter_map(|&o| base.checked_add(o as usize))
-                    .filter(|&o| o > start)
-                    .min()
-                    .unwrap_or(stream.len());
+                let next = table.packet_starts.partition_point(|&o| o <= start);
+                let end = table.packet_starts.get(next).copied().unwrap_or(stream.len());
 
                 let mut reader = XrBitReader::new(stream);
                 reader.set_limit_bytes(end);

@@ -9,6 +9,7 @@ const MAX_NAME_LENGTH: usize = 256;
 const MAX_CHANNELS: usize = 4096;
 const MAX_PARTS: usize = 512;
 
+#[derive(Clone)]
 pub struct ByteCursor<'a> {
     data: &'a [u8],
     pos: usize,

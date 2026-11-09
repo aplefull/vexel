@@ -70,11 +70,11 @@ pub fn pixel_format_from_guid(guid: &[u8]) -> PixelFormatKind {
 }
 
 fn read_u16(data: &[u8], pos: usize) -> Option<u16> {
-    data.get(pos..pos + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    data.get(pos..pos.checked_add(2)?).map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 
 fn read_u32(data: &[u8], pos: usize) -> Option<u32> {
-    data.get(pos..pos + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    data.get(pos..pos.checked_add(4)?).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 fn entry_type_size(kind: u16) -> usize {
@@ -123,7 +123,7 @@ pub fn parse_container(data: &[u8]) -> Option<Container> {
         };
 
         for i in 0..count {
-            let entry = ifd_offset + 2 + i * 12;
+            let Some(entry) = ifd_offset.checked_add(2 + i * 12) else { break };
             let Some(tag) = read_u16(data, entry) else { break };
             let Some(kind) = read_u16(data, entry + 2) else { break };
             let Some(items) = read_u32(data, entry + 4) else { break };
@@ -135,7 +135,7 @@ pub fn parse_container(data: &[u8]) -> Option<Container> {
 
             match tag {
                 TAG_PIXEL_FORMAT => {
-                    if let Some(guid) = data.get(payload_at..payload_at + 16) {
+                    if let Some(guid) = payload_at.checked_add(16).and_then(|end| data.get(payload_at..end)) {
                         container.pixel_format = Some(pixel_format_from_guid(guid));
                     }
                 }
@@ -147,7 +147,7 @@ pub fn parse_container(data: &[u8]) -> Option<Container> {
                 TAG_ALPHA_OFFSET => container.alpha_offset = value as usize,
                 TAG_ALPHA_BYTE_COUNT => container.alpha_byte_count = value as usize,
                 TAG_ICC_PROFILE => {
-                    if let Some(profile) = data.get(payload_at..payload_at + byte_len) {
+                    if let Some(profile) = payload_at.checked_add(byte_len).and_then(|end| data.get(payload_at..end)) {
                         container.icc_profile = Some(profile.to_vec());
                     }
                 }
@@ -155,7 +155,7 @@ pub fn parse_container(data: &[u8]) -> Option<Container> {
             }
         }
 
-        ifd_offset = match read_u32(data, ifd_offset + 2 + count * 12) {
+        ifd_offset = match ifd_offset.checked_add(2 + count * 12).and_then(|at| read_u32(data, at)) {
             Some(next) => next as usize,
             None => 0,
         };
@@ -175,7 +175,13 @@ pub fn find_codestream(data: &[u8]) -> Option<usize> {
     data.windows(CODESTREAM_MAGIC.len()).position(|w| w == CODESTREAM_MAGIC)
 }
 
+const MAX_BOX_DEPTH: usize = 16;
+
 pub fn parse_jpx_boxes(data: &[u8]) -> Option<Container> {
+    parse_jpx_boxes_at_depth(data, 0)
+}
+
+fn parse_jpx_boxes_at_depth(data: &[u8], depth: usize) -> Option<Container> {
     let mut pos = 0usize;
     let mut best: Option<Container> = None;
 
@@ -184,8 +190,8 @@ pub fn parse_jpx_boxes(data: &[u8]) -> Option<Container> {
         let kind = data.get(pos + 4..pos + 8)?;
 
         let (payload_start, payload_len) = if len == 1 {
-            let ext = u64::from_be_bytes(data.get(pos + 8..pos + 16)?.try_into().ok()?) as usize;
-            (pos + 16, ext.checked_sub(16)?)
+            let ext = u64::from_be_bytes(data.get(pos + 8..pos.checked_add(16)?)?.try_into().ok()?);
+            (pos + 16, usize::try_from(ext).unwrap_or(usize::MAX).checked_sub(16)?)
         } else if len == 0 {
             (pos + 8, data.len() - (pos + 8))
         } else {
@@ -205,8 +211,8 @@ pub fn parse_jpx_boxes(data: &[u8]) -> Option<Container> {
                     });
                 }
             }
-            b"jp2h" | b"jpch" | b"jplh" => {
-                if let Some(inner) = parse_jpx_boxes(payload) {
+            b"jp2h" | b"jpch" | b"jplh" if depth < MAX_BOX_DEPTH => {
+                if let Some(inner) = parse_jpx_boxes_at_depth(payload, depth + 1) {
                     best = Some(inner);
                 }
             }

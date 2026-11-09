@@ -517,10 +517,10 @@ fn nlt_inverse_linear(planes: &mut [Vec<i32>], bw: u8, depth: u8, image: &ImageP
 fn nlt_inverse_quadratic(planes: &mut [Vec<i32>], bw: u8, depth: u8, config: &Config, image: &ImageParams, ids: &Ids) {
     let vdco = config.quadratic.alpha as i32 - config.quadratic.sigma as i32 * 32768;
     let s = ((bw as u32) << 1).saturating_sub(depth as u32).min(62);
-    let dclev = (1i32 << bw) >> 1;
+    let dclev = ((1i64 << bw) >> 1) as i32;
     let s_r = (1i64 << s) >> 1;
     let max_val = (1i64 << depth) - 1;
-    let max_coef = (1i32 << bw) - 1;
+    let max_coef = ((1i64 << bw) - 1) as i32;
 
     for comp in 0..image.ncomps.min(planes.len()) {
         let count = sample_count(image, ids, comp).min(planes[comp].len());
@@ -539,34 +539,34 @@ fn nlt_inverse_extended(planes: &mut [Vec<i32>], bw: u8, depth: u8, config: &Con
     let t2 = config.extended.t2 as i64;
 
     let b2 = t1.saturating_mul(t1);
-    let a1 = b2 + (t1 << e.min(40)) + (1i64 << (2 * e).saturating_sub(2).min(62));
+    let a1 = b2.saturating_add(t1 << e.min(40)).saturating_add(1i64 << (2 * e).saturating_sub(2).min(62));
     let b1 = t1 + (1i64 << e.saturating_sub(1).min(62));
-    let a3 = b2 + (t2 << e.min(40)) - (1i64 << (2 * e).saturating_sub(2).min(62));
+    let a3 = b2.saturating_add(t2 << e.min(40)).saturating_sub(1i64 << (2 * e).saturating_sub(2).min(62));
     let b3 = t2 - (1i64 << e.saturating_sub(1).min(62));
 
     let s = ((bw as u32) << 1).saturating_sub(depth as u32).min(62);
     let s_r = (1i64 << s) >> 1;
     let max_val = (1i64 << depth) - 1;
     let max_coef = (1i64 << bw) - 1;
-    let dclev = (1i32 << bw) >> 1;
+    let dclev = (1i64 << bw) >> 1;
 
     for comp in 0..image.ncomps.min(planes.len()) {
         let count = sample_count(image, ids, comp).min(planes[comp].len());
 
         for value in &mut planes[comp][..count] {
-            let mut v = (*value as i64).wrapping_add(dclev as i64);
+            let mut v = (*value as i64) + dclev;
 
             if v < t1 {
                 v = clamp64_to(b1 - v, max_coef);
-                v = a1 - v.saturating_mul(v);
+                v = a1.saturating_sub(v.saturating_mul(v));
             } else if v < t2 {
-                v = (v << e.min(40)) + b2;
+                v = (v << e.min(40)).saturating_add(b2);
             } else {
                 v = clamp64_to(v - b3, max_coef);
-                v = a3 + v.saturating_mul(v);
+                v = a3.saturating_add(v.saturating_mul(v));
             }
 
-            *value = clamp64_to((v + s_r) >> s, max_val) as i32;
+            *value = clamp64_to(v.saturating_add(s_r) >> s, max_val) as i32;
         }
     }
 }

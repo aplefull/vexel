@@ -383,7 +383,7 @@ fn decode_block_highpass(
     let mut cont = sr & srn;
     let mut sign = reader.read_sign();
 
-    let mut level = (qp ^ sign) - sign;
+    let mut level = (qp ^ sign).wrapping_sub(sign);
     if index & 2 != 0 {
         level =
             level.wrapping_mul(decode_significant_abs_level_at(context, 6 + context_offset + cont as usize, reader));
@@ -414,7 +414,7 @@ fn decode_block_highpass(
         cont &= srn;
         sign = reader.read_sign();
 
-        let mut level = (qp ^ sign) - sign;
+        let mut level = (qp ^ sign).wrapping_sub(sign);
         if index & 1 != 0 {
             level = level.wrapping_mul(decode_significant_abs_level_at(
                 context,
@@ -563,7 +563,7 @@ pub fn decode_macroblock_dc(
                 value = value.wrapping_shl(model_bits as u32) | reader.read_i32(model_bits as u32);
             }
             if value != 0 && reader.read_bool() {
-                value = -value;
+                value = value.wrapping_neg();
             }
             mb.block_dc[ch][0] = value;
 
@@ -588,7 +588,7 @@ pub fn decode_macroblock_dc(
             dc_y = dc_y.wrapping_shl(model_bits as u32) | reader.read_i32(model_bits as u32);
         }
         if dc_y != 0 && reader.read_bool() {
-            dc_y = -dc_y;
+            dc_y = dc_y.wrapping_neg();
         }
         mb.block_dc[0][0] = dc_y;
 
@@ -602,7 +602,7 @@ pub fn decode_macroblock_dc(
             dc_u = dc_u.wrapping_shl(model_bits as u32) | reader.read_i32(model_bits as u32);
         }
         if dc_u != 0 && reader.read_bool() {
-            dc_u = -dc_u;
+            dc_u = dc_u.wrapping_neg();
         }
         mb.block_dc[1][0] = dc_u;
 
@@ -614,7 +614,7 @@ pub fn decode_macroblock_dc(
             dc_v = dc_v.wrapping_shl(model_bits as u32) | reader.read_i32(model_bits as u32);
         }
         if dc_v != 0 && reader.read_bool() {
-            dc_v = -dc_v;
+            dc_v = dc_v.wrapping_neg();
         }
         mb.block_dc[2][0] = dc_v;
     }
@@ -972,7 +972,7 @@ fn decode_block_adaptive<'a>(
         let flex_reader = flex_reader.unwrap_or(reader);
         let bits = flex as u32;
 
-        if qp + trim == 1 {
+        if qp.wrapping_add(trim) == 1 {
             for &position in DCT_INDEX_AC_444.iter().skip(1) {
                 let value = coeffs[position];
                 coeffs[position] = if value < 0 {

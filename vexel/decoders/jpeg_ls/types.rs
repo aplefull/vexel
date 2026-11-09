@@ -16,6 +16,8 @@ pub const INITABSLACK: i32 = 6;
 
 pub const DEFAULT_RESET: i32 = 64;
 
+pub const MAX_K: i32 = 24;
+
 pub const MAX_C: i32 = 127;
 pub const MIN_C: i32 = -128;
 
@@ -106,7 +108,8 @@ pub struct DecoderState {
 }
 
 impl DecoderState {
-    pub fn new() -> Self {
+    pub fn new(components: usize) -> Self {
+        let run_states = components.max(MAX_COMPONENTS);
         Self {
             n: vec![0; TOT_CONTEXTS],
             a: vec![0; TOT_CONTEXTS],
@@ -114,9 +117,9 @@ impl DecoderState {
             c: vec![0; TOT_CONTEXTS],
             vlut: vec![vec![0; 2 * LUTMAX16]; 3],
             classmap: vec![0; CONTEXTS1],
-            melc_state: vec![0; MAX_COMPONENTS],
-            melc_len: vec![0; MAX_COMPONENTS],
-            melc_order: vec![0; MAX_COMPONENTS],
+            melc_state: vec![0; run_states],
+            melc_len: vec![0; run_states],
+            melc_order: vec![0; run_states],
             limit_reduce: 0,
             qmul: Vec::new(),
             qmul_offset: 0,

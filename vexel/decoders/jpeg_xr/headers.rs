@@ -219,9 +219,7 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
     }
 
     if tile_stretch {
-        for _ in 0..(tile_cols + 1) * (tile_rows + 1) {
-            reader.skip(8);
-        }
+        reader.skip(8 * ((tile_cols + 1) * (tile_rows + 1)) as u64);
     }
 
     if windowing {

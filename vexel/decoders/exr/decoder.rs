@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::decoders::exr::compression::{b44_decompress, pxr24_reconstruct, rle_decompress, unpredict_and_reorder};
@@ -196,6 +197,10 @@ impl<R: Read + Seek> ExrDecoder<R> {
         }
 
         self.limits.check_dimensions(width as u32, height as u32)?;
+        let output_bytes = (width as u64 * height as u64)
+            .saturating_mul(4)
+            .saturating_mul(output_channel_count(&header, &select_channels(&header)) as u64);
+        self.limits.reserve(output_bytes)?;
 
         let mut header = header;
         if (header.kind.is_tiled() || header.kind.is_deep())
@@ -221,11 +226,19 @@ impl<R: Read + Seek> ExrDecoder<R> {
         for channel in &header.channels {
             let pw = num_samples(channel.x_sampling as i64, dw.x_min as i64, dw.x_max as i64) as usize;
             let ph = num_samples(channel.y_sampling as i64, dw.y_min as i64, dw.y_max as i64) as usize;
-            let bytes = pw
-                .checked_mul(ph)
-                .and_then(|n| n.checked_mul(4))
-                .ok_or_else(|| VexelError::Custom("EXR: channel plane size overflow".to_string()))?;
-            self.limits.reserve_usize(bytes)?;
+            let bytes = pw.checked_mul(ph).and_then(|n| n.checked_mul(4));
+            let reserved = match bytes {
+                Some(bytes) => self.limits.reserve_usize(bytes).map(|_| bytes),
+                None => Err(VexelError::Custom("EXR: channel plane size overflow".to_string())),
+            };
+            let bytes = match reserved {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    self.limits.free_usize(reserved_bytes);
+                    self.limits.free(output_bytes);
+                    return Err(e);
+                }
+            };
             reserved_bytes += bytes;
             planes.push(Plane { width: pw, height: ph, samples: vec![0f32; pw * ph] });
         }
@@ -258,8 +271,13 @@ impl<R: Read + Seek> ExrDecoder<R> {
         let lines_per_block = header.compression.lines_per_block() as i64;
         let (alpha_index, z_index) = if deep { deep_composite_channels(header) } else { (None, None) };
 
+        let row_table_bytes = if tiled && !deep { tile_row_table_bytes(header) } else { 0 };
+        limits.reserve_usize(row_table_bytes)?;
+
+        let mut seen_chunks = HashSet::new();
+
         for (chunk_index, &offset) in chunk_offsets.iter().enumerate() {
-            if offset < 8 || offset as usize >= data.len() {
+            if offset < 8 || offset >= data.len() as u64 {
                 log_warn!("EXR: chunk {} has invalid offset {}, skipping", chunk_index, offset);
                 continue;
             }
@@ -285,7 +303,14 @@ impl<R: Read + Seek> ExrDecoder<R> {
                 }
             }
 
+            let key = chunk_key(header, &cursor, lines_per_block);
+            if key.is_some_and(|key| seen_chunks.contains(&key)) {
+                log_warn!("EXR: chunk {} repeats an already decoded block, skipping", chunk_index);
+                continue;
+            }
+
             if deep {
+                seen_chunks.extend(key);
                 match deep::decode_deep_chunk(limits, header, &mut cursor, alpha_index, z_index) {
                     Ok(Some(pixels)) => scatter_deep_chunk(&pixels, planes, dw),
                     Ok(None) => {}
@@ -308,6 +333,7 @@ impl<R: Read + Seek> ExrDecoder<R> {
                     continue;
                 }
             };
+            seen_chunks.extend(key);
 
             match decompress_chunk(limits, header.compression, &layout, chunk_data) {
                 Ok(unpacked) => {
@@ -319,8 +345,31 @@ impl<R: Read + Seek> ExrDecoder<R> {
             }
         }
 
+        limits.free_usize(row_table_bytes);
         Ok(())
     }
+}
+
+fn chunk_key(header: &PartHeader, cursor: &ByteCursor, lines_per_block: i64) -> Option<(i64, i64, i32, i32)> {
+    let mut peek = cursor.clone();
+    if header.kind.is_tiled() {
+        let tile_x = peek.read_i32().ok()? as i64;
+        let tile_y = peek.read_i32().ok()? as i64;
+        let level_x = peek.read_i32().ok()?;
+        let level_y = peek.read_i32().ok()?;
+        Some((tile_x, tile_y, level_x, level_y))
+    } else {
+        let y = peek.read_i32().ok()? as i64;
+        Some(((y - header.data_window.y_min as i64).div_euclid(lines_per_block.max(1)), 0, 0, 0))
+    }
+}
+
+fn tile_row_table_bytes(header: &PartHeader) -> usize {
+    let rows = match &header.tiles {
+        Some(tiles) => (tiles.y_size as i64).min(header.data_window.height()).max(0) as usize,
+        None => 0,
+    };
+    rows.saturating_mul(std::mem::size_of::<(i64, Vec<bool>)>() + header.channels.len())
 }
 
 fn deep_composite_channels(header: &PartHeader) -> (Option<usize>, Option<usize>) {
@@ -340,7 +389,7 @@ fn scatter_deep_chunk(pixels: &DeepChunkPixels, planes: &mut [Plane], dw: Box2i)
             }
 
             let px = pixels.x0 - dw.x_min as i64;
-            if px < 0 {
+            if px < 0 || px as usize >= plane.width {
                 continue;
             }
 
@@ -350,6 +399,22 @@ fn scatter_deep_chunk(pixels: &DeepChunkPixels, planes: &mut [Plane], dw: Box2i)
             plane.samples[dst_start..dst_start + count].copy_from_slice(&values[src_start..src_start + count]);
         }
     }
+}
+
+fn read_chunk_payload<'a>(cursor: &mut ByteCursor<'a>, size: i32) -> VexelResult<&'a [u8]> {
+    if size <= 0 || cursor.remaining() == 0 {
+        return Err(VexelError::Custom(format!("EXR: invalid chunk data size {}", size)));
+    }
+
+    let size = size as usize;
+    if size > cursor.remaining() {
+        log_warn!(
+            "EXR: chunk data size {} runs past the end of the file, using the {} bytes left",
+            size,
+            cursor.remaining()
+        );
+    }
+    cursor.read_bytes(size.min(cursor.remaining()))
 }
 
 fn read_scanline_chunk<'a>(
@@ -366,11 +431,7 @@ fn read_scanline_chunk<'a>(
         return Ok(None);
     }
 
-    if size <= 0 || size as usize > cursor.remaining() {
-        return Err(VexelError::Custom(format!("EXR: invalid chunk data size {}", size)));
-    }
-
-    let data = cursor.read_bytes(size as usize)?;
+    let data = read_chunk_payload(cursor, size)?;
     let y1 = (y0 + lines_per_block - 1).min(dw.y_max as i64);
     let layout = build_scanline_layout(header, y0, y1);
 
@@ -388,11 +449,7 @@ fn read_tile_chunk<'a>(
     let level_y = cursor.read_i32()?;
     let size = cursor.read_i32()?;
 
-    if size <= 0 || size as usize > cursor.remaining() {
-        return Err(VexelError::Custom(format!("EXR: invalid tile data size {}", size)));
-    }
-
-    let data = cursor.read_bytes(size as usize)?;
+    let data = read_chunk_payload(cursor, size)?;
 
     if level_x != 0 || level_y != 0 {
         return Ok(None);
@@ -437,7 +494,7 @@ fn read_tile_chunk<'a>(
         rows.push((y, vec![true; header.channels.len()]));
     }
 
-    let unpacked_size = channels.iter().map(|c| c.width * c.rows * c.bpe).sum();
+    let unpacked_size = layout_size(&channels);
     let names = header.channels.iter().map(|c| c.name.clone()).collect();
 
     Ok(Some((ChunkLayout { channels, names, rows, unpacked_size }, x0, data)))
@@ -579,10 +636,14 @@ fn build_scanline_layout(header: &PartHeader, y0: i64, y1: i64) -> ChunkLayout {
         })
         .collect();
 
-    let unpacked_size = channels.iter().map(|c| c.width * c.rows * c.bpe).sum();
+    let unpacked_size = layout_size(&channels);
     let names = header.channels.iter().map(|c| c.name.clone()).collect();
 
     ChunkLayout { channels, names, rows, unpacked_size }
+}
+
+fn layout_size(channels: &[ChunkChannel]) -> usize {
+    channels.iter().map(|c| c.width.saturating_mul(c.rows).saturating_mul(c.bpe)).fold(0, usize::saturating_add)
 }
 
 fn repack_planar(planar: &[u8], layout: &ChunkLayout) -> Vec<u8> {
@@ -643,7 +704,7 @@ fn scatter_chunk(header: &PartHeader, layout: &ChunkLayout, x0: i64, unpacked: &
             }
 
             let col_start = sample_index(x0, dw.x_min as i64, channel.x_sampling as i64);
-            if col_start < 0 {
+            if col_start < 0 || col_start as usize >= plane.width {
                 continue;
             }
 
@@ -775,6 +836,24 @@ fn upsample_to_full(header: &PartHeader, plane: &Plane, channel_index: usize, wi
     }
 
     out
+}
+
+fn output_channel_count(header: &PartHeader, selection: &ChannelSelection) -> usize {
+    let alpha = usize::from(selection.a.is_some());
+    if selection.r.is_some() && selection.g.is_some() && selection.b.is_some() {
+        return 3 + alpha;
+    }
+    if selection.y.is_some() && selection.ry.is_some() && selection.by.is_some() {
+        return 3 + alpha;
+    }
+    if selection.y.is_some() {
+        return 1 + alpha;
+    }
+    match header.channels.len() {
+        1 => 1,
+        n if n >= 3 => 3 + alpha,
+        _ => 1 + alpha,
+    }
 }
 
 fn luminance_weights(header: &PartHeader) -> [f32; 3] {

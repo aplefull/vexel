@@ -151,7 +151,7 @@ fn inverse_convert_rgbe(r: i32, g: i32, b: i32) -> [u8; 4] {
 }
 
 pub fn pixel_to_float(value: i32, exp_bias: i8, mantissa_len: u8) -> f32 {
-    let lm = u32::from(mantissa_len);
+    let lm = u32::from(mantissa_len).min(23);
     let lm_shift = 1i32 << lm;
 
     let sign = value >> 31;
@@ -165,7 +165,7 @@ pub fn pixel_to_float(value: i32, exp_bias: i8, mantissa_len: u8) -> f32 {
         exponent = 1;
     }
 
-    exponent += 127 - i32::from(exp_bias);
+    exponent = exponent.wrapping_add(127 - i32::from(exp_bias));
 
     while mantissa < lm_shift && exponent > 1 && mantissa > 0 {
         exponent -= 1;
@@ -235,6 +235,10 @@ fn interpolate_uv(
     let size = mb_width * mb_height * 256;
     let mut out_u = vec![0i32; size];
     let mut out_v = vec![0i32; size];
+
+    if width < 2 || height < 2 {
+        return Chroma { u: out_u, v: out_v };
+    }
 
     let index_of = |row: usize, column: usize| -> usize {
         (row >> 4) * mb_width * 256 + ((column >> 4) << 8) + usize::from(IDX_CC[row & 15][column & 15])
@@ -349,7 +353,7 @@ impl<'a> Sampler<'a> {
 
     fn luma(&self, row: usize, column: usize) -> i32 {
         let (row, column) = self.origin(row, column);
-        self.planes[0].sample(row, column)
+        self.planes.first().map(|p| p.sample(row, column)).unwrap_or(0)
     }
 
     fn chroma_index(&self, row: usize, column: usize) -> usize {
@@ -443,7 +447,7 @@ pub fn build_image_data(
     mb_height: usize,
 ) -> PixelData {
     let sampler = build_sampler(planes, params, mb_width, mb_height);
-    let alpha_sampler = alpha.map(|planes| build_sampler(planes, params, mb_width, mb_height));
+    let alpha_sampler = alpha.map(|planes| build_sampler(&planes[..planes.len().min(1)], params, mb_width, mb_height));
 
     match params.bit_depth {
         BitDepth::Bd1White | BitDepth::Bd1Black => build_bilevel(&sampler, params),
@@ -607,7 +611,7 @@ fn build_ncomponent_8(
 
 fn build_16bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
     let shift = params.shift();
-    let len = u32::from(params.mantissa_len);
+    let len = u32::from(params.mantissa_len).min(31);
     let bias = (((1i32 << 15) >> len) << shift) + params.round_bias();
     let alpha_bias = (1 << (shift + 15)) + params.round_bias();
 
@@ -720,7 +724,7 @@ fn build_16bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams
 
 fn build_16bit_signed(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
     let shift = params.shift();
-    let len = u32::from(params.mantissa_len);
+    let len = u32::from(params.mantissa_len).min(31);
     let bias = params.round_bias();
 
     let normalize = |value: i16| -> u16 { ((i32::from(value) - i32::from(i16::MIN)) as u32).min(65535) as u16 };
@@ -821,7 +825,7 @@ fn build_half(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams)
 
 fn build_32bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
     let shift = params.shift();
-    let len = u32::from(params.mantissa_len);
+    let len = u32::from(params.mantissa_len).min(31);
     let signed = params.bit_depth == BitDepth::Bd32S;
 
     let bias = if signed {

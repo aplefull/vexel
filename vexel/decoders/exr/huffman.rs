@@ -155,6 +155,13 @@ fn build_dec_table(hcode: &[u64], im: usize, i_m: usize) -> VexelResult<Vec<HufD
         }
     }
 
+    for entry in hdecod.iter_mut().filter(|entry| entry.p.len() > 1) {
+        entry.p.sort_unstable_by_key(|&symbol| {
+            let code = hcode[symbol as usize];
+            (huf_length(code), huf_code(code))
+        });
+    }
+
     Ok(hdecod)
 }
 
@@ -242,28 +249,39 @@ fn huf_decode(
                     return Err(VexelError::Custom("EXR: corrupt huffman data".to_string()));
                 }
 
-                let mut found = false;
-                for &candidate in entry.p.iter() {
-                    let l = huf_length(hcode[candidate as usize]) as i32;
+                let mut found = None;
+                let mut start = 0usize;
+                while start < entry.p.len() {
+                    let length = huf_length(hcode[entry.p[start] as usize]);
+                    let end = start
+                        + entry.p[start..].partition_point(|&symbol| huf_length(hcode[symbol as usize]) == length);
+                    let l = length as i32;
 
                     while state.lc < l && state.pos < state.input.len() {
                         state.get_char();
                     }
 
-                    if state.lc >= l {
-                        let mask = if l >= 64 { u64::MAX } else { (1u64 << l) - 1 };
-                        if huf_code(hcode[candidate as usize]) == (state.c >> (state.lc - l)) & mask {
-                            state.lc -= l;
-                            state.emit(candidate, rlc)?;
-                            found = true;
-                            break;
-                        }
+                    if state.lc < l {
+                        break;
                     }
+
+                    let mask = if l >= 64 { u64::MAX } else { (1u64 << l) - 1 };
+                    let value = (state.c >> (state.lc - l)) & mask;
+                    if let Ok(k) =
+                        entry.p[start..end].binary_search_by_key(&value, |&symbol| huf_code(hcode[symbol as usize]))
+                    {
+                        found = Some((entry.p[start + k], l));
+                        break;
+                    }
+
+                    start = end;
                 }
 
-                if !found {
+                let Some((candidate, l)) = found else {
                     return Err(VexelError::Custom("EXR: corrupt huffman data".to_string()));
-                }
+                };
+                state.lc -= l;
+                state.emit(candidate, rlc)?;
             }
         }
     }

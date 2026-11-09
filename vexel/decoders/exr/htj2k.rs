@@ -1,7 +1,7 @@
 use crate::decoders::exr::types::{ChunkChannel, ExrPixelType};
 use crate::decoders::jpeg2000::codestream;
 use crate::decoders::jpeg2000::decoder::{component_dimensions, decode_codestream_planes};
-use crate::utils::error::VexelResult;
+use crate::utils::error::{VexelError, VexelResult};
 use crate::{log_warn, Limits};
 
 const HT_MAGIC: u16 = 0x4854;
@@ -75,14 +75,33 @@ pub fn htj2k_decompress(
     let codestream_data = &data[header.codestream_offset..];
 
     let parsed = codestream::parse(codestream_data)?;
-    let planes = decode_codestream_planes(&parsed, codestream_data, limits)?;
+
+    let max_width = channels.iter().map(|c| c.width).max().unwrap_or(0);
+    let max_rows = channels.iter().map(|c| c.rows).max().unwrap_or(0);
+    if parsed.siz.width() as usize > max_width
+        || parsed.siz.height() as usize > max_rows
+        || parsed.siz.components.len() > channels.len()
+    {
+        return Err(VexelError::Custom(format!(
+            "EXR: HTJ2K codestream is {}x{} with {} components, which does not fit a {}x{} chunk of {} channels",
+            parsed.siz.width(),
+            parsed.siz.height(),
+            parsed.siz.components.len(),
+            max_width,
+            max_rows,
+            channels.len()
+        )));
+    }
+
+    let mut codestream_limits = limits.clone();
+    let planes = decode_codestream_planes(&parsed, codestream_data, &mut codestream_limits)?;
 
     let mut out = vec![0u8; unpacked_size];
     let mut channel_starts = Vec::with_capacity(channels.len());
     let mut cursor = 0usize;
     for channel in channels {
         channel_starts.push(cursor);
-        cursor += channel.width * channel.rows * channel.bpe;
+        cursor = cursor.saturating_add(channel.width.saturating_mul(channel.rows).saturating_mul(channel.bpe));
     }
 
     if cursor != unpacked_size {

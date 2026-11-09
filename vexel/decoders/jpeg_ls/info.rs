@@ -59,7 +59,7 @@ pub struct JpegLsPresetParameters {
 pub struct JpegLsMappingTable {
     pub table_id: u8,
     pub entry_count: u16,
-    pub entries: Vec<u16>,
+    pub entries: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]

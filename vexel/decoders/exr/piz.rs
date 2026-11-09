@@ -183,7 +183,7 @@ pub fn piz_decompress(data: &[u8], channels: &[ChunkChannel]) -> VexelResult<Vec
     let huf_bytes = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
     pos += 4;
 
-    if pos + huf_bytes > data.len() {
+    if huf_bytes > data.len() - pos {
         return Err(VexelError::Custom("EXR: PIZ huffman data truncated".to_string()));
     }
 

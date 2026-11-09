@@ -77,6 +77,22 @@ fn read_header(data: &[u8]) -> VexelResult<Header> {
     })
 }
 
+fn clamp_section_size(value: &mut usize, cap: usize, what: &str) {
+    if *value > cap {
+        log_warn!("EXR: DWA {} {} exceeds what the block can hold, clamping to {}", what, value, cap);
+        *value = cap;
+    }
+}
+
+fn clamp_section_sizes(header: &mut Header, unpacked_size: usize) {
+    let rle_packed_cap = unpacked_size.saturating_add(unpacked_size / 64).saturating_add(64);
+    clamp_section_size(&mut header.unknown_uncompressed_size, unpacked_size, "unknown data size");
+    clamp_section_size(&mut header.rle_raw_size, unpacked_size, "RLE raw size");
+    clamp_section_size(&mut header.rle_uncompressed_size, rle_packed_cap, "RLE packed size");
+    clamp_section_size(&mut header.ac_uncompressed_count, unpacked_size, "AC count");
+    clamp_section_size(&mut header.dc_uncompressed_count, unpacked_size, "DC count");
+}
+
 struct Channel {
     width: usize,
     height: usize,
@@ -127,6 +143,12 @@ fn classify(channels: &[ChunkChannel], names: &[String], rules: &[Rule]) -> (Vec
         };
 
         if schemes[r] != Scheme::LossyDct || schemes[g] != Scheme::LossyDct || schemes[b] != Scheme::LossyDct {
+            continue;
+        }
+
+        let same_shape =
+            |other: usize| channels[other].width == channels[r].width && channels[other].rows == channels[r].rows;
+        if !same_shape(g) || !same_shape(b) {
             continue;
         }
 
@@ -381,7 +403,8 @@ pub fn dwa_decompress(
     names: &[String],
     unpacked_size: usize,
 ) -> VexelResult<Vec<u8>> {
-    let header = read_header(data)?;
+    let mut header = read_header(data)?;
+    clamp_section_sizes(&mut header, unpacked_size);
 
     if header.version > 2 {
         log_warn!("EXR: DWA version {} is newer than 2, decoding as version 2", header.version);
@@ -648,9 +671,9 @@ fn decode_sections(
 
                 for row in 0..height {
                     let dst_start = planes[index].row_offsets[row];
-                    let available = unknown.len().saturating_sub(unknown_cursor).min(row_bytes);
-                    out[dst_start..dst_start + available]
-                        .copy_from_slice(&unknown[unknown_cursor..unknown_cursor + available]);
+                    let source = unknown.get(unknown_cursor..).unwrap_or(&[]);
+                    let available = source.len().min(row_bytes);
+                    out[dst_start..dst_start + available].copy_from_slice(&source[..available]);
                     unknown_cursor += row_bytes;
                 }
             }
