@@ -14,7 +14,7 @@ pub struct DecodedBand {
     pub header: Lerc2Header,
 }
 
-fn compute_checksum_fletcher32(data: &[u8]) -> u32 {
+pub(super) fn compute_checksum_fletcher32(data: &[u8]) -> u32 {
     let mut sum1: u32 = 0xffff;
     let mut sum2: u32 = 0xffff;
     let mut words = data.len() / 2;

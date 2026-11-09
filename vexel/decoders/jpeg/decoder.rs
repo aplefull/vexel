@@ -2,19 +2,21 @@ use std::fmt::Debug;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
+use crate::decoders::jpeg::app::{parse_app, parse_comment, AppSection, AppSegment, IccAssembler};
 use crate::decoders::jpeg::bitreader::JpegBitReader;
 use crate::decoders::jpeg::idct::{dequantize_and_idct, nonzero_mask};
+use crate::decoders::jpeg::info::{
+    coding_name, process_name, subsampling_name, JpegArithmeticConditioning, JpegExpand, JpegFrame, JpegFrameComponent,
+    JpegHuffmanTable, JpegHuffmanTables, JpegInfo, JpegQuantizationTable, JpegQuantizationTables, JpegScan,
+    JpegScanComponent, JpegSection,
+};
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
 use crate::decoders::jpeg::types::{
-    APP14AdobeData, APP2Data, ArithmeticCodingTable, ArithmeticCodingValue, ColorComponentInfo, DACData, DHTData,
-    DQTData, HuffmanTable, IccProfileSequenceInfo, JFIFData, JFIFHeader, JpegCodingMethod, JpegMode, JpegSegmentData,
-    JpegSegmentInfo, Predictor, QuantizationTable, SOFData, SOSData, ScanComponent, ScanData,
-    DEFAULT_QUANTIZATION_TABLE, HUFF_PEEK_BITS, ZIGZAG_MAP,
+    ArithmeticCodingTable, ArithmeticCodingValue, ColorComponentInfo, HuffmanTable, JpegCodingMethod, JpegMode,
+    Predictor, QuantizationTable, ScanComponent, ScanData, DEFAULT_QUANTIZATION_TABLE, HUFF_PEEK_BITS, ZIGZAG_MAP,
 };
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::exif::ExifReader;
-use crate::utils::icc::ICCProfile;
-use crate::utils::info::JpegInfo;
+use crate::utils::info::{ColorModel, ImageSummary};
 use crate::utils::marker::Marker;
 use crate::{log_debug, log_warn, Image, Limits, PixelData};
 
@@ -1050,12 +1052,25 @@ struct HierarchicalFrame {
     scans: Vec<ScanData>,
 }
 
+struct RawHuffmanTable {
+    id: u8,
+    class: u8,
+    counts: Vec<u8>,
+    offsets: Vec<u32>,
+    symbols: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WalkMode {
+    InfoOnly,
+    Decode,
+}
+
 pub struct JpegDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
     limits: Limits,
-    jfif_header: Option<JFIFHeader>,
-    comments: Vec<String>,
+    has_jfif: bool,
     mode: JpegMode,
     coding_method: JpegCodingMethod,
     quantization_tables: Vec<QuantizationTable>,
@@ -1073,7 +1088,8 @@ pub struct JpegDecoder<R: Read + Seek> {
     component_count: u8,
     components: Vec<ColorComponentInfo>,
     scans: Vec<ScanData>,
-    segments: Vec<JpegSegmentInfo>,
+    info: Option<JpegInfo>,
+    walk_mode: WalkMode,
     reader: BitReader<R>,
     adobe_color_transform: Option<u8>,
     is_hierarchical: bool,
@@ -1084,7 +1100,7 @@ pub struct JpegDecoder<R: Read + Seek> {
     hierarchical_frames: Vec<HierarchicalFrame>,
     lossless_ssss16_is_min: bool,
     lossless_skip_color_transform: bool,
-    icc_chunks: Vec<(u8, Vec<u8>)>,
+    icc: IccAssembler,
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
@@ -1094,8 +1110,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             width: 0,
             height: 0,
             limits: Limits::default(),
-            comments: Vec::new(),
-            jfif_header: None,
+            has_jfif: false,
             mode: JpegMode::Baseline,
             coding_method: JpegCodingMethod::Huffman,
             mcu_width: 0,
@@ -1113,7 +1128,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             vertical_sampling_factor: 1,
             restart_interval: 0,
             scans: Vec::new(),
-            segments: Vec::new(),
+            info: None,
+            walk_mode: WalkMode::Decode,
             reader: BitReader::new(reader),
             adobe_color_transform: None,
             is_hierarchical: false,
@@ -1124,7 +1140,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             hierarchical_frames: Vec::new(),
             lossless_ssss16_is_min: true,
             lossless_skip_color_transform: false,
-            icc_chunks: Vec::new(),
+            icc: IccAssembler::default(),
         }
     }
 
@@ -1140,305 +1156,110 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> JpegInfo {
-        JpegInfo { sections: self.segments.clone(), icc_profile: self.assemble_icc_profile() }
+    pub fn get_info(&mut self) -> JpegInfo {
+        if self.info.is_none() {
+            let saved_limits = self.limits.clone();
+            if let Err(e) = self.walk(WalkMode::InfoOnly) {
+                log_warn!("Failed to read JPEG structure: {}", e);
+            }
+            self.limits = saved_limits;
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
-    fn assemble_icc_profile(&self) -> Option<ICCProfile> {
-        if self.icc_chunks.is_empty() {
-            return None;
-        }
-
-        let mut chunks: Vec<&(u8, Vec<u8>)> = self.icc_chunks.iter().collect();
-        chunks.sort_by_key(|(sequence, _)| *sequence);
-
-        let profile_data: Vec<u8> = chunks.iter().flat_map(|(_, data)| data.iter().copied()).collect();
-
-        match ICCProfile::new(&profile_data) {
-            Ok(profile) => Some(profile),
-            Err(e) => {
-                log_warn!("Failed to parse ICC profile from APP2 segments: {}", e);
-                None
-            }
-        }
+    fn reset_state(&mut self) {
+        self.width = 0;
+        self.height = 0;
+        self.has_jfif = false;
+        self.mode = JpegMode::Baseline;
+        self.coding_method = JpegCodingMethod::Huffman;
+        self.mcu_width = 0;
+        self.mcu_height = 0;
+        self.precision = 0;
+        self.component_count = 0;
+        self.successive_approximation_low = 0;
+        self.components.clear();
+        self.quantization_tables.clear();
+        self.ac_huffman_tables.clear();
+        self.dc_huffman_tables.clear();
+        self.ac_arithmetic_tables.clear();
+        self.dc_arithmetic_tables.clear();
+        self.horizontal_sampling_factor = 1;
+        self.vertical_sampling_factor = 1;
+        self.restart_interval = 0;
+        self.scans.clear();
+        self.adobe_color_transform = None;
+        self.is_hierarchical = false;
+        self.dhp_width = 0;
+        self.dhp_height = 0;
+        self.pending_expand_h = false;
+        self.pending_expand_v = false;
+        self.hierarchical_frames.clear();
+        self.icc.clear();
     }
 
     pub fn precision(&self) -> u8 {
         self.precision
     }
 
-    fn skip_unknown_marker_segment(&mut self, marker: &str, segment_start: u64) -> VexelResult<()> {
+    fn record(&mut self, offset: u64, length: Option<u64>, section: JpegSection) {
+        if let Some(info) = &mut self.info {
+            info.push(offset, length, section);
+        }
+    }
+
+    fn read_segment_payload(&mut self) -> VexelResult<(u16, Vec<u8>)> {
         let length = self.reader.read_u16()?;
+        let payload_len = usize::from(length.saturating_sub(2));
+        let mut payload = vec![0u8; payload_len];
+        let mut filled = 0;
+        while filled < payload_len {
+            match self.reader.read(&mut payload[filled..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => filled += n,
+            }
+        }
+        payload.truncate(filled);
+        Ok((length, payload))
+    }
+
+    fn skip_unknown_marker_segment(&mut self, marker: u16, segment_start: u64) -> VexelResult<()> {
+        let length = self.reader.read_u16()?;
+
+        self.record(segment_start, Some(2 + u64::from(length)), JpegSection::Unknown(marker));
 
         for _ in 0..length.saturating_sub(2) {
             self.reader.read_u8()?;
         }
 
-        self.record_segment(segment_start, marker, JpegSegmentData::Unknown { marker: marker.to_string(), length });
-
         Ok(())
     }
 
-    fn read_app_generic(&mut self, marker: &str, segment_start: u64) -> VexelResult<()> {
-        let length = self.reader.read_u16()?;
-        let payload_len = (length as usize).saturating_sub(2);
-        self.limits.reserve_usize(payload_len)?;
-        let payload = self.reader.read_bytes(payload_len)?;
-        self.limits.free_usize(payload_len);
+    fn read_app(&mut self, index: u8, segment_start: u64) -> VexelResult<()> {
+        let (length, payload) = self.read_segment_payload()?;
+        let segment = parse_app(index, &payload, segment_start + 4, &mut self.icc);
 
-        let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len().min(32));
-        let identifier = if null_pos > 0 {
-            Some(String::from_utf8_lossy(&payload[..null_pos]).trim_end_matches('\0').to_string())
-        } else {
-            None
-        };
+        match &segment {
+            AppSegment::Jfif(_) => self.has_jfif = true,
+            AppSegment::Adobe(adobe) => {
+                self.adobe_color_transform = Some(adobe.color_transform);
+                log_debug!("Adobe APP14: color_transform={}", adobe.color_transform);
+            }
+            AppSegment::Generic(_) if index == 0 => {
+                log_warn!("APP0 segment is neither JFIF nor JFXX");
+            }
+            _ => {}
+        }
 
-        self.record_segment(
-            segment_start,
-            marker,
-            JpegSegmentData::APP { marker: marker.to_string(), length, identifier },
-        );
+        self.record(segment_start, Some(2 + u64::from(length)), JpegSection::App(AppSection { index, segment }));
 
         Ok(())
     }
 
     fn read_com(&mut self, segment_start: u64) -> VexelResult<()> {
-        let length = self.reader.read_u16()?;
-
-        let byte_count = (length as usize).saturating_sub(2);
-        self.limits.reserve_usize(byte_count)?;
-        let mut comment_bytes = Vec::with_capacity(byte_count);
-        for _ in 0..byte_count {
-            comment_bytes.push(self.reader.read_u8()?);
-        }
-        self.limits.free_usize(byte_count);
-
-        let text = String::from_utf8_lossy(&comment_bytes).to_string();
-        self.comments.push(text.clone());
-
-        self.record_segment(segment_start, "COM", JpegSegmentData::COM { text });
-
-        Ok(())
-    }
-
-    fn read_app0_jfif(&mut self, segment_start: u64) -> VexelResult<()> {
-        let length = self.reader.read_u16()?;
-
-        if length < 7 {
-            for _ in 0..(length.saturating_sub(2)) {
-                self.reader.read_u8()?;
-            }
-            self.record_segment(
-                segment_start,
-                "APP0",
-                JpegSegmentData::APP { marker: "APP0".to_string(), length, identifier: None },
-            );
-            return Ok(());
-        }
-
-        let mut identifier = Vec::new();
-        for _ in 0..5 {
-            identifier.push(self.reader.read_u8()?);
-        }
-
-        let identifier = String::from_utf8_lossy(&identifier).to_string();
-
-        if identifier != "JFIF\0" {
-            log_warn!("Invalid JFIF identifier in APP0, might not be a JFIF header: {}", identifier);
-            let remaining = (length as i32) - 7;
-            for _ in 0..remaining.max(0) {
-                self.reader.read_u8()?;
-            }
-            self.record_segment(
-                segment_start,
-                "APP0",
-                JpegSegmentData::APP {
-                    marker: "APP0".to_string(),
-                    length,
-                    identifier: Some(identifier.trim_end_matches('\0').to_string()),
-                },
-            );
-            return Ok(());
-        }
-
-        let payload_len = (length as usize).saturating_sub(7);
-        self.limits.reserve_usize(payload_len)?;
-        let mut payload = vec![0u8; payload_len];
-        for byte in payload.iter_mut() {
-            *byte = self.reader.read_u8().unwrap_or(0);
-        }
-        self.limits.free_usize(payload_len);
-
-        let get = |i: usize| -> u8 { payload.get(i).copied().unwrap_or(0) };
-        let get_u16 = |i: usize| -> u16 { u16::from_be_bytes([get(i), get(i + 1)]) };
-
-        let version_major = get(0);
-        let version_minor = get(1);
-        let density_units = get(2);
-        let x_density = get_u16(3);
-        let y_density = get_u16(5);
-        let thumbnail_width = get(7);
-        let thumbnail_height = get(8);
-
-        let max_thumbnail_bytes = payload_len.saturating_sub(9);
-        let thumbnail_size = (thumbnail_width as usize * thumbnail_height as usize * 3).min(max_thumbnail_bytes);
-        let thumbnail_data = payload.get(9..9 + thumbnail_size).unwrap_or(&[]).to_vec();
-
-        self.jfif_header = Some(JFIFHeader {
-            identifier: identifier.clone(),
-            version_major,
-            version_minor,
-            density_units,
-            x_density,
-            y_density,
-            thumbnail_width,
-            thumbnail_height,
-            thumbnail_data,
-        });
-
-        let expected_len = (16u32 + thumbnail_width as u32 * thumbnail_height as u32 * 3).min(u16::MAX as u32) as u16;
-        if length != expected_len {
-            log_warn!("Invalid JFIF segment length, expected {}, got {}", expected_len, length);
-        }
-
-        self.record_segment(
-            segment_start,
-            "APP0",
-            JpegSegmentData::APP0(JFIFData {
-                length,
-                identifier,
-                version_major,
-                version_minor,
-                density_units,
-                x_density,
-                y_density,
-                thumbnail_width,
-                thumbnail_height,
-            }),
-        );
-
-        Ok(())
-    }
-
-    fn read_app1_exif(&mut self, segment_start: u64) -> VexelResult<()> {
-        let length = self.reader.read_u16()?;
-        let payload_len = (length as usize).saturating_sub(2);
-        self.limits.reserve_usize(payload_len)?;
-        let payload = self.reader.read_bytes(payload_len)?;
-        self.limits.free_usize(payload_len);
-
-        let exif = if payload.starts_with(b"Exif\0\0") { ExifReader::parse(&payload[6..]) } else { None };
-
-        self.record_segment(segment_start, "APP1", JpegSegmentData::APP1 { length, exif });
-
-        Ok(())
-    }
-
-    fn read_app2_icc(&mut self, segment_start: u64) -> VexelResult<()> {
-        let length = self.reader.read_u16()?;
-        let payload_len = (length as usize).saturating_sub(2);
-        self.limits.reserve_usize(payload_len)?;
-        let payload = self.reader.read_bytes(payload_len)?;
-        self.limits.free_usize(payload_len);
-
-        let null_pos = payload.iter().position(|&b| b == 0).unwrap_or(payload.len());
-        let identifier = String::from_utf8_lossy(&payload[..null_pos]).to_string();
-
-        let icc_sequence = if identifier == "ICC_PROFILE" && payload.len() >= null_pos + 3 {
-            let chunk_sequence = payload[null_pos + 1];
-            let total_chunks = payload[null_pos + 2];
-            let profile_data = &payload[null_pos + 3..];
-            self.icc_chunks.push((chunk_sequence, profile_data.to_vec()));
-            Some(IccProfileSequenceInfo {
-                chunk_sequence,
-                total_chunks,
-                profile_data_length: profile_data.len() as u32,
-            })
-        } else {
-            None
-        };
-
-        self.record_segment(
-            segment_start,
-            "APP2",
-            JpegSegmentData::APP2(APP2Data { length, identifier, icc_profile_sequence: icc_sequence }),
-        );
-
-        Ok(())
-    }
-
-    fn read_app14_adobe(&mut self, segment_start: u64) -> VexelResult<()> {
-        let length = self.reader.read_u16()?;
-
-        if length < 12 {
-            for _ in 0..(length.saturating_sub(2)) {
-                self.reader.read_u8()?;
-            }
-            self.record_segment(
-                segment_start,
-                "APP14",
-                JpegSegmentData::APP { marker: "APP14".to_string(), length, identifier: None },
-            );
-            return Ok(());
-        }
-
-        let mut id = [0u8; 5];
-        for b in &mut id {
-            *b = self.reader.read_u8()?;
-        }
-
-        if &id != b"Adobe" {
-            let remaining = (length as usize).saturating_sub(7);
-            for _ in 0..remaining {
-                self.reader.read_u8()?;
-            }
-            let identifier = String::from_utf8_lossy(&id).trim_end_matches('\0').to_string();
-            self.record_segment(
-                segment_start,
-                "APP14",
-                JpegSegmentData::APP { marker: "APP14".to_string(), length, identifier: Some(identifier) },
-            );
-            return Ok(());
-        }
-
-        if length < 12 {
-            let remaining = (length as usize).saturating_sub(7);
-            for _ in 0..remaining {
-                self.reader.read_u8()?;
-            }
-            self.record_segment(
-                segment_start,
-                "APP14",
-                JpegSegmentData::APP { marker: "APP14".to_string(), length, identifier: Some("Adobe".to_string()) },
-            );
-            return Ok(());
-        }
-
-        let payload_len = (length as usize).saturating_sub(7);
-        let mut payload = vec![0u8; payload_len];
-        for b in &mut payload {
-            *b = self.reader.read_u8()?;
-        }
-
-        let read_u16 = |i: usize| -> u16 {
-            let hi = payload.get(i).copied().unwrap_or(0) as u16;
-            let lo = payload.get(i + 1).copied().unwrap_or(0) as u16;
-            (hi << 8) | lo
-        };
-        let version = read_u16(0);
-        let flags0 = read_u16(2);
-        let flags1 = read_u16(4);
-        let color_transform = payload.get(6).copied().unwrap_or(0);
-
-        self.adobe_color_transform = Some(color_transform);
-        log_debug!("Adobe APP14: color_transform={}", color_transform);
-
-        self.record_segment(
-            segment_start,
-            "APP14",
-            JpegSegmentData::APP14(APP14AdobeData { length, version, flags0, flags1, color_transform }),
-        );
-
+        let (length, payload) = self.read_segment_payload()?;
+        self.record(segment_start, Some(2 + u64::from(length)), JpegSection::Comment(parse_comment(&payload)));
         Ok(())
     }
 
@@ -1452,7 +1273,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 if ids == [0x52, 0x47, 0x42] {
                     return JpegColorspace::RGB;
                 }
-                if self.jfif_header.is_some() {
+                if self.has_jfif {
                     return JpegColorspace::YCbCr;
                 }
                 if let Some(ct) = self.adobe_color_transform {
@@ -1482,10 +1303,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
     }
 
-    fn read_start_of_frame(&mut self, sof_marker: &str, segment_start: u64) -> VexelResult<()> {
+    fn read_start_of_frame(&mut self, marker: u8, segment_start: u64) -> VexelResult<()> {
         let length = self.reader.read_u16()?;
 
-        self.precision = self.reader.read_u8()?;
+        let raw_precision = self.reader.read_u8()?;
+        self.precision = raw_precision;
 
         if self.mode == JpegMode::Lossless {
             if self.precision < 2 || self.precision > 16 {
@@ -1497,25 +1319,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
             self.precision = 8;
         }
 
-        self.height = self.reader.read_u16()? as u32;
-        self.width = self.reader.read_u16()? as u32;
+        let raw_height = self.reader.read_u16()?;
+        let raw_width = self.reader.read_u16()?;
+        self.height = u32::from(raw_height);
+        self.width = u32::from(raw_width);
 
-        if self.width == 0 {
-            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
-        }
-
-        if self.height == 0 {
-            log_warn!("SOF height is 0, expecting DNL marker to define number of lines");
-        }
-
-        self.limits.reserve_buffer(self.width, self.height, 4)?;
-        self.limits.free(u64::from(self.width).saturating_mul(u64::from(self.height)).saturating_mul(4));
-
-        // TODO rename them, they are not MCU dimensions, but dimensions of the image in MCUs
-        self.mcu_width = self.width.div_ceil(8);
-        self.mcu_height = self.height.div_ceil(8);
-
-        self.component_count = self.reader.read_u8()?;
+        let raw_component_count = self.reader.read_u8()?;
+        self.component_count = raw_component_count;
 
         if self.component_count > 4 || self.component_count == 0 {
             log_warn!("Invalid number of components in SOF marker: {}, assuming 3", self.component_count);
@@ -1523,6 +1333,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         self.components.clear();
+        let mut frame_components = Vec::with_capacity(usize::from(self.component_count));
 
         for _ in 0..self.component_count {
             let id = match self.reader.read_u8() {
@@ -1539,6 +1350,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 self.vertical_sampling_factor = vertical_sampling_factor;
             }
 
+            frame_components.push(JpegFrameComponent {
+                id,
+                horizontal_sampling: sampling_factors >> 4,
+                vertical_sampling: sampling_factors & 0xF,
+                quantization_table: quantization_table_id,
+            });
+
             self.components.push(ColorComponentInfo {
                 id,
                 horizontal_sampling_factor,
@@ -1549,33 +1367,49 @@ impl<R: Read + Seek> JpegDecoder<R> {
             });
         }
 
+        self.record(
+            segment_start,
+            Some(2 + u64::from(length)),
+            JpegSection::Frame(JpegFrame {
+                marker,
+                precision: raw_precision,
+                height: raw_height,
+                width: raw_width,
+                component_count: raw_component_count,
+                components: frame_components,
+            }),
+        );
+
         if length != 8 + 3 * self.component_count as u16 {
             log_warn!("Invalid SOF marker length, expected {}, got {}", 8 + 3 * self.component_count, length);
         }
 
-        self.record_segment(
-            segment_start,
-            sof_marker,
-            JpegSegmentData::SOF(SOFData {
-                length,
-                marker: sof_marker.to_string(),
-                precision: self.precision,
-                width: self.width,
-                height: self.height,
-                component_count: self.component_count,
-                components: self.components.clone(),
-            }),
-        );
+        if self.width == 0 {
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+        }
+
+        if self.height == 0 {
+            log_warn!("SOF height is 0, expecting DNL marker to define number of lines");
+        }
+
+        if self.walk_mode == WalkMode::Decode {
+            self.limits.reserve_buffer(self.width, self.height, 4)?;
+            self.limits.free(u64::from(self.width).saturating_mul(u64::from(self.height)).saturating_mul(4));
+        }
+
+        // TODO rename them, they are not MCU dimensions, but dimensions of the image in MCUs
+        self.mcu_width = self.width.div_ceil(8);
+        self.mcu_height = self.height.div_ceil(8);
 
         Ok(())
     }
 
     fn read_restart_interval(&mut self, segment_start: u64) -> VexelResult<()> {
-        self.reader.read_u16()?;
+        let length = self.reader.read_u16()?;
 
         self.restart_interval = self.reader.read_u16()?;
 
-        self.record_segment(segment_start, "DRI", JpegSegmentData::DRI { restart_interval: self.restart_interval });
+        self.record(segment_start, Some(2 + u64::from(length)), JpegSection::RestartInterval(self.restart_interval));
 
         Ok(())
     }
@@ -1589,6 +1423,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let number_of_lines = self.reader.read_u16()?;
 
+        self.record(segment_start, Some(2 + u64::from(length)), JpegSection::NumberOfLines(number_of_lines));
+
         if number_of_lines == 0 {
             log_warn!("DNL specifies 0 lines, ignoring");
         } else {
@@ -1597,55 +1433,65 @@ impl<R: Read + Seek> JpegDecoder<R> {
             log_debug!("DNL: updated height to {}", self.height);
         }
 
-        self.record_segment(segment_start, "DNL", JpegSegmentData::DNL { number_of_lines });
-
         Ok(())
+    }
+
+    fn read_quantization_entry(&mut self) -> std::io::Result<(u8, u8, Vec<u16>)> {
+        let table_spec = self.reader.read_u8()?;
+        let id = table_spec & 0x0F;
+        let precision = (table_spec >> 4) & 0x0F;
+
+        let mut table = Vec::with_capacity(64);
+        if precision == 0 {
+            for _ in 0..64 {
+                table.push(self.reader.read_u8()? as u16);
+            }
+        } else {
+            for _ in 0..64 {
+                table.push(self.reader.read_u16()?);
+            }
+        }
+
+        Ok((id, precision, table))
     }
 
     fn read_quantization_table(&mut self, segment_start: u64) -> VexelResult<()> {
         let segment_length = self.reader.read_u16()?;
         let mut table_length = (segment_length as i16).saturating_sub(2);
 
-        let mut new_tables = Vec::new();
+        let mut info_tables = Vec::new();
+        let mut failure = None;
 
         while table_length > 0 {
-            let mut table = Vec::new();
-            let table_spec = self.reader.read_u8()?;
-            let id = table_spec & 0x0F;
-            let precision = (table_spec >> 4) & 0x0F;
-
-            table_length = table_length.saturating_sub(1);
-
-            if precision == 0 {
-                for _ in 0..64 {
-                    table.push(self.reader.read_u8()? as u16);
+            let (id, precision, table) = match self.read_quantization_entry() {
+                Ok(entry) => entry,
+                Err(e) => {
+                    failure = Some(e);
+                    break;
                 }
-                table_length = table_length.saturating_sub(64);
-            } else {
-                for _ in 0..64 {
-                    table.push(self.reader.read_u16()?);
-                }
-                table_length = table_length.saturating_sub(128);
-            }
-
-            let qt = QuantizationTable {
-                id,
-                precision,
-                table: table.clone(),
-                table_natural: Self::unzigzag_block(table.as_slice()).to_vec(),
             };
 
-            new_tables.push(qt.clone());
-            self.quantization_tables.push(qt);
+            table_length = table_length.saturating_sub(1);
+            table_length = table_length.saturating_sub(if precision == 0 { 64 } else { 128 });
+
+            let table_natural = Self::unzigzag_block(&table).to_vec();
+            info_tables.push(JpegQuantizationTable { id, precision, values: table_natural.clone() });
+            self.quantization_tables.push(QuantizationTable { id, table_natural });
         }
 
-        self.record_segment(
+        self.record(
             segment_start,
-            "DQT",
-            JpegSegmentData::DQT(DQTData { length: segment_length, tables: new_tables }),
+            Some(2 + u64::from(segment_length)),
+            JpegSection::QuantizationTables(JpegQuantizationTables {
+                tables: info_tables,
+                truncated: failure.is_some(),
+            }),
         );
 
-        Ok(())
+        match failure {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
+        }
     }
 
     fn unzigzag_block(block: &[u16]) -> [u16; 64] {
@@ -1658,46 +1504,58 @@ impl<R: Read + Seek> JpegDecoder<R> {
         unzigzagged
     }
 
+    fn read_huffman_entry(&mut self) -> std::io::Result<RawHuffmanTable> {
+        let table_spec = self.reader.read_bits(8)?;
+        let id = (table_spec & 0x0F) as u8;
+        let class = ((table_spec >> 4) & 0x0F) as u8;
+
+        let mut counts = Vec::with_capacity(16);
+        let mut offsets = Vec::with_capacity(17);
+        let mut total_symbols: u32 = 0;
+
+        offsets.push(0);
+        for _ in 0..16 {
+            let count = self.reader.read_bits(8)? as u8;
+            counts.push(count);
+            total_symbols += count as u32;
+            offsets.push(total_symbols);
+        }
+
+        if total_symbols > 256 {
+            log_warn!("Too many symbols in Huffman table: {}", total_symbols);
+            total_symbols = 256;
+        }
+
+        let mut symbols = Vec::with_capacity(total_symbols as usize);
+        for _ in 0..total_symbols {
+            symbols.push(self.reader.read_bits(8)? as u8);
+        }
+
+        Ok(RawHuffmanTable { id, class, counts, offsets, symbols })
+    }
+
     fn read_huffman_table(&mut self, segment_start: u64) -> VexelResult<()> {
         let total_length = self.reader.read_bits(16)? as u16;
         let mut segment_length = (total_length as i16).saturating_sub(2);
 
-        let mut new_tables = Vec::new();
+        let mut info_tables = Vec::new();
+        let mut failure = None;
 
         while segment_length > 0 {
-            let table_spec = self.reader.read_bits(8)?;
-            let id = (table_spec & 0x0F) as u8;
-            let class = ((table_spec >> 4) & 0x0F) as u8;
+            let RawHuffmanTable { id, class, counts, offsets, symbols } = match self.read_huffman_entry() {
+                Ok(entry) => entry,
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            };
 
-            let mut counts = Vec::with_capacity(16);
-            let mut offsets = Vec::with_capacity(17);
-            let mut total_symbols: u32 = 0;
-
-            offsets.push(0);
-            for _ in 0..16 {
-                let count = self.reader.read_bits(8)? as u8;
-                counts.push(count);
-                total_symbols += count as u32;
-                offsets.push(total_symbols);
-            }
-
-            if total_symbols > 256 {
-                log_warn!("Too many symbols in Huffman table: {}", total_symbols);
-                total_symbols = 256;
-            }
-
-            let mut table = Vec::with_capacity(total_symbols as usize);
-            for _ in 0..total_symbols {
-                table.push(self.reader.read_bits(8)? as u8);
-            }
-
+            let total_symbols = symbols.len() as u32;
             segment_length -= 1 + 16 + total_symbols as i16;
 
             let mut huffman_table = HuffmanTable {
                 id,
-                class,
-                counts,
-                symbols: table,
+                symbols: symbols.clone(),
                 offsets,
                 codes: vec![0; total_symbols as usize],
                 first_code: vec![u32::MAX; 16],
@@ -1735,7 +1593,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
 
             huffman_table.build_fast_lookup();
-            new_tables.push(huffman_table.clone());
+            info_tables.push(JpegHuffmanTable { class, id, counts, symbols });
 
             match class {
                 0 => {
@@ -1758,13 +1616,16 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        self.record_segment(
+        self.record(
             segment_start,
-            "DHT",
-            JpegSegmentData::DHT(DHTData { length: total_length, tables: new_tables }),
+            Some(2 + u64::from(total_length)),
+            JpegSection::HuffmanTables(JpegHuffmanTables { tables: info_tables, truncated: failure.is_some() }),
         );
 
-        Ok(())
+        match failure {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
+        }
     }
 
     fn read_dac(&mut self, segment_start: u64) -> VexelResult<()> {
@@ -1773,19 +1634,29 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let mut ac_tables = Vec::new();
         let mut dc_tables = Vec::new();
+        let mut info_tables = Vec::new();
+        let mut failure = None;
 
         while data_length >= 2 {
-            let table_info = self.reader.read_u8()?;
+            let entry = self.reader.read_u8().and_then(|info| Ok((info, self.reader.read_u8()?)));
+            let (table_info, raw_value) = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            };
             let table_class = (table_info >> 4) & 0x0F;
             let identifier = table_info & 0x0F;
 
-            let value = self.reader.read_u8()?;
+            info_tables.push(JpegArithmeticConditioning { class: table_class, id: identifier, value: raw_value });
 
-            let (value, length) = if table_class == 0 { ((value >> 4) & 0x0F, value & 0x0F) } else { (value, 0) };
+            let (value, length) =
+                if table_class == 0 { ((raw_value >> 4) & 0x0F, raw_value & 0x0F) } else { (raw_value, 0) };
 
             let ac_value = ArithmeticCodingValue { value, length };
 
-            let table = ArithmeticCodingTable { table_class, identifier, values: Vec::from([ac_value]) };
+            let table = ArithmeticCodingTable { identifier, values: Vec::from([ac_value]) };
 
             match table_class {
                 0 => dc_tables.push(table),
@@ -1798,14 +1669,18 @@ impl<R: Read + Seek> JpegDecoder<R> {
             data_length -= 2;
         }
 
-        self.ac_arithmetic_tables = ac_tables.clone();
-        self.dc_arithmetic_tables = dc_tables.clone();
-
-        self.record_segment(
+        self.record(
             segment_start,
-            "DAC",
-            JpegSegmentData::DAC(DACData { length: segment_length, ac_tables, dc_tables }),
+            Some(2 + u64::from(segment_length)),
+            JpegSection::ArithmeticConditioning(info_tables),
         );
+
+        if let Some(e) = failure {
+            return Err(e.into());
+        }
+
+        self.ac_arithmetic_tables = ac_tables;
+        self.dc_arithmetic_tables = dc_tables;
 
         Ok(())
     }
@@ -1814,6 +1689,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         if self.coding_method == JpegCodingMethod::Huffman {
             self.ensure_default_huffman_tables();
         }
+
+        let collect = self.walk_mode == WalkMode::Decode;
 
         let length = self.reader.read_u16()?;
 
@@ -1836,8 +1713,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        let start_spectral = self.reader.read_u8()?.min(63);
-        let end_spectral = self.reader.read_u8()?.min(63);
+        let raw_start_spectral = self.reader.read_u8()?;
+        let raw_end_spectral = self.reader.read_u8()?;
+        let start_spectral = raw_start_spectral.min(63);
+        let end_spectral = raw_end_spectral.min(63);
         let successive_approx = self.reader.read_u8()?;
         let successive_high = (successive_approx >> 4) & 0x0F;
         let successive_low = successive_approx & 0x0F;
@@ -1847,13 +1726,20 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         let scan_start = self.reader.stream_position()?;
-        let scan_data_limit = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4).max(65536);
-        self.limits.reserve_usize(scan_data_limit)?;
-        let remaining = self.reader.bytes_left().unwrap_or(0) as usize;
+        let scan_data_limit = if collect {
+            (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4).max(65536)
+        } else {
+            usize::MAX
+        };
+        if collect {
+            self.limits.reserve_usize(scan_data_limit)?;
+        }
+        let remaining = if collect { self.reader.bytes_left().unwrap_or(0) as usize } else { 0 };
         let mut scan_data = Vec::with_capacity(remaining.min(scan_data_limit));
         let is_arithmetic = self.coding_method == JpegCodingMethod::Arithmetic;
 
         let mut restart_offsets: Vec<usize> = vec![0];
+        let mut restart_markers = 0u32;
         let mut block = vec![0u8; SCAN_BLOCK_SIZE];
         let mut filled = 0usize;
         let mut cursor = 0usize;
@@ -1885,28 +1771,32 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let chunk = &block[cursor..filled];
             let run = chunk.iter().position(|&b| b == 0xFF).unwrap_or(chunk.len());
             if run > 0 {
-                let space = scan_data_limit.saturating_sub(scan_data.len());
-                if run >= space {
-                    scan_data.extend_from_slice(&chunk[..space]);
-                    cursor += space;
-                    truncated = true;
-                    break;
+                if collect {
+                    let space = scan_data_limit.saturating_sub(scan_data.len());
+                    if run >= space {
+                        scan_data.extend_from_slice(&chunk[..space]);
+                        cursor += space;
+                        truncated = true;
+                        break;
+                    }
+                    scan_data.extend_from_slice(&chunk[..run]);
                 }
-                scan_data.extend_from_slice(&chunk[..run]);
                 cursor += run;
                 continue;
             }
 
-            if scan_data.len() >= scan_data_limit {
+            if collect && scan_data.len() >= scan_data_limit {
                 truncated = true;
                 break;
             }
 
             match block[cursor + 1] {
                 0x00 => {
-                    scan_data.push(0xFF);
-                    if is_arithmetic {
-                        scan_data.push(0x00);
+                    if collect {
+                        scan_data.push(0xFF);
+                        if is_arithmetic {
+                            scan_data.push(0x00);
+                        }
                     }
                     cursor += 2;
                 }
@@ -1914,9 +1804,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     cursor += 1;
                 }
                 b if b >= (JpegMarker::RST0.to_u16() & 0xFF) as u8 && b <= (JpegMarker::RST7.to_u16() & 0xFF) as u8 => {
-                    scan_data.push(0xFF);
-                    scan_data.push(b);
-                    restart_offsets.push(scan_data.len());
+                    restart_markers += 1;
+                    if collect {
+                        scan_data.push(0xFF);
+                        scan_data.push(b);
+                        restart_offsets.push(scan_data.len());
+                    }
                     cursor += 2;
                 }
                 b if matches!(JpegMarker::from_u16(0xFF00 | b as u16), None | Some(JpegMarker::RES(_))) => {
@@ -1937,16 +1830,45 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let stop = end_marker.unwrap_or(block_origin + cursor as u64);
         self.reader.seek(SeekFrom::Start(scan_start + stop))?;
 
+        let lossless = matches!(self.mode, JpegMode::Lossless | JpegMode::DifferentialLossless);
+        let header_span = scan_start.saturating_sub(segment_start);
+        self.record(
+            segment_start,
+            Some(header_span + stop),
+            JpegSection::Scan(JpegScan {
+                header_length: length,
+                components: scan_components
+                    .iter()
+                    .map(|c| JpegScanComponent {
+                        id: c.component_id,
+                        dc_table: c.dc_table_selector,
+                        ac_table: c.ac_table_selector,
+                    })
+                    .collect(),
+                spectral_start: raw_start_spectral,
+                spectral_end: raw_end_spectral,
+                approximation_high: successive_high,
+                approximation_low: successive_low,
+                lossless,
+                restart_interval: self.restart_interval,
+                entropy_coded_length: stop,
+                restart_markers,
+            }),
+        );
+
+        if !collect {
+            return Ok(());
+        }
+
         let actual_scan_size = scan_data.len();
         self.limits.free_usize(scan_data_limit.saturating_sub(actual_scan_size));
 
-        let data_length = actual_scan_size as u64;
         let scan = ScanData {
             start_spectral,
             end_spectral,
             successive_high,
             successive_low,
-            components: scan_components.clone(),
+            components: scan_components,
             dc_tables: self.dc_huffman_tables.clone(),
             ac_tables: self.ac_huffman_tables.clone(),
             arith_dc_tables: self.dc_arithmetic_tables.clone(),
@@ -1957,26 +1879,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         self.scans.push(scan);
 
-        self.record_segment(
-            segment_start,
-            "SOS",
-            JpegSegmentData::SOS(SOSData {
-                length,
-                component_count: scan_component_count,
-                components: scan_components,
-                start_spectral,
-                end_spectral,
-                successive_high,
-                successive_low,
-                data_length,
-            }),
-        );
-
         Ok(())
     }
 
-    fn build_huffman_table_from_bits(id: u8, class: u8, bits: &[u8; 16], vals: &[u8]) -> HuffmanTable {
-        let counts: Vec<u8> = bits.to_vec();
+    fn build_huffman_table_from_bits(id: u8, bits: &[u8; 16], vals: &[u8]) -> HuffmanTable {
         let mut offsets = Vec::with_capacity(17);
         offsets.push(0u32);
         let mut total: u32 = 0;
@@ -2006,7 +1912,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        let mut t = HuffmanTable { id, class, counts, symbols, offsets, codes, first_code, fast_lookup: Vec::new() };
+        let mut t = HuffmanTable { id, symbols, offsets, codes, first_code, fast_lookup: Vec::new() };
         t.build_fast_lookup();
         t
     }
@@ -2077,24 +1983,22 @@ impl<R: Read + Seek> JpegDecoder<R> {
         ];
 
         if !self.dc_huffman_tables.iter().any(|t| t.id == 0) {
-            self.dc_huffman_tables.push(Self::build_huffman_table_from_bits(0, 0, &BITS_DC_LUMA, &VALS_DC_LUMA));
+            self.dc_huffman_tables.push(Self::build_huffman_table_from_bits(0, &BITS_DC_LUMA, &VALS_DC_LUMA));
         }
         if !self.dc_huffman_tables.iter().any(|t| t.id == 1) {
-            self.dc_huffman_tables.push(Self::build_huffman_table_from_bits(1, 0, &BITS_DC_CHROMA, &VALS_DC_CHROMA));
+            self.dc_huffman_tables.push(Self::build_huffman_table_from_bits(1, &BITS_DC_CHROMA, &VALS_DC_CHROMA));
         }
         if !self.ac_huffman_tables.iter().any(|t| t.id == 0) {
-            self.ac_huffman_tables.push(Self::build_huffman_table_from_bits(0, 1, &BITS_AC_LUMA, &VALS_AC_LUMA));
+            self.ac_huffman_tables.push(Self::build_huffman_table_from_bits(0, &BITS_AC_LUMA, &VALS_AC_LUMA));
         }
         if !self.ac_huffman_tables.iter().any(|t| t.id == 1) {
-            self.ac_huffman_tables.push(Self::build_huffman_table_from_bits(1, 1, &BITS_AC_CHROMA, &VALS_AC_CHROMA));
+            self.ac_huffman_tables.push(Self::build_huffman_table_from_bits(1, &BITS_AC_CHROMA, &VALS_AC_CHROMA));
         }
     }
 
     fn default_lossless_dc_table() -> HuffmanTable {
         let mut t = HuffmanTable {
-            class: 0,
             id: 0,
-            counts: vec![0, 0, 2, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
             symbols: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             offsets: vec![0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7],
             codes: vec![
@@ -2674,7 +2578,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let sample_bytes = samples.len().saturating_mul(2);
 
         let ids: Vec<u8> = self.components.iter().map(|c| c.id).collect();
-        let explicit_ycbcr = self.jfif_header.is_some() || self.adobe_color_transform.is_some_and(|ct| ct != 0);
+        let explicit_ycbcr = self.has_jfif || self.adobe_color_transform.is_some_and(|ct| ct != 0);
         if components_count == 3 && ids != [0x52, 0x47, 0x42] && explicit_ycbcr && !self.lossless_skip_color_transform {
             Self::lossless_ycbcr_to_rgb(&mut samples, self.precision);
         }
@@ -3995,12 +3899,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
     fn dequantize_and_idct_planes(&self, planes: &[ComponentPlane], zigzag_order: bool) -> Vec<RasterPlane> {
         let level_shift = if self.precision <= 8 { 128i32 } else { 2048i32 };
 
-        let default_table = QuantizationTable {
-            id: 0,
-            precision: 8,
-            table: Vec::new(),
-            table_natural: DEFAULT_QUANTIZATION_TABLE.to_vec(),
-        };
+        let default_table = QuantizationTable { id: 0, table_natural: DEFAULT_QUANTIZATION_TABLE.to_vec() };
 
         let max_h_samp = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1);
         let max_v_samp = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1);
@@ -4995,47 +4894,59 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let length = self.reader.read_u16()?;
 
         let precision = self.reader.read_u8()?;
-        let height = self.reader.read_u16()? as u32;
-        let width = self.reader.read_u16()? as u32;
+        let height = self.reader.read_u16()?;
+        let width = self.reader.read_u16()?;
         let component_count = self.reader.read_u8()?;
 
+        let mut components = Vec::with_capacity(usize::from(component_count));
         for _ in 0..component_count {
-            self.reader.read_u8()?;
-            self.reader.read_u8()?;
-            self.reader.read_u8()?;
+            let id = self.reader.read_u8()?;
+            let sampling = self.reader.read_u8()?;
+            let quantization_table = self.reader.read_u8()?;
+            components.push(JpegFrameComponent {
+                id,
+                horizontal_sampling: sampling >> 4,
+                vertical_sampling: sampling & 0x0F,
+                quantization_table,
+            });
         }
 
-        self.is_hierarchical = true;
-        self.dhp_width = width;
-        self.dhp_height = height;
-
-        self.limits.reserve_buffer(width, height, 4)?;
-
-        self.record_segment(
+        self.record(
             segment_start,
-            "DHP",
-            JpegSegmentData::SOF(crate::decoders::jpeg::types::SOFData {
-                length,
-                marker: "DHP".to_string(),
+            Some(2 + u64::from(length)),
+            JpegSection::HierarchicalProgression(JpegFrame {
+                marker: 0xDE,
                 precision,
-                width,
                 height,
+                width,
                 component_count,
-                components: Vec::new(),
+                components,
             }),
         );
+
+        self.is_hierarchical = true;
+        self.dhp_width = u32::from(width);
+        self.dhp_height = u32::from(height);
+
+        if self.walk_mode == WalkMode::Decode {
+            self.limits.reserve_buffer(self.dhp_width, self.dhp_height, 4)?;
+        }
 
         Ok(())
     }
 
     fn read_exp(&mut self, segment_start: u64) -> VexelResult<()> {
-        self.reader.read_u16()?;
+        let length = self.reader.read_u16()?;
         let expand = self.reader.read_u8()?;
         let expand_horizontal = (expand >> 4) & 1 != 0;
         let expand_vertical = expand & 1 != 0;
         self.pending_expand_h = expand_horizontal;
         self.pending_expand_v = expand_vertical;
-        self.record_segment(segment_start, "EXP", JpegSegmentData::EXP { expand_horizontal, expand_vertical });
+        self.record(
+            segment_start,
+            Some(2 + u64::from(length)),
+            JpegSection::Expand(JpegExpand { horizontal: expand_horizontal, vertical: expand_vertical }),
+        );
         Ok(())
     }
 
@@ -5060,167 +4971,171 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.pending_expand_v = false;
     }
 
-    fn record_segment(&mut self, start_offset: u64, marker: &str, data: JpegSegmentData) {
-        self.segments.push(JpegSegmentInfo { start_offset, marker: marker.to_string(), data });
+    fn start_frame(&mut self, marker: u8, segment_start: u64) -> VexelResult<()> {
+        if self.is_hierarchical {
+            self.finalize_current_frame();
+        }
+
+        let mode = match marker & 0x07 {
+            1 => Some(JpegMode::ExtendedSequential),
+            2 => Some(JpegMode::Progressive),
+            3 => Some(JpegMode::Lossless),
+            5 => Some(JpegMode::DifferentialSequential),
+            6 => Some(JpegMode::DifferentialProgressive),
+            7 => Some(JpegMode::DifferentialLossless),
+            _ => None,
+        };
+        let arithmetic = marker & 0x08 != 0;
+
+        if let Some(mode) = mode {
+            self.mode = mode;
+        }
+        if arithmetic {
+            self.coding_method = JpegCodingMethod::Arithmetic;
+        }
+
+        self.read_start_of_frame(marker, segment_start)
+    }
+
+    fn walk(&mut self, mode: WalkMode) -> VexelResult<()> {
+        self.reset_state();
+        self.walk_mode = mode;
+        self.info = Some(JpegInfo::default());
+        self.reader.seek(SeekFrom::Start(0))?;
+
+        let result = self.walk_markers();
+        self.finish_info();
+        result
+    }
+
+    fn walk_markers(&mut self) -> VexelResult<()> {
+        while let Ok(marker) = self.reader.next_marker(&JPEG_MARKERS) {
+            let Some(marker) = marker else {
+                log_debug!("End of file reached");
+                break;
+            };
+
+            log_debug!("Found marker: {:?}", marker);
+
+            let segment_start = self.reader.stream_position().unwrap_or(0).saturating_sub(2);
+            let code = marker.to_u16();
+
+            let result = match marker {
+                JpegMarker::SOI => {
+                    self.record(segment_start, Some(2), JpegSection::StartOfImage);
+                    Ok(())
+                }
+                JpegMarker::EOI => {
+                    self.record(segment_start, Some(2), JpegSection::EndOfImage);
+                    self.record_trailing_data(segment_start + 2);
+                    break;
+                }
+                JpegMarker::COM => self.read_com(segment_start),
+                JpegMarker::APP0
+                | JpegMarker::APP1
+                | JpegMarker::APP2
+                | JpegMarker::APP3
+                | JpegMarker::APP4
+                | JpegMarker::APP5
+                | JpegMarker::APP6
+                | JpegMarker::APP7
+                | JpegMarker::APP8
+                | JpegMarker::APP9
+                | JpegMarker::APP10
+                | JpegMarker::APP11
+                | JpegMarker::APP12
+                | JpegMarker::APP13
+                | JpegMarker::APP14
+                | JpegMarker::APP15 => self.read_app((code & 0x0F) as u8, segment_start),
+                JpegMarker::SOF0
+                | JpegMarker::SOF1
+                | JpegMarker::SOF2
+                | JpegMarker::SOF3
+                | JpegMarker::SOF5
+                | JpegMarker::SOF6
+                | JpegMarker::SOF7
+                | JpegMarker::SOF9
+                | JpegMarker::SOF10
+                | JpegMarker::SOF11
+                | JpegMarker::SOF13
+                | JpegMarker::SOF14
+                | JpegMarker::SOF15 => self.start_frame((code & 0xFF) as u8, segment_start),
+                JpegMarker::DHP => self.read_dhp(segment_start),
+                JpegMarker::EXP => self.read_exp(segment_start),
+                JpegMarker::DRI => self.read_restart_interval(segment_start),
+                JpegMarker::DNL => self.read_dnl(segment_start),
+                JpegMarker::DQT => self.read_quantization_table(segment_start),
+                JpegMarker::DHT => self.read_huffman_table(segment_start),
+                JpegMarker::DAC => self.read_dac(segment_start),
+                JpegMarker::SOS => self.read_start_of_scan(segment_start),
+                _ => {
+                    log_warn!("Unhandled marker found: {:?}", marker);
+                    self.skip_unknown_marker_segment(code, segment_start)
+                }
+            };
+
+            match result {
+                Ok(_) => {}
+                Err(VexelError::LimitExceeded(_)) => return result,
+                Err(e) => {
+                    log_warn!("Failed to process {:?} marker segment: {}", marker, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn record_trailing_data(&mut self, offset: u64) {
+        let remaining = self.reader.bytes_left().unwrap_or(0);
+        if remaining > 0 {
+            self.record(offset, Some(remaining), JpegSection::TrailingData);
+        }
+    }
+
+    fn finish_info(&mut self) {
+        let summary = self.build_summary();
+        if let Some(info) = &mut self.info {
+            info.summary = summary;
+        }
+    }
+
+    fn build_summary(&self) -> Option<ImageSummary> {
+        let info = self.info.as_ref()?;
+        let first_frame = info.sections.iter().find_map(|section| match &section.data {
+            JpegSection::Frame(frame) => Some(frame.marker),
+            _ => None,
+        })?;
+
+        let (width, height) =
+            if self.is_hierarchical { (self.dhp_width, self.dhp_height) } else { (self.width, self.height) };
+
+        let color_model = match self.detect_colorspace() {
+            JpegColorspace::Grayscale => ColorModel::Gray,
+            JpegColorspace::RGB => ColorModel::Rgb,
+            JpegColorspace::YCbCr => ColorModel::YCbCr,
+            JpegColorspace::CMYK => ColorModel::Cmyk,
+            JpegColorspace::YCCK => ColorModel::Ycck,
+            JpegColorspace::RGBA => ColorModel::Rgba,
+            JpegColorspace::Unknown => ColorModel::Unknown,
+        };
+
+        let mut summary = ImageSummary::new(width, height, color_model, self.components.len() as u16, self.precision);
+        summary.has_alpha = color_model == ColorModel::Rgba;
+        let hierarchy = if self.is_hierarchical { "Hierarchical, " } else { "" };
+        summary.compression =
+            Some(format!("{}{}, {} coding", hierarchy, process_name(first_frame), coding_name(first_frame)));
+        let factors: Vec<(u8, u8)> =
+            self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
+        summary.subsampling = subsampling_name(&factors);
+        summary.icc_profile = self.icc.assemble();
+        Some(summary)
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        while let Ok(marker) = self.reader.next_marker(&JPEG_MARKERS) {
-            match marker {
-                Some(marker) => {
-                    log_debug!("Found marker: {:?}", marker);
-
-                    let segment_start = self.reader.stream_position().unwrap_or(0).saturating_sub(2);
-
-                    let result = match marker {
-                        JpegMarker::SOI => {
-                            self.record_segment(segment_start, "SOI", JpegSegmentData::SOI);
-                            Ok(())
-                        }
-                        JpegMarker::EOI => {
-                            self.record_segment(segment_start, "EOI", JpegSegmentData::EOI);
-                            break;
-                        }
-                        JpegMarker::COM => self.read_com(segment_start),
-                        JpegMarker::APP0 => self.read_app0_jfif(segment_start),
-                        JpegMarker::APP1 => self.read_app1_exif(segment_start),
-                        JpegMarker::APP2 => self.read_app2_icc(segment_start),
-                        JpegMarker::APP3 => self.read_app_generic("APP3", segment_start),
-                        JpegMarker::APP4 => self.read_app_generic("APP4", segment_start),
-                        JpegMarker::APP5 => self.read_app_generic("APP5", segment_start),
-                        JpegMarker::APP6 => self.read_app_generic("APP6", segment_start),
-                        JpegMarker::APP7 => self.read_app_generic("APP7", segment_start),
-                        JpegMarker::APP8 => self.read_app_generic("APP8", segment_start),
-                        JpegMarker::APP9 => self.read_app_generic("APP9", segment_start),
-                        JpegMarker::APP10 => self.read_app_generic("APP10", segment_start),
-                        JpegMarker::APP11 => self.read_app_generic("APP11", segment_start),
-                        JpegMarker::APP12 => self.read_app_generic("APP12", segment_start),
-                        JpegMarker::APP13 => self.read_app_generic("APP13", segment_start),
-                        JpegMarker::APP14 => self.read_app14_adobe(segment_start),
-                        JpegMarker::APP15 => self.read_app_generic("APP15", segment_start),
-                        JpegMarker::SOF0 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.read_start_of_frame("SOF0", segment_start)
-                        }
-                        JpegMarker::SOF1 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::ExtendedSequential;
-                            self.read_start_of_frame("SOF1", segment_start)
-                        }
-                        JpegMarker::SOF2 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::Progressive;
-                            self.read_start_of_frame("SOF2", segment_start)
-                        }
-                        JpegMarker::SOF3 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::Lossless;
-                            self.read_start_of_frame("SOF3", segment_start)
-                        }
-                        JpegMarker::SOF5 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::DifferentialSequential;
-                            self.read_start_of_frame("SOF5", segment_start)
-                        }
-                        JpegMarker::SOF6 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::DifferentialProgressive;
-                            self.read_start_of_frame("SOF6", segment_start)
-                        }
-                        JpegMarker::SOF7 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::DifferentialLossless;
-                            self.read_start_of_frame("SOF7", segment_start)
-                        }
-                        JpegMarker::SOF9 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::ExtendedSequential;
-                            self.coding_method = JpegCodingMethod::Arithmetic;
-                            self.read_start_of_frame("SOF9", segment_start)
-                        }
-                        JpegMarker::SOF10 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::Progressive;
-                            self.coding_method = JpegCodingMethod::Arithmetic;
-                            self.read_start_of_frame("SOF10", segment_start)
-                        }
-                        JpegMarker::SOF11 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::Lossless;
-                            self.coding_method = JpegCodingMethod::Arithmetic;
-                            self.read_start_of_frame("SOF11", segment_start)
-                        }
-                        JpegMarker::SOF13 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::DifferentialSequential;
-                            self.coding_method = JpegCodingMethod::Arithmetic;
-                            self.read_start_of_frame("SOF13", segment_start)
-                        }
-                        JpegMarker::SOF14 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::DifferentialProgressive;
-                            self.coding_method = JpegCodingMethod::Arithmetic;
-                            self.read_start_of_frame("SOF14", segment_start)
-                        }
-                        JpegMarker::SOF15 => {
-                            if self.is_hierarchical {
-                                self.finalize_current_frame();
-                            }
-                            self.mode = JpegMode::DifferentialLossless;
-                            self.coding_method = JpegCodingMethod::Arithmetic;
-                            self.read_start_of_frame("SOF15", segment_start)
-                        }
-                        JpegMarker::DHP => self.read_dhp(segment_start),
-                        JpegMarker::EXP => self.read_exp(segment_start),
-                        JpegMarker::DRI => self.read_restart_interval(segment_start),
-                        JpegMarker::DNL => self.read_dnl(segment_start),
-                        JpegMarker::DQT => self.read_quantization_table(segment_start),
-                        JpegMarker::DHT => self.read_huffman_table(segment_start),
-                        JpegMarker::DAC => self.read_dac(segment_start),
-                        JpegMarker::SOS => self.read_start_of_scan(segment_start),
-                        _ => {
-                            log_warn!("Unhandled marker found: {:?}", marker);
-                            self.skip_unknown_marker_segment(&format!("{:?}", marker), segment_start)
-                        }
-                    };
-
-                    match result {
-                        Ok(_) => {}
-                        Err(VexelError::LimitExceeded(_)) => return Err(result.unwrap_err()),
-                        Err(e) => {
-                            log_warn!("Failed to process {:?} marker segment: {}", marker, e);
-                        }
-                    }
-                }
-                None => {
-                    log_debug!("End of file reached");
-                    break;
-                }
-            }
+        if let Err(e) = self.walk(WalkMode::Decode) {
+            self.info = None;
+            return Err(e);
         }
 
         log_debug!("Dimensions: {}x{}. Number of pixels: {}", self.width, self.height, self.width * self.height);
@@ -5256,28 +5171,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         match &self.mode {
-            JpegMode::Baseline => {
-                let image = self.decode_baseline()?;
-                Ok(image)
-            }
+            JpegMode::Baseline => self.decode_baseline(),
             JpegMode::ExtendedSequential => {
                 // TODO general decoding process is same as baseline, so this method can be used,
                 // but it would be nice to have a different name for this mode
-                let image = self.decode_baseline()?;
-                Ok(image)
+                self.decode_baseline()
             }
-            JpegMode::Progressive => {
-                let image = self.decode_progressive()?;
-                Ok(image)
-            }
-            JpegMode::Lossless => {
-                let image = self.decode_lossless()?;
-                Ok(image)
-            }
+            JpegMode::Progressive => self.decode_progressive(),
+            JpegMode::Lossless => self.decode_lossless(),
             JpegMode::DifferentialSequential | JpegMode::DifferentialProgressive | JpegMode::DifferentialLossless => {
                 log_warn!("Differential JPEG mode outside hierarchical context, treating as baseline");
-                let image = self.decode_baseline()?;
-                Ok(image)
+                self.decode_baseline()
             }
         }
     }

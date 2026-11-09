@@ -1,116 +1,3 @@
-use serde::Serialize;
-use tsify::Tsify;
-
-use crate::utils::exif::ExifData;
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct JpegSegmentInfo {
-    pub start_offset: u64,
-    pub marker: String,
-    pub data: JpegSegmentData,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
-pub enum JpegSegmentData {
-    SOI,
-    EOI,
-    APP0(JFIFData),
-    APP1 { length: u16, exif: Option<ExifData> },
-    APP2(APP2Data),
-    APP14(APP14AdobeData),
-    APP { marker: String, length: u16, identifier: Option<String> },
-    SOF(SOFData),
-    DHT(DHTData),
-    DAC(DACData),
-    DQT(DQTData),
-    DRI { restart_interval: u16 },
-    DNL { number_of_lines: u16 },
-    EXP { expand_horizontal: bool, expand_vertical: bool },
-    SOS(SOSData),
-    COM { text: String },
-    Unknown { marker: String, length: u16 },
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct JFIFData {
-    pub length: u16,
-    pub identifier: String,
-    pub version_major: u8,
-    pub version_minor: u8,
-    pub density_units: u8,
-    pub x_density: u16,
-    pub y_density: u16,
-    pub thumbnail_width: u8,
-    pub thumbnail_height: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
-pub struct APP2Data {
-    pub length: u16,
-    pub identifier: String,
-    pub icc_profile_sequence: Option<IccProfileSequenceInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct IccProfileSequenceInfo {
-    pub chunk_sequence: u8,
-    pub total_chunks: u8,
-    pub profile_data_length: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct APP14AdobeData {
-    pub length: u16,
-    pub version: u16,
-    pub flags0: u16,
-    pub flags1: u16,
-    pub color_transform: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct SOFData {
-    pub length: u16,
-    pub marker: String,
-    pub precision: u8,
-    pub width: u32,
-    pub height: u32,
-    pub component_count: u8,
-    pub components: Vec<ColorComponentInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct DHTData {
-    pub length: u16,
-    pub tables: Vec<HuffmanTable>,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct DACData {
-    pub length: u16,
-    pub ac_tables: Vec<ArithmeticCodingTable>,
-    pub dc_tables: Vec<ArithmeticCodingTable>,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct DQTData {
-    pub length: u16,
-    pub tables: Vec<QuantizationTable>,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct SOSData {
-    pub length: u16,
-    pub component_count: u8,
-    pub components: Vec<ScanComponent>,
-    pub start_spectral: u8,
-    pub end_spectral: u8,
-    pub successive_high: u8,
-    pub successive_low: u8,
-    pub data_length: u64,
-}
-
 #[rustfmt::skip]
 pub const ZIGZAG_MAP: [u8; 64] = [
      0,  1,  8, 16,  9,  2,  3, 10,
@@ -136,7 +23,7 @@ pub const DEFAULT_QUANTIZATION_TABLE: [u16; 64] = [
     72, 92, 95, 98, 112, 100, 103, 99,
 ];
 
-#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum JpegMode {
     Baseline,
     ExtendedSequential,
@@ -147,34 +34,25 @@ pub enum JpegMode {
     DifferentialLossless,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum JpegCodingMethod {
     Huffman,
     Arithmetic,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone)]
 pub struct QuantizationTable {
     pub id: u8,
-    pub precision: u8,
-    pub table: Vec<u16>,
-    #[serde(skip)]
     pub table_natural: Vec<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone)]
 pub struct HuffmanTable {
     pub id: u8,
-    pub class: u8,
-    pub counts: Vec<u8>,
     pub symbols: Vec<u8>,
-    #[serde(skip)]
     pub offsets: Vec<u32>,
-    #[serde(skip)]
     pub codes: Vec<u32>,
-    #[serde(skip)]
     pub first_code: Vec<u32>,
-    #[serde(skip)]
     pub fast_lookup: Vec<u32>,
 }
 
@@ -217,20 +95,19 @@ impl HuffmanTable {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone)]
 pub struct ArithmeticCodingValue {
     pub value: u8,
     pub length: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone)]
 pub struct ArithmeticCodingTable {
-    pub table_class: u8,
     pub identifier: u8,
     pub values: Vec<ArithmeticCodingValue>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone)]
 pub struct ColorComponentInfo {
     pub id: u8,
     pub horizontal_sampling_factor: u8,
@@ -238,19 +115,6 @@ pub struct ColorComponentInfo {
     pub quantization_table_id: u8,
     pub dc_table_selector: u8,
     pub ac_table_selector: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct JFIFHeader {
-    pub identifier: String,
-    pub version_major: u8,
-    pub version_minor: u8,
-    pub density_units: u8,
-    pub x_density: u16,
-    pub y_density: u16,
-    pub thumbnail_width: u8,
-    pub thumbnail_height: u8,
-    pub thumbnail_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,7 +132,7 @@ pub struct ScanData {
     pub restart_offsets: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone)]
 pub struct ScanComponent {
     pub component_id: u8,
     pub dc_table_selector: u8,

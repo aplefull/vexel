@@ -25,6 +25,9 @@ fuzz_target!(|data: &[u8]| {
         && (data.starts_with(b"II") || data.starts_with(b"MM"))
         && ((data[2] == 42 && data[3] == 0) || (data[2] == 0 && data[3] == 42));
     let input = if is_tiff { data.to_vec() } else { dng_skeleton(data) };
+    if let Ok(mut decoder) = vexel::Vexel::new(Cursor::new(&input[..])) {
+        let _ = decoder.get_info();
+    }
     if let Ok(mut decoder) = vexel::Vexel::new(Cursor::new(input)) {
         let _ = decoder.decode();
     }

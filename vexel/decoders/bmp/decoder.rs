@@ -3,17 +3,32 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
 use crate::decoders::bmp::compression::RleDecoder;
 use crate::decoders::bmp::headers::HeaderReader;
-use crate::decoders::bmp::pixels::{mask_alpha_is_used, PixelDecoder};
-use crate::decoders::bmp::types::{
-    BitmapCompression, BitmapFileHeader, BitmapInfoHeader, BmpExtraMasks, BmpPixelDataInfo, BmpSectionData,
-    BmpSectionInfo, ColorEntry, DibHeader,
+use crate::decoders::bmp::info::{
+    compression_name, BmpIccProfile, BmpInfo, BmpLinkedProfile, BmpPixelData, BmpSection, CS_TYPE_LINKED,
 };
+use crate::decoders::bmp::pixels::{mask_alpha_is_used, PixelDecoder};
+use crate::decoders::bmp::types::{BitmapCompression, BitmapFileHeader, ColorEntry, ColorMasks, DibHeader, DibKind};
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
-use crate::utils::info::BmpInfo;
+use crate::utils::info::{ColorModel, DataExtent, ImageSummary};
 use crate::{log_error, log_warn, Image, Limits};
+
+const BA_HEADER_SIZE: u64 = 14;
+const FILE_HEADER_SIZE: u64 = 14;
+
+#[derive(Clone, Copy, PartialEq)]
+enum ScanMode {
+    InfoOnly,
+    Decode,
+}
+
+struct PixelExtent {
+    offset: u64,
+    length: u64,
+    expected: Option<u64>,
+}
 
 pub struct BmpDecoder<R: Read + Seek> {
     width: u32,
@@ -21,13 +36,15 @@ pub struct BmpDecoder<R: Read + Seek> {
     limits: Limits,
     file_header: BitmapFileHeader,
     dib_header: DibHeader,
+    dib_offset: u64,
     extra_masks: Option<(u32, u32, u32, u32)>,
     color_table: Vec<ColorEntry>,
     icc_profile: Option<ICCProfile>,
     data: Vec<u8>,
     rle_decoded: bool,
     fallback_pixel_offset: u64,
-    sections: Vec<BmpSectionInfo>,
+    collected: BmpInfo,
+    info: Option<BmpInfo>,
     reader: BitReader<R>,
 }
 
@@ -37,26 +54,17 @@ impl<R: Read + Seek> BmpDecoder<R> {
             width: 0,
             height: 0,
             limits: Limits::default(),
-            file_header: BitmapFileHeader { file_size: 0, reserved1: 0, reserved2: 0, pixel_offset: 0 },
-            dib_header: DibHeader::Info(BitmapInfoHeader {
-                width: 0,
-                height: 0,
-                planes: 0,
-                bits_per_pixel: 0,
-                compression: BitmapCompression::BiRgb,
-                image_size: 0,
-                x_pixels_per_meter: 0,
-                y_pixels_per_meter: 0,
-                colors_used: 0,
-                important_colors: 0,
-            }),
+            file_header: BitmapFileHeader::default(),
+            dib_header: DibHeader::empty(),
+            dib_offset: 0,
             extra_masks: None,
             color_table: Vec::new(),
             icc_profile: None,
             data: Vec::new(),
             rle_decoded: false,
             fallback_pixel_offset: 0,
-            sections: Vec::new(),
+            collected: BmpInfo::default(),
+            info: None,
             reader: BitReader::with_le(reader),
         }
     }
@@ -65,77 +73,111 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> BmpInfo {
-        BmpInfo { sections: self.sections.clone() }
+    pub fn get_info(&mut self) -> BmpInfo {
+        if self.info.is_none() {
+            let saved_limits = self.limits.clone();
+            if let Err(e) = self.scan(ScanMode::InfoOnly) {
+                log_warn!("Failed to read BMP structure: {}", e);
+                self.finish_info();
+            }
+            self.limits = saved_limits;
+        }
+
+        self.info.clone().unwrap_or_default()
+    }
+
+    fn reset_state(&mut self) {
+        self.width = 0;
+        self.height = 0;
+        self.file_header = BitmapFileHeader::default();
+        self.dib_header = DibHeader::empty();
+        self.dib_offset = 0;
+        self.extra_masks = None;
+        self.color_table.clear();
+        self.icc_profile = None;
+        self.data.clear();
+        self.rle_decoded = false;
+        self.fallback_pixel_offset = 0;
+        self.collected = BmpInfo::default();
     }
 
     fn read_file_header(&mut self) -> VexelResult<()> {
         let start_offset = self.reader.stream_position().unwrap_or(0);
-        let (file_header, ba_header) = HeaderReader::read_file_header(&mut self.reader)?;
-        self.file_header = file_header;
-        if let Some(ba) = ba_header {
-            self.sections.push(BmpSectionInfo { start_offset, data: BmpSectionData::BitmapArrayHeader(ba) });
+        let headers = HeaderReader::read_file_header(&mut self.reader)?;
+        let mut offset = start_offset + headers.vendor_prefix_len;
+
+        if let Some(ba) = headers.array_header {
+            self.collected.push(offset, Some(BA_HEADER_SIZE), BmpSection::BitmapArrayHeader(ba));
+            offset += BA_HEADER_SIZE;
         }
-        self.sections.push(BmpSectionInfo { start_offset, data: BmpSectionData::FileHeader(self.file_header.clone()) });
+
+        if let Some(file_header) = headers.file_header {
+            self.collected.push(offset, Some(FILE_HEADER_SIZE), BmpSection::FileHeader(file_header.clone()));
+            self.file_header = file_header;
+        }
+
         Ok(())
     }
 
-    fn read_info_header(&mut self) -> VexelResult<()> {
+    fn read_info_header(&mut self, mode: ScanMode) -> VexelResult<()> {
         let start_offset = self.reader.stream_position().unwrap_or(0);
+        self.dib_offset = start_offset;
         let (dib_header, width, height) = HeaderReader::read_info_header(&mut self.reader)?;
         self.dib_header = dib_header;
         self.width = width;
         self.height = height;
-        self.limits.reserve_buffer(self.width, self.height, 4)?;
-        self.sections.push(BmpSectionInfo { start_offset, data: BmpSectionData::DibHeader(self.dib_header.clone()) });
+        self.collected.push(
+            start_offset,
+            Some(u64::from(self.dib_header.header_size)),
+            BmpSection::DibHeader(self.dib_header.clone()),
+        );
+        if mode == ScanMode::Decode {
+            self.limits.reserve_buffer(self.width, self.height, 4)?;
+        }
         Ok(())
     }
 
     fn read_extra_masks(&mut self) -> VexelResult<()> {
-        if matches!(self.dib_header, DibHeader::Info(_)) {
-            let compression = self.dib_header.compression();
+        if self.dib_header.kind == DibKind::Info {
+            let compression = self.dib_header.compression;
             if matches!(compression, BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields) {
                 let start_offset = self.reader.stream_position().unwrap_or(0);
-                let r = self.reader.read_u32()?;
-                let g = self.reader.read_u32()?;
-                let b = self.reader.read_u32()?;
-                let a = if matches!(compression, BitmapCompression::BiAlphaBitfields) {
-                    self.reader.read_u32()?
+                let red = self.reader.read_u32()?;
+                let green = self.reader.read_u32()?;
+                let blue = self.reader.read_u32()?;
+                let alpha = if matches!(compression, BitmapCompression::BiAlphaBitfields) {
+                    Some(self.reader.read_u32()?)
                 } else {
-                    0
+                    None
                 };
-                self.extra_masks = Some((r, g, b, a));
-                self.sections.push(BmpSectionInfo {
+                self.extra_masks = Some((red, green, blue, alpha.unwrap_or(0)));
+                let length = if alpha.is_some() { 16 } else { 12 };
+                self.collected.push(
                     start_offset,
-                    data: BmpSectionData::ExtraMasks(BmpExtraMasks {
-                        red_mask: r,
-                        green_mask: g,
-                        blue_mask: b,
-                        alpha_mask: a,
-                    }),
-                });
+                    Some(length),
+                    BmpSection::ExtraMasks(ColorMasks { red, green, blue, alpha }),
+                );
             }
         }
         Ok(())
     }
 
     fn read_color_table(&mut self) -> VexelResult<()> {
-        if self.dib_header.bits_per_pixel() <= 8 {
-            let max_colors = 1u32 << self.dib_header.bits_per_pixel();
-            let mut num_colors =
-                if self.dib_header.colors_used() > 0 { self.dib_header.colors_used() } else { max_colors };
+        if self.dib_header.bits_per_pixel <= 8 {
+            let max_colors = 1u32 << self.dib_header.bits_per_pixel;
+            let mut num_colors = if self.dib_header.colors_used > 0 { self.dib_header.colors_used } else { max_colors };
 
             if num_colors > max_colors {
                 log_warn!(
                     "Color table claims {} entries for {}-bit image, clamping to {}",
                     num_colors,
-                    self.dib_header.bits_per_pixel(),
+                    self.dib_header.bits_per_pixel,
                     max_colors
                 );
                 num_colors = max_colors;
             }
 
-            let is_core = matches!(self.dib_header, DibHeader::Core(_));
+            let is_core = self.dib_header.kind == DibKind::Core;
             let bytes_per_entry = if is_core { 3usize } else { 4usize };
             let table_bytes = u64::from(num_colors).saturating_mul(bytes_per_entry as u64);
             self.limits.reserve(table_bytes)?;
@@ -159,8 +201,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 });
             }
 
-            self.sections
-                .push(BmpSectionInfo { start_offset, data: BmpSectionData::ColorTable(self.color_table.clone()) });
+            let length = self.color_table.len() as u64 * bytes_per_entry as u64;
+            self.collected.push(start_offset, Some(length), BmpSection::ColorTable(self.color_table.clone()));
         }
 
         self.fallback_pixel_offset = self.reader.stream_position().unwrap_or(0);
@@ -171,12 +213,12 @@ impl<R: Read + Seek> BmpDecoder<R> {
     fn read_icc_profile(&mut self) -> VexelResult<()> {
         const ICC_MIN_PROFILE_SIZE: u64 = 128;
 
-        let (profile_data_offset, profile_size) = match &self.dib_header {
-            DibHeader::V5(h) if h.profile_size > 0 => (h.profile_data, h.profile_size),
+        let (profile_data_offset, declared_size) = match &self.dib_header.v5 {
+            Some(v5) if v5.profile_size > 0 => (v5.profile_data, v5.profile_size),
             _ => return Ok(()),
         };
 
-        let file_offset = 14u64 + profile_data_offset as u64;
+        let file_offset = self.dib_offset + profile_data_offset as u64;
         let stream_len = self.reader.seek(SeekFrom::End(0)).unwrap_or(0);
         if file_offset >= stream_len {
             log_warn!("BMP ICC profile offset {} is past end of file, skipping", file_offset);
@@ -184,9 +226,25 @@ impl<R: Read + Seek> BmpDecoder<R> {
         }
 
         let available = stream_len - file_offset;
-        let profile_size = u64::from(profile_size).min(available);
+        let profile_size = u64::from(declared_size).min(available);
+        let is_linked = self.dib_header.color_space.as_ref().is_some_and(|cs| cs.cs_type == CS_TYPE_LINKED);
+
+        if is_linked {
+            self.reader.seek(SeekFrom::Start(file_offset))?;
+            let bytes = self.reader.read_bytes(profile_size.min(4096) as usize)?;
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+            let path = bytes[..end].iter().map(|&b| b as char).collect();
+            self.collected.push(file_offset, Some(profile_size), BmpSection::LinkedProfile(BmpLinkedProfile { path }));
+            return Ok(());
+        }
+
         if profile_size < ICC_MIN_PROFILE_SIZE {
             log_warn!("BMP ICC profile is truncated to {} bytes, skipping", profile_size);
+            self.collected.push(
+                file_offset,
+                Some(profile_size),
+                BmpSection::IccProfile(BmpIccProfile { declared_size, parsed: false }),
+            );
             return Ok(());
         }
 
@@ -195,64 +253,183 @@ impl<R: Read + Seek> BmpDecoder<R> {
         self.reader.seek(SeekFrom::Start(file_offset))?;
         let data = self.reader.read_bytes(profile_size as usize)?;
 
-        if let Ok(profile) = ICCProfile::new(&data) {
-            self.sections
-                .push(BmpSectionInfo { start_offset: file_offset, data: BmpSectionData::IccProfile(profile.clone()) });
-            self.icc_profile = Some(profile);
-        }
+        let profile = ICCProfile::new(&data).ok();
+        self.collected.push(
+            file_offset,
+            Some(profile_size),
+            BmpSection::IccProfile(BmpIccProfile { declared_size, parsed: profile.is_some() }),
+        );
+        self.icc_profile = profile;
 
         Ok(())
     }
 
-    fn read_pixel_data(&mut self) -> VexelResult<()> {
-        const MIN_PIXEL_OFFSET: u64 = 26;
-
-        let mut pixel_offset = self.file_header.pixel_offset as u64;
-        self.reader.seek(SeekFrom::Start(pixel_offset))?;
-        let mut bytes_until_eof = self.reader.bytes_left()?;
-
-        if (pixel_offset < MIN_PIXEL_OFFSET || bytes_until_eof == 0)
-            && self.fallback_pixel_offset >= MIN_PIXEL_OFFSET
-            && self.fallback_pixel_offset != pixel_offset
-        {
-            log_warn!(
-                "Pixel data offset {} looks invalid, using offset {} right after the headers instead",
-                pixel_offset,
-                self.fallback_pixel_offset
-            );
-            pixel_offset = self.fallback_pixel_offset;
-            self.reader.seek(SeekFrom::Start(pixel_offset))?;
-            bytes_until_eof = self.reader.bytes_left()?;
-        }
-
-        let is_compressed = matches!(
-            self.dib_header.compression(),
+    fn is_compressed(&self) -> bool {
+        matches!(
+            self.dib_header.compression,
             BitmapCompression::BiRle4
                 | BitmapCompression::BiRle8
                 | BitmapCompression::BiCMYKRle4
                 | BitmapCompression::BiCMYKRle8
                 | BitmapCompression::Os2Huffman1D
                 | BitmapCompression::Os2Rle24
-        );
+        )
+    }
 
-        let bytes_to_read = if is_compressed {
-            bytes_until_eof
+    fn pixel_extent(&mut self) -> VexelResult<PixelExtent> {
+        const MIN_PIXEL_OFFSET: u64 = 26;
+
+        let mut offset = self.file_header.pixel_offset as u64;
+        self.reader.seek(SeekFrom::Start(offset))?;
+        let mut bytes_until_eof = self.reader.bytes_left()?;
+
+        if (offset < MIN_PIXEL_OFFSET || bytes_until_eof == 0)
+            && self.fallback_pixel_offset >= MIN_PIXEL_OFFSET
+            && self.fallback_pixel_offset != offset
+        {
+            log_warn!(
+                "Pixel data offset {} looks invalid, using offset {} right after the headers instead",
+                offset,
+                self.fallback_pixel_offset
+            );
+            offset = self.fallback_pixel_offset;
+            self.reader.seek(SeekFrom::Start(offset))?;
+            bytes_until_eof = self.reader.bytes_left()?;
+        }
+
+        let embedded = matches!(self.dib_header.compression, BitmapCompression::BiJpeg | BitmapCompression::BiPng);
+
+        let (length, expected) = if embedded {
+            let image_size = u64::from(self.dib_header.image_size);
+            let length = if image_size > 0 { image_size.min(bytes_until_eof) } else { bytes_until_eof };
+            (length, (image_size > 0).then_some(image_size))
+        } else if self.is_compressed() {
+            (bytes_until_eof, None)
         } else {
-            let row_size = (u64::from(self.dib_header.bits_per_pixel()) * u64::from(self.width)).div_ceil(32) * 4;
-            let data_size = row_size * u64::from(self.height);
-            std::cmp::min(data_size, bytes_until_eof)
+            let row_size = (u64::from(self.dib_header.bits_per_pixel) * u64::from(self.width)).div_ceil(32) * 4;
+            let data_size = row_size.saturating_mul(u64::from(self.height));
+            (data_size.min(bytes_until_eof), Some(data_size))
         };
 
-        self.limits.reserve(bytes_to_read)?;
+        Ok(PixelExtent { offset, length, expected })
+    }
 
-        self.sections.push(BmpSectionInfo {
-            start_offset: pixel_offset,
-            data: BmpSectionData::PixelData(BmpPixelDataInfo { offset: pixel_offset, length: bytes_to_read }),
-        });
+    fn record_pixel_extent(&mut self) -> VexelResult<PixelExtent> {
+        let extent = self.pixel_extent()?;
+        self.collected.push(
+            extent.offset,
+            Some(extent.length),
+            BmpSection::PixelData(BmpPixelData {
+                compression: self.dib_header.compression,
+                expected_length: extent.expected,
+            }),
+        );
+        Ok(extent)
+    }
 
-        self.data = self.reader.read_bytes(bytes_to_read as usize)?;
+    fn read_pixel_data(&mut self, extent: &PixelExtent) -> VexelResult<()> {
+        self.limits.reserve(extent.length)?;
+        self.reader.seek(SeekFrom::Start(extent.offset))?;
+        self.data = self.reader.read_bytes(extent.length as usize)?;
 
         Ok(())
+    }
+
+    fn build_summary(&self, extent: Option<&PixelExtent>) -> ImageSummary {
+        let header = &self.dib_header;
+        let bpp = header.bits_per_pixel;
+        let alpha_mask = header.color_masks().or(self.extra_masks).map(|(_, _, _, a)| a).unwrap_or(0);
+        let uses_masks =
+            matches!(header.compression, BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields);
+        let has_alpha = (uses_masks && alpha_mask != 0) || bpp == 64;
+
+        let (color_model, channels, bits) = match (header.compression, bpp) {
+            (BitmapCompression::BiCmyk, 32) => (ColorModel::Cmyk, 4, 8),
+            (_, 0..=8) => (ColorModel::Indexed, 1, bpp as u8),
+            (_, 16) => (if has_alpha { ColorModel::Rgba } else { ColorModel::Rgb }, if has_alpha { 4 } else { 3 }, 5),
+            (_, 64) => (ColorModel::Rgba, 4, 16),
+            _ => (if has_alpha { ColorModel::Rgba } else { ColorModel::Rgb }, if has_alpha { 4 } else { 3 }, 8),
+        };
+
+        let mut summary = ImageSummary::new(self.width, self.height, color_model, channels, bits);
+        summary.has_alpha = has_alpha;
+        if header.compression != BitmapCompression::BiRgb {
+            summary.compression = Some(compression_name(header.compression).to_string());
+        }
+        summary.icc_profile = self.icc_profile.clone();
+        if let Some(extent) = extent {
+            if let (Some(expected), false) = (extent.expected, self.is_compressed()) {
+                summary.data = Some(DataExtent { expected, actual: extent.length });
+            }
+        }
+        summary
+    }
+
+    fn finish_info(&mut self) {
+        let mut info = std::mem::take(&mut self.collected);
+        let has_dib = info.sections.iter().any(|section| matches!(section.data, BmpSection::DibHeader(_)));
+        if has_dib {
+            let extent = info.sections.iter().find_map(|section| match &section.data {
+                BmpSection::PixelData(pixel_data) => Some(PixelExtent {
+                    offset: section.offset,
+                    length: section.length.unwrap_or(0),
+                    expected: pixel_data.expected_length,
+                }),
+                _ => None,
+            });
+            info.summary = Some(self.build_summary(extent.as_ref()));
+        }
+        info.sections.sort_by_key(|section| section.offset);
+        self.info = Some(info);
+    }
+
+    fn scan(&mut self, mode: ScanMode) -> VexelResult<Option<PixelExtent>> {
+        self.reset_state();
+        self.reader.seek(SeekFrom::Start(0))?;
+
+        if let Err(e) = self.read_file_header() {
+            log_error!("Error reading file header. This might be critical! Error: {}", e);
+        };
+
+        match self.read_info_header(mode) {
+            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
+            Err(e) => {
+                log_error!("Error reading info header. This might be critical! Error: {}", e);
+            }
+            Ok(_) => (),
+        };
+
+        if let Err(e) = self.read_extra_masks() {
+            log_error!("Error reading extra masks. This might be critical! Error: {}", e);
+        };
+
+        match self.read_color_table() {
+            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
+            Err(e) => {
+                log_error!("Error reading color table. This might be critical! Error: {}", e);
+            }
+            Ok(_) => (),
+        };
+
+        match self.read_icc_profile() {
+            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
+            Err(e) => {
+                log_warn!("Error reading ICC profile: {}", e);
+            }
+            Ok(_) => (),
+        };
+
+        let extent = match self.record_pixel_extent() {
+            Ok(extent) => Some(extent),
+            Err(e) => {
+                log_error!("Error locating pixel data. This might be critical! Error: {}", e);
+                None
+            }
+        };
+
+        self.finish_info();
+
+        Ok(extent)
     }
 
     fn convert_cmyk_color_table(&mut self) {
@@ -267,7 +444,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
     fn decode_jpeg(&mut self) -> VexelResult<Image> {
         self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
-        let image_size = self.dib_header.image_size();
+        let image_size = self.dib_header.image_size;
         let jpeg_bytes = if image_size > 0 {
             self.limits.reserve(u64::from(image_size))?;
             self.reader.read_bytes(image_size as usize)?
@@ -282,7 +459,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
     fn decode_png(&mut self) -> VexelResult<Image> {
         self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
-        let image_size = self.dib_header.image_size();
+        let image_size = self.dib_header.image_size;
         let png_bytes = if image_size > 0 {
             self.limits.reserve(u64::from(image_size))?;
             self.reader.read_bytes(image_size as usize)?
@@ -331,17 +508,25 @@ impl<R: Read + Seek> BmpDecoder<R> {
             _ => 0,
         };
 
-        let pixel_offset = 14 + header_size + extra_mask_bytes + (num_colors as usize * bytes_per_color);
+        let declared_header_end = (header_size as u64)
+            .saturating_add(extra_mask_bytes as u64)
+            .saturating_add(u64::from(num_colors).saturating_mul(bytes_per_color as u64));
+        if declared_header_end > data.len() as u64 {
+            log_warn!("ICO BMP header and palette extend past the image data, truncating");
+        }
+        let header_end = declared_header_end.min(data.len() as u64) as usize;
+        let pixel_offset = 14 + header_end;
 
+        let to_usize = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
         let xor_size = {
-            let row_size = (bpp as u32 * dir_width).div_ceil(32) * 4;
-            (row_size * dir_height) as usize
+            let row_size = (u64::from(bpp) * u64::from(dir_width)).div_ceil(32) * 4;
+            to_usize(row_size.saturating_mul(u64::from(dir_height)))
         };
-        let and_start = pixel_offset - 14 + xor_size;
-        let and_mask_row_size = dir_width.div_ceil(32) * 4;
-        let and_size = (and_mask_row_size * dir_height) as usize;
+        let and_start = header_end.saturating_add(xor_size);
+        let and_mask_row_size = u64::from(dir_width.div_ceil(32)) * 4;
+        let and_size = to_usize(and_mask_row_size.saturating_mul(u64::from(dir_height)));
         let and_mask = if and_start < data.len() {
-            let end = (and_start + and_size).min(data.len());
+            let end = and_start.saturating_add(and_size).min(data.len());
             data[and_start..end].to_vec()
         } else {
             Vec::new()
@@ -350,9 +535,9 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let inject_alpha_masks = bpp == 32 && compression_val == 0 && !is_core;
         let adjusted_pixel_offset = if inject_alpha_masks { pixel_offset + 16 } else { pixel_offset };
 
-        let xor_end = (pixel_offset - 14 + xor_size).min(data.len());
-        let pre_pixel_data = &data[..pixel_offset - 14];
-        let pixel_data = &data[pixel_offset - 14..xor_end];
+        let xor_end = header_end.saturating_add(xor_size).min(data.len());
+        let pre_pixel_data = &data[..header_end];
+        let pixel_data = &data[header_end..xor_end];
 
         let total_size =
             (14 + pre_pixel_data.len() + if inject_alpha_masks { 16 } else { 0 } + pixel_data.len()) as u32;
@@ -365,7 +550,9 @@ impl<R: Read + Seek> BmpDecoder<R> {
         full_bmp.extend_from_slice(pre_pixel_data);
 
         if inject_alpha_masks {
-            full_bmp[30] = 6;
+            if let Some(compression) = full_bmp.get_mut(30) {
+                *compression = 6;
+            }
             for mask in [0x00FF0000u32, 0x0000FF00, 0x000000FF, 0xFF000000] {
                 full_bmp.extend_from_slice(&mask.to_le_bytes());
             }
@@ -393,54 +580,28 @@ impl<R: Read + Seek> BmpDecoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        if let Err(e) = self.read_file_header() {
-            log_error!("Error reading file header. This might be critical! Error: {}", e);
-        };
+        self.info = None;
+        let extent = self.scan(ScanMode::Decode)?;
 
-        match self.read_info_header() {
-            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
-            Err(e) => {
-                log_error!("Error reading info header. This might be critical! Error: {}", e);
-            }
-            Ok(_) => (),
-        };
+        let embedded = matches!(self.dib_header.compression, BitmapCompression::BiJpeg | BitmapCompression::BiPng);
+        if let Some(extent) = extent.filter(|_| !embedded) {
+            match self.read_pixel_data(&extent) {
+                Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
+                Err(e) => {
+                    log_error!("Error reading pixel data. This might be critical! Error: {}", e);
+                }
+                Ok(_) => (),
+            };
+        }
 
-        if let Err(e) = self.read_extra_masks() {
-            log_error!("Error reading extra masks. This might be critical! Error: {}", e);
-        };
-
-        match self.read_color_table() {
-            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
-            Err(e) => {
-                log_error!("Error reading color table. This might be critical! Error: {}", e);
-            }
-            Ok(_) => (),
-        };
-
-        match self.read_icc_profile() {
-            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
-            Err(e) => {
-                log_warn!("Error reading ICC profile: {}", e);
-            }
-            Ok(_) => (),
-        };
-
-        match self.read_pixel_data() {
-            Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
-            Err(e) => {
-                log_error!("Error reading pixel data. This might be critical! Error: {}", e);
-            }
-            Ok(_) => (),
-        };
-
-        let bottom_up = self.dib_header.height() > 0;
-        let compression = self.dib_header.compression();
+        let bottom_up = self.dib_header.height > 0;
+        let compression = self.dib_header.compression;
 
         match compression {
             BitmapCompression::BiRgb => (),
             BitmapCompression::BiRle8 | BitmapCompression::BiCMYKRle8 => {
-                if self.dib_header.bits_per_pixel() != 8 {
-                    log_warn!("Invalid bit depth for RLE8 compression: {}", self.dib_header.bits_per_pixel());
+                if self.dib_header.bits_per_pixel != 8 {
+                    log_warn!("Invalid bit depth for RLE8 compression: {}", self.dib_header.bits_per_pixel);
                 }
 
                 let raw_size = self.data.len();
@@ -455,8 +616,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 }
             }
             BitmapCompression::BiRle4 | BitmapCompression::BiCMYKRle4 => {
-                if self.dib_header.bits_per_pixel() != 4 {
-                    log_warn!("Invalid bit depth for RLE4 compression: {}", self.dib_header.bits_per_pixel());
+                if self.dib_header.bits_per_pixel != 4 {
+                    log_warn!("Invalid bit depth for RLE4 compression: {}", self.dib_header.bits_per_pixel);
                 }
 
                 let raw_size = self.data.len();
@@ -478,10 +639,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 return self.decode_png();
             }
             BitmapCompression::Os2Huffman1D => {
-                if self.dib_header.bits_per_pixel() != 1 {
+                if self.dib_header.bits_per_pixel != 1 {
                     log_warn!(
                         "Invalid bit depth for Huffman 1D compression: {}, decoding as 1-bit",
-                        self.dib_header.bits_per_pixel()
+                        self.dib_header.bits_per_pixel
                     );
                 }
 
@@ -503,10 +664,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 ));
             }
             BitmapCompression::Os2Rle24 => {
-                if self.dib_header.bits_per_pixel() != 24 {
+                if self.dib_header.bits_per_pixel != 24 {
                     log_warn!(
                         "Invalid bit depth for RLE24 compression: {}, decoding as 24-bit",
-                        self.dib_header.bits_per_pixel()
+                        self.dib_header.bits_per_pixel
                     );
                 }
 
@@ -519,7 +680,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
                 return Ok(PixelDecoder::decode_24bit_image(&self.data, self.width, self.height, bottom_up));
             }
-            BitmapCompression::BiCmyk => match self.dib_header.bits_per_pixel() {
+            BitmapCompression::BiCmyk => match self.dib_header.bits_per_pixel {
                 32 => {
                     return Ok(PixelDecoder::decode_cmyk32_image(&self.data, self.width, self.height, bottom_up));
                 }
@@ -530,7 +691,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             },
         }
 
-        let image = match self.dib_header.bits_per_pixel() {
+        let image = match self.dib_header.bits_per_pixel {
             1 => PixelDecoder::decode_1bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table),
             2 => PixelDecoder::decode_2bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table),
             4 => {
@@ -549,7 +710,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }
             16 => {
                 let use_masks = matches!(
-                    self.dib_header.compression(),
+                    self.dib_header.compression,
                     BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields
                 );
                 if let Some((red_mask, green_mask, blue_mask, alpha_mask)) =
@@ -572,7 +733,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             24 => PixelDecoder::decode_24bit_image(&self.data, self.width, self.height, bottom_up),
             32 => {
                 let use_masks = matches!(
-                    self.dib_header.compression(),
+                    self.dib_header.compression,
                     BitmapCompression::BiBitfields | BitmapCompression::BiAlphaBitfields
                 );
                 let (red_mask, green_mask, blue_mask, alpha_mask) = use_masks
@@ -596,7 +757,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             }
             64 => PixelDecoder::decode_64bit_image(&self.data, self.width, self.height, bottom_up),
             _ => {
-                log_warn!("Invalid bit depth: {}. Attempting to decode as 24bit.", self.dib_header.bits_per_pixel());
+                log_warn!("Invalid bit depth: {}. Attempting to decode as 24bit.", self.dib_header.bits_per_pixel);
                 PixelDecoder::decode_24bit_image(&self.data, self.width, self.height, bottom_up)
             }
         };

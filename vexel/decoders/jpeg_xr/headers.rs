@@ -5,7 +5,17 @@ use crate::utils::error::{VexelError, VexelResult};
 
 #[derive(Debug, Clone)]
 pub struct ImageHeader {
+    pub version: u32,
     pub subversion: u32,
+    pub tiling_present: bool,
+    pub spatial_transform: u32,
+    pub short_header: bool,
+    pub long_word: bool,
+    pub windowing: bool,
+    pub tile_stretch: bool,
+    pub premultiplied_alpha: bool,
+    pub source_color_bits: u32,
+    pub source_depth_bits: u32,
     pub hard_tile_boundaries: bool,
     pub bitstream_format: BitstreamFormat,
     pub index_table_present: bool,
@@ -128,7 +138,7 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
 
     let tiling_present = reader.read_bool();
     let bitstream_format = if reader.read_bool() { BitstreamFormat::Frequency } else { BitstreamFormat::Spatial };
-    reader.skip(3);
+    let spatial_transform = reader.read(3);
     let index_table_present = reader.read_bool();
 
     let overlap_bits = reader.read(2);
@@ -138,12 +148,12 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
     });
 
     let short_header = reader.read_bool();
-    reader.skip(1);
+    let long_word = reader.read_bool();
     let windowing = reader.read_bool();
     let trim_flexbits_flag = reader.read_bool();
     let tile_stretch = reader.read_bool();
     let rb_swapped = reader.read_bool();
-    reader.skip(1);
+    let premultiplied_alpha = reader.read_bool();
     let alpha_channel = reader.read_bool();
 
     let color_bits = reader.read(4);
@@ -221,7 +231,10 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
         extra_right = reader.read(6);
     }
 
-    if ((width + extra_left + extra_right) & 0xf) + ((height + extra_top + extra_bottom) & 0xf) != 0 {
+    if (width.wrapping_add(extra_left).wrapping_add(extra_right) & 0xf)
+        + (height.wrapping_add(extra_top).wrapping_add(extra_bottom) & 0xf)
+        != 0
+    {
         if (width & 0xf) + (height & 0xf) + extra_left + extra_top != 0 {
             return Err(VexelError::Custom("JPEG XR: inconsistent windowing parameters".to_string()));
         }
@@ -235,7 +248,17 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
     reader.align_byte();
 
     Ok(ImageHeader {
+        version,
         subversion,
+        tiling_present,
+        spatial_transform,
+        short_header,
+        long_word,
+        windowing,
+        tile_stretch,
+        premultiplied_alpha,
+        source_color_bits: color_bits,
+        source_depth_bits: depth_bits,
         hard_tile_boundaries,
         bitstream_format,
         index_table_present,

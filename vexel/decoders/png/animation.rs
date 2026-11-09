@@ -218,7 +218,16 @@ fn decode_frame_pixels(
 ) -> Option<PixelData> {
     let decoder = PixelDecoder::new(bit_depth, color_type, width, interlace, palette.clone(), transparency.clone());
 
-    let decompressed = ZlibDecoder::from_slice(fdat).decode();
+    let channels = match color_type {
+        ColorType::Grayscale | ColorType::Indexed => 1,
+        ColorType::GrayscaleAlpha => 2,
+        ColorType::RGB => 3,
+        ColorType::RGBA => 4,
+    };
+    let bits_per_pixel = u64::from(bit_depth) * channels;
+    let bytes_per_row = (bits_per_pixel * u64::from(width)).div_ceil(8) + 1;
+    let capacity = usize::try_from(bytes_per_row.saturating_mul(u64::from(height))).unwrap_or(usize::MAX / 8);
+    let decompressed = ZlibDecoder::from_slice(fdat).decode_with_capacity(capacity);
     let frame_pixels = decoder.deinterlace_scan_lines_owned(decompressed, width, height).ok()?;
     let mut pixels = decoder.decode_pixels_by_type(frame_pixels).ok()?;
     pixels.correct_pixels(width, height);

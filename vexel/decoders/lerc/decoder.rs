@@ -1,11 +1,11 @@
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
+use super::info::{scan, LercInfo};
 use super::mask::BitMask;
 use super::types::{LercDataType, LERC1_MAGIC, LERC2_MAGIC};
 use super::{lerc1, lerc2};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
-use crate::utils::info::LercInfo;
 use crate::{log_warn, Image, Limits};
 
 pub struct LercRaster {
@@ -16,8 +16,6 @@ pub struct LercRaster {
     pub data_type: LercDataType,
     pub values: Vec<f64>,
     pub mask: Option<BitMask>,
-    pub max_z_error: f64,
-    pub version: i32,
 }
 
 impl LercRaster {
@@ -49,8 +47,6 @@ pub fn decode_blob(data: &[u8]) -> VexelResult<LercRaster> {
         let height = first.n_rows as u32;
         let n_depth = first.n_depth as u32;
         let data_type = first.data_type()?;
-        let max_z_error = first.max_z_error;
-        let version = first.version;
         let band_count = bands.len();
 
         let mut values = Vec::with_capacity(width as usize * height as usize * n_depth as usize * band_count);
@@ -61,17 +57,7 @@ pub fn decode_blob(data: &[u8]) -> VexelResult<LercRaster> {
             masks.push(band.mask);
         }
 
-        return Ok(LercRaster {
-            width,
-            height,
-            n_depth,
-            bands: band_count,
-            data_type,
-            values,
-            mask: band_mask(masks),
-            max_z_error,
-            version,
-        });
+        return Ok(LercRaster { width, height, n_depth, bands: band_count, data_type, values, mask: band_mask(masks) });
     }
 
     if data.len() >= LERC1_MAGIC.len() && &data[..LERC1_MAGIC.len()] == LERC1_MAGIC {
@@ -80,7 +66,6 @@ pub fn decode_blob(data: &[u8]) -> VexelResult<LercRaster> {
 
         let width = first.width as u32;
         let height = first.height as u32;
-        let max_z_error = first.max_z_error;
         let band_count = bands.len();
 
         let mut values = Vec::with_capacity(width as usize * height as usize * band_count);
@@ -99,8 +84,6 @@ pub fn decode_blob(data: &[u8]) -> VexelResult<LercRaster> {
             data_type: LercDataType::Float,
             values,
             mask: band_mask(masks),
-            max_z_error,
-            version: 1,
         });
     }
 
@@ -279,6 +262,7 @@ impl<R: Read + Seek> LercDecoder<R> {
     }
 
     fn read_blob(&mut self) -> VexelResult<Vec<u8>> {
+        self.reader.seek(SeekFrom::Start(0))?;
         let mut data = Vec::new();
         self.reader.read_to_end(&mut data)?;
         Ok(data)
@@ -290,30 +274,22 @@ impl<R: Read + Seek> LercDecoder<R> {
 
         self.limits.check_dimensions(raster.width, raster.height)?;
 
-        self.info = Some(LercInfo {
-            width: raster.width,
-            height: raster.height,
-            version: raster.version,
-            bands: raster.bands as u32,
-            depth: raster.n_depth,
-            data_type: format!("{:?}", raster.data_type),
-            max_z_error: raster.max_z_error,
-            has_mask: raster.mask.is_some(),
-        });
-
         let pixels = to_pixel_data(&raster);
 
         Ok(Image::from_pixels(raster.width, raster.height, pixels))
     }
 
     pub fn get_info(&mut self) -> LercInfo {
-        if let Some(info) = &self.info {
-            return info.clone();
+        if self.info.is_none() {
+            let saved_pos = self.reader.stream_position().unwrap_or(0);
+            let data = self.read_blob();
+            let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+            match data {
+                Ok(data) => self.info = Some(scan(&data)),
+                Err(e) => log_warn!("Failed to read LERC data: {}", e),
+            }
         }
 
-        match self.decode() {
-            Ok(_) => self.info.clone().unwrap_or_default(),
-            Err(_) => LercInfo::default(),
-        }
+        self.info.clone().unwrap_or_default()
     }
 }

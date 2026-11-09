@@ -1,10 +1,9 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
-use crate::decoders::png::PngDecoder;
+use crate::decoders::png::{PngDecoder, PngInfo};
 use crate::utils::error::VexelResult;
 use crate::utils::image::ImageFrame;
-use crate::utils::info::PngInfo;
 use crate::{log_warn, Image, Limits};
 
 pub const MAGIC: &[u8; 8] = b"RPGMV\0\0\0";
@@ -18,11 +17,12 @@ const PNG_PREFIX: [u8; ENCRYPTED_SIZE] =
 pub struct RpgmvpDecoder<R: Read + Seek> {
     limits: Limits,
     reader: BitReader<R>,
+    info: Option<PngInfo>,
 }
 
 impl<R: Read + Seek> RpgmvpDecoder<R> {
     pub fn new(reader: R) -> Self {
-        RpgmvpDecoder { limits: Limits::default(), reader: BitReader::new(reader) }
+        RpgmvpDecoder { limits: Limits::default(), reader: BitReader::new(reader), info: None }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
@@ -66,18 +66,32 @@ impl<R: Read + Seek> RpgmvpDecoder<R> {
         Ok(decoder)
     }
 
-    pub fn get_info(&mut self) -> VexelResult<PngInfo> {
-        let mut decoder = self.png_decoder()?;
-        let _ = decoder.decode();
+    fn capture_info(&mut self, decoder: &mut PngDecoder<Cursor<Vec<u8>>>) {
+        let mut info = decoder.get_info();
+        info.shift_offsets(ENCRYPTED_SIZE as u64);
+        self.info = Some(info);
+    }
 
-        Ok(decoder.get_info())
+    pub fn get_info(&mut self) -> VexelResult<PngInfo> {
+        if self.info.is_none() {
+            let mut decoder = self.png_decoder()?;
+            self.capture_info(&mut decoder);
+        }
+
+        Ok(self.info.clone().unwrap_or_default())
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        self.png_decoder()?.decode()
+        let mut decoder = self.png_decoder()?;
+        let result = decoder.decode();
+        self.capture_info(&mut decoder);
+        result
     }
 
     pub fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
-        self.png_decoder()?.decode_frames()
+        let mut decoder = self.png_decoder()?;
+        let result = decoder.decode_frames();
+        self.capture_info(&mut decoder);
+        result
     }
 }

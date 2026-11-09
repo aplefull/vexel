@@ -1,14 +1,20 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
+use super::info::{NetpbmComment, NetpbmEncoding, NetpbmHeader, NetpbmInfo, NetpbmPixelData, NetpbmSection};
 use super::simd;
-use super::types::{
-    NetpbmFormat, NetpbmHeaderData, NetpbmPixelDataInfo, NetpbmSectionData, NetpbmSectionInfo, TupleType,
-};
+use super::types::{NetpbmFormat, TupleType};
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::ImageFrame;
-use crate::utils::info::NetpbmInfo;
+use crate::utils::info::{ColorModel, DataExtent, ImageSummary};
 use crate::{log_warn, Image, Limits, PixelData};
+
+#[derive(Clone, Copy, PartialEq)]
+enum WalkMode {
+    InfoOnly,
+    DecodeFirst,
+    DecodeAll,
+}
 
 pub struct NetPbmDecoder<R: Read + Seek> {
     width: u32,
@@ -19,9 +25,13 @@ pub struct NetPbmDecoder<R: Read + Seek> {
     format: Option<NetpbmFormat>,
     tuple_type: Option<TupleType>,
     tuple_type_raw: Option<String>,
+    raw_max_value: Option<u32>,
+    raw_depth: Option<u32>,
     reader: BitReader<R>,
     lookahead: Option<u8>,
-    sections: Vec<NetpbmSectionInfo>,
+    image_index: u32,
+    collected: NetpbmInfo,
+    info: Option<NetpbmInfo>,
 }
 
 impl<R: Read + Seek> NetPbmDecoder<R> {
@@ -35,9 +45,13 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             format: None,
             tuple_type: None,
             tuple_type_raw: None,
+            raw_max_value: None,
+            raw_depth: None,
             reader: BitReader::new(reader),
             lookahead: None,
-            sections: Vec::new(),
+            image_index: 0,
+            collected: NetpbmInfo::default(),
+            info: None,
         }
     }
 
@@ -45,8 +59,96 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> NetpbmInfo {
-        NetpbmInfo { sections: self.sections.clone() }
+    pub fn get_info(&mut self) -> NetpbmInfo {
+        if self.info.is_none() {
+            let saved_limits = self.limits.clone();
+            if let Err(e) = self.walk(WalkMode::InfoOnly) {
+                log_warn!("Failed to read Netpbm structure: {}", e);
+            }
+            self.limits = saved_limits;
+            self.finish_info();
+        }
+
+        self.info.clone().unwrap_or_default()
+    }
+
+    fn position(&mut self) -> u64 {
+        let position = self.reader.stream_position().unwrap_or(0);
+        if self.lookahead.is_some() {
+            position.saturating_sub(1)
+        } else {
+            position
+        }
+    }
+
+    fn finish_info(&mut self) {
+        let mut info = std::mem::take(&mut self.collected);
+        info.sections.sort_by_key(|section| section.offset);
+
+        let image_count = info.sections.iter().filter(|s| matches!(s.data, NetpbmSection::Header(_))).count();
+
+        let first_header = info.sections.iter().find_map(|section| match &section.data {
+            NetpbmSection::Header(header) => Some(header.clone()),
+            _ => None,
+        });
+        let first_pixels = info.sections.iter().find_map(|section| match &section.data {
+            NetpbmSection::PixelData(pixel_data) if pixel_data.image == 0 => {
+                Some((pixel_data.clone(), section.length.unwrap_or(0)))
+            }
+            _ => None,
+        });
+
+        if let Some(header) = first_header {
+            info.summary = Some(Self::build_summary(&header, first_pixels, image_count as u32));
+        }
+
+        self.info = Some(info);
+    }
+
+    fn build_summary(header: &NetpbmHeader, pixels: Option<(NetpbmPixelData, u64)>, image_count: u32) -> ImageSummary {
+        let max_value = match header.max_value {
+            None => 1,
+            Some(0) => 255,
+            Some(value) => value.min(65535),
+        };
+        let bits = (32 - max_value.leading_zeros()) as u8;
+
+        let (color_model, channels) = match header.format {
+            NetpbmFormat::P1 | NetpbmFormat::P4 => (ColorModel::Bilevel, 1),
+            NetpbmFormat::P2 | NetpbmFormat::P5 => (ColorModel::Gray, 1),
+            NetpbmFormat::P3 | NetpbmFormat::P6 => (ColorModel::Rgb, 3),
+            NetpbmFormat::P7 => {
+                let depth = header.depth.filter(|&d| d > 0).unwrap_or(3);
+                let model = match (&header.tuple_type, depth) {
+                    (Some(TupleType::BlackAndWhite), _) => ColorModel::Bilevel,
+                    (Some(TupleType::Grayscale), _) => ColorModel::Gray,
+                    (Some(TupleType::RGB), _) => ColorModel::Rgb,
+                    (Some(TupleType::BlackAndWhiteAlpha | TupleType::GrayscaleAlpha), _) => ColorModel::GrayAlpha,
+                    (Some(TupleType::RGBAlpha), _) => ColorModel::Rgba,
+                    (Some(TupleType::CMYK), _) => ColorModel::Cmyk,
+                    (Some(TupleType::CMYKAlpha), _) => ColorModel::Cmyka,
+                    (None, 1) => ColorModel::Gray,
+                    (None, 2) => ColorModel::GrayAlpha,
+                    (None, 3) => ColorModel::Rgb,
+                    (None, 4) => ColorModel::Rgba,
+                    (None, _) => ColorModel::Multichannel,
+                };
+                (model, depth.min(u32::from(u16::MAX)) as u16)
+            }
+        };
+
+        let mut summary = ImageSummary::new(header.width, header.height, color_model, channels, bits);
+        summary.has_alpha = matches!(color_model, ColorModel::GrayAlpha | ColorModel::Rgba | ColorModel::Cmyka);
+        if image_count > 1 {
+            summary.pages = Some(image_count);
+        }
+        if let Some((pixel_data, actual)) = pixels {
+            if let Some(expected) = pixel_data.expected_length {
+                summary.data = Some(DataExtent { expected, actual });
+            }
+        }
+
+        summary
     }
 
     fn scale_to_8bit(value: u32, max_value: u32) -> u8 {
@@ -72,7 +174,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             };
             match byte {
                 b'#' => {
-                    let comment_offset = self.reader.stream_position().unwrap_or(0).saturating_sub(1);
+                    let comment_offset = self.position().saturating_sub(1);
                     let mut comment = String::new();
                     loop {
                         match self.next_byte() {
@@ -80,10 +182,13 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             Some(b) => comment.push(b as char),
                         }
                     }
-                    self.sections.push(NetpbmSectionInfo {
-                        start_offset: comment_offset,
-                        data: NetpbmSectionData::Comment(comment),
-                    });
+                    let comment_end = self.position();
+                    let image = self.image_index;
+                    self.collected.push(
+                        comment_offset,
+                        Some(comment_end.saturating_sub(comment_offset)),
+                        NetpbmSection::Comment(NetpbmComment { image, text: comment }),
+                    );
                 }
                 b' ' | b'\t' | b'\n' | b'\r' => continue,
                 _ => return Ok(byte),
@@ -158,15 +263,18 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         self.format = None;
         self.tuple_type = None;
         self.tuple_type_raw = None;
+        self.raw_max_value = None;
+        self.raw_depth = None;
     }
 
-    fn read_header(&mut self) -> VexelResult<()> {
-        let header_start = self.reader.stream_position().unwrap_or(0);
+    fn read_header(&mut self, mode: WalkMode) -> VexelResult<()> {
+        let header_start = self.position();
 
         let b0 = self.next_byte().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))? as u16;
         let b1 = self.next_byte().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))? as u16;
         let magick = (b0 << 8) | b1;
 
+        let mut magic_valid = true;
         let format = match magick {
             0x5031 => NetpbmFormat::P1,
             0x5032 => NetpbmFormat::P2,
@@ -177,36 +285,44 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             0x5037 => NetpbmFormat::P7,
             _ => {
                 log_warn!("Invalid magic number: {}", magick);
+                magic_valid = false;
                 NetpbmFormat::P6
             }
         };
 
         self.format = Some(format.clone());
 
-        match format {
-            NetpbmFormat::P7 => self.read_pam_header()?,
-            _ => self.read_standard_header(format)?,
-        }
+        let parsed = match format {
+            NetpbmFormat::P7 => self.read_pam_header(),
+            _ => self.read_standard_header(format.clone()),
+        };
+
+        let header_end = self.position();
+        self.collected.push(
+            header_start,
+            Some(header_end.saturating_sub(header_start)),
+            NetpbmSection::Header(NetpbmHeader {
+                image: self.image_index,
+                format,
+                magic_valid,
+                width: self.width,
+                height: self.height,
+                max_value: self.raw_max_value,
+                depth: self.raw_depth,
+                tuple_type: self.tuple_type.clone(),
+                tuple_type_raw: self.tuple_type_raw.clone(),
+            }),
+        );
+
+        parsed?;
 
         if self.width == 0 || self.height == 0 {
             return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
-        self.limits.reserve_buffer(self.width, self.height, 4)?;
-
-        let depth = if self.depth > 0 { Some(self.depth) } else { None };
-        self.sections.push(NetpbmSectionInfo {
-            start_offset: header_start,
-            data: NetpbmSectionData::Header(NetpbmHeaderData {
-                format: self.format.clone().unwrap(),
-                width: self.width,
-                height: self.height,
-                max_value: self.max_value,
-                depth,
-                tuple_type: self.tuple_type.clone(),
-                tuple_type_raw: self.tuple_type_raw.clone(),
-            }),
-        });
+        if mode != WalkMode::InfoOnly {
+            self.limits.reserve_buffer(self.width, self.height, 4)?;
+        }
 
         Ok(())
     }
@@ -225,6 +341,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             _ => {
                 let first = self.skip_whitespace_and_comments()?;
                 self.max_value = self.read_decimal(first)?;
+                self.raw_max_value = Some(self.max_value);
 
                 if self.max_value == 0 {
                     log_warn!("Invalid MAXVAL value: {}", self.max_value);
@@ -264,12 +381,14 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                     })?
                 }
                 "DEPTH" => {
+                    self.raw_depth = value.parse::<u32>().ok();
                     self.depth = value.parse::<u8>().or_else(|_| {
                         log_warn!("Invalid DEPTH value: {}", value);
                         Ok::<u8, VexelError>(3)
                     })?
                 }
                 "MAXVAL" => {
+                    self.raw_max_value = value.parse::<u32>().ok();
                     self.max_value = value.parse().or_else(|_| {
                         log_warn!("Invalid MAXVAL value: {}", value);
                         Ok::<u32, VexelError>(255)
@@ -314,7 +433,11 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn read_binary_frame_data(&mut self, byte_count: usize) -> VexelResult<Vec<u8>> {
-        let mut buf = vec![0u8; byte_count];
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(byte_count).map_err(|_| {
+            VexelError::LimitExceeded(format!("Netpbm frame of {} bytes cannot be allocated", byte_count))
+        })?;
+        buf.resize(byte_count, 0);
         if self.reader.read_exact(&mut buf).is_err() {
             let available = self.reader.read_to_end().unwrap_or_default();
             let n = available.len().min(buf.len());
@@ -324,8 +447,8 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn decode_ascii_bitmap(&mut self) -> VexelResult<PixelData> {
-        let pixel_count = (self.width * self.height) as usize;
-        let mut image_data = Vec::with_capacity(pixel_count);
+        let pixel_count = (self.width as usize).saturating_mul(self.height as usize);
+        let mut image_data = Vec::with_capacity(pixel_count.min(1 << 20));
 
         for _ in 0..pixel_count {
             let value = match self.read_ascii_number() {
@@ -343,7 +466,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
     fn read_ascii_samples(&mut self, count: usize) -> Vec<u32> {
         let max_value = self.max_value;
-        let mut samples = Vec::with_capacity(count);
+        let mut samples = Vec::with_capacity(count.min(1 << 20));
         for _ in 0..count {
             let v = self.read_ascii_number().map(|v| v.clamp(0, max_value)).unwrap_or_else(|e| {
                 log_warn!("Error reading ASCII number: {:?}", e);
@@ -355,7 +478,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn decode_ascii_graymap(&mut self) -> VexelResult<PixelData> {
-        let pixel_count = (self.width * self.height) as usize;
+        let pixel_count = (self.width as usize).saturating_mul(self.height as usize);
         let samples = self.read_ascii_samples(pixel_count);
 
         if self.max_value > 255 {
@@ -370,7 +493,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn decode_ascii_pixmap(&mut self) -> VexelResult<PixelData> {
-        let sample_count = (self.width * self.height) as usize * 3;
+        let sample_count = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(3);
         let samples = self.read_ascii_samples(sample_count);
 
         if self.max_value > 255 {
@@ -385,13 +508,13 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn decode_binary_bitmap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let mut image_data = vec![0u8; (self.width * self.height) as usize];
+        let mut image_data = vec![0u8; (self.width as usize).saturating_mul(self.height as usize)];
         simd::unpack_bits(data, &mut image_data, self.width, self.height);
         Ok(PixelData::L1(image_data))
     }
 
     fn decode_binary_graymap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let pixel_count = (self.width * self.height) as usize;
+        let pixel_count = (self.width as usize).saturating_mul(self.height as usize);
 
         if self.max_value <= 255 {
             let mut image_data = vec![0u8; pixel_count];
@@ -405,7 +528,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn decode_binary_pixmap(&self, data: &[u8]) -> VexelResult<PixelData> {
-        let sample_count = (self.width * self.height) as usize * 3;
+        let sample_count = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(3);
 
         if self.max_value <= 255 {
             let mut image_data = vec![0u8; sample_count];
@@ -421,7 +544,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     fn decode_pam(&self, data: &[u8]) -> VexelResult<PixelData> {
         let depth = self.depth;
         let max_value = self.max_value;
-        let pixel_count = (self.width * self.height) as usize;
+        let pixel_count = (self.width as usize).saturating_mul(self.height as usize);
         let is_16bit = max_value > 255;
 
         match (&self.tuple_type, depth) {
@@ -639,27 +762,105 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         }
     }
 
+    fn pixel_layout(&self) -> NetpbmPixelData {
+        let pixels = u64::from(self.width) * u64::from(self.height);
+        let bytes_per_sample = if self.max_value > 255 { 2u8 } else { 1u8 };
+        let (encoding, samples, bytes_per_sample, expected_length) = match &self.format {
+            Some(NetpbmFormat::P1) => (NetpbmEncoding::Plain, pixels, None, None),
+            Some(NetpbmFormat::P2) => (NetpbmEncoding::Plain, pixels, None, None),
+            Some(NetpbmFormat::P3) => (NetpbmEncoding::Plain, pixels.saturating_mul(3), None, None),
+            Some(NetpbmFormat::P4) => {
+                let expected = u64::from(self.width.div_ceil(8)) * u64::from(self.height);
+                (NetpbmEncoding::Raw, pixels, None, Some(expected))
+            }
+            Some(NetpbmFormat::P5) => (
+                NetpbmEncoding::Raw,
+                pixels,
+                Some(bytes_per_sample),
+                Some(pixels.saturating_mul(u64::from(bytes_per_sample))),
+            ),
+            Some(NetpbmFormat::P7) => {
+                let depth = if self.depth == 0 { 3 } else { self.depth };
+                let max_value = if self.max_value == 0 { 255 } else { self.max_value };
+                let bytes_per_sample = if max_value > 255 { 2u8 } else { 1u8 };
+                let samples = pixels.saturating_mul(u64::from(depth));
+                (
+                    NetpbmEncoding::Raw,
+                    samples,
+                    Some(bytes_per_sample),
+                    Some(samples.saturating_mul(u64::from(bytes_per_sample))),
+                )
+            }
+            Some(NetpbmFormat::P6) | None => {
+                let samples = pixels.saturating_mul(3);
+                (
+                    NetpbmEncoding::Raw,
+                    samples,
+                    Some(bytes_per_sample),
+                    Some(samples.saturating_mul(u64::from(bytes_per_sample))),
+                )
+            }
+        };
+
+        NetpbmPixelData { image: self.image_index, encoding, samples, bytes_per_sample, expected_length }
+    }
+
+    fn skip_frame(&mut self, layout: &NetpbmPixelData) -> VexelResult<()> {
+        match layout.expected_length {
+            Some(expected) => {
+                let available = self.reader.bytes_left().unwrap_or(0);
+                let position = self.reader.stream_position()?;
+                self.reader.seek(SeekFrom::Start(position + expected.min(available)))?;
+            }
+            None => {
+                for _ in 0..layout.samples {
+                    if self.read_ascii_number().is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn read_and_decode_frame(&mut self) -> VexelResult<PixelData> {
         let bytes_per_sample = if self.max_value > 255 { 2usize } else { 1usize };
-        let pixel_data_start = self.reader.stream_position().unwrap_or(0);
 
-        let result = match &self.format {
+        let samples_per_pixel = match &self.format {
+            Some(NetpbmFormat::P7) => u64::from(self.depth.max(3)),
+            Some(NetpbmFormat::P3) | Some(NetpbmFormat::P6) | None => 3,
+            _ => 1,
+        };
+        let frame_bytes = (u64::from(self.width) * u64::from(self.height)).checked_mul(samples_per_pixel * 2);
+        if frame_bytes.is_none_or(|bytes| bytes > isize::MAX as u64) {
+            return Err(VexelError::LimitExceeded(format!(
+                "Netpbm image {}x{} is too large to allocate",
+                self.width, self.height
+            )));
+        }
+
+        match &self.format {
             Some(NetpbmFormat::P1) => self.decode_ascii_bitmap(),
             Some(NetpbmFormat::P2) => self.decode_ascii_graymap(),
             Some(NetpbmFormat::P3) => self.decode_ascii_pixmap(),
             Some(NetpbmFormat::P4) => {
                 let bytes_per_row = self.width.div_ceil(8) as usize;
-                let byte_count = bytes_per_row * self.height as usize;
+                let byte_count = bytes_per_row.saturating_mul(self.height as usize);
                 let data = self.read_binary_frame_data(byte_count)?;
                 self.decode_binary_bitmap(&data)
             }
             Some(NetpbmFormat::P5) => {
-                let byte_count = self.width as usize * self.height as usize * bytes_per_sample;
+                let byte_count =
+                    (self.width as usize).saturating_mul(self.height as usize).saturating_mul(bytes_per_sample);
                 let data = self.read_binary_frame_data(byte_count)?;
                 self.decode_binary_graymap(&data)
             }
             Some(NetpbmFormat::P6) => {
-                let byte_count = self.width as usize * self.height as usize * 3 * bytes_per_sample;
+                let byte_count = (self.width as usize)
+                    .saturating_mul(self.height as usize)
+                    .saturating_mul(3)
+                    .saturating_mul(bytes_per_sample);
                 let data = self.read_binary_frame_data(byte_count)?;
                 self.decode_binary_pixmap(&data)
             }
@@ -667,7 +868,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                 let depth = if self.depth == 0 { 3 } else { self.depth } as usize;
                 let max_value = if self.max_value == 0 { 255 } else { self.max_value };
                 let bps = if max_value > 255 { 2usize } else { 1usize };
-                let byte_count = self.width as usize * self.height as usize * depth * bps;
+                let byte_count = (self.width as usize)
+                    .saturating_mul(self.height as usize)
+                    .saturating_mul(depth)
+                    .saturating_mul(bps);
                 let data = self.read_binary_frame_data(byte_count)?;
 
                 if self.depth == 0 {
@@ -684,21 +888,14 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             }
             None => {
                 log_warn!("Format not set before decoding, assuming binary pixmap (P6)");
-                let byte_count = self.width as usize * self.height as usize * 3 * bytes_per_sample;
+                let byte_count = (self.width as usize)
+                    .saturating_mul(self.height as usize)
+                    .saturating_mul(3)
+                    .saturating_mul(bytes_per_sample);
                 let data = self.read_binary_frame_data(byte_count)?;
                 self.decode_binary_pixmap(&data)
             }
-        };
-
-        let pixel_data_end = self.reader.stream_position().unwrap_or(pixel_data_start);
-        self.sections.push(NetpbmSectionInfo {
-            start_offset: pixel_data_start,
-            data: NetpbmSectionData::PixelData(NetpbmPixelDataInfo {
-                length: pixel_data_end.saturating_sub(pixel_data_start),
-            }),
-        });
-
-        result
+        }
     }
 
     fn has_more_data(&mut self) -> bool {
@@ -712,51 +909,69 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        let mut pages = self.decode_images(true)?;
+        let mut pages = self.walk(WalkMode::DecodeFirst)?;
+        if pages.is_empty() {
+            return Err(VexelError::Custom("No Netpbm image decoded".to_string()));
+        }
         Ok(pages.remove(0))
     }
 
     pub fn decode_pages(&mut self) -> VexelResult<Vec<Image>> {
-        self.decode_images(false)
+        let pages = self.walk(WalkMode::DecodeAll)?;
+        self.finish_info();
+        Ok(pages)
     }
 
-    fn decode_images(&mut self, first_only: bool) -> VexelResult<Vec<Image>> {
+    fn walk(&mut self, mode: WalkMode) -> VexelResult<Vec<Image>> {
         self.reader.seek(SeekFrom::Start(0))?;
         self.lookahead = None;
+        self.collected = NetpbmInfo::default();
+        self.image_index = 0;
 
         let mut pages: Vec<Image> = Vec::new();
 
         loop {
             self.reset_frame_state();
 
-            match self.read_header() {
+            match self.read_header(mode) {
                 Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
-                Err(_) => {
-                    if pages.is_empty() {
-                        return Err(VexelError::Custom("Error reading header".to_string()));
+                Err(e) => {
+                    if self.image_index == 0 {
+                        return Err(e);
                     }
+                    log_warn!("Stopping at image {}: failed to read header: {}", self.image_index + 1, e);
                     break;
                 }
                 Ok(_) => {}
             }
 
-            let width = self.width;
-            let height = self.height;
+            let layout = self.pixel_layout();
+            let start = self.position();
+            let result = match mode {
+                WalkMode::InfoOnly => self.skip_frame(&layout).map(|_| None),
+                _ => self.read_and_decode_frame().map(Some),
+            };
+            let end = self.position();
+            self.collected.push(start, Some(end.saturating_sub(start)), NetpbmSection::PixelData(layout));
 
-            let mut pixel_data = match self.read_and_decode_frame() {
-                Ok(data) => data,
-                Err(_) => {
-                    if pages.is_empty() {
-                        return Err(VexelError::Custom("Error decoding image".to_string()));
+            match result {
+                Ok(Some(mut pixel_data)) => {
+                    pixel_data.correct_pixels(self.width, self.height);
+                    pages.push(Image::from_frame(ImageFrame::new(self.width, self.height, pixel_data, 0)));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    if self.image_index == 0 {
+                        return Err(e);
                     }
+                    log_warn!("Stopping at image {}: failed to decode: {}", self.image_index + 1, e);
                     break;
                 }
-            };
+            }
 
-            pixel_data.correct_pixels(width, height);
-            pages.push(Image::from_frame(ImageFrame::new(width, height, pixel_data, 0)));
+            self.image_index += 1;
 
-            if first_only || !self.has_more_data() {
+            if mode == WalkMode::DecodeFirst || !self.has_more_data() {
                 break;
             }
         }

@@ -14,6 +14,9 @@ fuzz_target!(|data: &[u8]| {
         v.extend_from_slice(data);
         v
     };
+    if let Ok(mut decoder) = vexel::Vexel::new(Cursor::new(&input[..])) {
+        let _ = decoder.get_info();
+    }
     if let Ok(mut decoder) = vexel::Vexel::new(Cursor::new(input)) {
         let _ = decoder.decode();
     }

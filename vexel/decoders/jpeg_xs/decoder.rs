@@ -1,7 +1,8 @@
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 use super::bitreader::XsBitReader;
 use super::ids::Ids;
+use super::info::{scan, JpegXsInfo};
 use super::markers::{parse_header, parse_slice_header};
 use super::precinct::Precinct;
 use super::simd;
@@ -11,7 +12,6 @@ use super::unpack::{sign_magnitude_to_value, Unpacker};
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
-use crate::utils::info::JpegXsInfo;
 use crate::{log_warn, Image, Limits};
 
 pub struct JpegXsDecoder<R: Read + Seek> {
@@ -19,7 +19,7 @@ pub struct JpegXsDecoder<R: Read + Seek> {
     limits: Limits,
     config: Config,
     image: ImageParams,
-    markers: Vec<JpegXsMarkerInfo>,
+    info: Option<JpegXsInfo>,
     truncated: bool,
 }
 
@@ -30,7 +30,7 @@ impl<R: Read + Seek> JpegXsDecoder<R> {
             limits: Limits::default(),
             config: Config::default(),
             image: ImageParams::default(),
-            markers: Vec::new(),
+            info: None,
             truncated: false,
         }
     }
@@ -39,23 +39,18 @@ impl<R: Read + Seek> JpegXsDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> JpegXsInfo {
-        JpegXsInfo {
-            width: self.image.width,
-            height: self.image.height,
-            components: self.image.ncomps as u8,
-            bit_depth: self.image.depth,
-            profile: self.config.profile,
-            level: self.config.level,
-            sublevel: self.config.sublevel,
-            color_transform: self.config.color_transform,
-            nlt: self.config.tnlt,
-            horizontal_decompositions: self.config.nlx,
-            vertical_decompositions: self.config.nly,
-            slice_height: self.config.slice_height,
-            column_width: self.config.cw,
-            markers: self.markers.clone(),
+    pub fn get_info(&mut self) -> JpegXsInfo {
+        if self.info.is_none() {
+            let saved_pos = self.reader.stream_position().unwrap_or(0);
+            let data = self.reader.seek(SeekFrom::Start(0)).and_then(|_| self.reader.read_to_end());
+            let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+            match data {
+                Ok(data) => self.info = Some(scan(&data)),
+                Err(e) => log_warn!("Failed to read JPEG XS data: {}", e),
+            }
         }
+
+        self.info.clone().unwrap_or_default()
     }
 
     fn read_all(&mut self) -> VexelResult<Vec<u8>> {
@@ -80,7 +75,6 @@ impl<R: Read + Seek> JpegXsDecoder<R> {
 
         self.config = header.config;
         self.image = header.image;
-        self.markers = header.markers;
 
         if !header.saw_pih {
             return Err(VexelError::Custom("JPEG XS codestream has no picture header".to_string()));

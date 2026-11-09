@@ -1,27 +1,25 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use crate::decoders::dicom::parser::{element_preview, DataCursor, DataSet, Element, ElementValue, Parser};
+use crate::decoders::dicom::info::{scan, DicomInfo};
+use crate::decoders::dicom::parser::{DataCursor, DataSet, Element, ElementValue, Parser};
 use crate::decoders::dicom::pixels::{
     color_frame_to_pixels, expand_segmented_lut, extract_native_frame, float_frames_to_pixels, mono_frames_to_pixels,
     Lut, MonoTransform, PixelParams, StoredFrame,
 };
 use crate::decoders::dicom::rle::decode_rle_frame;
-use crate::decoders::dicom::types::{
-    tag_element, tag_group, tag_name, tags, DicomElementInfo, Photometric, TransferSyntax, VoiFunction, Vr,
-};
+use crate::decoders::dicom::types::{tags, Photometric, TransferSyntax, VoiFunction, Vr};
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::utils::deflate::DeflateDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, ImageFrame, PixelData};
-use crate::utils::info::DicomInfo;
 use crate::{log_debug, log_warn, Limits};
 
 pub struct DicomDecoder<R: Read + Seek> {
     reader: R,
     limits: Limits,
-    sections: Vec<DicomElementInfo>,
+    info: Option<DicomInfo>,
     parsed: Option<Parsed>,
 }
 
@@ -74,17 +72,130 @@ fn sniff_encoding(data: &[u8]) -> (bool, bool) {
     (explicit_le, false)
 }
 
+pub(super) struct Encoding {
+    pub explicit: bool,
+    pub big_endian: bool,
+    pub deflated: bool,
+    pub guessed: bool,
+    pub explicit_override: bool,
+}
+
+pub(super) struct ParsedFile {
+    pub has_preamble: bool,
+    pub meta: DataSet,
+    pub dataset_start: usize,
+    pub transfer_syntax_uid: Option<String>,
+    pub transfer_syntax: TransferSyntax,
+    pub encoding: Encoding,
+    pub inflated_length: Option<usize>,
+    pub dataset: DataSet,
+}
+
+pub(super) fn parse_file(data: &[u8], limits: &Limits) -> ParsedFile {
+    let has_preamble = has_dicm_magic(data);
+    let (meta, dataset_start) = if has_preamble {
+        let mut cursor = DataCursor::new(data, false);
+        cursor.set_position(132);
+        let meta = Parser::new(true).parse_meta(&mut cursor);
+        let start = cursor.position();
+        (meta, start)
+    } else if data.len() >= 8 && u16::from_le_bytes([data[0], data[1]]) == 0x0002 {
+        let mut cursor = DataCursor::new(data, false);
+        let meta = Parser::new(true).parse_meta(&mut cursor);
+        let start = cursor.position();
+        (meta, start)
+    } else {
+        (DataSet::default(), 0)
+    };
+
+    let ts_uid = meta.string(tags::TRANSFER_SYNTAX_UID);
+    let mut transfer_syntax = match &ts_uid {
+        Some(uid) => TransferSyntax::from_uid(uid),
+        None => TransferSyntax::Unknown,
+    };
+
+    if let Some(uid) = &ts_uid {
+        log_debug!("DICOM: transfer syntax {} ({})", uid, transfer_syntax.name());
+    }
+
+    let rest = &data[dataset_start.min(data.len())..];
+
+    let inflated;
+    let mut guessed = false;
+    let mut explicit_override = false;
+    let (dataset_bytes, explicit, big_endian): (&[u8], bool, bool) = match transfer_syntax {
+        TransferSyntax::DeflatedExplicitLittleEndian => {
+            let max_output = limits.max_alloc.unwrap_or(1 << 30) as usize;
+            inflated = DeflateDecoder::from_slice(rest).decode_with_max(max_output);
+            (&inflated, true, false)
+        }
+        TransferSyntax::Unknown => {
+            let (explicit, big_endian) = sniff_encoding(rest);
+            if ts_uid.is_some() {
+                log_warn!("DICOM: unrecognized transfer syntax, guessing encoding from data");
+            }
+            guessed = true;
+            (rest, explicit, big_endian)
+        }
+        ts => {
+            let mut explicit = ts.is_explicit_vr();
+            if !explicit && rest.len() >= 8 && Vr::from_bytes([rest[4], rest[5]]).is_some() {
+                log_warn!("DICOM: implicit VR transfer syntax but dataset looks explicit, switching");
+                explicit = true;
+                explicit_override = true;
+            }
+            (rest, explicit, ts.is_big_endian())
+        }
+    };
+
+    if transfer_syntax == TransferSyntax::Unknown && ts_uid.is_none() {
+        let (explicit, big_endian) = sniff_encoding(dataset_bytes);
+        transfer_syntax = match (explicit, big_endian) {
+            (_, true) => TransferSyntax::ExplicitBigEndian,
+            (true, false) => TransferSyntax::ExplicitLittleEndian,
+            (false, false) => TransferSyntax::ImplicitLittleEndian,
+        };
+    }
+
+    let deflated = transfer_syntax == TransferSyntax::DeflatedExplicitLittleEndian;
+    let base = if deflated { 0 } else { dataset_start.min(data.len()) };
+    let mut cursor = DataCursor::with_base(dataset_bytes, big_endian, base);
+    let dataset = Parser::new(explicit).parse_dataset(&mut cursor, 0);
+
+    ParsedFile {
+        has_preamble,
+        meta,
+        dataset_start,
+        transfer_syntax_uid: ts_uid,
+        transfer_syntax,
+        encoding: Encoding { explicit, big_endian, deflated, guessed, explicit_override },
+        inflated_length: deflated.then_some(dataset_bytes.len()),
+        dataset,
+    }
+}
+
 impl<R: Read + Seek> DicomDecoder<R> {
     pub fn new(reader: R) -> Self {
-        Self { reader, limits: Limits::default(), sections: Vec::new(), parsed: None }
+        Self { reader, limits: Limits::default(), info: None, parsed: None }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> DicomInfo {
-        DicomInfo { sections: self.sections.clone() }
+    pub fn get_info(&mut self) -> DicomInfo {
+        if self.info.is_none() {
+            let saved_pos = self.reader.stream_position().unwrap_or(0);
+            let mut data = Vec::new();
+            let read = self.reader.seek(SeekFrom::Start(0)).and_then(|_| self.reader.read_to_end(&mut data));
+            let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+            match read {
+                Ok(_) => self.info = Some(scan(&data, &self.limits)),
+                Err(e) => log_warn!("Failed to read DICOM data: {}", e),
+            }
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
     fn load(&mut self) -> VexelResult<()> {
@@ -96,77 +207,13 @@ impl<R: Read + Seek> DicomDecoder<R> {
         let mut data = Vec::new();
         self.reader.read_to_end(&mut data)?;
 
-        let (meta, dataset_start) = if has_dicm_magic(&data) {
-            let mut cursor = DataCursor::new(&data, false);
-            cursor.set_position(132);
-            let meta = Parser::new(true).parse_meta(&mut cursor);
-            let start = cursor.position();
-            (meta, start)
-        } else if data.len() >= 8 && u16::from_le_bytes([data[0], data[1]]) == 0x0002 {
-            let mut cursor = DataCursor::new(&data, false);
-            let meta = Parser::new(true).parse_meta(&mut cursor);
-            let start = cursor.position();
-            (meta, start)
-        } else {
-            (DataSet::default(), 0)
-        };
+        let file = parse_file(&data, &self.limits);
 
-        let ts_uid = meta.string(tags::TRANSFER_SYNTAX_UID);
-        let mut transfer_syntax = match &ts_uid {
-            Some(uid) => TransferSyntax::from_uid(uid),
-            None => TransferSyntax::Unknown,
-        };
+        let mut elements = file.meta.elements;
+        elements.extend(file.dataset.elements);
+        let dataset = DataSet { elements, ..Default::default() };
 
-        if let Some(uid) = &ts_uid {
-            log_debug!("DICOM: transfer syntax {} ({})", uid, transfer_syntax.name());
-        }
-
-        let rest = &data[dataset_start.min(data.len())..];
-
-        let inflated;
-        let (dataset_bytes, explicit, big_endian): (&[u8], bool, bool) = match transfer_syntax {
-            TransferSyntax::DeflatedExplicitLittleEndian => {
-                let max_output = self.limits.max_alloc.unwrap_or(1 << 30) as usize;
-                inflated = DeflateDecoder::from_slice(rest).decode_with_max(max_output);
-                (&inflated, true, false)
-            }
-            TransferSyntax::Unknown => {
-                let (explicit, big_endian) = sniff_encoding(rest);
-                if ts_uid.is_some() {
-                    log_warn!("DICOM: unrecognized transfer syntax, guessing encoding from data");
-                }
-                (rest, explicit, big_endian)
-            }
-            ts => {
-                let mut explicit = ts.is_explicit_vr();
-                if !explicit && rest.len() >= 8 && Vr::from_bytes([rest[4], rest[5]]).is_some() {
-                    log_warn!("DICOM: implicit VR transfer syntax but dataset looks explicit, switching");
-                    explicit = true;
-                }
-                (rest, explicit, ts.is_big_endian())
-            }
-        };
-
-        if transfer_syntax == TransferSyntax::Unknown && ts_uid.is_none() {
-            let (explicit, big_endian) = sniff_encoding(dataset_bytes);
-            transfer_syntax = match (explicit, big_endian) {
-                (_, true) => TransferSyntax::ExplicitBigEndian,
-                (true, false) => TransferSyntax::ExplicitLittleEndian,
-                (false, false) => TransferSyntax::ImplicitLittleEndian,
-            };
-        }
-
-        let mut cursor = DataCursor::new(dataset_bytes, big_endian);
-        let mut dataset = Parser::new(explicit).parse_dataset(&mut cursor, 0);
-
-        let mut elements = meta.elements;
-        elements.append(&mut dataset.elements);
-        let dataset = DataSet { elements };
-
-        self.sections.clear();
-        collect_info(&dataset, 0, &mut self.sections);
-
-        self.parsed = Some(Parsed { transfer_syntax, dataset });
+        self.parsed = Some(Parsed { transfer_syntax: file.transfer_syntax, dataset });
         Ok(())
     }
 
@@ -251,15 +298,16 @@ impl<R: Read + Seek> DicomDecoder<R> {
                     self.decode_native_frames(bytes, &params, &transform, palette.as_ref(), &mut num_frames)?
                 }
             }
-            Element { value: ElementValue::Fragments { offset_table, fragments }, .. } => self.decode_encapsulated(
-                transfer_syntax,
-                offset_table,
-                fragments,
-                &params,
-                &transform,
-                palette.as_ref(),
-                num_frames,
-            )?,
+            Element { value: ElementValue::Fragments { offset_table, fragments, .. }, .. } => self
+                .decode_encapsulated(
+                    transfer_syntax,
+                    offset_table,
+                    fragments,
+                    &params,
+                    &transform,
+                    palette.as_ref(),
+                    num_frames,
+                )?,
             _ => return Err(VexelError::Custom("DICOM: pixel data element has unexpected structure".to_string())),
         };
 
@@ -639,7 +687,7 @@ fn absorb_codec_frame(
     Ok(())
 }
 
-fn read_pixel_params(dataset: &DataSet, transfer_syntax: TransferSyntax) -> VexelResult<PixelParams> {
+pub(super) fn read_pixel_params(dataset: &DataSet, transfer_syntax: TransferSyntax) -> VexelResult<PixelParams> {
     let rows = dataset.u16_value(tags::ROWS).unwrap_or(0) as u32;
     let cols = dataset.u16_value(tags::COLUMNS).unwrap_or(0) as u32;
 
@@ -842,7 +890,7 @@ fn read_palette(dataset: &DataSet, params: &PixelParams) -> Option<[Lut; 3]> {
     Some([red, green, blue])
 }
 
-fn frame_delay_ms(dataset: &DataSet, num_frames: usize) -> u32 {
+pub(super) fn frame_delay_ms(dataset: &DataSet, num_frames: usize) -> u32 {
     if num_frames <= 1 {
         return 0;
     }
@@ -940,30 +988,6 @@ fn find_icon_datasets(dataset: &DataSet, depth: u8, out: &mut Vec<DataSet>) {
                 for item in items {
                     find_icon_datasets(item, depth + 1, out);
                 }
-            }
-        }
-    }
-}
-
-fn collect_info(dataset: &DataSet, depth: u8, out: &mut Vec<DicomElementInfo>) {
-    if depth > 6 {
-        return;
-    }
-
-    for element in &dataset.elements {
-        out.push(DicomElementInfo {
-            group: tag_group(element.tag),
-            element: tag_element(element.tag),
-            vr: element.vr.as_str().to_string(),
-            length: element.length,
-            name: tag_name(element.tag).unwrap_or("").to_string(),
-            value: element_preview(element),
-            depth,
-        });
-
-        if let ElementValue::Sequence(items) = &element.value {
-            for item in items {
-                collect_info(item, depth + 1, out);
             }
         }
     }

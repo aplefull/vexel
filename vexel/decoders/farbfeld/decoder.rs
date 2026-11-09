@@ -1,16 +1,15 @@
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
+use super::info::{FarbfeldHeader, FarbfeldInfo, FarbfeldPixelData, FarbfeldSection};
 use super::simd::{decode_be_u16, drop_alpha_u16, is_opaque_u16};
-use super::types::{FarbfeldHeaderData, FarbfeldPixelDataInfo, FarbfeldSectionData, FarbfeldSectionInfo};
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
-use crate::utils::info::FarbfeldInfo;
+use crate::utils::info::{ColorModel, DataExtent, ImageSummary};
 use crate::{log_warn, Image, Limits};
 
 pub const MAGIC: &[u8; 8] = b"farbfeld";
 
-const HEADER_SIZE: u64 = 16;
 const CHANNELS: usize = 4;
 const BYTES_PER_PIXEL: usize = CHANNELS * 2;
 
@@ -19,41 +18,69 @@ pub struct FarbfeldDecoder<R: Read + Seek> {
     height: u32,
     limits: Limits,
     reader: BitReader<R>,
-    sections: Vec<FarbfeldSectionInfo>,
+    info: Option<FarbfeldInfo>,
 }
 
 impl<R: Read + Seek> FarbfeldDecoder<R> {
     pub fn new(reader: R) -> Self {
-        FarbfeldDecoder {
-            width: 0,
-            height: 0,
-            limits: Limits::default(),
-            reader: BitReader::new(reader),
-            sections: Vec::new(),
-        }
+        FarbfeldDecoder { width: 0, height: 0, limits: Limits::default(), reader: BitReader::new(reader), info: None }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
     }
 
-    fn read_header(&mut self) -> VexelResult<()> {
-        let header_start = self.reader.stream_position().unwrap_or(0);
+    fn scan(&mut self) -> VexelResult<()> {
+        self.reader.seek(SeekFrom::Start(0))?;
+        let mut info = FarbfeldInfo::default();
 
         let mut magic = [0u8; 8];
-        if self.reader.read(&mut magic)? != magic.len() || &magic != MAGIC {
+        let magic_read = self.reader.read(&mut magic)?;
+        let magic_valid = magic_read == magic.len() && &magic == MAGIC;
+        if !magic_valid {
             log_warn!("Invalid or truncated farbfeld magic value: {:?}, continuing anyway", magic);
         }
 
         let mut dims = [0u8; 8];
-        let read = self.reader.read(&mut dims)?;
+        let dims_read = self.reader.read(&mut dims)?;
 
-        if read != dims.len() {
-            log_warn!("Truncated farbfeld header: got {} of 8 dimension bytes", read);
+        if dims_read != dims.len() {
+            log_warn!("Truncated farbfeld header: got {} of 8 dimension bytes", dims_read);
         }
 
         self.width = u32::from_be_bytes([dims[0], dims[1], dims[2], dims[3]]);
         self.height = u32::from_be_bytes([dims[4], dims[5], dims[6], dims[7]]);
+
+        let header_length = (magic_read + dims_read) as u64;
+        info.push(
+            0,
+            Some(header_length),
+            FarbfeldSection::Header(FarbfeldHeader { magic_valid, width: self.width, height: self.height }),
+        );
+
+        let expected = self.expected_bytes();
+        let available = self.reader.bytes_left().unwrap_or(0);
+        let actual = expected.min(available);
+        info.push(
+            header_length,
+            Some(actual),
+            FarbfeldSection::PixelData(FarbfeldPixelData { expected_length: expected }),
+        );
+
+        let mut summary = ImageSummary::new(self.width, self.height, ColorModel::Rgba, CHANNELS as u16, 16);
+        summary.has_alpha = true;
+        summary.data = Some(DataExtent { expected, actual });
+        info.summary = Some(summary);
+
+        self.info = Some(info);
+
+        self.reader.seek(SeekFrom::Start(header_length))?;
+
+        Ok(())
+    }
+
+    fn read_header(&mut self) -> VexelResult<()> {
+        self.scan()?;
 
         if self.width == 0 || self.height == 0 {
             return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
@@ -61,12 +88,11 @@ impl<R: Read + Seek> FarbfeldDecoder<R> {
 
         self.limits.check_dimensions(self.width, self.height)?;
 
-        self.sections.push(FarbfeldSectionInfo {
-            start_offset: header_start,
-            data: FarbfeldSectionData::Header(FarbfeldHeaderData { width: self.width, height: self.height }),
-        });
-
         Ok(())
+    }
+
+    fn expected_bytes(&self) -> u64 {
+        u64::from(self.width).saturating_mul(u64::from(self.height)).saturating_mul(BYTES_PER_PIXEL as u64)
     }
 
     fn expected_samples(&self) -> usize {
@@ -77,8 +103,7 @@ impl<R: Read + Seek> FarbfeldDecoder<R> {
     }
 
     fn read_pixel_data(&mut self) -> VexelResult<Vec<u8>> {
-        let pixels = u64::from(self.width).saturating_mul(u64::from(self.height));
-        let expected_bytes = pixels.saturating_mul(BYTES_PER_PIXEL as u64);
+        let expected_bytes = self.expected_bytes();
 
         let available = self.reader.bytes_left().unwrap_or(0);
         let to_read = usize::try_from(expected_bytes.min(available)).unwrap_or(usize::MAX);
@@ -120,20 +145,20 @@ impl<R: Read + Seek> FarbfeldDecoder<R> {
         PixelData::RGB16(rgb)
     }
 
-    pub fn get_info(&self) -> FarbfeldInfo {
-        FarbfeldInfo { sections: self.sections.clone() }
+    pub fn get_info(&mut self) -> FarbfeldInfo {
+        if self.info.is_none() {
+            if let Err(e) = self.scan() {
+                log_warn!("Failed to read farbfeld header: {}", e);
+            }
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         self.read_header()?;
 
-        let pixel_data_start = self.reader.stream_position().unwrap_or(HEADER_SIZE);
         let raw = self.read_pixel_data()?;
-
-        self.sections.push(FarbfeldSectionInfo {
-            start_offset: pixel_data_start,
-            data: FarbfeldSectionData::PixelData(FarbfeldPixelDataInfo { length: raw.len() as u64 }),
-        });
 
         let pixels = self.build_pixels(&raw)?;
 

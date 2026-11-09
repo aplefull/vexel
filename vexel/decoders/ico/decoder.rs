@@ -1,25 +1,35 @@
+use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
 use crate::decoders::bmp::decoder::BmpDecoder;
-use crate::decoders::ico::types::{
-    IcoIconDirData, IcoIconDirEntryData, IcoImageDataInfo, IcoImageFormat, IcoSectionData, IcoSectionInfo, IcoType,
-    IconDirEntry,
+use crate::decoders::bmp::headers::HeaderReader;
+use crate::decoders::bmp::types::{BitmapCompression, DibKind};
+use crate::decoders::ico::info::{
+    EmbeddedBmp, EmbeddedImage, IcoDirectory, IcoDirectoryEntry, IcoImageData, IcoInfo, IcoSection,
 };
+use crate::decoders::ico::types::{IcoImageFormat, IcoType, IconDirEntry};
 use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, ImageFrame, PixelData};
-use crate::utils::info::IcoInfo;
+use crate::utils::info::{ColorModel, ImageSummary};
 use crate::{log_error, log_warn, Limits};
+
+const DIRECTORY_SIZE: u64 = 6;
+const ENTRY_SIZE: u64 = 16;
+const MAX_DETAILED_IMAGES: usize = 256;
 
 pub struct IcoDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
     limits: Limits,
     ico_type: IcoType,
+    type_raw: u16,
+    reserved: u16,
+    declared_count: u16,
     entries: Vec<IconDirEntry>,
     entry_offsets: Vec<u64>,
-    sections: Vec<IcoSectionInfo>,
+    info: Option<IcoInfo>,
     reader: BitReader<R>,
 }
 
@@ -30,9 +40,12 @@ impl<R: Read + Seek> IcoDecoder<R> {
             height: 0,
             limits: Limits::default(),
             ico_type: IcoType::Ico,
+            type_raw: 0,
+            reserved: 0,
+            declared_count: 0,
             entries: Vec::new(),
             entry_offsets: Vec::new(),
-            sections: Vec::new(),
+            info: None,
             reader: BitReader::with_le(reader),
         }
     }
@@ -41,19 +54,234 @@ impl<R: Read + Seek> IcoDecoder<R> {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> IcoInfo {
-        IcoInfo { sections: self.sections.clone() }
+    pub fn get_info(&mut self) -> IcoInfo {
+        if self.info.is_none() {
+            let saved_limits = self.limits.clone();
+            if let Err(e) = self.read_directory() {
+                log_warn!("Failed to read ICO directory: {}", e);
+            }
+            self.info = Some(self.build_info());
+            self.limits = saved_limits;
+        }
+
+        self.info.clone().unwrap_or_default()
+    }
+
+    fn build_info(&mut self) -> IcoInfo {
+        let mut info = IcoInfo::default();
+        if self.type_raw == 0 && self.entries.is_empty() && self.declared_count == 0 {
+            return info;
+        }
+
+        let ico_type = match self.type_raw {
+            1 => Some(IcoType::Ico),
+            2 => Some(IcoType::Cur),
+            _ => None,
+        };
+        info.push(
+            0,
+            Some(DIRECTORY_SIZE),
+            IcoSection::Directory(IcoDirectory {
+                reserved: self.reserved,
+                type_raw: self.type_raw,
+                ico_type,
+                image_count: self.declared_count,
+            }),
+        );
+
+        let entries = self.entries.clone();
+        let is_cursor = self.ico_type == IcoType::Cur;
+        for (index, (entry, &offset)) in entries.iter().zip(self.entry_offsets.clone().iter()).enumerate() {
+            info.push(
+                offset,
+                Some(ENTRY_SIZE),
+                IcoSection::DirectoryEntry(IcoDirectoryEntry {
+                    index: index as u32,
+                    width: entry.width,
+                    height: entry.height,
+                    color_count: entry.color_count,
+                    reserved: entry.reserved,
+                    planes: (!is_cursor).then_some(entry.planes),
+                    bit_count: (!is_cursor).then_some(entry.bit_count),
+                    hotspot: is_cursor.then_some([entry.hotspot_x, entry.hotspot_y]),
+                    bytes_in_res: entry.bytes_in_res,
+                    image_offset: entry.image_offset,
+                }),
+            );
+        }
+
+        let file_length = self.reader.seek(SeekFrom::End(0)).unwrap_or(0);
+        let mut image_offsets: Vec<u64> = entries.iter().map(|entry| u64::from(entry.image_offset)).collect();
+        image_offsets.sort_unstable();
+        image_offsets.dedup();
+        if entries.len() > MAX_DETAILED_IMAGES {
+            log_warn!("ICO has {} images, inspecting only the first {}", entries.len(), MAX_DETAILED_IMAGES);
+        }
+
+        let mut largest: Option<(u64, ImageSummary)> = None;
+        let mut inspected: HashMap<u64, (u32, u64)> = HashMap::new();
+        for (index, entry) in entries.iter().enumerate() {
+            if index >= MAX_DETAILED_IMAGES {
+                let start = u64::from(entry.image_offset);
+                let next = image_offsets.get(image_offsets.partition_point(|&offset| offset <= start)).copied();
+                let span = next.unwrap_or(file_length).min(file_length).saturating_sub(start);
+                info.push(
+                    start,
+                    Some(span),
+                    IcoSection::ImageData(IcoImageData {
+                        index: index as u32,
+                        image_format: entry.image_format,
+                        declared_length: entry.bytes_in_res,
+                        directory_bit_count: (!is_cursor).then_some(entry.bit_count),
+                        embedded: None,
+                        same_data_as: None,
+                    }),
+                );
+                continue;
+            }
+
+            let start = u64::from(entry.image_offset);
+            if let Some(&(first_index, length)) = inspected.get(&start) {
+                info.push(
+                    start,
+                    Some(length),
+                    IcoSection::ImageData(IcoImageData {
+                        index: index as u32,
+                        image_format: entry.image_format,
+                        declared_length: entry.bytes_in_res,
+                        directory_bit_count: (!is_cursor).then_some(entry.bit_count),
+                        embedded: None,
+                        same_data_as: Some(first_index),
+                    }),
+                );
+                continue;
+            }
+
+            let bytes = match self.read_entry_bytes(entry) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    log_warn!("Failed to read ICO image {}: {}", index + 1, e);
+                    Vec::new()
+                }
+            };
+
+            let (embedded, summary) = match entry.image_format {
+                IcoImageFormat::Png => {
+                    let mut png = PngDecoder::new(Cursor::new(bytes.clone()));
+                    let mut png_info = png.get_info();
+                    png_info.shift_offsets(u64::from(entry.image_offset));
+                    let summary = png_info.summary.clone();
+                    (Some(EmbeddedImage::Png(png_info)), summary)
+                }
+                IcoImageFormat::Bmp => {
+                    let bmp = Self::inspect_bmp(&bytes);
+                    let summary = Self::bmp_summary(&bmp, entry);
+                    (Some(EmbeddedImage::Bmp(bmp)), Some(summary))
+                }
+            };
+
+            let area = u64::from(entry.width) * u64::from(entry.height);
+            if let Some(summary) = summary {
+                if largest.as_ref().is_none_or(|(best, _)| area > *best) {
+                    largest = Some((area, summary));
+                }
+            }
+
+            inspected.insert(start, (index as u32, bytes.len() as u64));
+            info.push(
+                start,
+                Some(bytes.len() as u64),
+                IcoSection::ImageData(IcoImageData {
+                    index: index as u32,
+                    image_format: entry.image_format,
+                    declared_length: entry.bytes_in_res,
+                    directory_bit_count: (!is_cursor).then_some(entry.bit_count),
+                    embedded,
+                    same_data_as: None,
+                }),
+            );
+        }
+
+        if let Some((_, mut summary)) = largest {
+            summary.pages = Some(entries.len() as u32);
+            info.summary = Some(summary);
+        }
+
+        info.sections.sort_by_key(|section| section.offset);
+        info
+    }
+
+    fn read_entry_bytes(&mut self, entry: &IconDirEntry) -> VexelResult<Vec<u8>> {
+        self.reader.seek(SeekFrom::Start(entry.image_offset as u64))?;
+        let bytes_available = self.reader.bytes_left().unwrap_or(0);
+        let bytes_to_read = self.max_readable_bytes(entry, bytes_available) as usize;
+        Ok(self.reader.read_bytes(bytes_to_read)?)
+    }
+
+    fn inspect_bmp(bytes: &[u8]) -> EmbeddedBmp {
+        let mut reader = BitReader::with_le(Cursor::new(bytes));
+        let dib = HeaderReader::read_info_header(&mut reader).ok().map(|(dib, _, _)| dib);
+
+        let Some(header) = &dib else {
+            return EmbeddedBmp {
+                dib: None,
+                color_table_entries: 0,
+                xor_length: 0,
+                and_mask_length: 0,
+                and_mask_present: false,
+            };
+        };
+
+        let bpp = u64::from(header.bits_per_pixel);
+        let color_table_entries = if bpp <= 8 {
+            if header.colors_used > 0 {
+                header.colors_used.min(1 << bpp)
+            } else {
+                1 << bpp
+            }
+        } else {
+            0
+        };
+        let bytes_per_color = if header.kind == DibKind::Core { 3 } else { 4 };
+        let mask_bytes = match header.compression {
+            BitmapCompression::BiBitfields if header.kind == DibKind::Info => 12,
+            BitmapCompression::BiAlphaBitfields if header.kind == DibKind::Info => 16,
+            _ => 0,
+        };
+
+        let width = u64::from(header.width.unsigned_abs());
+        let height = u64::from(header.height.unsigned_abs() / 2);
+        let xor_length = (bpp * width).div_ceil(32).saturating_mul(4).saturating_mul(height);
+        let and_mask_length = width.div_ceil(32).saturating_mul(4).saturating_mul(height);
+        let and_start = (u64::from(header.header_size) + mask_bytes + u64::from(color_table_entries) * bytes_per_color)
+            .saturating_add(xor_length);
+        let and_mask_present = (bytes.len() as u64) > and_start;
+
+        EmbeddedBmp { dib, color_table_entries, xor_length, and_mask_length, and_mask_present }
+    }
+
+    fn bmp_summary(bmp: &EmbeddedBmp, entry: &IconDirEntry) -> ImageSummary {
+        let bpp = bmp.dib.as_ref().map(|dib| dib.bits_per_pixel).unwrap_or(entry.bit_count);
+        let (color_model, channels, bits) = match bpp {
+            0..=8 => (ColorModel::Indexed, 1, bpp as u8),
+            16 => (ColorModel::Rgb, 3, 5),
+            32 => (ColorModel::Rgba, 4, 8),
+            _ => (ColorModel::Rgb, 3, 8),
+        };
+        let mut summary = ImageSummary::new(entry.width, entry.height, color_model, channels, bits);
+        summary.has_alpha = bpp == 32 || bmp.and_mask_present;
+        summary
     }
 
     fn read_header(&mut self) -> VexelResult<u16> {
-        let header_offset = self.reader.stream_position().unwrap_or(0);
-
         let reserved = self.reader.read_u16()?;
+        self.reserved = reserved;
         if reserved != 0 {
             log_warn!("ICO reserved field is non-zero: {}", reserved);
         }
 
         let type_val = self.reader.read_u16()?;
+        self.type_raw = type_val;
         self.ico_type = match type_val {
             1 => IcoType::Ico,
             2 => IcoType::Cur,
@@ -64,11 +292,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
         };
 
         let count = self.reader.read_u16()?;
-
-        self.sections.push(IcoSectionInfo {
-            start_offset: header_offset,
-            data: IcoSectionData::IconDir(IcoIconDirData { ico_type: self.ico_type, image_count: count }),
-        });
+        self.declared_count = count;
 
         Ok(count)
     }
@@ -80,8 +304,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
             let width_byte = self.reader.read_u8()?;
             let height_byte = self.reader.read_u8()?;
             let color_count = self.reader.read_u8()?;
-            // TODO: add a method to skip bytes, so we don't have to read into vars we don't use
-            let _reserved = self.reader.read_u8()?;
+            let reserved = self.reader.read_u8()?;
             let planes_or_hotspot_x = self.reader.read_u16()?;
             let bit_count_or_hotspot_y = self.reader.read_u16()?;
             let bytes_in_res = self.reader.read_u32()?;
@@ -96,6 +319,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
             };
 
             self.entries.push(IconDirEntry {
+                reserved,
                 width,
                 height,
                 color_count,
@@ -135,36 +359,6 @@ impl<R: Read + Seek> IcoDecoder<R> {
         Ok(())
     }
 
-    fn push_entry_and_image_data_sections(&mut self) {
-        for (entry, &offset) in self.entries.iter().zip(self.entry_offsets.iter()) {
-            self.sections.push(IcoSectionInfo {
-                start_offset: offset,
-                data: IcoSectionData::IconDirEntry(IcoIconDirEntryData {
-                    width: entry.width,
-                    height: entry.height,
-                    color_count: entry.color_count,
-                    planes: entry.planes,
-                    bit_count: entry.bit_count,
-                    bytes_in_res: entry.bytes_in_res,
-                    image_offset: entry.image_offset,
-                    hotspot_x: entry.hotspot_x,
-                    hotspot_y: entry.hotspot_y,
-                    image_format: entry.image_format,
-                }),
-            });
-        }
-        for entry in &self.entries {
-            self.sections.push(IcoSectionInfo {
-                start_offset: entry.image_offset as u64,
-                data: IcoSectionData::ImageData(IcoImageDataInfo {
-                    length: entry.bytes_in_res,
-                    image_format: entry.image_format,
-                }),
-            });
-        }
-        self.sections.sort_by_key(|s| s.start_offset);
-    }
-
     fn max_readable_bytes(&self, entry: &IconDirEntry, bytes_available: u64) -> u64 {
         let next_entry_offset = self
             .entries
@@ -182,10 +376,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
     }
 
     fn decode_png_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {
-        self.reader.seek(SeekFrom::Start(entry.image_offset as u64))?;
-        let bytes_available = self.reader.bytes_left().unwrap_or(0);
-        let bytes_to_read = self.max_readable_bytes(entry, bytes_available) as usize;
-        let png_bytes = self.reader.read_bytes(bytes_to_read)?;
+        let png_bytes = self.read_entry_bytes(entry)?;
 
         let mut png_decoder = PngDecoder::new(Cursor::new(png_bytes));
         png_decoder.set_limits(self.limits.clone());
@@ -195,10 +386,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
     }
 
     fn decode_bmp_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {
-        self.reader.seek(SeekFrom::Start(entry.image_offset as u64))?;
-        let bytes_available = self.reader.bytes_left().unwrap_or(0);
-        let bytes_to_read = self.max_readable_bytes(entry, bytes_available) as usize;
-        let bmp_bytes = self.reader.read_bytes(bytes_to_read)?;
+        let bmp_bytes = self.read_entry_bytes(entry)?;
 
         let (image, and_mask, actual_bpp) =
             BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
@@ -213,7 +401,9 @@ impl<R: Read + Seek> IcoDecoder<R> {
         self.reader.seek(SeekFrom::Start(0))?;
         self.entries.clear();
         self.entry_offsets.clear();
-        self.sections.clear();
+        self.type_raw = 0;
+        self.reserved = 0;
+        self.declared_count = 0;
 
         let count = match self.read_header() {
             Ok(c) => c,
@@ -240,8 +430,6 @@ impl<R: Read + Seek> IcoDecoder<R> {
                 log_warn!("Error detecting ICO image formats: {}", e);
             }
         }
-
-        self.push_entry_and_image_data_sections();
 
         if self.entries.is_empty() {
             return Err(VexelError::Custom("ICO file contains no valid entries".to_string()));

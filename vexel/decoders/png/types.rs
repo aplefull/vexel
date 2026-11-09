@@ -1,10 +1,8 @@
 use serde::Serialize;
 use tsify::Tsify;
 
-use crate::utils::icc::ICCProfile;
-
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PngChunk {
+pub enum ChunkKind {
     IHDR,
     PLTE,
     IDAT,
@@ -28,29 +26,29 @@ pub enum PngChunk {
     FDAT,
 }
 
-pub fn get_chunk(chunk_type: &[u8; 4]) -> Option<PngChunk> {
+pub fn chunk_kind(chunk_type: &[u8; 4]) -> Option<ChunkKind> {
     match chunk_type {
-        b"IHDR" => Some(PngChunk::IHDR),
-        b"PLTE" => Some(PngChunk::PLTE),
-        b"IDAT" => Some(PngChunk::IDAT),
-        b"IEND" => Some(PngChunk::IEND),
-        b"tRNS" => Some(PngChunk::TRNS),
-        b"cHRM" => Some(PngChunk::CHRM),
-        b"gAMA" => Some(PngChunk::GAMA),
-        b"iCCP" => Some(PngChunk::ICCP),
-        b"sBIT" => Some(PngChunk::SBIT),
-        b"sRGB" => Some(PngChunk::SRGB),
-        b"tEXt" => Some(PngChunk::TEXT),
-        b"zTXt" => Some(PngChunk::ZTXT),
-        b"iTXt" => Some(PngChunk::ITXT),
-        b"bKGD" => Some(PngChunk::BKGD),
-        b"pHYs" => Some(PngChunk::PHYS),
-        b"tIME" => Some(PngChunk::TIME),
-        b"sPLT" => Some(PngChunk::SPLT),
-        b"hIST" => Some(PngChunk::HIST),
-        b"acTL" => Some(PngChunk::ACTL),
-        b"fcTL" => Some(PngChunk::FCTL),
-        b"fdAT" => Some(PngChunk::FDAT),
+        b"IHDR" => Some(ChunkKind::IHDR),
+        b"PLTE" => Some(ChunkKind::PLTE),
+        b"IDAT" => Some(ChunkKind::IDAT),
+        b"IEND" => Some(ChunkKind::IEND),
+        b"tRNS" => Some(ChunkKind::TRNS),
+        b"cHRM" => Some(ChunkKind::CHRM),
+        b"gAMA" => Some(ChunkKind::GAMA),
+        b"iCCP" => Some(ChunkKind::ICCP),
+        b"sBIT" => Some(ChunkKind::SBIT),
+        b"sRGB" => Some(ChunkKind::SRGB),
+        b"tEXt" => Some(ChunkKind::TEXT),
+        b"zTXt" => Some(ChunkKind::ZTXT),
+        b"iTXt" => Some(ChunkKind::ITXT),
+        b"bKGD" => Some(ChunkKind::BKGD),
+        b"pHYs" => Some(ChunkKind::PHYS),
+        b"tIME" => Some(ChunkKind::TIME),
+        b"sPLT" => Some(ChunkKind::SPLT),
+        b"hIST" => Some(ChunkKind::HIST),
+        b"acTL" => Some(ChunkKind::ACTL),
+        b"fcTL" => Some(ChunkKind::FCTL),
+        b"fdAT" => Some(ChunkKind::FDAT),
         _ => None,
     }
 }
@@ -94,14 +92,6 @@ pub enum BackgroundData {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Tsify)]
-pub enum RenderingIntent {
-    Perceptual = 0,
-    RelativeColorimetric = 1,
-    Saturation = 2,
-    AbsoluteColorimetric = 3,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Tsify)]
 pub struct Chromaticities {
     pub white_point_x: f32,
     pub white_point_y: f32,
@@ -138,29 +128,6 @@ pub struct PngFrame {
     pub fdat: Vec<u8>,
 }
 
-pub struct CrcCalculator;
-
-impl CrcCalculator {
-    pub fn new() -> Self {
-        CrcCalculator
-    }
-
-    pub fn calculate_crc_two_parts(&self, part1: &[u8], part2: &[u8]) -> u32 {
-        use super::crc_simd::update_crc;
-        let mut combined = Vec::with_capacity(part1.len() + part2.len());
-        combined.extend_from_slice(part1);
-        combined.extend_from_slice(part2);
-        update_crc(0xffffffff, &combined) ^ 0xffffffff
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub enum PngText {
-    Basic { keyword: String, text: String },
-    Compressed { keyword: String, text: String },
-    International { keyword: String, language_tag: String, translated_keyword: String, text: String },
-}
-
 #[derive(Debug, Clone, Serialize, Tsify)]
 pub struct SuggestedPaletteSample {
     pub red: u16,
@@ -175,19 +142,6 @@ pub struct SuggestedPalette {
     pub name: String,
     pub sample_depth: u8,
     pub samples: Vec<SuggestedPaletteSample>,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct PhysicalDimensions {
-    pub pixels_per_unit_x: u32,
-    pub pixels_per_unit_y: u32,
-    pub unit: PhysicalUnit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
-pub enum PhysicalUnit {
-    Unknown,
-    Meter,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -207,156 +161,4 @@ pub struct ImageTime {
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct IhdrChunkData {
-    pub width: u32,
-    pub height: u32,
-    pub bit_depth: u8,
-    pub color_type: ColorType,
-    pub compression_method: u8,
-    pub filter_method: u8,
-    pub interlace_method: u8,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct PlteChunkData {
-    pub entries: Vec<[u8; 3]>,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct IdatChunkData {
-    pub data_length: u32,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct GamaChunkData {
-    pub gamma: f32,
-    pub gamma_raw: u32,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct ChrmChunkData {
-    pub chromaticities: Chromaticities,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TrnsChunkData {
-    pub transparency: TransparencyData,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BkgdChunkData {
-    pub background: BackgroundData,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct PhysChunkData {
-    pub physical_dimensions: PhysicalDimensions,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct SbitChunkData {
-    pub significant_bits: SignificantBits,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TimeChunkData {
-    pub time: ImageTime,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TextChunkData {
-    pub text: PngText,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct SrgbChunkData {
-    pub rendering_intent: RenderingIntent,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct IccpChunkData {
-    pub profile_name: String,
-    pub profile: ICCProfile,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct SpltChunkData {
-    pub palette: SuggestedPalette,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct HistChunkData {
-    pub frequencies: Vec<u16>,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct ActlChunkData {
-    pub actl: ActlChunk,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct FctlChunkData {
-    pub fctl: FctlChunk,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct FdatChunkData {
-    pub sequence_number: u32,
-    pub data_length: u32,
-    pub crc: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub enum PngChunkData {
-    IHDR(IhdrChunkData),
-    PLTE(PlteChunkData),
-    IDAT(IdatChunkData),
-    GAMA(GamaChunkData),
-    CHRM(ChrmChunkData),
-    TRNS(TrnsChunkData),
-    BKGD(BkgdChunkData),
-    PHYS(PhysChunkData),
-    SBIT(SbitChunkData),
-    TIME(TimeChunkData),
-    TEXT(TextChunkData),
-    ZTXT(TextChunkData),
-    ITXT(TextChunkData),
-    SRGB(SrgbChunkData),
-    ICCP(IccpChunkData),
-    SPLT(SpltChunkData),
-    HIST(HistChunkData),
-    ACTL(ActlChunkData),
-    FCTL(FctlChunkData),
-    FDAT(FdatChunkData),
-    IEND { crc: u32 },
-    Signature,
-    Unknown { chunk_type: String, length: u32, crc: u32 },
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct PngChunkInfo {
-    pub start_offset: u64,
-    pub chunk_type: String,
-    pub length: u32,
-    pub data: PngChunkData,
 }

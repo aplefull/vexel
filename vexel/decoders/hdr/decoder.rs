@@ -1,10 +1,10 @@
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
+use super::info::{HdrFormat, HdrHeader, HdrInfo, HdrPixelData, HdrResolution, HdrScanlineEncoding, HdrSection};
 use super::pixels::PixelDecoder;
-use super::types::{HdrFormat, HdrHeaderData, HdrPixelDataInfo, HdrSectionData, HdrSectionInfo};
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::HdrInfo;
+use crate::utils::info::{ColorModel, ImageSummary, SampleFormat};
 use crate::{log_warn, Image, Limits};
 
 pub struct HdrDecoder<R: Read + Seek> {
@@ -13,7 +13,7 @@ pub struct HdrDecoder<R: Read + Seek> {
     limits: Limits,
     format: HdrFormat,
     reader: BitReader<R>,
-    sections: Vec<HdrSectionInfo>,
+    info: Option<HdrInfo>,
 }
 
 impl<R: Read + Seek> HdrDecoder<R> {
@@ -24,7 +24,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
             limits: Limits::default(),
             format: HdrFormat::RGBE,
             reader: BitReader::new(reader),
-            sections: Vec::new(),
+            info: None,
         }
     }
 
@@ -48,56 +48,54 @@ impl<R: Read + Seek> HdrDecoder<R> {
         Ok(buffer)
     }
 
-    fn read_header(&mut self) -> VexelResult<()> {
-        let header_start = self.reader.stream_position().unwrap_or(0);
-        let mut line;
-
-        let mut gamma: Option<f32> = None;
-        let mut exposure: Option<f32> = None;
-        let mut pixel_aspect_ratio: Option<f32> = None;
-        let mut color_correction: Option<[f32; 3]> = None;
-        let mut primaries: Option<[f32; 8]> = None;
-        let mut comments: Vec<String> = Vec::new();
-
+    fn read_header_lines(&mut self, header: &mut HdrHeader) -> VexelResult<()> {
         loop {
-            line = String::from_utf8_lossy(self.read_until_newline()?.as_slice()).to_string();
+            let line = String::from_utf8_lossy(self.read_until_newline()?.as_slice()).to_string();
 
-            if line.starts_with("#?RADIANCE") {
+            if let Some(program) = line.strip_prefix("#?") {
+                header.program = Some(program.trim().to_string());
                 continue;
             }
 
             if line.starts_with('#') {
-                comments.push(line.trim_start_matches('#').trim().to_string());
+                header.comments.push(line.trim_start_matches('#').trim().to_string());
                 continue;
             }
 
             if line.starts_with("FORMAT") {
-                let format = line.to_lowercase();
+                let lowered = line.to_lowercase();
+                let rest = line.trim_start_matches("FORMAT");
+                let format = rest.split_once('=').map_or(rest, |(_, value)| value).trim().to_string();
 
-                if format.contains("32-bit_rle_rgbe") {
+                if lowered.contains("32-bit_rle_rgbe") {
                     self.format = HdrFormat::RGBE;
-                } else if format.contains("32-bit_rle_xyze") {
+                } else if lowered.contains("32-bit_rle_xyze") {
                     self.format = HdrFormat::XYZE;
                 } else {
                     log_warn!("Invalid HDR format: {}", format);
                     self.format = HdrFormat::RGBE;
                 }
 
+                header.format = Some(format);
                 continue;
             }
 
             if line.starts_with("GAMMA") {
-                gamma = Some(Self::parse_f32(Self::get_value(line).as_str()));
+                header.gamma = Some(Self::parse_f32(Self::get_value(line).as_str()));
                 continue;
             }
 
             if line.starts_with("EXPOSURE") {
-                exposure = Some(Self::parse_f32(Self::get_value(line).as_str()));
+                let value = Self::get_value(line);
+                match value.trim().parse::<f32>() {
+                    Ok(value) => header.exposure = Some(header.exposure.unwrap_or(1.0) * value),
+                    Err(_) => log_warn!("Failed to parse exposure: {}", value),
+                }
                 continue;
             }
 
             if line.starts_with("PIXASPECT") {
-                pixel_aspect_ratio = Some(Self::parse_f32(Self::get_value(line).as_str()));
+                header.pixel_aspect_ratio = Some(Self::parse_f32(Self::get_value(line).as_str()));
                 continue;
             }
 
@@ -105,45 +103,49 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 let value = Self::get_value(line);
                 let parts: Vec<&str> = value.split_whitespace().collect();
 
-                let r = Self::parse_f32(parts.get(1).unwrap_or(&"0"));
-                let g = Self::parse_f32(parts.get(2).unwrap_or(&"0"));
-                let b = Self::parse_f32(parts.get(3).unwrap_or(&"0"));
+                let r = Self::parse_f32(parts.first().unwrap_or(&"1"));
+                let g = Self::parse_f32(parts.get(1).unwrap_or(&"1"));
+                let b = Self::parse_f32(parts.get(2).unwrap_or(&"1"));
 
-                color_correction = Some([r, g, b]);
+                let [pr, pg, pb] = header.color_correction.unwrap_or([1.0, 1.0, 1.0]);
+                header.color_correction = Some([pr * r, pg * g, pb * b]);
                 continue;
             }
 
             if line.starts_with("PRIMARIES") {
                 let value = Self::get_value(line);
-                let parts: Vec<&str> = value.split_whitespace().collect();
-
-                let mut p = Vec::new();
-                for part in parts.iter() {
-                    p.push(Self::parse_f32(part));
-                }
+                let mut p: Vec<f32> = value.split_whitespace().map(Self::parse_f32).collect();
 
                 if p.len() != 8 {
                     log_warn!("Invalid number of primaries: {}", p.len());
-                    if p.len() > 8 {
-                        p.truncate(8);
-                    } else {
-                        while p.len() < 8 {
-                            p.push(0.0);
-                        }
-                    }
+                    p.resize(8, 0.0);
                 }
 
-                primaries = Some([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]]);
+                header.primaries = Some([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]]);
+                continue;
+            }
+
+            if line.starts_with("SOFTWARE") {
+                header.software = Some(Self::get_value(line).trim().to_string());
+                continue;
+            }
+
+            if line.starts_with("VIEW") {
+                header.view = Some(Self::get_value(line).trim().to_string());
                 continue;
             }
 
             if line.trim().is_empty() {
-                break;
+                return Ok(());
             }
-        }
 
+            header.other_lines.push(line.trim().to_string());
+        }
+    }
+
+    fn read_resolution(&mut self) -> VexelResult<HdrResolution> {
         loop {
-            line = String::from_utf8_lossy(self.read_until_newline()?.as_slice()).to_string();
+            let line = String::from_utf8_lossy(self.read_until_newline()?.as_slice()).to_string();
 
             if line.trim().is_empty() {
                 continue;
@@ -156,18 +158,8 @@ impl<R: Read + Seek> HdrDecoder<R> {
             }
 
             let (dim1, dim2) = match parts[0].chars().nth(1) {
-                Some('Y') => {
-                    let height_str = parts[1];
-                    let width_str = parts[3];
-
-                    (width_str, height_str)
-                }
-                Some('X') => {
-                    let width_str = parts[1];
-                    let height_str = parts[3];
-
-                    (width_str, height_str)
-                }
+                Some('Y') => (parts[3], parts[1]),
+                Some('X') => (parts[1], parts[3]),
                 _ => {
                     return Err(VexelError::Custom(format!(
                         "Invalid header line: {}, cant parse image dimensions",
@@ -176,32 +168,68 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 }
             };
 
-            self.width = dim1.parse::<u32>().map_err(|_| "Failed to parse width")?;
-            self.height = dim2.parse::<u32>().map_err(|_| "Failed to parse height")?;
+            let width = dim1.parse::<u32>().map_err(|_| "Failed to parse width")?;
+            let height = dim2.parse::<u32>().map_err(|_| "Failed to parse height")?;
 
-            if self.width == 0 || self.height == 0 {
-                return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+            return Ok(HdrResolution { line: line.trim().to_string(), width, height });
+        }
+    }
+
+    fn scan(&mut self) -> VexelResult<()> {
+        self.reader.seek(SeekFrom::Start(0))?;
+        self.format = HdrFormat::RGBE;
+        let mut info = HdrInfo::default();
+
+        let mut header = HdrHeader::default();
+        let header_result = self.read_header_lines(&mut header);
+        let header_end = self.reader.stream_position().unwrap_or(0);
+        info.push(0, Some(header_end), HdrSection::Header(header));
+
+        let result = header_result.and_then(|_| self.read_resolution());
+        let resolution = match result {
+            Ok(resolution) => resolution,
+            Err(e) => {
+                self.info = Some(info);
+                return Err(e);
             }
+        };
 
-            self.limits.reserve_buffer(self.width, self.height, 4)?;
+        let resolution_end = self.reader.stream_position().unwrap_or(header_end);
+        self.width = resolution.width;
+        self.height = resolution.height;
+        info.push(header_end, Some(resolution_end - header_end), HdrSection::Resolution(resolution));
 
-            break;
+        let available = self.reader.bytes_left().unwrap_or(0);
+        let first_scanline = self.reader.peek_bytes(4.min(available as usize)).unwrap_or_default();
+        let encoding = match first_scanline.as_slice() {
+            [] => None,
+            [2, 2, hi, lo] if u32::from(u16::from_be_bytes([*hi, *lo])) == self.width => Some(HdrScanlineEncoding::Rle),
+            _ => Some(HdrScanlineEncoding::Flat),
+        };
+        let decoded_length = (u64::from(self.width) * u64::from(self.height)).saturating_mul(4);
+        info.push(resolution_end, Some(available), HdrSection::PixelData(HdrPixelData { encoding, decoded_length }));
+
+        let color_model = if self.format == HdrFormat::XYZE { ColorModel::Xyz } else { ColorModel::Rgb };
+        let mut summary = ImageSummary::new(self.width, self.height, color_model, 3, 32);
+        summary.sample_format = SampleFormat::Float;
+        summary.compression = encoding.map(|encoding| match encoding {
+            HdrScanlineEncoding::Rle => "Adaptive RLE".to_string(),
+            HdrScanlineEncoding::Flat => "None".to_string(),
+        });
+        info.summary = Some(summary);
+        self.info = Some(info);
+
+        Ok(())
+    }
+
+    fn read_header(&mut self) -> VexelResult<()> {
+        self.scan()?;
+
+        if self.width == 0 || self.height == 0 {
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
-        self.sections.push(HdrSectionInfo {
-            start_offset: header_start,
-            data: HdrSectionData::Header(HdrHeaderData {
-                width: self.width,
-                height: self.height,
-                format: self.format,
-                gamma,
-                exposure,
-                pixel_aspect_ratio,
-                color_correction,
-                primaries,
-                comments,
-            }),
-        });
+        self.limits.reserve_buffer(self.width, self.height, 4)?;
 
         Ok(())
     }
@@ -344,21 +372,20 @@ impl<R: Read + Seek> HdrDecoder<R> {
         Ok(rgbe_data)
     }
 
-    pub fn get_info(&self) -> HdrInfo {
-        HdrInfo { sections: self.sections.clone() }
+    pub fn get_info(&mut self) -> HdrInfo {
+        if self.info.is_none() {
+            if let Err(e) = self.scan() {
+                log_warn!("Failed to read HDR header: {}", e);
+            }
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         self.read_header()?;
 
-        let pixel_data_start = self.reader.stream_position().unwrap_or(0);
         let rgbe_data = self.read_scanlines()?;
-        let pixel_data_length = rgbe_data.len() as u64;
-
-        self.sections.push(HdrSectionInfo {
-            start_offset: pixel_data_start,
-            data: HdrSectionData::PixelData(HdrPixelDataInfo { length: pixel_data_length }),
-        });
 
         let pixel_decoder = PixelDecoder::new(self.width, self.height, self.format);
         let mut pixel_data = pixel_decoder.decode(&rgbe_data)?;

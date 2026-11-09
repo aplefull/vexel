@@ -4,15 +4,16 @@ use crate::decoders::jpeg_xr::bitreader::XrBitReader;
 use crate::decoders::jpeg_xr::coeffs::{decode_coefficients, DecodeConfig, PlaneCoefficients, COEFFS_PER_PLANE};
 use crate::decoders::jpeg_xr::container::{self, Container};
 use crate::decoders::jpeg_xr::headers::{parse_image_header, parse_plane_header, ImageHeader, PlaneHeader};
+use crate::decoders::jpeg_xr::info::{scan, JpegXrInfo};
 use crate::decoders::jpeg_xr::pixels::{build_image_data, OutputParams};
 use crate::decoders::jpeg_xr::tile::TileLayout;
 use crate::decoders::jpeg_xr::transform::{
     inverse_transform_macroblock, CornerPrediction, MacroblockCursor, MacroblockPosition, Plane, TransformParams,
 };
 use crate::decoders::jpeg_xr::types::*;
+use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, PixelData};
-use crate::utils::info::JpegXrInfo;
 use crate::utils::limits::Limits;
 
 pub struct JpegXrDecoder<R: Read + Seek> {
@@ -39,10 +40,16 @@ impl<R: Read + Seek> JpegXrDecoder<R> {
 
     pub fn get_info(&mut self) -> JpegXrInfo {
         if self.info.is_none() {
-            let _ = self.decode();
+            let saved_pos = self.reader.stream_position().unwrap_or(0);
+            let data = self.read_all();
+            let _ = self.reader.seek(std::io::SeekFrom::Start(saved_pos));
+            match data {
+                Ok(data) => self.info = Some(scan(&data)),
+                Err(e) => log_warn!("Failed to read JPEG XR data: {}", e),
+            }
         }
 
-        self.info.clone().unwrap_or_else(empty_info)
+        self.info.clone().unwrap_or_default()
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -60,8 +67,6 @@ impl<R: Read + Seek> JpegXrDecoder<R> {
 
         let image_header = &primary.image;
         let plane_header = &primary.plane;
-
-        let pixel_format = container.as_ref().and_then(|c| c.pixel_format).unwrap_or(PixelFormatKind::Unknown);
 
         let has_alpha = alpha.is_some() || primary.alpha_planes.is_some();
 
@@ -95,26 +100,6 @@ impl<R: Read + Seek> JpegXrDecoder<R> {
         } else {
             (image_header.width, image_header.height)
         };
-
-        self.info = Some(JpegXrInfo {
-            width,
-            height,
-            bitstream_format: format!("{:?}", image_header.bitstream_format),
-            source_color_format: format!("{:?}", image_header.source_color_format),
-            internal_color_format: format!("{:?}", plane_header.internal_color_format),
-            source_bit_depth: format!("{:?}", image_header.source_bit_depth),
-            pixel_format: format!("{:?}", pixel_format),
-            num_channels: plane_header.num_channels as u32,
-            overlap: format!("{:?}", image_header.overlap),
-            subband: format!("{:?}", plane_header.subband),
-            orientation: format!("{:?}", orientation),
-            tile_columns: image_header.tile_cols as u32 + 1,
-            tile_rows: image_header.tile_rows as u32 + 1,
-            alpha_channel: has_alpha,
-            hard_tile_boundaries: image_header.hard_tile_boundaries,
-            scaled_arithmetic: plane_header.scaled_arith,
-            trim_flexbits: image_header.trim_flexbits_flag,
-        });
 
         Ok(Image::from_pixels(width, height, pixels))
     }
@@ -396,7 +381,7 @@ fn apply_orientation(pixels: PixelData, width: usize, height: usize, orientation
     }
 }
 
-fn locate_codestream(data: &[u8]) -> VexelResult<(Option<Container>, usize)> {
+pub(crate) fn locate_codestream(data: &[u8]) -> VexelResult<(Option<Container>, usize)> {
     if container::looks_like_codestream(data) {
         return Ok((None, 0));
     }
@@ -418,26 +403,4 @@ fn locate_codestream(data: &[u8]) -> VexelResult<(Option<Container>, usize)> {
     }
 
     Err(VexelError::Custom("JPEG XR: no codestream found".to_string()))
-}
-
-fn empty_info() -> JpegXrInfo {
-    JpegXrInfo {
-        width: 0,
-        height: 0,
-        bitstream_format: String::new(),
-        source_color_format: String::new(),
-        internal_color_format: String::new(),
-        source_bit_depth: String::new(),
-        pixel_format: String::new(),
-        num_channels: 0,
-        overlap: String::new(),
-        subband: String::new(),
-        orientation: String::new(),
-        tile_columns: 0,
-        tile_rows: 0,
-        alpha_channel: false,
-        hard_tile_boundaries: false,
-        scaled_arithmetic: false,
-        trim_flexbits: false,
-    }
 }

@@ -1,7 +1,7 @@
-use std::io::{Read, Seek, SeekFrom};
-
+use super::info::{
+    CompressedTextChunk, GamaChunk, IccpChunk, IhdrChunk, InternationalTextChunk, PhysChunk, SrgbChunk, TextChunk,
+};
 use super::types::*;
-use crate::bitreader::BitReader;
 use crate::log_warn;
 use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::VexelResult;
@@ -10,981 +10,41 @@ use crate::utils::limits::Limits;
 
 const MAX_DECOMPRESSED_ICC: usize = 64 * 1024 * 1024;
 const MAX_DECOMPRESSED_TEXT: usize = 16 * 1024 * 1024;
+const MAX_KEYWORD_LENGTH: usize = 79;
 
-pub struct ChunkReader;
+struct ByteCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
 
-impl ChunkReader {
-    pub fn read_ihdr<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<(u32, u32, u8, ColorType, CompressionMethod, bool, bool)> {
-        let (start_offset, length, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let width = reader.read_u32()?;
-        let height = reader.read_u32()?;
-        let bit_depth = reader.read_u8()?;
-        let color_type_raw = reader.read_u8()?;
-        let compression_method_raw = reader.read_u8()?;
-        let filter_method = reader.read_u8()?;
-        let interlace_method = reader.read_u8()?;
-
-        let bit_depth = match bit_depth {
-            1 | 2 | 4 | 8 | 16 => bit_depth,
-            _ => {
-                log_warn!("Invalid bit depth: {}", bit_depth);
-                8
-            }
-        };
-
-        let color_type = match color_type_raw {
-            0 => ColorType::Grayscale,
-            2 => ColorType::RGB,
-            3 => ColorType::Indexed,
-            4 => ColorType::GrayscaleAlpha,
-            6 => ColorType::RGBA,
-            _ => {
-                log_warn!("Invalid color type: {}", color_type_raw);
-                ColorType::RGB
-            }
-        };
-
-        let compression_method = match compression_method_raw {
-            0 => CompressionMethod::Deflate,
-            1 => CompressionMethod::None,
-            _ => {
-                log_warn!("Invalid compression method: {}", compression_method_raw);
-                CompressionMethod::None
-            }
-        };
-
-        let has_filters = match filter_method {
-            0 => true,
-            1 => false,
-            _ => {
-                log_warn!("Invalid filter method: {}", filter_method);
-                true
-            }
-        };
-
-        let interlace = match interlace_method {
-            0 => false,
-            1 => true,
-            _ => {
-                log_warn!("Invalid interlace method: {}", interlace_method);
-                false
-            }
-        };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length,
-
-            data: PngChunkData::IHDR(IhdrChunkData {
-                width,
-                height,
-                bit_depth,
-                color_type,
-                compression_method: compression_method_raw,
-                filter_method,
-                interlace_method,
-                crc,
-            }),
-        });
-
-        Ok((width, height, bit_depth, color_type, compression_method, has_filters, interlace))
+impl<'a> ByteCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        ByteCursor { data, pos: 0 }
     }
 
-    pub fn read_plte<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<Vec<[u8; 3]>> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let length = length_u32;
-
-        if length % 3 != 0 {
-            log_warn!("PLTE chunk length is not a multiple of 3");
-        }
-
-        let entries = length / 3;
-        let mut palette = Vec::with_capacity(entries as usize);
-
-        for _ in 0..entries {
-            let r = reader.read_u8()?;
-            let g = reader.read_u8()?;
-            let b = reader.read_u8()?;
-            palette.push([r, g, b]);
-        }
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::PLTE(PlteChunkData { entries: palette.clone(), crc }),
-        });
-
-        Ok(palette)
+    fn u8(&mut self) -> u8 {
+        let value = self.data.get(self.pos).copied().unwrap_or(0);
+        self.pos += 1;
+        value
     }
 
-    pub fn read_idat<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        idat_data: &mut Vec<u8>,
-        frames: &mut [PngFrame],
-        limits: &mut Limits,
-        length: u32,
-        chunk_type: [u8; 4],
-    ) -> VexelResult<()> {
-        let (start_offset, length_u32, chunk_type_str, crc, data_start, total_read) =
-            capture_chunk_into(reader, idat_data, limits, length, chunk_type)?;
-
-        if !frames.is_empty() {
-            let fctl_info = frames.last_mut().unwrap();
-            fctl_info.fdat.extend_from_slice(&idat_data[data_start..data_start + total_read]);
-        }
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-            data: PngChunkData::IDAT(IdatChunkData { data_length: length_u32, crc }),
-        });
-
-        Ok(())
+    fn u16(&mut self) -> u16 {
+        u16::from_be_bytes([self.u8(), self.u8()])
     }
 
-    pub fn read_iccp<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        limits: &mut Limits,
-    ) -> VexelResult<(String, ICCProfile)> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        limits.reserve(length_u32 as u64)?;
-
-        let length = length_u32;
-        let mut num_read = 0;
-
-        let mut profile_name_bytes = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            num_read += 1;
-
-            if byte == 0 {
-                break;
-            }
-
-            if !((32..=126).contains(&byte) || byte >= 161) {
-                log_warn!("Invalid character in iCCP profile name: {}, replacing with space", byte);
-                profile_name_bytes.push(32);
-            } else {
-                profile_name_bytes.push(byte);
-            }
-
-            if profile_name_bytes.len() >= 79 {
-                log_warn!("iCCP profile name too long");
-                break;
-            }
-        }
-
-        let compression_method = reader.read_u8()?;
-        num_read += 1;
-
-        if compression_method != 0 {
-            log_warn!("Invalid compression method in iCCP chunk: {}", compression_method);
-        }
-
-        let mut compressed_profile = Vec::new();
-        while num_read < length {
-            compressed_profile.push(reader.read_u8()?);
-            num_read += 1;
-        }
-
-        let max_decompress = decompress_ceiling(compressed_profile.len(), MAX_DECOMPRESSED_ICC, limits);
-        let profile_data = ZlibDecoder::from_slice(&compressed_profile).decode_with_max(max_decompress);
-        limits.free(length_u32 as u64);
-        limits.reserve_usize(profile_data.len())?;
-
-        let icc = ICCProfile::new(&profile_data)?;
-        let profile_name = String::from_utf8_lossy(&profile_name_bytes).to_string();
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::ICCP(IccpChunkData { profile_name: profile_name.clone(), profile: icc.clone(), crc }),
-        });
-
-        Ok((profile_name, icc))
+    fn u32(&mut self) -> u32 {
+        u32::from_be_bytes([self.u8(), self.u8(), self.u8(), self.u8()])
     }
 
-    pub fn read_iend<R: Read + Seek>(reader: &mut BitReader<R>, chunks: &mut Vec<PngChunkInfo>) -> VexelResult<()> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::IEND { crc },
-        });
-
-        Ok(())
+    fn rest(&self) -> &'a [u8] {
+        &self.data[self.pos.min(self.data.len())..]
     }
 
-    pub fn read_splt<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<SuggestedPalette> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let length = length_u32;
-
-        let mut name = Vec::new();
-        loop {
-            let byte = reader.read_u8()?;
-            if byte == 0 {
-                break;
-            }
-
-            if !((32..=126).contains(&byte) || byte >= 161) {
-                log_warn!("Invalid character in sPLT name: {}, replacing with space", byte);
-                name.push(32);
-            }
-
-            name.push(byte);
-
-            if name.len() >= 79 {
-                log_warn!("sPLT name too long");
-                break;
-            }
-        }
-
-        let mut sample_depth = reader.read_u8()?;
-
-        if sample_depth != 8 && sample_depth != 16 {
-            log_warn!("Invalid sPLT sample depth: {}, assuming 8", sample_depth);
-            sample_depth = 8;
-        }
-
-        let entry_size = if sample_depth == 8 { 6 } else { 10 };
-        let remaining_bytes = length - (name.len() as u32 + 2);
-
-        if !remaining_bytes.is_multiple_of(entry_size as u32) {
-            log_warn!("Invalid sPLT chunk length");
-        }
-
-        let num_entries = remaining_bytes / entry_size as u32;
-
-        let mut entries = Vec::new();
-        for _ in 0..num_entries {
-            let (red, green, blue, alpha) = if sample_depth == 8 {
-                (reader.read_u8()? as u16, reader.read_u8()? as u16, reader.read_u8()? as u16, reader.read_u8()? as u16)
-            } else {
-                (reader.read_u16()?, reader.read_u16()?, reader.read_u16()?, reader.read_u16()?)
-            };
-            let frequency = reader.read_u16()?;
-
-            entries.push(SuggestedPaletteSample { red, green, blue, alpha, frequency });
-        }
-
-        let name_str = String::from_utf8_lossy(name.as_slice()).to_string();
-        let palette = SuggestedPalette { name: name_str, sample_depth, samples: entries };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::SPLT(SpltChunkData { palette: palette.clone(), crc }),
-        });
-
-        Ok(palette)
-    }
-
-    pub fn read_srgb<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<RenderingIntent> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let intent = match reader.read_u8()? {
-            0 => RenderingIntent::Perceptual,
-            1 => RenderingIntent::RelativeColorimetric,
-            2 => RenderingIntent::Saturation,
-            3 => RenderingIntent::AbsoluteColorimetric,
-            n => {
-                log_warn!("Invalid sRGB rendering intent: {}", n);
-                RenderingIntent::Perceptual
-            }
-        };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::SRGB(SrgbChunkData { rendering_intent: intent, crc }),
-        });
-
-        Ok(intent)
-    }
-
-    pub fn read_gama<R: Read + Seek>(reader: &mut BitReader<R>, chunks: &mut Vec<PngChunkInfo>) -> VexelResult<f32> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let gamma_int = reader.read_u32()?;
-        let gamma = gamma_int as f32 / 100000.0;
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::GAMA(GamaChunkData { gamma, gamma_raw: gamma_int, crc }),
-        });
-
-        Ok(gamma)
-    }
-
-    pub fn read_chrm<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<Chromaticities> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let mut buf = vec![0u8; length_u32 as usize];
-        reader.read_exact(&mut buf)?;
-
-        let read_u32_be = |buf: &[u8], offset: usize| -> u32 {
-            if offset + 4 <= buf.len() {
-                u32::from_be_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
-            } else {
-                0
-            }
-        };
-
-        let chromaticities = Chromaticities {
-            white_point_x: read_u32_be(&buf, 0) as f32 / 100000.0,
-            white_point_y: read_u32_be(&buf, 4) as f32 / 100000.0,
-            red_x: read_u32_be(&buf, 8) as f32 / 100000.0,
-            red_y: read_u32_be(&buf, 12) as f32 / 100000.0,
-            green_x: read_u32_be(&buf, 16) as f32 / 100000.0,
-            green_y: read_u32_be(&buf, 20) as f32 / 100000.0,
-            blue_x: read_u32_be(&buf, 24) as f32 / 100000.0,
-            blue_y: read_u32_be(&buf, 28) as f32 / 100000.0,
-        };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::CHRM(ChrmChunkData { chromaticities, crc }),
-        });
-
-        Ok(chromaticities)
-    }
-
-    pub fn read_trns<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        color_type: ColorType,
-        palette: Option<&Vec<[u8; 3]>>,
-    ) -> VexelResult<TransparencyData> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let length = length_u32;
-
-        let trns_data = match color_type {
-            ColorType::Grayscale => {
-                if length != 2 {
-                    log_warn!("Invalid tRNS length for grayscale");
-                }
-
-                let value = reader.read_u16()?;
-                TransparencyData::Grayscale(value)
-            }
-            ColorType::RGB => {
-                if length != 6 {
-                    log_warn!("Invalid tRNS length for RGB");
-                }
-
-                let r = reader.read_u16()?;
-                let g = reader.read_u16()?;
-                let b = reader.read_u16()?;
-
-                TransparencyData::RGB(r, g, b)
-            }
-            ColorType::Indexed => {
-                if palette.is_none() {
-                    log_warn!("tRNS chunk before PLTE chunk");
-                }
-
-                let clamped = (length as usize).min(256);
-                if length as usize > 256 {
-                    log_warn!("tRNS chunk length {} exceeds palette limit, clamping to 256", length);
-                }
-                let mut value = vec![0; clamped];
-                reader.read_exact(&mut value)?;
-
-                TransparencyData::Palette(value)
-            }
-            _ => {
-                log_warn!("tRNS chunk not allowed for color type {:?}", color_type);
-                TransparencyData::Grayscale(0)
-            }
-        };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::TRNS(TrnsChunkData { transparency: trns_data.clone(), crc }),
-        });
-
-        Ok(trns_data)
-    }
-
-    pub fn read_bkgd<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        color_type: ColorType,
-        palette: Option<&Vec<[u8; 3]>>,
-    ) -> VexelResult<BackgroundData> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let length = length_u32;
-
-        let background = match color_type {
-            ColorType::Grayscale | ColorType::GrayscaleAlpha => {
-                if length != 2 {
-                    log_warn!("Invalid bKGD length for grayscale");
-                }
-
-                let value = reader.read_u16()?;
-                BackgroundData::Grayscale(value)
-            }
-            ColorType::RGB | ColorType::RGBA => {
-                if length != 6 {
-                    log_warn!("Invalid bKGD length for RGB");
-                }
-
-                let r = reader.read_u16()?;
-                let g = reader.read_u16()?;
-                let b = reader.read_u16()?;
-
-                BackgroundData::RGB(r, g, b)
-            }
-            ColorType::Indexed => {
-                if length != 1 {
-                    log_warn!("Invalid bKGD length for indexed color");
-                }
-
-                if palette.is_none() {
-                    log_warn!("bKGD chunk before PLTE chunk");
-                }
-
-                let value = reader.read_u8()?;
-                BackgroundData::PaletteIndex(value)
-            }
-        };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::BKGD(BkgdChunkData { background: background.clone(), crc }),
-        });
-
-        Ok(background)
-    }
-
-    pub fn read_phys<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<PhysicalDimensions> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let pixels_per_unit_x = reader.read_u32()?;
-        let pixels_per_unit_y = reader.read_u32()?;
-        let unit_specifier = reader.read_u8()?;
-
-        let unit = match unit_specifier {
-            0 => PhysicalUnit::Unknown,
-            1 => PhysicalUnit::Meter,
-            _ => PhysicalUnit::Unknown,
-        };
-
-        let dimensions = PhysicalDimensions { pixels_per_unit_x, pixels_per_unit_y, unit };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::PHYS(PhysChunkData { physical_dimensions: dimensions.clone(), crc }),
-        });
-
-        Ok(dimensions)
-    }
-
-    pub fn read_sbit<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        color_type: ColorType,
-    ) -> VexelResult<SignificantBits> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let length = length_u32;
-
-        let clamped = (length as usize).min(4);
-        if length as usize > 4 {
-            log_warn!("sBIT chunk length {} exceeds maximum, clamping to 4", length);
-        }
-        let mut chunk_data = vec![0; clamped];
-        reader.read_exact(&mut chunk_data)?;
-
-        let sbit_data = match color_type {
-            ColorType::Grayscale => {
-                if length != 1 {
-                    log_warn!("Invalid sBIT length for grayscale: {}", length);
-                }
-
-                SignificantBits::Grayscale { gray: *chunk_data.first().unwrap_or(&0) }
-            }
-            ColorType::RGB => {
-                if length != 3 {
-                    log_warn!("Invalid sBIT length for RGB: {}", length);
-                }
-
-                SignificantBits::RGB {
-                    red: *chunk_data.first().unwrap_or(&0),
-                    green: *chunk_data.get(1).unwrap_or(&0),
-                    blue: *chunk_data.get(2).unwrap_or(&0),
-                }
-            }
-            ColorType::Indexed => {
-                if length != 3 {
-                    log_warn!("Invalid sBIT length for indexed color: {}", length);
-                }
-
-                SignificantBits::Indexed {
-                    red: *chunk_data.first().unwrap_or(&0),
-                    green: *chunk_data.get(1).unwrap_or(&0),
-                    blue: *chunk_data.get(2).unwrap_or(&0),
-                }
-            }
-            ColorType::GrayscaleAlpha => {
-                if length != 2 {
-                    log_warn!("Invalid sBIT length for grayscale alpha: {}", length);
-                }
-
-                SignificantBits::GrayscaleAlpha {
-                    gray: *chunk_data.first().unwrap_or(&0),
-                    alpha: *chunk_data.get(1).unwrap_or(&0),
-                }
-            }
-            ColorType::RGBA => {
-                if length != 4 {
-                    log_warn!("Invalid sBIT length for RGBA: {}", length);
-                }
-
-                SignificantBits::RGBA {
-                    red: *chunk_data.first().unwrap_or(&0),
-                    green: *chunk_data.get(1).unwrap_or(&0),
-                    blue: *chunk_data.get(2).unwrap_or(&0),
-                    alpha: *chunk_data.get(3).unwrap_or(&0),
-                }
-            }
-        };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::SBIT(SbitChunkData { significant_bits: sbit_data.clone(), crc }),
-        });
-
-        Ok(sbit_data)
-    }
-
-    pub fn read_hist<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        palette: Option<&Vec<[u8; 3]>>,
-    ) -> VexelResult<Vec<u16>> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        if palette.is_none() {
-            log_warn!("Encountered hIST chunk before PLTE chunk");
-            return Ok(Vec::new());
-        }
-
-        let palette_len = palette.unwrap().len();
-        let length = length_u32;
-
-        if length as usize != palette_len * 2 {
-            log_warn!("Invalid hIST length: {}, expected {}", length, palette_len * 2);
-        }
-
-        let entry_count = (length / 2) as usize;
-        let mut frequencies = Vec::new();
-
-        for _ in 0..entry_count {
-            frequencies.push(reader.read_u16()?);
-        }
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::HIST(HistChunkData { frequencies: frequencies.clone(), crc }),
-        });
-
-        Ok(frequencies)
-    }
-
-    pub fn read_time<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<ImageTime> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let year = reader.read_u16()?;
-        let month = reader.read_u8()?;
-        let day = reader.read_u8()?;
-        let hour = reader.read_u8()?;
-        let minute = reader.read_u8()?;
-        let second = reader.read_u8()?;
-
-        if !(1..=12).contains(&month) {
-            log_warn!("Invalid month in tIME chunk: {}", month);
-        }
-
-        if !(1..=31).contains(&day) {
-            log_warn!("Invalid day in tIME chunk: {}", day);
-        }
-
-        if hour > 23 {
-            log_warn!("Invalid hour in tIME chunk: {}", hour);
-        }
-
-        if minute > 59 {
-            log_warn!("Invalid minute in tIME chunk: {}", minute);
-        }
-
-        if second > 60 {
-            log_warn!("Invalid second in tIME chunk: {}", second);
-        }
-
-        let time = ImageTime { year, month, day, hour, minute, second };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::TIME(TimeChunkData { time: time.clone(), crc }),
-        });
-
-        Ok(time)
-    }
-
-    pub fn read_text<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        limits: &mut Limits,
-    ) -> VexelResult<PngText> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        limits.reserve(length_u32 as u64)?;
-        let length = length_u32;
-        let mut chunk_data = vec![0u8; length as usize];
-        reader.read_exact(&mut chunk_data)?;
-
-        let null_pos = chunk_data.iter().position(|&b| b == 0).unwrap_or(chunk_data.len());
-        let keyword = String::from_utf8_lossy(&chunk_data[..null_pos]).to_string();
-        let text_bytes = if null_pos + 1 < chunk_data.len() { &chunk_data[null_pos + 1..] } else { &[] };
-        let text = String::from_utf8_lossy(text_bytes).to_string();
-
-        let png_text = PngText::Basic { keyword: keyword.clone(), text: text.clone() };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::TEXT(TextChunkData { text: png_text.clone(), crc }),
-        });
-
-        Ok(png_text)
-    }
-
-    pub fn read_ztxt<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        limits: &mut Limits,
-    ) -> VexelResult<PngText> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        limits.reserve(length_u32 as u64)?;
-        let mut chunk_data = vec![0u8; length_u32 as usize];
-        reader.read_exact(&mut chunk_data)?;
-
-        let null_pos = chunk_data.iter().position(|&b| b == 0).unwrap_or(chunk_data.len());
-        let keyword = String::from_utf8_lossy(&chunk_data[..null_pos]).to_string();
-
-        let after_null = null_pos + 1;
-        let compression_method = chunk_data.get(after_null).copied().unwrap_or(0);
-
-        if compression_method != 0 {
-            log_warn!("Unknown compression method in zTXt chunk: {}", compression_method);
-            let png_text = PngText::Compressed { keyword, text: String::new() };
-            chunks.push(PngChunkInfo {
-                start_offset,
-                chunk_type: chunk_type_str,
-                length: length_u32,
-
-                data: PngChunkData::ZTXT(TextChunkData { text: png_text.clone(), crc }),
-            });
-            return Ok(png_text);
-        }
-
-        let compressed_text =
-            if after_null + 1 < chunk_data.len() { chunk_data[after_null + 1..].to_vec() } else { Vec::new() };
-
-        let max_decompress = decompress_ceiling(compressed_text.len(), MAX_DECOMPRESSED_TEXT, limits);
-        let text_bytes = ZlibDecoder::from_slice(&compressed_text).decode_with_max(max_decompress);
-        limits.free(length_u32 as u64);
-        limits.reserve_usize(text_bytes.len() * 3)?;
-
-        let text = String::from_utf8_lossy(&text_bytes).to_string();
-
-        let png_text = PngText::Compressed { keyword: keyword.clone(), text: text.clone() };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::ZTXT(TextChunkData { text: png_text.clone(), crc }),
-        });
-
-        Ok(png_text)
-    }
-
-    pub fn read_itxt<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        limits: &mut Limits,
-    ) -> VexelResult<PngText> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        limits.reserve(length_u32 as u64)?;
-        let mut chunk_data = vec![0u8; length_u32 as usize];
-        reader.read_exact(&mut chunk_data)?;
-
-        let mut pos = 0;
-
-        let kw_end = chunk_data[pos..].iter().position(|&b| b == 0).unwrap_or(chunk_data.len() - pos);
-        let keyword = String::from_utf8_lossy(&chunk_data[pos..pos + kw_end]).to_string();
-        pos += kw_end + 1;
-
-        let compression_flag = chunk_data.get(pos).copied().unwrap_or(0);
-        pos += 1;
-        let compression_method = chunk_data.get(pos).copied().unwrap_or(0);
-        pos += 1;
-
-        let lang_end = chunk_data[pos.min(chunk_data.len())..]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(chunk_data.len().saturating_sub(pos));
-        let language_tag = String::from_utf8_lossy(&chunk_data[pos..pos + lang_end]).to_string();
-        pos += lang_end + 1;
-
-        let trans_end = chunk_data[pos.min(chunk_data.len())..]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(chunk_data.len().saturating_sub(pos));
-        let translated_keyword = String::from_utf8_lossy(&chunk_data[pos..pos + trans_end]).to_string();
-        pos += trans_end + 1;
-
-        let text_bytes = if pos < chunk_data.len() { chunk_data[pos..].to_vec() } else { Vec::new() };
-
-        let text = if compression_flag == 1 {
-            if compression_method != 0 {
-                log_warn!("Invalid compression method in iTXt chunk: {}", compression_method);
-            }
-
-            let max_decompress = decompress_ceiling(text_bytes.len(), MAX_DECOMPRESSED_TEXT, limits);
-            let decompressed = ZlibDecoder::from_slice(&text_bytes).decode_with_max(max_decompress);
-            limits.free(length_u32 as u64);
-            limits.reserve_usize(decompressed.len() * 3)?;
-            String::from_utf8_lossy(&decompressed).to_string()
-        } else {
-            String::from_utf8_lossy(&text_bytes).to_string()
-        };
-
-        let png_text = PngText::International {
-            keyword: keyword.clone(),
-            language_tag: language_tag.clone(),
-            translated_keyword: translated_keyword.clone(),
-            text: text.clone(),
-        };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::ITXT(TextChunkData { text: png_text.clone(), crc }),
-        });
-
-        Ok(png_text)
-    }
-
-    pub fn read_actl<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-    ) -> VexelResult<ActlChunk> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let num_frames = reader.read_u32()?;
-        let num_plays = reader.read_u32()?;
-
-        if num_frames == 0 {
-            log_warn!("acTL chunk with zero frames");
-        }
-
-        let actl = ActlChunk { num_frames, num_plays };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::ACTL(ActlChunkData { actl: actl.clone(), crc }),
-        });
-
-        Ok(actl)
-    }
-
-    pub fn read_fctl<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        width: u32,
-        height: u32,
-        limits: &mut Limits,
-    ) -> VexelResult<FctlChunk> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let sequence_number = reader.read_u32()?;
-        let mut width_frame = reader.read_u32()?;
-        let mut height_frame = reader.read_u32()?;
-        let x_offset = reader.read_u32()?;
-        let y_offset = reader.read_u32()?;
-        let delay_num = reader.read_u16()?;
-        let delay_den = reader.read_u16()?;
-        let mut dispose_op = reader.read_u8()?;
-        let mut blend_op = reader.read_u8()?;
-
-        if x_offset.saturating_add(width_frame) > width {
-            log_warn!(format!(
-                "fcTL width would overflow actual image width, clamping: x_offset={}, width={}, image_width={}",
-                x_offset, width_frame, width
-            ));
-            width_frame = width.saturating_sub(x_offset);
-        }
-
-        if y_offset.saturating_add(height_frame) > height {
-            log_warn!(format!(
-                "fcTL height would overflow actual image height, clamping: y_offset={}, height={}, image_height={}",
-                y_offset, height_frame, height
-            ));
-            height_frame = height.saturating_sub(y_offset);
-        }
-
-        if width_frame == 0 || height_frame == 0 {
-            log_warn!(format!("Invalid fcTL parameters: width={}, height={}", width_frame, height_frame));
-        }
-
-        limits.reserve_buffer(width_frame, height_frame, 4)?;
-
-        if dispose_op > 2 {
-            log_warn!(format!("Invalid fcTL dispose_op: {}", dispose_op));
-            dispose_op = 0;
-        }
-
-        if blend_op > 1 {
-            log_warn!(format!("Invalid fcTL blend_op: {}", blend_op));
-            blend_op = 0;
-        }
-
-        let fctl = FctlChunk {
-            sequence_number,
-            width: width_frame,
-            height: height_frame,
-            x_offset,
-            y_offset,
-            delay_num,
-            delay_den,
-            dispose_op,
-            blend_op,
-        };
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::FCTL(FctlChunkData { fctl: fctl.clone(), crc }),
-        });
-
-        Ok(fctl)
-    }
-
-    pub fn read_fdat<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-        chunks: &mut Vec<PngChunkInfo>,
-        frames: &mut [PngFrame],
-        limits: &mut Limits,
-    ) -> VexelResult<()> {
-        let (start_offset, length_u32, chunk_type_str, crc) = capture_chunk_info(reader)?;
-
-        let length = length_u32.saturating_sub(4);
-
-        let sequence_number = reader.read_u32()?;
-
-        if frames.is_empty() {
-            log_warn!("fdAT chunk without preceding fcTL chunk");
-            return Ok(());
-        }
-
-        limits.reserve(length as u64)?;
-        let mut frame_data = vec![0; length as usize];
-        reader.read_exact(&mut frame_data)?;
-
-        if let Some(frame) = frames.last_mut() {
-            frame.fdat.extend(frame_data);
-        }
-
-        chunks.push(PngChunkInfo {
-            start_offset,
-            chunk_type: chunk_type_str,
-            length: length_u32,
-
-            data: PngChunkData::FDAT(FdatChunkData { sequence_number, data_length: length, crc }),
-        });
-
-        Ok(())
+    fn null_terminated(&mut self) -> &'a [u8] {
+        let rest = self.rest();
+        let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+        self.pos += end + 1;
+        &rest[..end]
     }
 }
 
@@ -996,108 +56,375 @@ fn decompress_ceiling(compressed_len: usize, absolute_max: usize, limits: &Limit
     }
 }
 
-fn capture_chunk_into<R: Read + Seek>(
-    reader: &mut BitReader<R>,
-    dst: &mut Vec<u8>,
-    limits: &mut Limits,
-    length_u32: u32,
-    chunk_type: [u8; 4],
-) -> VexelResult<(u64, u32, String, u32, usize, usize)> {
-    let start_offset = reader.stream_position()? - 8;
-    let chunk_type_str = String::from_utf8_lossy(&chunk_type).to_string();
-
-    limits.reserve(length_u32 as u64)?;
-
-    let data_start = dst.len();
-    dst.resize(data_start + length_u32 as usize, 0);
-
-    let mut total_read = 0;
-    while total_read < length_u32 as usize {
-        match reader.read(&mut dst[data_start + total_read..]) {
-            Ok(0) => break,
-            Ok(n) => total_read += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        }
+fn sanitized_keyword(bytes: &[u8], chunk_name: &str) -> String {
+    if bytes.len() > MAX_KEYWORD_LENGTH {
+        log_warn!("{} keyword too long ({} bytes)", chunk_name, bytes.len());
     }
 
-    if total_read < length_u32 as usize {
-        log_warn!("Truncated {} chunk: read {} of {} bytes", chunk_type_str, total_read, length_u32);
-        dst.truncate(data_start + total_read);
-    }
+    let sanitized: Vec<u8> = bytes
+        .iter()
+        .take(MAX_KEYWORD_LENGTH)
+        .map(|&byte| {
+            if (32..=126).contains(&byte) || byte >= 161 {
+                byte
+            } else {
+                log_warn!("Invalid character in {} keyword: {}, replacing with space", chunk_name, byte);
+                b' '
+            }
+        })
+        .collect();
 
-    let crc = reader.read_u32().unwrap_or(0);
-
-    const MAX_CRC_CHECK_SIZE: u32 = 64 * 1024 * 1024;
-    if length_u32 <= MAX_CRC_CHECK_SIZE {
-        let calculated_crc = CrcCalculator::new().calculate_crc_two_parts(&chunk_type, &dst[data_start..]);
-        if total_read == length_u32 as usize && calculated_crc != crc {
-            log_warn!(
-                "CRC mismatch for chunk {}: expected 0x{:08x}, calculated 0x{:08x}",
-                chunk_type_str,
-                crc,
-                calculated_crc
-            );
-        }
-    } else {
-        log_warn!("Chunk {} is too large for CRC validation ({} bytes), skipping", chunk_type_str, length_u32);
-    }
-
-    Ok((start_offset, length_u32, chunk_type_str, crc, data_start, total_read))
+    sanitized.iter().map(|&b| b as char).collect()
 }
 
-pub fn capture_chunk_info<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(u64, u32, String, u32)> {
-    let pos_before = reader.stream_position()?;
+fn decompress_text(compressed: &[u8], limits: &mut Limits) -> VexelResult<String> {
+    let max_decompress = decompress_ceiling(compressed.len(), MAX_DECOMPRESSED_TEXT, limits);
+    let text_bytes = ZlibDecoder::from_slice(compressed).decode_with_max(max_decompress);
+    limits.reserve_usize(text_bytes.len() * 3)?;
 
-    let start_offset = pos_before - 8;
+    Ok(String::from_utf8_lossy(&text_bytes).to_string())
+}
 
-    reader.seek(SeekFrom::Start(start_offset))?;
+pub fn parse_ihdr(data: &[u8]) -> IhdrChunk {
+    if data.len() < 13 {
+        log_warn!("IHDR chunk too short: {} bytes", data.len());
+    }
 
-    let length_u32 = reader.read_u32()?;
+    let mut cursor = ByteCursor::new(data);
+    IhdrChunk {
+        width: cursor.u32(),
+        height: cursor.u32(),
+        bit_depth: cursor.u8(),
+        color_type: cursor.u8(),
+        compression_method: cursor.u8(),
+        filter_method: cursor.u8(),
+        interlace_method: cursor.u8(),
+    }
+}
 
-    let mut chunk_type = vec![0; 4];
-    reader.read_exact(&mut chunk_type)?;
-    let chunk_type_str = String::from_utf8_lossy(&chunk_type).to_string();
+pub fn parse_plte(data: &[u8]) -> Vec<[u8; 3]> {
+    if !data.len().is_multiple_of(3) {
+        log_warn!("PLTE chunk length is not a multiple of 3");
+    }
 
-    const MAX_CRC_CHECK_SIZE: u32 = 64 * 1024 * 1024;
+    data.chunks_exact(3).map(|rgb| [rgb[0], rgb[1], rgb[2]]).collect()
+}
 
-    let crc = if length_u32 <= MAX_CRC_CHECK_SIZE {
-        let mut chunk_data = vec![0u8; length_u32 as usize];
-        let mut total_read = 0;
-        while total_read < chunk_data.len() {
-            match reader.read(&mut chunk_data[total_read..]) {
-                Ok(0) => break,
-                Ok(n) => total_read += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+pub fn parse_gama(data: &[u8]) -> GamaChunk {
+    let gamma_raw = ByteCursor::new(data).u32();
+    GamaChunk { gamma_raw, gamma: gamma_raw as f32 / 100000.0 }
+}
+
+pub fn parse_chrm(data: &[u8]) -> Chromaticities {
+    if data.len() < 32 {
+        log_warn!("cHRM chunk too short: {} bytes", data.len());
+    }
+
+    let mut cursor = ByteCursor::new(data);
+    let mut next = || cursor.u32() as f32 / 100000.0;
+    Chromaticities {
+        white_point_x: next(),
+        white_point_y: next(),
+        red_x: next(),
+        red_y: next(),
+        green_x: next(),
+        green_y: next(),
+        blue_x: next(),
+        blue_y: next(),
+    }
+}
+
+pub fn parse_trns(data: &[u8], color_type: ColorType, has_palette: bool) -> Option<TransparencyData> {
+    let mut cursor = ByteCursor::new(data);
+    match color_type {
+        ColorType::Grayscale => {
+            if data.len() != 2 {
+                log_warn!("Invalid tRNS length for grayscale");
             }
+            Some(TransparencyData::Grayscale(cursor.u16()))
         }
-
-        if total_read < chunk_data.len() {
-            chunk_data.truncate(total_read);
+        ColorType::RGB => {
+            if data.len() != 6 {
+                log_warn!("Invalid tRNS length for RGB");
+            }
+            Some(TransparencyData::RGB(cursor.u16(), cursor.u16(), cursor.u16()))
         }
-
-        let crc = reader.read_u32().unwrap_or(0);
-
-        let calculator = CrcCalculator::new();
-        let calculated_crc = calculator.calculate_crc_two_parts(&chunk_type, &chunk_data);
-
-        if total_read == length_u32 as usize && calculated_crc != crc {
-            log_warn!(
-                "CRC mismatch for chunk {}: expected 0x{:08x}, calculated 0x{:08x}",
-                chunk_type_str,
-                crc,
-                calculated_crc
-            );
+        ColorType::Indexed => {
+            if !has_palette {
+                log_warn!("tRNS chunk before PLTE chunk");
+            }
+            if data.len() > 256 {
+                log_warn!("tRNS chunk length {} exceeds palette limit, clamping to 256", data.len());
+            }
+            Some(TransparencyData::Palette(data[..data.len().min(256)].to_vec()))
         }
+        _ => {
+            log_warn!("tRNS chunk not allowed for color type {:?}", color_type);
+            None
+        }
+    }
+}
 
-        crc
-    } else {
-        log_warn!("Chunk {} is too large for CRC validation ({} bytes), skipping", chunk_type_str, length_u32);
-        0
+pub fn parse_bkgd(data: &[u8], color_type: ColorType, has_palette: bool) -> Option<BackgroundData> {
+    let mut cursor = ByteCursor::new(data);
+    let (expected, background) = match color_type {
+        ColorType::Grayscale | ColorType::GrayscaleAlpha => (2, BackgroundData::Grayscale(cursor.u16())),
+        ColorType::RGB | ColorType::RGBA => (6, BackgroundData::RGB(cursor.u16(), cursor.u16(), cursor.u16())),
+        ColorType::Indexed => {
+            if !has_palette {
+                log_warn!("bKGD chunk before PLTE chunk");
+            }
+            (1, BackgroundData::PaletteIndex(cursor.u8()))
+        }
     };
 
-    reader.seek(SeekFrom::Start(start_offset + 8))?;
+    if data.len() != expected {
+        log_warn!("Invalid bKGD length {} for color type {:?}", data.len(), color_type);
+    }
 
-    Ok((start_offset, length_u32, chunk_type_str, crc))
+    (!data.is_empty()).then_some(background)
+}
+
+pub fn parse_phys(data: &[u8]) -> PhysChunk {
+    let mut cursor = ByteCursor::new(data);
+    PhysChunk { pixels_per_unit_x: cursor.u32(), pixels_per_unit_y: cursor.u32(), unit: cursor.u8() }
+}
+
+pub fn parse_sbit(data: &[u8], color_type: ColorType) -> SignificantBits {
+    let expected = match color_type {
+        ColorType::Grayscale => 1,
+        ColorType::GrayscaleAlpha => 2,
+        ColorType::RGB | ColorType::Indexed => 3,
+        ColorType::RGBA => 4,
+    };
+    if data.len() != expected {
+        log_warn!("Invalid sBIT length {} for color type {:?}", data.len(), color_type);
+    }
+
+    let mut cursor = ByteCursor::new(data);
+    match color_type {
+        ColorType::Grayscale => SignificantBits::Grayscale { gray: cursor.u8() },
+        ColorType::RGB => SignificantBits::RGB { red: cursor.u8(), green: cursor.u8(), blue: cursor.u8() },
+        ColorType::Indexed => SignificantBits::Indexed { red: cursor.u8(), green: cursor.u8(), blue: cursor.u8() },
+        ColorType::GrayscaleAlpha => SignificantBits::GrayscaleAlpha { gray: cursor.u8(), alpha: cursor.u8() },
+        ColorType::RGBA => {
+            SignificantBits::RGBA { red: cursor.u8(), green: cursor.u8(), blue: cursor.u8(), alpha: cursor.u8() }
+        }
+    }
+}
+
+pub fn parse_hist(data: &[u8], palette_len: Option<usize>) -> Vec<u16> {
+    match palette_len {
+        None => log_warn!("Encountered hIST chunk before PLTE chunk"),
+        Some(len) if data.len() != len * 2 => {
+            log_warn!("Invalid hIST length: {}, expected {}", data.len(), len * 2);
+        }
+        Some(_) => {}
+    }
+
+    data.chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]])).collect()
+}
+
+pub fn parse_time(data: &[u8]) -> ImageTime {
+    let mut cursor = ByteCursor::new(data);
+    let time = ImageTime {
+        year: cursor.u16(),
+        month: cursor.u8(),
+        day: cursor.u8(),
+        hour: cursor.u8(),
+        minute: cursor.u8(),
+        second: cursor.u8(),
+    };
+
+    if !(1..=12).contains(&time.month) {
+        log_warn!("Invalid month in tIME chunk: {}", time.month);
+    }
+    if !(1..=31).contains(&time.day) {
+        log_warn!("Invalid day in tIME chunk: {}", time.day);
+    }
+    if time.hour > 23 {
+        log_warn!("Invalid hour in tIME chunk: {}", time.hour);
+    }
+    if time.minute > 59 {
+        log_warn!("Invalid minute in tIME chunk: {}", time.minute);
+    }
+    if time.second > 60 {
+        log_warn!("Invalid second in tIME chunk: {}", time.second);
+    }
+
+    time
+}
+
+pub fn parse_splt(data: &[u8]) -> SuggestedPalette {
+    let mut cursor = ByteCursor::new(data);
+    let name = sanitized_keyword(cursor.null_terminated(), "sPLT");
+
+    let mut sample_depth = cursor.u8();
+    if sample_depth != 8 && sample_depth != 16 {
+        log_warn!("Invalid sPLT sample depth: {}, assuming 8", sample_depth);
+        sample_depth = 8;
+    }
+
+    let entry_size = if sample_depth == 8 { 6 } else { 10 };
+    let entries = cursor.rest();
+    if !entries.len().is_multiple_of(entry_size) {
+        log_warn!("Invalid sPLT chunk length");
+    }
+
+    let samples = entries
+        .chunks_exact(entry_size)
+        .map(|entry| {
+            let mut cursor = ByteCursor::new(entry);
+            let (red, green, blue, alpha) = if sample_depth == 8 {
+                (cursor.u8() as u16, cursor.u8() as u16, cursor.u8() as u16, cursor.u8() as u16)
+            } else {
+                (cursor.u16(), cursor.u16(), cursor.u16(), cursor.u16())
+            };
+            SuggestedPaletteSample { red, green, blue, alpha, frequency: cursor.u16() }
+        })
+        .collect();
+
+    SuggestedPalette { name, sample_depth, samples }
+}
+
+pub fn parse_srgb(data: &[u8]) -> SrgbChunk {
+    let rendering_intent = ByteCursor::new(data).u8();
+    if rendering_intent > 3 {
+        log_warn!("Invalid sRGB rendering intent: {}", rendering_intent);
+    }
+    SrgbChunk { rendering_intent }
+}
+
+pub fn parse_text(data: &[u8]) -> TextChunk {
+    let mut cursor = ByteCursor::new(data);
+    let keyword = String::from_utf8_lossy(cursor.null_terminated()).to_string();
+    let text = String::from_utf8_lossy(cursor.rest()).to_string();
+    TextChunk { keyword, text }
+}
+
+pub fn parse_ztxt(data: &[u8], limits: &mut Limits) -> VexelResult<CompressedTextChunk> {
+    let mut cursor = ByteCursor::new(data);
+    let keyword = String::from_utf8_lossy(cursor.null_terminated()).to_string();
+    let compression_method = cursor.u8();
+
+    if compression_method != 0 {
+        log_warn!("Unknown compression method in zTXt chunk: {}", compression_method);
+        return Ok(CompressedTextChunk { keyword, compression_method, text: String::new() });
+    }
+
+    let text = decompress_text(cursor.rest(), limits)?;
+    Ok(CompressedTextChunk { keyword, compression_method, text })
+}
+
+pub fn parse_itxt(data: &[u8], limits: &mut Limits) -> VexelResult<InternationalTextChunk> {
+    let mut cursor = ByteCursor::new(data);
+    let keyword = String::from_utf8_lossy(cursor.null_terminated()).to_string();
+    let compressed = cursor.u8() == 1;
+    let compression_method = cursor.u8();
+    let language_tag = String::from_utf8_lossy(cursor.null_terminated()).to_string();
+    let translated_keyword = String::from_utf8_lossy(cursor.null_terminated()).to_string();
+
+    let text = if compressed {
+        if compression_method != 0 {
+            log_warn!("Invalid compression method in iTXt chunk: {}", compression_method);
+        }
+        decompress_text(cursor.rest(), limits)?
+    } else {
+        String::from_utf8_lossy(cursor.rest()).to_string()
+    };
+
+    Ok(InternationalTextChunk { keyword, compressed, compression_method, language_tag, translated_keyword, text })
+}
+
+pub fn parse_iccp(data: &[u8], limits: &mut Limits) -> VexelResult<(IccpChunk, Option<ICCProfile>)> {
+    let mut cursor = ByteCursor::new(data);
+    let profile_name = sanitized_keyword(cursor.null_terminated(), "iCCP");
+    let compression_method = cursor.u8();
+
+    if compression_method != 0 {
+        log_warn!("Invalid compression method in iCCP chunk: {}", compression_method);
+    }
+
+    let compressed = cursor.rest();
+    let max_decompress = decompress_ceiling(compressed.len(), MAX_DECOMPRESSED_ICC, limits);
+    let profile_data = ZlibDecoder::from_slice(compressed).decode_with_max(max_decompress);
+    limits.reserve_usize(profile_data.len())?;
+
+    let profile = match ICCProfile::new(&profile_data) {
+        Ok(profile) => Some(profile),
+        Err(e) => {
+            log_warn!("Failed to parse iCCP profile: {}", e);
+            None
+        }
+    };
+
+    let chunk = IccpChunk {
+        profile_name,
+        compression_method,
+        compressed_length: compressed.len() as u64,
+        profile_length: (!profile_data.is_empty()).then_some(profile_data.len() as u64),
+        profile_parsed: profile.is_some(),
+    };
+
+    Ok((chunk, profile))
+}
+
+pub fn parse_actl(data: &[u8]) -> ActlChunk {
+    let mut cursor = ByteCursor::new(data);
+    let actl = ActlChunk { num_frames: cursor.u32(), num_plays: cursor.u32() };
+    if actl.num_frames == 0 {
+        log_warn!("acTL chunk with zero frames");
+    }
+    actl
+}
+
+pub fn parse_fctl(data: &[u8]) -> FctlChunk {
+    let mut cursor = ByteCursor::new(data);
+    FctlChunk {
+        sequence_number: cursor.u32(),
+        width: cursor.u32(),
+        height: cursor.u32(),
+        x_offset: cursor.u32(),
+        y_offset: cursor.u32(),
+        delay_num: cursor.u16(),
+        delay_den: cursor.u16(),
+        dispose_op: cursor.u8(),
+        blend_op: cursor.u8(),
+    }
+}
+
+pub fn sanitize_fctl(fctl: &FctlChunk, width: u32, height: u32) -> FctlChunk {
+    let mut sanitized = fctl.clone();
+
+    if fctl.x_offset.saturating_add(fctl.width) > width {
+        log_warn!(format!(
+            "fcTL width would overflow actual image width, clamping: x_offset={}, width={}, image_width={}",
+            fctl.x_offset, fctl.width, width
+        ));
+        sanitized.width = width.saturating_sub(fctl.x_offset);
+    }
+
+    if fctl.y_offset.saturating_add(fctl.height) > height {
+        log_warn!(format!(
+            "fcTL height would overflow actual image height, clamping: y_offset={}, height={}, image_height={}",
+            fctl.y_offset, fctl.height, height
+        ));
+        sanitized.height = height.saturating_sub(fctl.y_offset);
+    }
+
+    if sanitized.width == 0 || sanitized.height == 0 {
+        log_warn!(format!("Invalid fcTL parameters: width={}, height={}", sanitized.width, sanitized.height));
+    }
+
+    if fctl.dispose_op > 2 {
+        log_warn!(format!("Invalid fcTL dispose_op: {}", fctl.dispose_op));
+        sanitized.dispose_op = 0;
+    }
+
+    if fctl.blend_op > 1 {
+        log_warn!(format!("Invalid fcTL blend_op: {}", fctl.blend_op));
+        sanitized.blend_op = 0;
+    }
+
+    sanitized
 }

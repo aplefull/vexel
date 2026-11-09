@@ -70,7 +70,9 @@ impl SegmentType {
 #[derive(Clone, Debug)]
 pub struct SegmentHeader {
     pub number: u32,
+    pub flags: u8,
     pub segment_type: SegmentType,
+    pub retention: Vec<bool>,
     pub referred_to: Vec<u32>,
     pub page_association: u32,
     pub data_length: u32,
@@ -88,12 +90,12 @@ pub fn parse_segment_header(data: &[u8]) -> Option<SegmentHeader> {
     let page_association_size = if flags & 0x40 != 0 { 4 } else { 1 };
 
     let rtscarf = data[5];
-    let (referred_count, mut offset) = if (rtscarf & 0xe0) == 0xe0 {
+    let (referred_count, retention_start, mut offset) = if (rtscarf & 0xe0) == 0xe0 {
         let long = u32::from_be_bytes([data[5], data[6], data[7], data[8]]);
         let count = long & 0x1fff_ffff;
-        (count, 5 + 4 + (count as usize + 8) / 8)
+        (count, 9, 5 + 4 + (count as usize + 8) / 8)
     } else {
-        ((rtscarf >> 5) as u32, 6)
+        ((rtscarf >> 5) as u32, 5, 6)
     };
 
     let referred_size = if number <= 256 {
@@ -111,6 +113,12 @@ pub fn parse_segment_header(data: &[u8]) -> Option<SegmentHeader> {
     if needed > data.len() {
         return None;
     }
+
+    let retention = if retention_start == 5 {
+        (0..=referred_count as usize).map(|bit| rtscarf & (1 << bit) != 0).collect()
+    } else {
+        (0..=referred_count as usize).map(|bit| data[retention_start + bit / 8] & (1 << (bit % 8)) != 0).collect()
+    };
 
     let mut referred_to = Vec::with_capacity(referred_count as usize);
     for _ in 0..referred_count {
@@ -136,7 +144,16 @@ pub fn parse_segment_header(data: &[u8]) -> Option<SegmentHeader> {
     let data_length = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
     offset += 4;
 
-    Some(SegmentHeader { number, segment_type, referred_to, page_association, data_length, header_length: offset })
+    Some(SegmentHeader {
+        number,
+        flags,
+        segment_type,
+        retention,
+        referred_to,
+        page_association,
+        data_length,
+        header_length: offset,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -13,14 +13,15 @@ pub(crate) use utils::bitreader;
 pub use utils::error::{VexelError, VexelResult};
 pub use utils::frames::Frames;
 use utils::frames::{BufferedFrames, SingleFrame};
-pub use utils::icc;
 pub use utils::icc::ICCProfile;
 pub use utils::image::{Image, ImageFormat, ImageFrame, PixelData, PixelFormat};
 pub use utils::info::ImageInfo;
 pub use utils::limits::Limits;
 pub(crate) use utils::logger::{log_debug, log_error, log_warn};
 pub use utils::logger::{set_log_level, LogLevel};
+pub use utils::{icc, info};
 use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::{JsCast, JsValue};
 #[cfg(all(target_arch = "wasm32", feature = "rayon"))]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
@@ -285,16 +286,27 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         self.format.clone()
     }
 
-    /// Returns format-specific metadata collected during the last [`decode`](Self::decode) call.
+    /// Returns format-specific metadata for the image.
     ///
-    /// Metadata is populated as a side effect of decoding, so [`decode`](Self::decode) must be
-    /// called first. Calling `get_info` before `decode` returns an empty or zeroed struct.
-    /// The returned [`ImageInfo`] variant matches the detected format.
+    /// Metadata comes from a header walk and does not require a [`decode`](Self::decode).
+    /// The result is cached by the decoder. The returned [`ImageInfo`] variant matches the
+    /// detected format.
     pub fn get_info(&mut self) -> ImageInfo {
-        match self.decoder.as_dyn() {
-            Some(decoder) => decoder.get_info(),
-            None => ImageInfo::Unknown,
-        }
+        let decoder = &mut self.decoder;
+        let result = catch_decoder_panic(move || {
+            Ok(match decoder.as_dyn() {
+                Some(decoder) => decoder.get_info(),
+                None => ImageInfo::Unknown,
+            })
+        });
+
+        result.unwrap_or_else(|e| {
+            log_warn!("Failed to collect image info: {}", e);
+            if let Some(decoder) = self.decoder.as_dyn() {
+                decoder.set_limits(self.limits.clone());
+            }
+            ImageInfo::Unknown
+        })
     }
 
     /// Returns `true` if the detected format can contain multiple pages and the
@@ -549,6 +561,28 @@ extern "C" {
     fn performance_now() -> f64;
 }
 
+fn bigints_to_numbers(value: &JsValue) -> JsValue {
+    if value.is_bigint() {
+        let digits = value.unchecked_ref::<js_sys::BigInt>().to_string(10).ok().map(String::from);
+        return JsValue::from_f64(digits.and_then(|digits| digits.parse().ok()).unwrap_or(f64::NAN));
+    }
+
+    if js_sys::Array::is_array(value) {
+        let array = value.unchecked_ref::<js_sys::Array>();
+        for index in 0..array.length() {
+            array.set(index, bigints_to_numbers(&array.get(index)));
+        }
+    } else if value.is_object() {
+        for key in js_sys::Object::keys(value.unchecked_ref::<js_sys::Object>()).iter() {
+            if let Ok(field) = js_sys::Reflect::get(value, &key) {
+                let _ = js_sys::Reflect::set(value, &key, &bigints_to_numbers(&field));
+            }
+        }
+    }
+
+    value.clone()
+}
+
 fn pixels_to_js(pixels: PixelData) -> Uint8ClampedArray {
     let bytes = pixels.into_rgba8_bytes();
     let array = Uint8ClampedArray::new_with_length(bytes.len() as u32);
@@ -687,12 +721,17 @@ impl WasmDecoder {
         self.timings.into_ts().map_err(|e| e.to_string())
     }
 
-    /// Returns format-specific metadata collected during the last `decode` call.
-    ///
-    /// `decode` must be called first; calling `getInfo` before it returns an empty struct.
+    /// Returns format-specific metadata for the image.
     #[wasm_bindgen(js_name = getInfo)]
     pub fn get_info(&mut self) -> Result<Ts<ImageInfo>, String> {
-        self.decoder.get_info().into_ts().map_err(|e| e.to_string())
+        let info = self.decoder.get_info();
+        info.into_ts().or_else(|_| {
+            let serializer = serde_wasm_bindgen::Serializer::new()
+                .serialize_missing_as_null(true)
+                .serialize_large_number_types_as_bigints(true);
+            let value = info.serialize(&serializer).map_err(|e| e.to_string())?;
+            Ok(Ts::new_unchecked(bigints_to_numbers(&value)))
+        })
     }
 
     /// Detects the image format from `data` without decoding it.

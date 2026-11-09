@@ -1,6 +1,6 @@
 use crate::decoders::exr::types::{
-    Box2i, ExrAttributeInfo, ExrChannel, ExrCompression, ExrPixelType, LevelMode, LineOrder, PartHeader, PartKind,
-    TileDesc, EXR_MAGIC, VERSION_FLAG_DEEP, VERSION_FLAG_MULTIPART, VERSION_FLAG_TILED,
+    Box2i, ExrChannel, ExrCompression, ExrPixelType, LevelMode, PartHeader, PartKind, TileDesc, EXR_MAGIC,
+    VERSION_FLAG_DEEP, VERSION_FLAG_MULTIPART, VERSION_FLAG_TILED,
 };
 use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
@@ -85,14 +85,12 @@ impl<'a> ByteCursor<'a> {
 }
 
 pub struct ExrFile {
-    pub version: i32,
     pub multipart: bool,
     pub parts: Vec<ExrPart>,
 }
 
 pub struct ExrPart {
     pub header: PartHeader,
-    pub chunk_count: u32,
     pub chunk_offsets: Vec<u64>,
 }
 
@@ -167,10 +165,10 @@ pub fn parse(data: &[u8]) -> VexelResult<ExrFile> {
             chunk_offsets.push(cursor.read_u64()?);
         }
 
-        parts.push(ExrPart { header, chunk_count: chunk_count as u32, chunk_offsets });
+        parts.push(ExrPart { header, chunk_offsets });
     }
 
-    Ok(ExrFile { version, multipart, parts })
+    Ok(ExrFile { multipart, parts })
 }
 
 fn parse_header(
@@ -185,13 +183,10 @@ fn parse_header(
     let mut data_window = Box2i { x_min: 0, y_min: 0, x_max: 0, y_max: 0 };
     let mut have_data_window = false;
     let mut display_window = Box2i { x_min: 0, y_min: 0, x_max: 0, y_max: 0 };
-    let mut line_order = LineOrder::IncreasingY;
     let mut tiles = None;
     let mut chunk_count = None;
     let mut part_type: Option<String> = None;
-    let mut name = None;
     let mut chromaticities = None;
-    let mut attributes = Vec::new();
 
     loop {
         let attr_name = cursor.read_cstring(MAX_NAME_LENGTH)?;
@@ -234,8 +229,6 @@ fn parse_header(
             size as usize
         };
 
-        attributes.push(ExrAttributeInfo { name: attr_name.clone(), attr_type: attr_type.clone(), size: size as u32 });
-
         let value = cursor.read_bytes(size)?;
         let mut value_cursor = ByteCursor::new(value);
 
@@ -253,9 +246,6 @@ fn parse_header(
             }
             ("displayWindow", "box2i") => {
                 display_window = parse_box2i(&mut value_cursor)?;
-            }
-            ("lineOrder", "lineOrder") => {
-                line_order = LineOrder::from_u8(value_cursor.read_u8()?);
             }
             ("tiles", "tiledesc") => {
                 let x_size = value_cursor.read_u32()?;
@@ -281,9 +271,6 @@ fn parse_header(
                 if count >= 0 {
                     chunk_count = Some(count as u32);
                 }
-            }
-            ("name", "string") => {
-                name = Some(String::from_utf8_lossy(value).into_owned());
             }
             ("chromaticities", "chromaticities") => {
                 let mut values = [0f32; 8];
@@ -350,22 +337,10 @@ fn parse_header(
         tiles = Some(TileDesc { x_size: 64, y_size: 64, level_mode: LevelMode::OneLevel, round_up: false });
     }
 
-    Ok(PartHeader {
-        name,
-        kind,
-        channels,
-        compression,
-        data_window,
-        display_window,
-        line_order,
-        tiles,
-        chunk_count,
-        chromaticities,
-        attributes,
-    })
+    Ok(PartHeader { kind, channels, compression, data_window, display_window, tiles, chunk_count, chromaticities })
 }
 
-fn fixed_attr_size(attr_type: &str) -> Option<usize> {
+pub(super) fn fixed_attr_size(attr_type: &str) -> Option<usize> {
     match attr_type {
         "compression" | "lineOrder" | "envmap" | "deepImageState" => Some(1),
         "half" => Some(2),
@@ -385,7 +360,7 @@ fn fixed_attr_size(attr_type: &str) -> Option<usize> {
     }
 }
 
-fn scan_chlist_size(data: &[u8]) -> Option<usize> {
+pub(super) fn scan_chlist_size(data: &[u8]) -> Option<usize> {
     let mut pos = 0;
     loop {
         match data.get(pos) {
@@ -518,7 +493,7 @@ pub fn tile_level_dimensions(header: &PartHeader) -> Vec<(u32, u32, i64, i64)> {
     levels
 }
 
-fn compute_chunk_count(header: &PartHeader) -> u64 {
+pub(super) fn compute_chunk_count(header: &PartHeader) -> u64 {
     let h = header.data_window.height();
     let w = header.data_window.width();
     if h <= 0 || w <= 0 {
@@ -538,9 +513,9 @@ fn compute_chunk_count(header: &PartHeader) -> u64 {
             .map(|(_, _, lw, lh)| {
                 let nx = (lw + tw - 1) / tw;
                 let ny = (lh + th - 1) / th;
-                (nx * ny) as u64
+                nx.saturating_mul(ny).max(0) as u64
             })
-            .sum()
+            .fold(0u64, u64::saturating_add)
     } else {
         let lines = match header.kind {
             PartKind::DeepScanline => 1,

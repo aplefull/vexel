@@ -5,7 +5,6 @@ use crate::log_warn;
 pub struct HeaderParse {
     pub config: Config,
     pub image: ImageParams,
-    pub markers: Vec<JpegXsMarkerInfo>,
     pub saw_pih: bool,
     pub saw_cdt: bool,
 }
@@ -29,16 +28,10 @@ fn marker_name(marker: u16) -> &'static str {
 }
 
 pub fn parse_header(reader: &mut XsBitReader) -> HeaderParse {
-    let mut out = HeaderParse {
-        config: Config::default(),
-        image: ImageParams::default(),
-        markers: Vec::new(),
-        saw_pih: false,
-        saw_cdt: false,
-    };
+    let mut out =
+        HeaderParse { config: Config::default(), image: ImageParams::default(), saw_pih: false, saw_cdt: false };
 
     if reader.peek(16) as u16 == MARKER_SOC {
-        out.markers.push(JpegXsMarkerInfo { offset: 0, marker: "SOC".to_string(), length: 2 });
         reader.read(16);
     } else {
         log_warn!("JPEG XS: missing SOC marker, attempting to continue");
@@ -61,12 +54,9 @@ pub fn parse_header(reader: &mut XsBitReader) -> HeaderParse {
             break;
         }
 
-        let offset = reader.consumed_bits() / 8;
         reader.read(16);
 
         let length = if reader.can_peek(16) { reader.peek(16) as u32 } else { 0 };
-
-        out.markers.push(JpegXsMarkerInfo { offset, marker: marker_name(marker).to_string(), length });
 
         let segment_start = reader.consumed_bits();
 

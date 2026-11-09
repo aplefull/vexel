@@ -50,8 +50,9 @@ impl JlsBitReader {
     }
 
     pub fn fill_buffer(&mut self, no: i32) {
-        self.reg <<= no;
-        self.bits += no;
+        let no = no.clamp(0, 32);
+        self.reg = self.reg.checked_shl(no as u32).unwrap_or(0);
+        self.bits = (self.bits + no).min(31);
 
         while self.bits >= 0 {
             let x = self.get_byte();
@@ -77,7 +78,7 @@ impl JlsBitReader {
     }
 
     pub fn get_bits(&mut self, n: i32) -> u32 {
-        let val = self.reg >> (32 - n);
+        let val = self.reg.checked_shr((32 - n.clamp(0, 32)) as u32).unwrap_or(0);
         self.fill_buffer(n);
         val
     }

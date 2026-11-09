@@ -1,6 +1,3 @@
-use serde::Serialize;
-use tsify::Tsify;
-
 pub const EXR_MAGIC: [u8; 4] = [0x76, 0x2F, 0x31, 0x01];
 
 pub const VERSION_FLAG_TILED: i32 = 0x200;
@@ -129,31 +126,6 @@ impl ExrCompression {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LineOrder {
-    IncreasingY,
-    DecreasingY,
-    RandomY,
-}
-
-impl LineOrder {
-    pub fn from_u8(value: u8) -> LineOrder {
-        match value {
-            1 => LineOrder::DecreasingY,
-            2 => LineOrder::RandomY,
-            _ => LineOrder::IncreasingY,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            LineOrder::IncreasingY => "increasing y",
-            LineOrder::DecreasingY => "decreasing y",
-            LineOrder::RandomY => "random y",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelMode {
     OneLevel,
     Mipmap,
@@ -234,17 +206,14 @@ impl Box2i {
 
 #[derive(Debug, Clone)]
 pub struct PartHeader {
-    pub name: Option<String>,
     pub kind: PartKind,
     pub channels: Vec<ExrChannel>,
     pub compression: ExrCompression,
     pub data_window: Box2i,
     pub display_window: Box2i,
-    pub line_order: LineOrder,
     pub tiles: Option<TileDesc>,
     pub chunk_count: Option<u32>,
     pub chromaticities: Option<[f32; 8]>,
-    pub attributes: Vec<ExrAttributeInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -254,37 +223,4 @@ pub struct ChunkChannel {
     pub bpe: usize,
     pub pixel_type: ExrPixelType,
     pub p_linear: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct ExrAttributeInfo {
-    pub name: String,
-    pub attr_type: String,
-    pub size: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct ExrChannelInfo {
-    pub name: String,
-    pub pixel_type: String,
-    pub x_sampling: i32,
-    pub y_sampling: i32,
-    pub p_linear: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
-pub struct ExrPartInfo {
-    pub name: Option<String>,
-    pub part_type: String,
-    pub compression: String,
-    pub width: u32,
-    pub height: u32,
-    pub data_window: [i32; 4],
-    pub display_window: [i32; 4],
-    pub line_order: String,
-    pub tile_size: Option<[u32; 2]>,
-    pub chunk_count: u32,
-    pub channels: Vec<ExrChannelInfo>,
-    pub attributes: Vec<ExrAttributeInfo>,
 }

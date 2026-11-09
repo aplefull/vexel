@@ -4,15 +4,13 @@ use crate::decoders::exr::compression::{b44_decompress, pxr24_reconstruct, rle_d
 use crate::decoders::exr::deep::{self, DeepChunkPixels};
 use crate::decoders::exr::dwa::dwa_decompress;
 use crate::decoders::exr::htj2k::htj2k_decompress;
-use crate::decoders::exr::parser::{self, ByteCursor, ExrFile, ExrPart};
+use crate::decoders::exr::info::{scan, ExrInfo};
+use crate::decoders::exr::parser::{self, ByteCursor, ExrFile};
 use crate::decoders::exr::piz::piz_decompress;
-use crate::decoders::exr::types::{
-    Box2i, ChunkChannel, ExrChannelInfo, ExrCompression, ExrPartInfo, ExrPixelType, PartHeader,
-};
+use crate::decoders::exr::types::{Box2i, ChunkChannel, ExrCompression, ExrPixelType, PartHeader};
 use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, PixelData};
-use crate::utils::info::ExrInfo;
 use crate::utils::tiff::color::half_to_f32;
 use crate::{log_debug, log_warn, Limits};
 
@@ -23,7 +21,7 @@ pub struct ExrDecoder<R: Read + Seek> {
     limits: Limits,
     data: Vec<u8>,
     file: Option<ExrFile>,
-    info: ExrInfo,
+    info: Option<ExrInfo>,
 }
 
 struct Plane {
@@ -71,21 +69,30 @@ fn is_sampled(v: i64, sampling: i64) -> bool {
 
 impl<R: Read + Seek> ExrDecoder<R> {
     pub fn new(reader: R) -> Self {
-        Self {
-            reader,
-            limits: Limits::default(),
-            data: Vec::new(),
-            file: None,
-            info: ExrInfo { version: 0, multipart: false, parts: Vec::new() },
-        }
+        Self { reader, limits: Limits::default(), data: Vec::new(), file: None, info: None }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> ExrInfo {
-        self.info.clone()
+    pub fn get_info(&mut self) -> ExrInfo {
+        if self.info.is_none() {
+            if self.data.is_empty() {
+                let saved_pos = self.reader.stream_position().unwrap_or(0);
+                let mut data = Vec::new();
+                let read = self.reader.seek(SeekFrom::Start(0)).and_then(|_| self.reader.read_to_end(&mut data));
+                let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+                match read {
+                    Ok(_) => self.info = Some(scan(&data)),
+                    Err(e) => log_warn!("Failed to read EXR data: {}", e),
+                }
+            } else {
+                self.info = Some(scan(&self.data));
+            }
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
     fn load(&mut self) -> VexelResult<()> {
@@ -99,13 +106,6 @@ impl<R: Read + Seek> ExrDecoder<R> {
         self.data = data;
 
         let file = parser::parse(&self.data)?;
-
-        self.info = ExrInfo {
-            version: file.version,
-            multipart: file.multipart,
-            parts: file.parts.iter().map(build_part_info).collect(),
-        };
-
         self.file = Some(file);
         Ok(())
     }
@@ -701,17 +701,17 @@ fn channel_layer(name: &str) -> &str {
     }
 }
 
-struct ChannelSelection {
-    r: Option<usize>,
-    g: Option<usize>,
-    b: Option<usize>,
-    a: Option<usize>,
-    y: Option<usize>,
-    ry: Option<usize>,
-    by: Option<usize>,
+pub(super) struct ChannelSelection {
+    pub r: Option<usize>,
+    pub g: Option<usize>,
+    pub b: Option<usize>,
+    pub a: Option<usize>,
+    pub y: Option<usize>,
+    pub ry: Option<usize>,
+    pub by: Option<usize>,
 }
 
-fn select_channels(header: &PartHeader) -> ChannelSelection {
+pub(super) fn select_channels(header: &PartHeader) -> ChannelSelection {
     let mut selection = ChannelSelection { r: None, g: None, b: None, a: None, y: None, ry: None, by: None };
 
     let layers: Vec<&str> = header.channels.iter().map(|c| channel_layer(&c.name)).collect();
@@ -927,39 +927,4 @@ fn build_image(header: &PartHeader, planes: Vec<Plane>, width: u32, height: u32)
     };
 
     Ok(Image::from_pixels(width, height, pixels))
-}
-
-fn build_part_info(part: &ExrPart) -> ExrPartInfo {
-    let header = &part.header;
-    let dw = header.data_window;
-
-    ExrPartInfo {
-        name: header.name.clone(),
-        part_type: header.kind.name().to_string(),
-        compression: header.compression.name(),
-        width: dw.width().clamp(0, u32::MAX as i64) as u32,
-        height: dw.height().clamp(0, u32::MAX as i64) as u32,
-        data_window: [dw.x_min, dw.y_min, dw.x_max, dw.y_max],
-        display_window: [
-            header.display_window.x_min,
-            header.display_window.y_min,
-            header.display_window.x_max,
-            header.display_window.y_max,
-        ],
-        line_order: header.line_order.name().to_string(),
-        tile_size: header.tiles.map(|t| [t.x_size, t.y_size]),
-        chunk_count: part.chunk_count,
-        channels: header
-            .channels
-            .iter()
-            .map(|c| ExrChannelInfo {
-                name: c.name.clone(),
-                pixel_type: c.pixel_type.name().to_string(),
-                x_sampling: c.x_sampling,
-                y_sampling: c.y_sampling,
-                p_linear: c.p_linear,
-            })
-            .collect(),
-        attributes: header.attributes.clone(),
-    }
 }

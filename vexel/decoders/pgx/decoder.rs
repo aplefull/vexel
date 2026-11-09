@@ -1,11 +1,11 @@
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
+use super::info::{PgxByteOrder, PgxHeader, PgxInfo, PgxPixelData, PgxSection};
 use super::simd::{unpack_u16, unpack_u8};
-use super::types::{PgxByteOrder, PgxHeaderData, PgxPixelDataInfo, PgxSectionData, PgxSectionInfo};
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
-use crate::utils::info::PgxInfo;
+use crate::utils::info::{ColorModel, DataExtent, ImageSummary, SampleFormat};
 use crate::{log_warn, Image, Limits};
 
 pub const MAGIC: &[u8; 2] = b"PG";
@@ -20,7 +20,7 @@ pub struct PgxDecoder<R: Read + Seek> {
     byte_order: PgxByteOrder,
     limits: Limits,
     reader: BitReader<R>,
-    sections: Vec<PgxSectionInfo>,
+    info: Option<PgxInfo>,
 }
 
 impl<R: Read + Seek> PgxDecoder<R> {
@@ -33,7 +33,7 @@ impl<R: Read + Seek> PgxDecoder<R> {
             byte_order: PgxByteOrder::BigEndian,
             limits: Limits::default(),
             reader: BitReader::new(reader),
-            sections: Vec::new(),
+            info: None,
         }
     }
 
@@ -41,26 +41,64 @@ impl<R: Read + Seek> PgxDecoder<R> {
         self.limits = limits;
     }
 
-    fn read_header(&mut self) -> VexelResult<()> {
-        let header_start = self.reader.stream_position().unwrap_or(0);
+    fn scan(&mut self) -> VexelResult<()> {
+        self.reader.seek(SeekFrom::Start(0))?;
 
         let available = self.reader.bytes_left().unwrap_or(0);
         let peek_len = usize::try_from(available).unwrap_or(usize::MAX).min(MAX_HEADER_SIZE);
         let peeked = self.reader.peek_bytes(peek_len)?;
 
-        let parsed = parse_header(&peeked);
-
-        let Some(header) = parsed else {
+        let Some(header) = parse_header(&peeked) else {
             return Err(VexelError::Custom("invalid PGX header".to_string()));
         };
 
         self.width = header.width;
         self.height = header.height;
-        self.precision = header.precision;
         self.signed = header.signed;
         self.byte_order = header.byte_order;
+        self.precision = header.precision.clamp(1, 31) as u8;
+        if u32::from(self.precision) != header.precision {
+            log_warn!("Invalid PGX precision {}, clamping to {}", header.precision, self.precision);
+        }
 
-        self.reader.seek(std::io::SeekFrom::Start(header_start + header.data_offset as u64))?;
+        let mut info = PgxInfo::default();
+        let header_length = header.data_offset as u64;
+        info.push(
+            0,
+            Some(header_length),
+            PgxSection::Header(PgxHeader {
+                byte_order: header.byte_order,
+                signed: header.signed,
+                precision: header.precision,
+                width: header.width,
+                height: header.height,
+            }),
+        );
+
+        let expected = self.expected_bytes();
+        let actual = expected.min(available.saturating_sub(header_length));
+        info.push(
+            header_length,
+            Some(actual),
+            PgxSection::PixelData(PgxPixelData {
+                bytes_per_sample: self.bytes_per_sample() as u8,
+                expected_length: expected,
+            }),
+        );
+
+        let mut summary = ImageSummary::new(self.width, self.height, ColorModel::Gray, 1, self.precision);
+        summary.sample_format = if self.signed { SampleFormat::Signed } else { SampleFormat::Unsigned };
+        summary.data = Some(DataExtent { expected, actual });
+        info.summary = Some(summary);
+        self.info = Some(info);
+
+        self.reader.seek(SeekFrom::Start(header_length))?;
+
+        Ok(())
+    }
+
+    fn read_header(&mut self) -> VexelResult<()> {
+        self.scan()?;
 
         if self.width == 0 || self.height == 0 {
             return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
@@ -68,18 +106,11 @@ impl<R: Read + Seek> PgxDecoder<R> {
 
         self.limits.check_dimensions(self.width, self.height)?;
 
-        self.sections.push(PgxSectionInfo {
-            start_offset: header_start,
-            data: PgxSectionData::Header(PgxHeaderData {
-                width: self.width,
-                height: self.height,
-                precision: self.precision,
-                signed: self.signed,
-                byte_order: self.byte_order,
-            }),
-        });
-
         Ok(())
+    }
+
+    fn expected_bytes(&self) -> u64 {
+        u64::from(self.width).saturating_mul(u64::from(self.height)).saturating_mul(self.bytes_per_sample() as u64)
     }
 
     fn bytes_per_sample(&self) -> usize {
@@ -93,8 +124,7 @@ impl<R: Read + Seek> PgxDecoder<R> {
     }
 
     fn read_samples(&mut self) -> VexelResult<Vec<u8>> {
-        let pixels = u64::from(self.width).saturating_mul(u64::from(self.height));
-        let expected = pixels.saturating_mul(self.bytes_per_sample() as u64);
+        let expected = self.expected_bytes();
 
         let available = self.reader.bytes_left().unwrap_or(0);
         let to_read = usize::try_from(expected.min(available)).unwrap_or(usize::MAX);
@@ -153,20 +183,20 @@ impl<R: Read + Seek> PgxDecoder<R> {
         }
     }
 
-    pub fn get_info(&self) -> PgxInfo {
-        PgxInfo { sections: self.sections.clone() }
+    pub fn get_info(&mut self) -> PgxInfo {
+        if self.info.is_none() {
+            if let Err(e) = self.scan() {
+                log_warn!("Failed to read PGX header: {}", e);
+            }
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         self.read_header()?;
 
-        let pixel_data_start = self.reader.stream_position().unwrap_or(0);
         let raw = self.read_samples()?;
-
-        self.sections.push(PgxSectionInfo {
-            start_offset: pixel_data_start,
-            data: PgxSectionData::PixelData(PgxPixelDataInfo { length: raw.len() as u64 }),
-        });
 
         let pixels = self.build_pixels(&raw)?;
 
@@ -177,7 +207,7 @@ impl<R: Read + Seek> PgxDecoder<R> {
 struct ParsedHeader {
     width: u32,
     height: u32,
-    precision: u8,
+    precision: u32,
     signed: bool,
     byte_order: PgxByteOrder,
     data_offset: usize,
@@ -217,10 +247,6 @@ fn parse_header(data: &[u8]) -> Option<ParsedHeader> {
     skip_blanks(data, &mut pos);
     let height = read_number(data, &mut pos)?;
 
-    if !(1..=31).contains(&precision) {
-        return None;
-    }
-
     while let Some(&b) = data.get(pos) {
         if b == b'\r' || b == b'\n' {
             pos += 1;
@@ -229,7 +255,7 @@ fn parse_header(data: &[u8]) -> Option<ParsedHeader> {
         }
     }
 
-    Some(ParsedHeader { width, height, precision: precision as u8, signed, byte_order, data_offset: pos })
+    Some(ParsedHeader { width, height, precision, signed, byte_order, data_offset: pos })
 }
 
 fn skip_blanks(data: &[u8], pos: &mut usize) {

@@ -1,40 +1,53 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::decoders::jpeg2000::codestream::{self, Codestream};
+use crate::decoders::jpeg2000::info::{scan, Jpeg2000Info};
 use crate::decoders::jpeg2000::simd;
 use crate::decoders::jpeg2000::tile::{self, TileDecoder};
 use crate::decoders::jpeg2000::types::*;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, PixelData};
-use crate::utils::info::{Jpeg2000ComponentInfo, Jpeg2000Info};
 use crate::utils::limits::Limits;
 use crate::{log_debug, log_warn};
 
 pub struct Jpeg2000Decoder<R: Read + Seek> {
     reader: R,
     limits: Limits,
-    info: Jpeg2000Info,
+    info: Option<Jpeg2000Info>,
+    precision: u8,
+    signed: bool,
 }
 
 impl<R: Read + Seek> Jpeg2000Decoder<R> {
     pub fn new(reader: R) -> Self {
-        Self { reader, limits: Limits::default(), info: Jpeg2000Info::default() }
+        Self { reader, limits: Limits::default(), info: None, precision: 0, signed: false }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> Jpeg2000Info {
-        self.info.clone()
+    pub fn get_info(&mut self) -> Jpeg2000Info {
+        if self.info.is_none() {
+            let saved_pos = self.reader.stream_position().unwrap_or(0);
+            let mut data = Vec::new();
+            let read = self.reader.seek(SeekFrom::Start(0)).and_then(|_| self.reader.read_to_end(&mut data));
+            let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+            match read {
+                Ok(_) => self.info = Some(scan(&data)),
+                Err(e) => log_warn!("Failed to read JPEG 2000 data: {}", e),
+            }
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
     pub fn precision(&self) -> u8 {
-        self.info.components.first().map(|c| c.precision.min(255) as u8).unwrap_or(0)
+        self.precision
     }
 
     pub fn is_signed(&self) -> bool {
-        self.info.components.first().map(|c| c.signed).unwrap_or(false)
+        self.signed
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -55,7 +68,17 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
             log_warn!("JPEG 2000: CAP marker declares HT but no component signals HT block coding");
         }
 
-        self.info = build_info(&parsed);
+        if let Some(first) = parsed.siz.components.first() {
+            self.precision = first.prec.min(255) as u8;
+            self.signed = first.signed;
+        }
+        log_debug!(
+            "JPEG 2000: {}x{}, {} components, {} tiles",
+            parsed.siz.width(),
+            parsed.siz.height(),
+            parsed.siz.components.len(),
+            parsed.siz.num_tiles_x() * parsed.siz.num_tiles_y()
+        );
 
         let width = parsed.siz.width();
         let height = parsed.siz.height();
@@ -319,7 +342,7 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
     }
 }
 
-fn resolve_colorspace(
+pub(crate) fn resolve_colorspace(
     container: Option<&codestream::Jp2Container>,
     siz: &SizInfo,
     num_planes: usize,
@@ -963,41 +986,4 @@ where
     }
 
     out
-}
-
-fn build_info(parsed: &Codestream) -> Jpeg2000Info {
-    let siz = &parsed.siz;
-    let default = parsed.defaults.first().cloned().unwrap_or_default();
-
-    log_debug!(
-        "JPEG 2000: {}x{}, {} components, {} tiles",
-        siz.width(),
-        siz.height(),
-        siz.components.len(),
-        siz.num_tiles_x() * siz.num_tiles_y()
-    );
-
-    Jpeg2000Info {
-        width: siz.width(),
-        height: siz.height(),
-        num_components: siz.components.len() as u32,
-        tile_width: siz.xtsiz,
-        tile_height: siz.ytsiz,
-        num_tiles: siz.num_tiles_x() * siz.num_tiles_y(),
-        num_layers: parsed.num_layers,
-        num_resolutions: default.coding.num_resolutions,
-        progression_order: format!("{:?}", parsed.progression),
-        reversible: default.coding.reversible,
-        multiple_component_transform: parsed.mct,
-        components: siz
-            .components
-            .iter()
-            .map(|component| Jpeg2000ComponentInfo {
-                precision: component.prec,
-                signed: component.signed,
-                dx: component.dx,
-                dy: component.dy,
-            })
-            .collect(),
-    }
 }

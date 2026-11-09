@@ -11,6 +11,9 @@ fuzz_target!(|data: &[u8]| {
     let magic = format!("P{}\n", variant);
     let mut input = magic.into_bytes();
     input.extend_from_slice(&data[1..]);
+    if let Ok(mut decoder) = vexel::Vexel::new(Cursor::new(&input[..])) {
+        let _ = decoder.get_info();
+    }
     if let Ok(mut decoder) = vexel::Vexel::new(Cursor::new(input)) {
         let _ = decoder.decode();
     }

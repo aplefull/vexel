@@ -365,6 +365,32 @@ impl ICCProfile {
         tags
     }
 
+    pub fn description(&self) -> Option<String> {
+        let text = match self.tags.get("desc")? {
+            ICCTagData::TextDescription(desc) => {
+                if desc.unicode.trim().is_empty() {
+                    desc.ascii.clone()
+                } else {
+                    desc.unicode.clone()
+                }
+            }
+            ICCTagData::MultiLocalizedUnicode(strings) => strings
+                .iter()
+                .find(|s| s.language == "en")
+                .or_else(|| strings.first())
+                .map(|s| s.text.clone())
+                .unwrap_or_default(),
+            ICCTagData::Text(text) => text.clone(),
+            _ => return None,
+        };
+        let text = text.trim_end_matches('\0').trim().to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
     pub fn log_info(&self) {
         println!("ICC Profile Information:");
         println!("----------------------");

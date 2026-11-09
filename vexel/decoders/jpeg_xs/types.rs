@@ -241,10 +241,3 @@ impl GcliMethod {
         self.alphabet == Alphabet::Raw4Bits
     }
 }
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct JpegXsMarkerInfo {
-    pub offset: u64,
-    pub marker: String,
-    pub length: u32,
-}

@@ -2,22 +2,26 @@ use std::io::{Read, Seek};
 
 use crate::bitreader::BitReader;
 use crate::decoders::bmp::types::{
-    BitmapArrayHeader, BitmapCompression, BitmapCoreHeader, BitmapFileHeader, BitmapInfoHeader, BitmapV2InfoHeader,
-    BitmapV3InfoHeader, BitmapV4Header, BitmapV5Header, ColorSpace, DibHeader, OS22XBitmapHeader, CIEXYZ,
+    BitmapArrayHeader, BitmapCompression, BitmapFileHeader, ColorMasks, ColorSpace, DibColorSpace, DibHeader, DibKind,
+    DibV5Fields, Os2Fields, CIEXYZ,
 };
 use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
 
+pub struct FileHeaders {
+    pub file_header: Option<BitmapFileHeader>,
+    pub array_header: Option<BitmapArrayHeader>,
+    pub vendor_prefix_len: u64,
+}
+
 pub struct HeaderReader;
 
 impl HeaderReader {
-    pub fn read_file_header<R: Read + Seek>(
-        reader: &mut BitReader<R>,
-    ) -> VexelResult<(BitmapFileHeader, Option<BitmapArrayHeader>)> {
+    pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<FileHeaders> {
         let peeked = reader.peek_bytes(16).unwrap_or_default();
         if peeked.len() >= 16 && Self::looks_like_headerless_dib(&peeked) {
             log_warn!("No BMP file header found; treating file as a headerless DIB");
-            return Ok((BitmapFileHeader { file_size: 0, reserved1: 0, reserved2: 0, pixel_offset: 0 }, None));
+            return Ok(FileHeaders { file_header: None, array_header: None, vendor_prefix_len: 0 });
         }
 
         let mut vendor_prefix_len = 0u64;
@@ -38,8 +42,12 @@ impl HeaderReader {
                 screen_width: reader.read_u16()?,
                 screen_height: reader.read_u16()?,
             };
-            let (file_header, _) = Self::read_file_header(reader)?;
-            return Ok((file_header, Some(ba)));
+            let inner = Self::read_file_header(reader)?;
+            return Ok(FileHeaders {
+                file_header: inner.file_header,
+                array_header: Some(ba),
+                vendor_prefix_len: vendor_prefix_len + inner.vendor_prefix_len,
+            });
         }
 
         match signature {
@@ -53,15 +61,17 @@ impl HeaderReader {
             }
         }
 
-        Ok((
-            BitmapFileHeader {
+        Ok(FileHeaders {
+            file_header: Some(BitmapFileHeader {
+                signature,
                 file_size: reader.read_u32()?.saturating_add(vendor_prefix_len as u32),
                 reserved1: reader.read_u16()?,
                 reserved2: reader.read_u16()?,
                 pixel_offset: reader.read_u32()?.saturating_add(vendor_prefix_len as u32),
-            },
-            None,
-        ))
+            }),
+            array_header: None,
+            vendor_prefix_len,
+        })
     }
 
     fn looks_like_headerless_dib(header: &[u8]) -> bool {
@@ -126,148 +136,116 @@ impl HeaderReader {
         }
 
         let row_size = (u64::from(bpp) * u64::from(width.unsigned_abs())).div_ceil(32) * 4;
-        let data_size = row_size * u64::from(height.unsigned_abs());
+        let data_size = row_size.saturating_mul(u64::from(height.unsigned_abs()));
 
         u64::from(pixel_offset).saturating_add(data_size) <= bytes_remaining.saturating_add(row_size)
     }
 
     pub fn read_info_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(DibHeader, u32, u32)> {
         let header_size = reader.read_u32()?;
+        let mut header = DibHeader::empty();
+        header.header_size = header_size;
 
-        let dib_header = match header_size {
-            12 => DibHeader::Core(Self::read_bitmap_core_header(reader)?),
-            16 => DibHeader::OS2V2(Self::read_os2_v2_short_header(reader)?),
-            64 => DibHeader::OS2V2(Self::read_os2_v2_header(reader)?),
-            40 => DibHeader::Info(Self::read_bitmap_info_header(reader)?),
-            52 => DibHeader::V2(Self::read_v2_header(reader)?),
-            56 => DibHeader::V3(Self::read_v3_header(reader)?),
-            108 => DibHeader::V4(Self::read_v4_header(reader)?),
-            124 => DibHeader::V5(Self::read_v5_header(reader)?),
+        match header_size {
+            12 => {
+                header.kind = DibKind::Core;
+                header.width = i32::from(reader.read_u16()?);
+                header.height = i32::from(reader.read_u16()?);
+                header.planes = reader.read_u16()?;
+                header.bits_per_pixel = reader.read_u16()?;
+            }
+            16 => {
+                header.kind = DibKind::Os2V2Short;
+                header.width = reader.read_u32()? as i32;
+                header.height = reader.read_u32()? as i32;
+                header.planes = reader.read_u16()?;
+                header.bits_per_pixel = reader.read_u16()?;
+            }
+            64 => {
+                header.kind = DibKind::Os2V2;
+                Self::read_info_fields(reader, &mut header, true)?;
+                header.os2 = Some(Os2Fields {
+                    units: reader.read_u16()?,
+                    reserved: reader.read_u16()?,
+                    recording: reader.read_u16()?,
+                    rendering: reader.read_u16()?,
+                    size1: reader.read_u32()?,
+                    size2: reader.read_u32()?,
+                    color_encoding: reader.read_u32()?,
+                    identifier: reader.read_u32()?,
+                });
+            }
+            40 | 52 | 56 | 108 | 124 => {
+                header.kind = match header_size {
+                    40 => DibKind::Info,
+                    52 => DibKind::V2,
+                    56 => DibKind::V3,
+                    108 => DibKind::V4,
+                    _ => DibKind::V5,
+                };
+                Self::read_info_fields(reader, &mut header, false)?;
+                if header_size >= 52 {
+                    let red = reader.read_u32()?;
+                    let green = reader.read_u32()?;
+                    let blue = reader.read_u32()?;
+                    let alpha = if header_size >= 56 { Some(reader.read_u32()?) } else { None };
+                    header.masks = Some(ColorMasks { red, green, blue, alpha });
+                }
+                if header_size >= 108 {
+                    header.color_space = Some(DibColorSpace {
+                        cs_type: reader.read_u32()?,
+                        endpoints: Self::read_color_space(reader)?,
+                        gamma_red: reader.read_u32()?,
+                        gamma_green: reader.read_u32()?,
+                        gamma_blue: reader.read_u32()?,
+                    });
+                }
+                if header_size >= 124 {
+                    header.v5 = Some(DibV5Fields {
+                        intent: reader.read_u32()?,
+                        profile_data: reader.read_u32()?,
+                        profile_size: reader.read_u32()?,
+                        reserved: reader.read_u32()?,
+                    });
+                }
+            }
             _ => {
                 log_warn!("Invalid DIB header size: {}, assuming 40 bytes. This may cause issues.", header_size);
-                DibHeader::Info(Self::read_bitmap_info_header(reader)?)
+                header.kind = DibKind::Info;
+                Self::read_info_fields(reader, &mut header, false)?;
             }
-        };
+        }
 
-        let (width, height) = match &dib_header {
-            DibHeader::Core(h) => (h.width as u32, h.height as u32),
-            DibHeader::OS2V2(h) => (h.width.unsigned_abs(), h.height.unsigned_abs()),
-            DibHeader::Info(h) => (h.width.unsigned_abs(), h.height.unsigned_abs()),
-            DibHeader::V2(h) => (h.info.width.unsigned_abs(), h.info.height.unsigned_abs()),
-            DibHeader::V3(h) => (h.v2.info.width.unsigned_abs(), h.v2.info.height.unsigned_abs()),
-            DibHeader::V4(h) => (h.v3.v2.info.width.unsigned_abs(), h.v3.v2.info.height.unsigned_abs()),
-            DibHeader::V5(h) => (h.v4.v3.v2.info.width.unsigned_abs(), h.v4.v3.v2.info.height.unsigned_abs()),
-        };
+        let (width, height) = (header.width.unsigned_abs(), header.height.unsigned_abs());
 
         if width == 0 || height == 0 {
             return Err(VexelError::InvalidDimensions { width, height });
         }
 
-        Ok((dib_header, width, height))
+        Ok((header, width, height))
     }
 
-    fn read_bitmap_core_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapCoreHeader> {
-        Ok(BitmapCoreHeader {
-            width: reader.read_u16()?,
-            height: reader.read_u16()?,
-            planes: reader.read_u16()?,
-            bits_per_pixel: reader.read_u16()?,
-        })
-    }
-
-    fn read_os2_v2_short_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<OS22XBitmapHeader> {
-        Ok(OS22XBitmapHeader {
-            width: reader.read_u32()? as i32,
-            height: reader.read_u32()? as i32,
-            planes: reader.read_u16()?,
-            bits_per_pixel: reader.read_u16()?,
-            compression: BitmapCompression::BiRgb,
-            image_size: 0,
-            x_pixels_per_meter: 0,
-            y_pixels_per_meter: 0,
-            colors_used: 0,
-            important_colors: 0,
-            units: 0,
-            reserved: 0,
-            recording: 0,
-            rendering: 0,
-            size1: 0,
-            size2: 0,
-            color_encoding: 0,
-            identifier: 0,
-        })
-    }
-
-    fn read_os2_v2_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<OS22XBitmapHeader> {
-        Ok(OS22XBitmapHeader {
-            width: reader.read_u32()? as i32,
-            height: reader.read_u32()? as i32,
-            planes: reader.read_u16()?,
-            bits_per_pixel: reader.read_u16()?,
-            compression: BitmapCompression::from_u32_os2(reader.read_u32()?),
-            image_size: reader.read_u32()?,
-            x_pixels_per_meter: reader.read_u32()? as i32,
-            y_pixels_per_meter: reader.read_u32()? as i32,
-            colors_used: reader.read_u32()?,
-            important_colors: reader.read_u32()?,
-            units: reader.read_u16()?,
-            reserved: reader.read_u16()?,
-            recording: reader.read_u16()?,
-            rendering: reader.read_u16()?,
-            size1: reader.read_u32()?,
-            size2: reader.read_u32()?,
-            color_encoding: reader.read_u32()?,
-            identifier: reader.read_u32()?,
-        })
-    }
-
-    pub fn read_bitmap_info_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapInfoHeader> {
-        Ok(BitmapInfoHeader {
-            width: reader.read_u32()? as i32,
-            height: reader.read_u32()? as i32,
-            planes: reader.read_u16()?,
-            bits_per_pixel: reader.read_u16()?,
-            compression: BitmapCompression::from_u32(reader.read_u32()?),
-            image_size: reader.read_u32()?,
-            x_pixels_per_meter: reader.read_u32()? as i32,
-            y_pixels_per_meter: reader.read_u32()? as i32,
-            colors_used: reader.read_u32()?,
-            important_colors: reader.read_u32()?,
-        })
-    }
-
-    fn read_v2_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapV2InfoHeader> {
-        Ok(BitmapV2InfoHeader {
-            info: Self::read_bitmap_info_header(reader)?,
-            red_mask: reader.read_u32()?,
-            green_mask: reader.read_u32()?,
-            blue_mask: reader.read_u32()?,
-        })
-    }
-
-    fn read_v3_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapV3InfoHeader> {
-        Ok(BitmapV3InfoHeader { v2: Self::read_v2_header(reader)?, alpha_mask: reader.read_u32()? })
-    }
-
-    fn read_v4_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapV4Header> {
-        Ok(BitmapV4Header {
-            v3: Self::read_v3_header(reader)?,
-            cs_type: reader.read_u32()?,
-            endpoints: Self::read_color_space(reader)?,
-            gamma_red: reader.read_u32()?,
-            gamma_green: reader.read_u32()?,
-            gamma_blue: reader.read_u32()?,
-        })
-    }
-
-    fn read_v5_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<BitmapV5Header> {
-        Ok(BitmapV5Header {
-            v4: Self::read_v4_header(reader)?,
-            intent: reader.read_u32()?,
-            profile_data: reader.read_u32()?,
-            profile_size: reader.read_u32()?,
-            reserved: reader.read_u32()?,
-        })
+    fn read_info_fields<R: Read + Seek>(
+        reader: &mut BitReader<R>,
+        header: &mut DibHeader,
+        os2: bool,
+    ) -> VexelResult<()> {
+        header.width = reader.read_u32()? as i32;
+        header.height = reader.read_u32()? as i32;
+        header.planes = reader.read_u16()?;
+        header.bits_per_pixel = reader.read_u16()?;
+        header.compression_raw = reader.read_u32()?;
+        header.compression = if os2 {
+            BitmapCompression::from_u32_os2(header.compression_raw)
+        } else {
+            BitmapCompression::from_u32(header.compression_raw)
+        };
+        header.image_size = reader.read_u32()?;
+        header.x_pixels_per_meter = reader.read_u32()? as i32;
+        header.y_pixels_per_meter = reader.read_u32()? as i32;
+        header.colors_used = reader.read_u32()?;
+        header.important_colors = reader.read_u32()?;
+        Ok(())
     }
 
     fn read_color_space<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<ColorSpace> {

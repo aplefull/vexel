@@ -1,10 +1,10 @@
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
 use crate::decoders::jbig1::arithmetic::ArithDecoder;
+use crate::decoders::jbig1::info::{scan, Jbig1Info};
 use crate::decoders::jbig1::types::{self, *};
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::info::Jbig1Info;
 use crate::{log_warn, Image, Limits, PixelData};
 
 fn at_pixel(plane_data: &[u8], row_offset: usize, x: usize, tx: i32) -> u32 {
@@ -62,8 +62,7 @@ pub struct Jbig1Decoder<R: Read + Seek> {
     line_l2: u32,
     line_l3: u32,
 
-    sections: Vec<Jbig1SectionInfo>,
-    data_stream_offset: u64,
+    info: Option<Jbig1Info>,
 
     reader: BitReader<R>,
 }
@@ -102,8 +101,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             line_l1: 0,
             line_l2: 0,
             line_l3: 0,
-            sections: Vec::new(),
-            data_stream_offset: 0,
+            info: None,
             reader: BitReader::new(reader),
         }
     }
@@ -112,12 +110,21 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         self.limits = limits;
     }
 
-    pub fn get_info(&self) -> Jbig1Info {
-        Jbig1Info { sections: self.sections.clone() }
+    pub fn get_info(&mut self) -> Jbig1Info {
+        if self.info.is_none() {
+            let saved_pos = self.reader.stream_position().unwrap_or(0);
+            let data = self.reader.seek(SeekFrom::Start(0)).and_then(|_| self.reader.read_to_end());
+            let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+            match data {
+                Ok(data) => self.info = Some(scan(&data)),
+                Err(e) => log_warn!("Failed to read JBIG1 data: {}", e),
+            }
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
     fn read_bih(&mut self) -> VexelResult<()> {
-        let bih_offset = self.reader.stream_position().unwrap_or(0);
         let mut bih = [0u8; 20];
         self.reader.read_exact(&mut bih)?;
 
@@ -131,22 +138,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         self.my = bih[17];
         self.order = bih[18];
         self.options = bih[19];
-
-        self.sections.push(Jbig1SectionInfo {
-            start_offset: bih_offset,
-            data: Jbig1SectionData::Bih(Jbig1BihData {
-                dl: self.dl,
-                d: self.d,
-                planes: self.planes,
-                xd: self.xd,
-                yd: self.yd,
-                l0: self.l0,
-                mx: self.mx,
-                my: self.my,
-                order: self.order,
-                options: self.options,
-            }),
-        });
 
         if self.dl > self.d {
             log_warn!("JBIG1: DL ({}) > D ({}), clamping DL to D", self.dl, self.d);
@@ -251,29 +242,12 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 MARKER_SDNORM | MARKER_SDRST => {
                     let is_reset = marker == MARKER_SDRST;
 
-                    let stripe_plane = self.current_plane;
-                    let stripe_layer = self.current_layer;
-                    let stripe_index = self.current_stripe;
-                    let stripe_offset = self.data_stream_offset + sde_start as u64;
-                    let stripe_len = sde_data.len();
-
                     {
                         let plane = self.current_plane as usize;
                         let layer = self.current_layer as usize;
                         let at_moves_for_stripe = std::mem::take(&mut at_moves);
                         self.decode_pscd(plane, layer, sde_data, &at_moves_for_stripe);
                     }
-
-                    self.sections.push(Jbig1SectionInfo {
-                        start_offset: stripe_offset,
-                        data: Jbig1SectionData::Stripe(Jbig1StripeData {
-                            plane: stripe_plane,
-                            layer: stripe_layer,
-                            stripe_index,
-                            data_length: stripe_len,
-                            is_reset,
-                        }),
-                    });
 
                     let plane = self.current_plane as usize;
                     let layer_idx = (self.current_layer - self.dl) as usize;
@@ -314,10 +288,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     let tx = data[pos + 6] as i8;
                     let ty = data[pos + 7] as i8;
                     at_moves.push(AtMove { line, tx, ty });
-                    self.sections.push(Jbig1SectionInfo {
-                        start_offset: self.data_stream_offset + pos as u64,
-                        data: Jbig1SectionData::AtMove(Jbig1AtMoveData { line, tx, ty }),
-                    });
                     pos += 8;
                     sde_start = pos;
                 }
@@ -327,10 +297,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                         break;
                     }
                     let new_yd = u32::from_be_bytes([data[pos + 2], data[pos + 3], data[pos + 4], data[pos + 5]]);
-                    self.sections.push(Jbig1SectionInfo {
-                        start_offset: self.data_stream_offset + pos as u64,
-                        data: Jbig1SectionData::Newlen(Jbig1NewlenData { new_height: new_yd }),
-                    });
                     if self.options & OPT_VLENGTH != 0 {
                         log_warn!("JBIG1: NEWLEN updating height from {} to {}", self.yd, new_yd);
                         self.yd = new_yd;
@@ -346,14 +312,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
                     let comment_len =
                         u32::from_be_bytes([data[pos + 2], data[pos + 3], data[pos + 4], data[pos + 5]]) as usize;
-                    let comment_offset = self.data_stream_offset + pos as u64;
-                    let text_end = (pos + 6 + comment_len).min(data.len());
-                    let text_bytes = &data[pos + 6..text_end];
-                    let text = String::from_utf8_lossy(text_bytes).into_owned();
-                    self.sections.push(Jbig1SectionInfo {
-                        start_offset: comment_offset,
-                        data: Jbig1SectionData::Comment(Jbig1CommentData { text }),
-                    });
                     pos += 6 + comment_len;
                     if pos > data.len() {
                         pos = data.len();
@@ -362,19 +320,11 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 }
                 MARKER_ABORT => {
                     log_warn!("JBIG1: ABORT marker encountered, stopping decode");
-                    self.sections.push(Jbig1SectionInfo {
-                        start_offset: self.data_stream_offset + pos as u64,
-                        data: Jbig1SectionData::Abort,
-                    });
                     aborted = true;
                     break;
                 }
                 _ => {
                     log_warn!("JBIG1: unknown marker 0xFF {:02X}, skipping", marker);
-                    self.sections.push(Jbig1SectionInfo {
-                        start_offset: self.data_stream_offset + pos as u64,
-                        data: Jbig1SectionData::Unknown(Jbig1UnknownMarkerData { marker }),
-                    });
                     pos += 2;
                     sde_start = pos;
                 }
@@ -1092,14 +1042,9 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         self.read_bih()?;
 
         if self.options & OPT_DPPRIV != 0 && self.options & OPT_DPLAST == 0 {
-            let dptable_offset = self.reader.stream_position().unwrap_or(0);
             let mut dptable = vec![0u8; 1728];
             match self.reader.read_exact(&mut dptable) {
                 Ok(_) => {
-                    self.sections.push(Jbig1SectionInfo {
-                        start_offset: dptable_offset,
-                        data: Jbig1SectionData::Dptable(Jbig1DptableData { length: 1728, table: dptable.clone() }),
-                    });
                     let internal = dppriv_to_internal(&dptable);
                     self.dppriv = Some(internal);
                 }
@@ -1111,7 +1056,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
 
         self.allocate_layer_buffers();
 
-        self.data_stream_offset = self.reader.stream_position().unwrap_or(0);
         let data = self.read_all_data()?;
         self.process_stream(&data)?;
 

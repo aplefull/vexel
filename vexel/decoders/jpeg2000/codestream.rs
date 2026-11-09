@@ -929,7 +929,7 @@ fn walk_boxes(data: &[u8], container: &mut Jp2Container, depth: u32) {
             return;
         }
 
-        let end = (pos as u64 + length).min(data.len() as u64) as usize;
+        let end = (pos as u64).saturating_add(length).min(data.len() as u64) as usize;
         let body_start = pos + header_len;
         if body_start > end {
             return;

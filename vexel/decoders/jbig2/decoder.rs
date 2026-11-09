@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use crate::decoders::jbig2::arith::{ArithDecoder, Cx};
@@ -12,6 +12,7 @@ use crate::decoders::jbig2::halftone::{
     decode_halftone_region, decode_pattern_dict, HalftoneParams, PatternDict, PatternDictParams,
 };
 use crate::decoders::jbig2::huffman::{self, HuffmanReader, HuffmanTable};
+use crate::decoders::jbig2::info::{scan, Jbig2Info};
 use crate::decoders::jbig2::refinement::{decode_refinement_region, stats_size as refine_stats_size, RefinementParams};
 use crate::decoders::jbig2::segment::{parse_region_info, parse_segment_header, SegmentHeader, SegmentType};
 use crate::decoders::jbig2::symbol_dict::{decode_symbol_dict, SymbolDictHuffman, SymbolDictParams};
@@ -21,12 +22,11 @@ use crate::decoders::jbig2::text::{
 };
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, PixelData};
-use crate::utils::info::Jbig2Info;
 use crate::utils::limits::Limits;
 use crate::utils::tiff::fax;
 use crate::{log_debug, log_warn};
 
-const JBIG2_FILE_ID: [u8; 8] = [0x97, 0x4a, 0x42, 0x32, 0x0d, 0x0a, 0x1a, 0x0a];
+pub(super) const JBIG2_FILE_ID: [u8; 8] = [0x97, 0x4a, 0x42, 0x32, 0x0d, 0x0a, 0x1a, 0x0a];
 
 enum SegmentResult {
     Symbols(Vec<Arc<Bitmap>>),
@@ -50,14 +50,12 @@ struct Page {
 pub struct Jbig2Decoder<R: Read + Seek> {
     reader: R,
     limits: Limits,
-    width: u32,
-    height: u32,
-    page_count: usize,
+    info: Option<Jbig2Info>,
 }
 
 impl<R: Read + Seek> Jbig2Decoder<R> {
     pub fn new(reader: R) -> Self {
-        Jbig2Decoder { reader, limits: Limits::default(), width: 0, height: 0, page_count: 0 }
+        Jbig2Decoder { reader, limits: Limits::default(), info: None }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
@@ -65,11 +63,17 @@ impl<R: Read + Seek> Jbig2Decoder<R> {
     }
 
     pub fn get_info(&mut self) -> Jbig2Info {
-        if self.width == 0 {
-            let _ = self.decode_all_pages();
+        if self.info.is_none() {
+            let saved_pos = self.reader.stream_position().unwrap_or(0);
+            let data = self.read_all();
+            let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+            match data {
+                Ok(data) => self.info = Some(scan(&data)),
+                Err(e) => log_warn!("Failed to read JBIG2 data: {}", e),
+            }
         }
 
-        Jbig2Info { width: self.width, height: self.height, pages: self.page_count as u32 }
+        self.info.clone().unwrap_or_default()
     }
 
     fn read_all(&mut self) -> VexelResult<Vec<u8>> {
@@ -101,7 +105,6 @@ impl<R: Read + Seek> Jbig2Decoder<R> {
         context.run(&segments, &data);
 
         let pages = context.finish();
-        self.page_count = pages.len();
 
         if pages.is_empty() {
             return Err(VexelError::Custom("JBIG2 stream contains no page information".to_string()));
@@ -109,10 +112,6 @@ impl<R: Read + Seek> Jbig2Decoder<R> {
 
         let mut images = Vec::with_capacity(pages.len());
         for (page, color) in &pages {
-            if self.width == 0 {
-                self.width = page.width;
-                self.height = page.height;
-            }
             images.push(bitmap_to_image(page, color.as_deref()));
         }
 
@@ -120,13 +119,14 @@ impl<R: Read + Seek> Jbig2Decoder<R> {
     }
 }
 
-struct ParsedSegment {
-    header: SegmentHeader,
-    start: usize,
-    end: usize,
+pub(super) struct ParsedSegment {
+    pub header: SegmentHeader,
+    pub header_offset: usize,
+    pub start: usize,
+    pub end: usize,
 }
 
-fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSegment> {
+pub(super) fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSegment> {
     let mut segments = Vec::new();
     let mut offset = 0usize;
     let mut random_access = false;
@@ -149,20 +149,21 @@ fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSegment> {
             let Some(header) = parse_segment_header(&data[offset..]) else {
                 break;
             };
+            let header_offset = offset;
             offset += header.header_length;
             let is_eof = header.segment_type == SegmentType::EndOfFile;
-            headers.push(header);
+            headers.push((header, header_offset));
             if is_eof {
                 break;
             }
         }
 
-        for header in headers {
+        for (header, header_offset) in headers {
             let length = resolve_length(&header, data, offset);
             let start = offset.min(data.len());
             let end = start.saturating_add(length).min(data.len());
             offset = end;
-            segments.push(ParsedSegment { header, start, end });
+            segments.push(ParsedSegment { header, header_offset, start, end });
         }
 
         return segments;
@@ -172,6 +173,7 @@ fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSegment> {
         let Some(header) = parse_segment_header(&data[offset..]) else {
             break;
         };
+        let header_offset = offset;
         offset += header.header_length;
 
         let length = resolve_length(&header, data, offset);
@@ -180,7 +182,7 @@ fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSegment> {
         offset = end;
 
         let is_eof = header.segment_type == SegmentType::EndOfFile;
-        segments.push(ParsedSegment { header, start, end });
+        segments.push(ParsedSegment { header, header_offset, start, end });
         if is_eof {
             break;
         }

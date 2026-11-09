@@ -1,5 +1,6 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
+use super::info::{build_info, DngInfo};
 use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::utils::error::{VexelError, VexelResult};
@@ -10,6 +11,7 @@ use crate::utils::tiff::compression::{
     predictor_x_factor,
 };
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
+use crate::utils::tiff::info::walk_structure;
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
 use crate::utils::tiff::types::{
     Compression, PhotometricInterpretation, Predictor, SampleFormat, TiffHeader, TiffTags,
@@ -88,6 +90,7 @@ pub struct DngDecoder<R: Read + Seek> {
     cfa_phase: (u32, u32),
     lossy_curves: Option<Box<[[u16; 256]; 3]>>,
     float_scale: Option<f32>,
+    info: Option<DngInfo>,
 }
 
 impl<R: Read + Seek> DngDecoder<R> {
@@ -103,11 +106,28 @@ impl<R: Read + Seek> DngDecoder<R> {
             cfa_phase: (0, 0),
             lossy_curves: None,
             float_scale: None,
+            info: None,
         }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
+    }
+
+    pub fn get_info(&mut self) -> DngInfo {
+        if self.info.is_none() {
+            let saved_limits = self.limits.clone();
+            let saved_pos = self.reader.stream_position().unwrap_or(0);
+            let structure = walk_structure(&mut self.reader, &mut self.limits);
+            match structure {
+                Ok(structure) => self.info = Some(build_info(structure, &mut self.reader)),
+                Err(e) => log_warn!("Failed to read DNG structure: {}", e),
+            }
+            self.limits = saved_limits;
+            let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+        }
+
+        self.info.clone().unwrap_or_default()
     }
 
     pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {

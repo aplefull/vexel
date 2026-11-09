@@ -9,7 +9,6 @@ use crate::utils::types::ByteOrder;
 
 pub struct TiffFileHeader {
     pub byte_order: ByteOrder,
-    pub magic: u16,
     pub first_ifd_offset: u32,
 }
 
@@ -32,7 +31,7 @@ pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResul
 
     let first_ifd_offset = reader.read_u32()?;
 
-    Ok(TiffFileHeader { byte_order, magic, first_ifd_offset })
+    Ok(TiffFileHeader { byte_order, first_ifd_offset })
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +62,7 @@ impl IfdCycleGuard {
 
 pub fn type_size(field_type: u16) -> Option<usize> {
     match field_type {
-        1 | 2 | 6 | 7 => Some(1),
+        1 | 2 | 6 | 7 | 129 => Some(1),
         3 | 8 => Some(2),
         4 | 9 | 11 | 13 => Some(4),
         5 | 10 | 12 => Some(8),
@@ -83,6 +82,7 @@ pub struct IfdEntry {
 pub struct Ifd {
     pub offset: u32,
     pub byte_order: ByteOrder,
+    pub declared_entries: u16,
     pub entries: Vec<IfdEntry>,
     pub next_ifd_offset: u32,
 }
@@ -95,7 +95,8 @@ impl Ifd {
         limits: &mut Limits,
     ) -> VexelResult<Ifd> {
         reader.seek(SeekFrom::Start(offset as u64))?;
-        let num_entries = reader.read_u16()? as u64;
+        let declared_entries = reader.read_u16()?;
+        let num_entries = declared_entries as u64;
 
         let stream_len = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(offset as u64 + 2))?;
@@ -125,7 +126,7 @@ impl Ifd {
 
         let next_ifd_offset = reader.read_u32().unwrap_or(0);
 
-        Ok(Ifd { offset, byte_order, entries, next_ifd_offset })
+        Ok(Ifd { offset, byte_order, declared_entries, entries, next_ifd_offset })
     }
 
     pub fn entry(&self, tag: TiffTags) -> Option<&IfdEntry> {
@@ -283,7 +284,7 @@ where
     }
 
     let bytes_per_value = type_size(type_).unwrap_or(4) as u32;
-    let total_bytes = bytes_per_value * count;
+    let total_bytes = bytes_per_value.saturating_mul(count);
 
     if total_bytes <= 4 {
         let val_bytes = match byte_order {

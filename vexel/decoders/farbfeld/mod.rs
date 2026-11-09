@@ -1,6 +1,6 @@
 pub mod decoder;
+pub mod info;
 pub mod simd;
-pub mod types;
 
 pub use decoder::FarbfeldDecoder;
-pub use types::*;
+pub use info::*;

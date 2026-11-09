@@ -1,5 +1,5 @@
+use super::info::HdrFormat;
 use super::simd;
-use super::types::HdrFormat;
 use crate::utils::error::VexelResult;
 use crate::PixelData;
 

@@ -66,6 +66,7 @@ const FIXED_LITLEN_LENGTHS: [u8; 288] = {
 };
 
 const FIXED_DIST_LENGTHS: [u8; 32] = [5u8; 32];
+const MAX_DEFLATE_RATIO: usize = 1032;
 
 const TAG_INVALID: u32 = 0;
 const TAG_LITERAL: u32 = 1;
@@ -500,6 +501,11 @@ impl<'a> BitBuffer<'a> {
         self.count = self.count.wrapping_sub(n);
     }
 
+    #[inline(always)]
+    fn overrun(&self) -> bool {
+        self.count > 64
+    }
+
     fn align_to_byte(&mut self) {
         let rem = self.count % 8;
         if rem != 0 {
@@ -552,6 +558,9 @@ impl<'a> BitBuffer<'a> {
         let (entry, consumed) = table.lookup(self.buf);
         if entry.is_invalid() || consumed == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad litlen code"));
+        }
+        if self.overrun() || consumed > self.count {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Deflate stream ends inside a code"));
         }
         self.consume(consumed);
         Ok(entry)
@@ -641,7 +650,7 @@ fn decode_block(
             };
             let match_dist = dist_base + dist_extra;
 
-            if match_dist == 0 || match_dist > output.len() {
+            if bits.overrun() || match_dist == 0 || match_dist > output.len() {
                 return false;
             }
 
@@ -669,13 +678,14 @@ impl<'a> DeflateDecoder<'a> {
     }
 
     pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
-        let max_output = if capacity_hint > 0 { capacity_hint * 4 } else { 256 * 1024 * 1024 };
+        let max_output = if capacity_hint > 0 { capacity_hint.saturating_mul(4) } else { 256 * 1024 * 1024 };
         self.decode_impl(capacity_hint, max_output)
     }
 
     fn decode_impl(&self, capacity_hint: usize, max_output: usize) -> Vec<u8> {
         let mut bits = BitBuffer::new(self.data);
-        let mut output = Vec::with_capacity(if capacity_hint > 0 { capacity_hint + 32 } else { 0 });
+        let reachable = self.data.len().saturating_mul(MAX_DEFLATE_RATIO);
+        let mut output = Vec::with_capacity(if capacity_hint > 0 { capacity_hint.min(reachable) + 32 } else { 0 });
 
         let mut fixed: Option<(Box<HuffTable>, Box<HuffTable>)> = None;
         let mut scratch = TableScratch::new();

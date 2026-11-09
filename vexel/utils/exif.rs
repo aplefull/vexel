@@ -4,6 +4,7 @@ use serde::Serialize;
 use tsify::Tsify;
 
 use crate::bitreader::BitReader;
+use crate::utils::info::InfoWriter;
 use crate::utils::limits::Limits;
 use crate::utils::tiff::ifd::{read_file_header, type_size, Ifd, IfdCycleGuard, IfdEntry};
 use crate::utils::types::ByteOrder;
@@ -49,7 +50,7 @@ pub struct ExifData {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum IfdType {
+pub(crate) enum IfdType {
     Ifd0,
     ExifIfd,
     GpsIfd,
@@ -225,25 +226,22 @@ fn materialize_entry<R: Read + Seek>(
     Some(ExifEntry { tag: entry.tag, tag_name, value })
 }
 
-fn parse_value(data_type: u16, count: usize, bytes: &[u8], byte_order: ByteOrder) -> ExifValue {
+pub(crate) fn parse_value(data_type: u16, count: usize, bytes: &[u8], byte_order: ByteOrder) -> ExifValue {
     match data_type {
         1 => ExifValue::Byte(bytes.iter().take(count).copied().collect()),
-        2 => {
-            let mut strings = Vec::new();
-            let mut current = String::new();
-            for &b in bytes.iter().take(count) {
-                if b == 0 {
-                    if !current.is_empty() {
-                        strings.push(current.clone());
-                        current.clear();
+        2 | 129 => {
+            let strings = bytes[..count.min(bytes.len())]
+                .split(|&b| b == 0)
+                .filter(|chunk| !chunk.is_empty())
+                .map(|chunk| match std::str::from_utf8(chunk) {
+                    Ok(text) => text.to_string(),
+                    Err(e) if e.error_len().is_none() && e.valid_up_to() > 0 => {
+                        String::from_utf8_lossy(&chunk[..e.valid_up_to()]).into_owned()
                     }
-                } else {
-                    current.push(b as char);
-                }
-            }
-            if !current.is_empty() {
-                strings.push(current);
-            }
+                    Err(_) if data_type == 129 => String::from_utf8_lossy(chunk).into_owned(),
+                    Err(_) => chunk.iter().map(|&b| b as char).collect(),
+                })
+                .collect();
             ExifValue::Ascii(strings)
         }
         3 => ExifValue::Short(
@@ -360,7 +358,7 @@ fn ifd_pointer_offset(value: &ExifValue) -> Option<u32> {
     }
 }
 
-fn tag_name(tag: u16, ifd_type: IfdType) -> Option<&'static str> {
+pub(crate) fn tag_name(tag: u16, ifd_type: IfdType) -> Option<&'static str> {
     match ifd_type {
         IfdType::GpsIfd => match tag {
             0x0000 => Some("GPSVersionID"),
@@ -553,5 +551,62 @@ fn tag_name(tag: u16, ifd_type: IfdType) -> Option<&'static str> {
             0xEA1C => Some("Padding"),
             _ => None,
         },
+    }
+}
+
+fn join_values<T: std::fmt::Display>(values: &[T]) -> String {
+    values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+}
+
+fn join_rationals<T: std::fmt::Display>(values: &[(T, T)]) -> String {
+    values.iter().map(|(n, d)| format!("{}/{}", n, d)).collect::<Vec<_>>().join(", ")
+}
+
+impl std::fmt::Display for ExifValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExifValue::Ascii(strings) => f.write_str(&strings.join(" / ")),
+            ExifValue::Short(v) => f.write_str(&join_values(v)),
+            ExifValue::Long(v) => f.write_str(&join_values(v)),
+            ExifValue::Rational(v) => f.write_str(&join_rationals(v)),
+            ExifValue::SByte(v) => f.write_str(&join_values(v)),
+            ExifValue::SShort(v) => f.write_str(&join_values(v)),
+            ExifValue::SLong(v) => f.write_str(&join_values(v)),
+            ExifValue::SRational(v) => f.write_str(&join_rationals(v)),
+            ExifValue::Float(v) => f.write_str(&join_values(v)),
+            ExifValue::Double(v) => f.write_str(&join_values(v)),
+            ExifValue::Byte(v) => write!(f, "{} bytes", v.len()),
+            ExifValue::Undefined(v) => write!(f, "{} bytes (undefined)", v.len()),
+        }
+    }
+}
+
+fn describe_ifd(name: &str, ifd: &ExifIfd, out: &mut InfoWriter) {
+    out.group(format!("{} ({} entries)", name, ifd.entries.len()), |out| {
+        for entry in &ifd.entries {
+            let label = entry.tag_name.clone().unwrap_or_else(|| format!("0x{:04X}", entry.tag));
+            out.text(&label, &entry.value.to_string());
+        }
+    });
+}
+
+impl ExifData {
+    pub fn describe(&self, out: &mut InfoWriter) {
+        let byte_order = match self.byte_order {
+            ByteOrder::LittleEndian => "Little-endian (II)",
+            ByteOrder::BigEndian => "Big-endian (MM)",
+        };
+        out.field("Byte order", byte_order);
+        describe_ifd("IFD0", &self.ifd0, out);
+        for (name, ifd) in [
+            ("Exif IFD", &self.exif_ifd),
+            ("GPS IFD", &self.gps_ifd),
+            ("Interoperability IFD", &self.interop_ifd),
+            ("IFD1 (thumbnail)", &self.ifd1),
+        ] {
+            if let Some(ifd) = ifd {
+                describe_ifd(name, ifd, out);
+            }
+        }
     }
 }

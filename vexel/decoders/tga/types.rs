@@ -16,7 +16,7 @@ pub const ATTR_TYPE_PREMULTIPLIED_ALPHA: u8 = 4;
 pub const TGA_FOOTER_SIZE: i64 = 26;
 pub const TGA_SIGNATURE: &[u8] = b"TRUEVISION-XFILE.\x00";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Tsify)]
 pub struct TgaHeader {
     pub id_length: u8,
     pub palette_type: u8,
@@ -30,60 +30,6 @@ pub struct TgaHeader {
     pub height: u16,
     pub bpp: u8,
     pub flags: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TgaHeaderData {
-    pub id_length: u8,
-    pub palette_type: u8,
-    pub image_type_raw: u8,
-    pub palette_first: u16,
-    pub palette_length: u16,
-    pub palette_bpp: u8,
-    pub x_origin: u16,
-    pub y_origin: u16,
-    pub width: u16,
-    pub height: u16,
-    pub bpp: u8,
-    pub flags: u8,
-}
-
-impl From<&TgaHeader> for TgaHeaderData {
-    fn from(header: &TgaHeader) -> Self {
-        Self {
-            id_length: header.id_length,
-            palette_type: header.palette_type,
-            image_type_raw: header.image_type_raw,
-            palette_first: header.palette_first,
-            palette_length: header.palette_length,
-            palette_bpp: header.palette_bpp,
-            x_origin: header.x_origin,
-            y_origin: header.y_origin,
-            width: header.width,
-            height: header.height,
-            bpp: header.bpp,
-            flags: header.flags,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TgaImageIdData {
-    pub length: u8,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TgaColorMapData {
-    pub first_entry_index: u16,
-    pub entry_count: u16,
-    pub entry_size: u8,
-    pub data_length: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TgaPixelData {
-    pub length: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -122,21 +68,4 @@ pub struct TgaExtensionAreaData {
     pub postage_stamp_offset: u32,
     pub scan_line_offset: u32,
     pub attributes_type: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[serde(tag = "type")]
-pub enum TgaSectionData {
-    Header(TgaHeaderData),
-    ImageId(TgaImageIdData),
-    ColorMap(TgaColorMapData),
-    PixelData(TgaPixelData),
-    Footer(TgaFooterData),
-    ExtensionArea(TgaExtensionAreaData),
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TgaSectionInfo {
-    pub start_offset: u64,
-    pub data: TgaSectionData,
 }

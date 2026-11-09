@@ -10,9 +10,7 @@ pub(crate) trait ImageDecoder<R: Read + Seek + Sync> {
 
     fn decode(&mut self) -> VexelResult<Image>;
 
-    fn get_info(&mut self) -> ImageInfo {
-        ImageInfo::Unknown
-    }
+    fn get_info(&mut self) -> ImageInfo;
 
     fn supports_pages() -> bool
     where

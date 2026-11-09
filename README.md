@@ -27,6 +27,7 @@ Functional means some may not be implemented yet, but vast majority of files wil
 | HDR      | Full support |
 | ICO/CUR  | Full support |
 | JBIG1    | Full support |
+| JBIG2    | Functional |
 | TIFF     | Functional - see notes below |
 | DNG      | Functional - see notes below |
 | DICOM    | Full support |
@@ -94,9 +95,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pixels: Vec<u8> = image.to_rgba8();
 
-    let info = decoder.get_info();
-    println!("{:?}", info);
-
     Ok(())
 }
 ```
@@ -131,6 +129,25 @@ let image = decoder.decode()?;
 
 Use `Limits::no_limits()` to remove all constraints.
 
+### Metadata
+
+`get_info()` returns format-specific metadata without decoding pixels, so it can be called on its own. Every format has the same shape: a summary of what the decoder will produce (dimensions, color model, bit depth, compression, frame or page count, ICC profile, and so on) plus a list of the file's structural sections (chunks, segments, markers, IFDs, boxes) with their offsets and lengths.
+
+```rust
+use vexel::Vexel;
+
+let mut decoder = Vexel::open("image.png")?;
+let info = decoder.get_info();
+
+if let Some(summary) = info.summary() {
+    println!("{}x{}", summary.width, summary.height);
+}
+
+println!("{}", info);
+```
+
+`Display` prints the full tree as text, and `to_tree()` returns it as data. In WASM, `getInfo()` returns the same structure as a typed JS object.
+
 ### Pixel formats
 
 Decoders produce one of the following pixel formats:
@@ -157,7 +174,7 @@ Decoders produce one of the following pixel formats:
 
 `image.to_rgb8()` and `image.to_rgba8()` convert any format to 8-bit and return the pixels as a `Vec<u8>`.
 
-To work with the native data without converting, match on `frame.pixels()`:
+To work with the native data without converting, match on `image.pixels()`:
 
 ```rust
 use vexel::{Vexel, PixelData};
@@ -219,6 +236,7 @@ The library builds to WASM, exposing a `Decoder` class:
 - `decoder.decode()` / `decodePages()` / `decodeThumbnails()` - decode the image, all pages, or embedded thumbnails
 - `decoder.nextFrame()` - returns the next animation frame as RGBA8, or `null` when exhausted
 - `decoder.getInfo()` - returns format-specific metadata
+- `decoder.lastTimings()` - returns timings for the last decode call
 - `decoder.setLimits(...)` - overrides the default resource limits
 
 `decode()` returns a single picture (the first frame of an animation); `nextFrame()` walks the frames one at a time:
@@ -231,7 +249,7 @@ while ((frame = decoder.nextFrame()) !== null) {
 }
 ```
 
-Standalone exports: `tryGuessFormat(data)`, `parseIcc(data)`, `setLogLevel(level)` (accepts `"Debug"`, `"Warning"`, or `"Error"`).
+Standalone exports: `tryGuessFormat(data)`, `parseIcc(data)`, `setLogLevel(level)` (accepts `"Debug"`, `"Warning"`, `"Error"`, or `"None"`).
 
 ## Performance
 
@@ -275,7 +293,7 @@ Options:
       --info                 Print format metadata and exit
       --void                 Decode but do not write output
       --gui                  Open decoded image in a GUI preview window
-      --log-level <LEVEL>    Log verbosity: Debug, Warning, Error
+      --log-level <LEVEL>    Log verbosity: error, warn, debug, none [default: error]
       --memory-limit <MiB>   Maximum memory usage in MiB, 0 = unlimited [default: 4096]
       --no-limits            Disable pixel-data allocation and pixel-count decode limits
 ```

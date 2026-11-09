@@ -113,7 +113,7 @@ impl<R: Read + Seek + Sync> ImageDecoder<R> for RpgmvpDecoder<R> {
 
     fn get_info(&mut self) -> ImageInfo {
         match RpgmvpDecoder::get_info(self) {
-            Ok(info) => ImageInfo::Png(info),
+            Ok(info) => ImageInfo::Rpgmvp(info),
             Err(_) => ImageInfo::Unknown,
         }
     }
@@ -145,20 +145,4 @@ impl<R: Read + Seek + Sync> ImageDecoder<R> for GifDecoder<R> {
     }
 }
 
-impl<R: Read + Seek + Sync> ImageDecoder<R> for DngDecoder<R> {
-    fn set_limits(&mut self, limits: Limits) {
-        DngDecoder::set_limits(self, limits);
-    }
-
-    fn decode(&mut self) -> VexelResult<Image> {
-        DngDecoder::decode(self)
-    }
-
-    fn supports_thumbnails() -> bool {
-        true
-    }
-
-    fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
-        DngDecoder::decode_thumbnails(self)
-    }
-}
+impl_decoder!(DngDecoder, Dng, thumbnails = true);

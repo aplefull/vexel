@@ -2,7 +2,6 @@ use serde::Serialize;
 use tsify::Tsify;
 
 use crate::log_warn;
-use crate::utils::icc::ICCProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
 pub enum BitmapCompression {
@@ -63,119 +62,55 @@ pub struct BitmapArrayHeader {
     pub screen_height: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Default, Serialize, Tsify)]
 pub struct BitmapFileHeader {
+    pub signature: u16,
     pub file_size: u32,
     pub reserved1: u16,
     pub reserved2: u16,
     pub pixel_offset: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub enum DibHeader {
-    Core(BitmapCoreHeader),
-    OS2V2(OS22XBitmapHeader),
-    Info(BitmapInfoHeader),
-    V2(BitmapV2InfoHeader),
-    V3(BitmapV3InfoHeader),
-    V4(BitmapV4Header),
-    V5(BitmapV5Header),
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+pub enum DibKind {
+    Core,
+    Os2V2Short,
+    Os2V2,
+    Info,
+    V2,
+    V3,
+    V4,
+    V5,
 }
 
-impl DibHeader {
-    pub fn bits_per_pixel(&self) -> u16 {
-        match self {
-            DibHeader::Core(h) => h.bits_per_pixel,
-            DibHeader::OS2V2(h) => h.bits_per_pixel,
-            DibHeader::Info(h) => h.bits_per_pixel,
-            DibHeader::V2(h) => h.info.bits_per_pixel,
-            DibHeader::V3(h) => h.v2.info.bits_per_pixel,
-            DibHeader::V4(h) => h.v3.v2.info.bits_per_pixel,
-            DibHeader::V5(h) => h.v4.v3.v2.info.bits_per_pixel,
-        }
-    }
-
-    pub fn colors_used(&self) -> u32 {
-        match self {
-            DibHeader::Core(_) => 0,
-            DibHeader::OS2V2(h) => h.colors_used,
-            DibHeader::Info(h) => h.colors_used,
-            DibHeader::V2(h) => h.info.colors_used,
-            DibHeader::V3(h) => h.v2.info.colors_used,
-            DibHeader::V4(h) => h.v3.v2.info.colors_used,
-            DibHeader::V5(h) => h.v4.v3.v2.info.colors_used,
-        }
-    }
-
-    pub fn height(&self) -> i32 {
-        match self {
-            DibHeader::Core(h) => h.height as i32,
-            DibHeader::OS2V2(h) => h.height,
-            DibHeader::Info(h) => h.height,
-            DibHeader::V2(h) => h.info.height,
-            DibHeader::V3(h) => h.v2.info.height,
-            DibHeader::V4(h) => h.v3.v2.info.height,
-            DibHeader::V5(h) => h.v4.v3.v2.info.height,
-        }
-    }
-
-    pub fn compression(&self) -> BitmapCompression {
-        match self {
-            DibHeader::Core(_) => BitmapCompression::BiRgb,
-            DibHeader::OS2V2(h) => h.compression,
-            DibHeader::Info(h) => h.compression,
-            DibHeader::V2(h) => h.info.compression,
-            DibHeader::V3(h) => h.v2.info.compression,
-            DibHeader::V4(h) => h.v3.v2.info.compression,
-            DibHeader::V5(h) => h.v4.v3.v2.info.compression,
-        }
-    }
-
-    pub fn image_size(&self) -> u32 {
-        match self {
-            DibHeader::Core(_) => 0,
-            DibHeader::OS2V2(h) => h.image_size,
-            DibHeader::Info(h) => h.image_size,
-            DibHeader::V2(h) => h.info.image_size,
-            DibHeader::V3(h) => h.v2.info.image_size,
-            DibHeader::V4(h) => h.v3.v2.info.image_size,
-            DibHeader::V5(h) => h.v4.v3.v2.info.image_size,
-        }
-    }
-
-    pub fn color_masks(&self) -> Option<(u32, u32, u32, u32)> {
-        match self {
-            DibHeader::V2(h) => Some((h.red_mask, h.green_mask, h.blue_mask, 0)),
-            DibHeader::V3(h) => Some((h.v2.red_mask, h.v2.green_mask, h.v2.blue_mask, h.alpha_mask)),
-            DibHeader::V4(h) => Some((h.v3.v2.red_mask, h.v3.v2.green_mask, h.v3.v2.blue_mask, h.v3.alpha_mask)),
-            DibHeader::V5(h) => {
-                Some((h.v4.v3.v2.red_mask, h.v4.v3.v2.green_mask, h.v4.v3.v2.blue_mask, h.v4.v3.alpha_mask))
-            }
-            _ => None,
-        }
-    }
+#[derive(Debug, Clone, Copy, Serialize, Tsify)]
+#[tsify(missing_as_null)]
+pub struct ColorMasks {
+    pub red: u32,
+    pub green: u32,
+    pub blue: u32,
+    pub alpha: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BitmapCoreHeader {
-    pub width: u16,
-    pub height: u16,
-    pub planes: u16,
-    pub bits_per_pixel: u16,
+pub struct DibColorSpace {
+    pub cs_type: u32,
+    pub endpoints: ColorSpace,
+    pub gamma_red: u32,
+    pub gamma_green: u32,
+    pub gamma_blue: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-pub struct OS22XBitmapHeader {
-    pub width: i32,
-    pub height: i32,
-    pub planes: u16,
-    pub bits_per_pixel: u16,
-    pub compression: BitmapCompression,
-    pub image_size: u32,
-    pub x_pixels_per_meter: i32,
-    pub y_pixels_per_meter: i32,
-    pub colors_used: u32,
-    pub important_colors: u32,
+pub struct DibV5Fields {
+    pub intent: u32,
+    pub profile_data: u32,
+    pub profile_size: u32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct Os2Fields {
     pub units: u16,
     pub reserved: u16,
     pub recording: u16,
@@ -187,50 +122,53 @@ pub struct OS22XBitmapHeader {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BitmapInfoHeader {
+#[tsify(missing_as_null)]
+pub struct DibHeader {
+    pub kind: DibKind,
+    pub header_size: u32,
     pub width: i32,
     pub height: i32,
     pub planes: u16,
     pub bits_per_pixel: u16,
     pub compression: BitmapCompression,
+    pub compression_raw: u32,
     pub image_size: u32,
     pub x_pixels_per_meter: i32,
     pub y_pixels_per_meter: i32,
     pub colors_used: u32,
     pub important_colors: u32,
+    pub masks: Option<ColorMasks>,
+    pub color_space: Option<DibColorSpace>,
+    pub v5: Option<DibV5Fields>,
+    pub os2: Option<Os2Fields>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BitmapV2InfoHeader {
-    pub info: BitmapInfoHeader,
-    pub red_mask: u32,
-    pub green_mask: u32,
-    pub blue_mask: u32,
-}
+impl DibHeader {
+    pub fn empty() -> Self {
+        DibHeader {
+            kind: DibKind::Info,
+            header_size: 0,
+            width: 0,
+            height: 0,
+            planes: 0,
+            bits_per_pixel: 0,
+            compression: BitmapCompression::BiRgb,
+            compression_raw: 0,
+            image_size: 0,
+            x_pixels_per_meter: 0,
+            y_pixels_per_meter: 0,
+            colors_used: 0,
+            important_colors: 0,
+            masks: None,
+            color_space: None,
+            v5: None,
+            os2: None,
+        }
+    }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BitmapV3InfoHeader {
-    pub v2: BitmapV2InfoHeader,
-    pub alpha_mask: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BitmapV4Header {
-    pub v3: BitmapV3InfoHeader,
-    pub cs_type: u32,
-    pub endpoints: ColorSpace,
-    pub gamma_red: u32,
-    pub gamma_green: u32,
-    pub gamma_blue: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BitmapV5Header {
-    pub v4: BitmapV4Header,
-    pub intent: u32,
-    pub profile_data: u32,
-    pub profile_size: u32,
-    pub reserved: u32,
+    pub fn color_masks(&self) -> Option<(u32, u32, u32, u32)> {
+        self.masks.map(|masks| (masks.red, masks.green, masks.blue, masks.alpha.unwrap_or(0)))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -253,35 +191,4 @@ pub struct ColorEntry {
     pub green: u8,
     pub red: u8,
     pub reserved: u8,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BmpExtraMasks {
-    pub red_mask: u32,
-    pub green_mask: u32,
-    pub blue_mask: u32,
-    pub alpha_mask: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BmpPixelDataInfo {
-    pub offset: u64,
-    pub length: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub enum BmpSectionData {
-    BitmapArrayHeader(BitmapArrayHeader),
-    FileHeader(BitmapFileHeader),
-    DibHeader(DibHeader),
-    ExtraMasks(BmpExtraMasks),
-    ColorTable(Vec<ColorEntry>),
-    PixelData(BmpPixelDataInfo),
-    IccProfile(ICCProfile),
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct BmpSectionInfo {
-    pub start_offset: u64,
-    pub data: BmpSectionData,
 }

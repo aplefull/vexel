@@ -9,16 +9,25 @@ pub const UNDEFINED_LENGTH: u32 = 0xFFFF_FFFF;
 pub struct DataCursor<'a> {
     data: &'a [u8],
     pos: usize,
+    base: usize,
     pub big_endian: bool,
 }
 
 impl<'a> DataCursor<'a> {
     pub fn new(data: &'a [u8], big_endian: bool) -> Self {
-        Self { data, pos: 0, big_endian }
+        Self { data, pos: 0, base: 0, big_endian }
+    }
+
+    pub fn with_base(data: &'a [u8], big_endian: bool, base: usize) -> Self {
+        Self { data, pos: 0, base, big_endian }
     }
 
     pub fn position(&self) -> usize {
         self.pos
+    }
+
+    pub fn absolute(&self) -> usize {
+        self.base + self.pos
     }
 
     pub fn set_position(&mut self, pos: usize) {
@@ -85,7 +94,13 @@ impl<'a> DataCursor<'a> {
 pub enum ElementValue {
     Bytes(Vec<u8>),
     Sequence(Vec<DataSet>),
-    Fragments { offset_table: Vec<u32>, fragments: Vec<Vec<u8>> },
+    Fragments { offset_table: Vec<u32>, fragments: Vec<Vec<u8>>, items: Vec<FragmentItem> },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FragmentItem {
+    pub offset: usize,
+    pub length: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -94,11 +109,16 @@ pub struct Element {
     pub vr: Vr,
     pub length: u32,
     pub value: ElementValue,
+    pub offset: usize,
+    pub end: usize,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct DataSet {
     pub elements: Vec<Element>,
+    pub offset: usize,
+    pub length: u32,
+    pub end: usize,
 }
 
 impl DataSet {
@@ -221,10 +241,6 @@ fn keep_full_value(tag: u32) -> bool {
         )
 }
 
-fn is_short_string_vr(vr: Vr) -> bool {
-    vr.is_string() || matches!(vr, Vr::Ds | Vr::Is)
-}
-
 pub struct Parser {
     pub explicit_vr: bool,
 }
@@ -280,6 +296,7 @@ impl Parser {
     }
 
     fn parse_element(&self, cursor: &mut DataCursor, depth: u8) -> VexelResult<Option<Element>> {
+        let offset = cursor.absolute();
         let group = cursor.read_u16()?;
         let element = cursor.read_u16()?;
         let tag = ((group as u32) << 16) | element as u32;
@@ -287,8 +304,8 @@ impl Parser {
         let (vr, length) = self.read_vr_and_length(cursor, tag)?;
 
         if tag == tags::PIXEL_DATA && length == UNDEFINED_LENGTH {
-            let (offset_table, fragments) = self.parse_fragments(cursor)?;
-            return Ok(Some(Element { tag, vr, length, value: ElementValue::Fragments { offset_table, fragments } }));
+            let value = self.parse_fragments(cursor)?;
+            return Ok(Some(Element { tag, vr, length, value, offset, end: cursor.absolute() }));
         }
 
         let is_sequence = vr == Vr::Sq
@@ -308,14 +325,16 @@ impl Parser {
                 log_warn!("DICOM: sequence nesting too deep at tag {:08X}, skipping", tag);
                 if length != UNDEFINED_LENGTH {
                     cursor.read_bytes(length as usize);
-                    return Ok(Some(Element { tag, vr, length, value: ElementValue::Sequence(Vec::new()) }));
+                    let value = ElementValue::Sequence(Vec::new());
+                    return Ok(Some(Element { tag, vr, length, value, offset, end: cursor.absolute() }));
                 }
                 return Ok(None);
             }
 
             let implicit_content = vr == Vr::Un;
             let items = self.parse_sequence_items(cursor, length, depth + 1, implicit_content)?;
-            return Ok(Some(Element { tag, vr, length, value: ElementValue::Sequence(items) }));
+            let value = ElementValue::Sequence(items);
+            return Ok(Some(Element { tag, vr, length, value, offset, end: cursor.absolute() }));
         }
 
         let len = length as usize;
@@ -340,7 +359,7 @@ impl Parser {
             swap_endian_units(&mut value, endian_unit_size(vr));
         }
 
-        Ok(Some(Element { tag, vr, length, value: ElementValue::Bytes(value) }))
+        Ok(Some(Element { tag, vr, length, value: ElementValue::Bytes(value), offset, end: cursor.absolute() }))
     }
 
     fn read_vr_and_length(&self, cursor: &mut DataCursor, tag: u32) -> VexelResult<(Vr, u32)> {
@@ -382,6 +401,7 @@ impl Parser {
             if length == UNDEFINED_LENGTH { usize::MAX } else { cursor.position().saturating_add(length as usize) };
 
         while cursor.remaining() >= 8 && cursor.position() < end {
+            let item_offset = cursor.absolute();
             let item_tag = cursor.read_u16().map(|g| (g as u32) << 16)? | cursor.read_u16()? as u32;
             let item_len = cursor.read_u32()?;
 
@@ -390,18 +410,26 @@ impl Parser {
                 tags::ITEM => {
                     let item_parser = if implicit_content { Parser::new(false) } else { Parser::new(self.explicit_vr) };
                     if item_len == UNDEFINED_LENGTH {
-                        let item = item_parser.parse_dataset(cursor, depth);
-                        items.push(item);
+                        let mut item = item_parser.parse_dataset(cursor, depth);
                         if cursor.peek_tag() == Some(tags::ITEM_DELIMITER) {
                             cursor.read_bytes(8);
                         }
+                        item.offset = item_offset;
+                        item.length = item_len;
+                        item.end = cursor.absolute();
+                        items.push(item);
                     } else {
+                        let declared_len = item_len;
                         let item_len = (item_len as usize).min(cursor.remaining());
                         let item_end = cursor.position() + item_len;
-                        let mut sub = DataCursor::new(cursor.read_bytes(item_len), cursor.big_endian);
-                        let item = item_parser.parse_dataset(&mut sub, depth);
-                        items.push(item);
+                        let base = cursor.absolute();
+                        let mut sub = DataCursor::with_base(cursor.read_bytes(item_len), cursor.big_endian, base);
+                        let mut item = item_parser.parse_dataset(&mut sub, depth);
                         cursor.set_position(item_end);
+                        item.offset = item_offset;
+                        item.length = declared_len;
+                        item.end = cursor.absolute();
+                        items.push(item);
                     }
                 }
                 _ => {
@@ -414,18 +442,21 @@ impl Parser {
         Ok(items)
     }
 
-    fn parse_fragments(&self, cursor: &mut DataCursor) -> VexelResult<(Vec<u32>, Vec<Vec<u8>>)> {
+    fn parse_fragments(&self, cursor: &mut DataCursor) -> VexelResult<ElementValue> {
         let mut offset_table = Vec::new();
         let mut fragments = Vec::new();
+        let mut items = Vec::new();
         let mut first = true;
 
         while cursor.remaining() >= 8 {
+            let item_offset = cursor.absolute();
             let item_tag = cursor.read_u16().map(|g| (g as u32) << 16)? | cursor.read_u16()? as u32;
             let item_len = cursor.read_u32()?;
 
             match item_tag {
                 tags::SEQUENCE_DELIMITER => break,
                 tags::ITEM => {
+                    items.push(FragmentItem { offset: item_offset, length: item_len });
                     let len = (item_len as usize).min(cursor.remaining());
                     let bytes = cursor.read_bytes(len);
                     if first {
@@ -443,7 +474,7 @@ impl Parser {
             }
         }
 
-        Ok((offset_table, fragments))
+        Ok(ElementValue::Fragments { offset_table, fragments, items })
     }
 }
 
@@ -475,65 +506,7 @@ fn tag_from_words(raw: u32, big_endian: bool) -> u32 {
     }
 }
 
-pub fn element_preview(element: &Element) -> String {
-    match &element.value {
-        ElementValue::Sequence(items) => format!("sequence, {} item(s)", items.len()),
-        ElementValue::Fragments { fragments, .. } => format!("encapsulated, {} fragment(s)", fragments.len()),
-        ElementValue::Bytes(bytes) => {
-            if bytes.is_empty() {
-                return String::new();
-            }
-            if is_short_string_vr(element.vr) || (element.vr == Vr::Implicit && looks_like_text(bytes)) {
-                let s: String =
-                    bytes.iter().take(64).map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { '.' }).collect();
-                let s = s.trim_matches(|c: char| c == '.' || c == ' ').to_string();
-                if !s.is_empty() {
-                    return s;
-                }
-            }
-            match element.vr {
-                Vr::Us | Vr::Ss | Vr::Ul | Vr::Sl | Vr::Fl | Vr::Fd => {
-                    let values: Vec<String> = match element.vr {
-                        Vr::Us => bytes
-                            .chunks_exact(2)
-                            .take(8)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]]).to_string())
-                            .collect(),
-                        Vr::Ss => bytes
-                            .chunks_exact(2)
-                            .take(8)
-                            .map(|c| i16::from_le_bytes([c[0], c[1]]).to_string())
-                            .collect(),
-                        Vr::Ul => bytes
-                            .chunks_exact(4)
-                            .take(8)
-                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]).to_string())
-                            .collect(),
-                        Vr::Sl => bytes
-                            .chunks_exact(4)
-                            .take(8)
-                            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]).to_string())
-                            .collect(),
-                        Vr::Fl => bytes
-                            .chunks_exact(4)
-                            .take(8)
-                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]).to_string())
-                            .collect(),
-                        _ => bytes
-                            .chunks_exact(8)
-                            .take(8)
-                            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]).to_string())
-                            .collect(),
-                    };
-                    values.join(", ")
-                }
-                _ => format!("<{} bytes>", element.length),
-            }
-        }
-    }
-}
-
-fn looks_like_text(bytes: &[u8]) -> bool {
+pub(super) fn looks_like_text(bytes: &[u8]) -> bool {
     let sample = &bytes[..bytes.len().min(32)];
     sample.iter().all(|&b| (0x20..0x7F).contains(&b) || b == 0 || b == b'\\' || b == 0x1B)
         && sample.iter().any(|&b| b.is_ascii_alphanumeric())

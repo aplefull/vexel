@@ -3,12 +3,29 @@ use tsify::Tsify;
 
 use crate::utils::error::VexelError;
 
+macro_rules! tiff_tags {
+    ($($name:ident = $value:literal,)*) => {
+        #[derive(Debug, Clone, Copy)]
+        #[repr(u16)]
+        #[allow(dead_code)]
+        pub enum TiffTags {
+            $($name = $value,)*
+        }
+
+        impl TiffTags {
+            pub fn name(tag: u16) -> Option<&'static str> {
+                match tag {
+                    $($value => Some(stringify!($name)),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
 // TODO some tags are commented out since they are duplicates, but with different values
 // This probably requires a different approach to handle them
-#[derive(Debug, Clone, Copy)]
-#[repr(u16)]
-#[allow(dead_code)]
-pub enum TiffTags {
+tiff_tags! {
     NewSubfileType = 254,
     SubfileType = 255,
     ImageWidth = 256,
@@ -694,67 +711,4 @@ impl Default for TiffHeader {
             lerc_additional_compression: LercAdditionalCompression::None,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
-pub struct TiffIfdData {
-    pub ifd_index: usize,
-    pub image_width: u32,
-    pub image_length: u32,
-    pub bits_per_sample: Vec<u16>,
-    pub compression: Compression,
-    pub photometric_interpretation: PhotometricInterpretation,
-    pub samples_per_pixel: u16,
-    pub rows_per_strip: u32,
-    pub strip_count: usize,
-    pub strip_offsets: Vec<u32>,
-    pub strip_byte_counts: Vec<u32>,
-    pub x_resolution: f32,
-    pub y_resolution: f32,
-    pub resolution_unit: ResolutionUnit,
-    pub planar_configuration: PlanarConfiguration,
-    pub predictor: Predictor,
-    pub sample_format: Vec<SampleFormat>,
-    pub extra_samples: Vec<u16>,
-    pub color_map_entries: usize,
-    pub ycbcr_coefficients: [f32; 3],
-    pub ycbcr_sub_sampling: [u16; 2],
-    pub reference_black_white: [f32; 6],
-    pub tile_width: Option<u32>,
-    pub tile_length: Option<u32>,
-    pub tile_count: usize,
-    pub tile_offsets: Vec<u32>,
-    pub tile_byte_counts: Vec<u32>,
-    pub jpeg_tables_length: usize,
-    pub image_depth: u32,
-    pub tile_depth: u32,
-    pub is_tiled: bool,
-    pub is_volumetric: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TiffPixelData {
-    pub length: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TiffFileHeaderData {
-    pub byte_order: String,
-    pub magic: u16,
-    pub first_ifd_offset: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[serde(tag = "type")]
-pub enum TiffSectionData {
-    FileHeader(TiffFileHeaderData),
-    Ifd(TiffIfdData),
-    PixelData(TiffPixelData),
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
-pub struct TiffSectionInfo {
-    pub start_offset: u64,
-    pub data: TiffSectionData,
 }

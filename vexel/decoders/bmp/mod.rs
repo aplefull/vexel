@@ -1,9 +1,10 @@
 pub mod compression;
 pub mod decoder;
 pub mod headers;
+pub mod info;
 pub mod pixels;
 pub mod simd;
 pub mod types;
 
 pub use decoder::BmpDecoder;
-pub use types::*;
+pub use info::*;
