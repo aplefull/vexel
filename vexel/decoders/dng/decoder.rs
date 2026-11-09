@@ -7,8 +7,8 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
 use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, half_to_f32, u16_from_bytes};
 use crate::utils::tiff::compression::{
-    apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_lzw, decompress_packbits,
-    predictor_x_factor,
+    apply_predictor_float, apply_predictor_horizontal, decompress_deflate_with_capacity, decompress_lzw_with_capacity,
+    decompress_packbits_with_capacity, predictor_x_factor,
 };
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
 use crate::utils::tiff::info::walk_structure;
@@ -21,6 +21,11 @@ use crate::{log_warn, Image, Limits};
 
 const DNG_PHOTOMETRIC_CFA: u32 = 32803;
 const DNG_PHOTOMETRIC_LINEAR_RAW: u32 = 34892;
+const MAX_DNG_IFDS: usize = 64;
+const MAX_BLACK_REPEAT_VALUES: u32 = 4096;
+const CHUNK_JPEG_ALLOC_SLACK: usize = 16 * 1024 * 1024;
+const CHUNK_READ_SLACK: u64 = 1024 * 1024;
+const TILE_PADDING_SLACK: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CfaPattern {
@@ -70,6 +75,27 @@ pub struct DngMetadata {
     pub model: String,
 }
 
+struct IfdQueueFilter {
+    seen: std::collections::HashSet<u32>,
+}
+
+impl IfdQueueFilter {
+    fn new(first: u32) -> Self {
+        Self { seen: std::collections::HashSet::from([first]) }
+    }
+
+    fn extend(&mut self, queue: &mut Vec<u32>, offsets: impl IntoIterator<Item = u32>) {
+        for offset in offsets {
+            if self.seen.len() >= MAX_DNG_IFDS {
+                return;
+            }
+            if offset != 0 && self.seen.insert(offset) {
+                queue.push(offset);
+            }
+        }
+    }
+}
+
 struct IfdSummary {
     ifd: Ifd,
     width: u32,
@@ -90,6 +116,7 @@ pub struct DngDecoder<R: Read + Seek> {
     cfa_phase: (u32, u32),
     lossy_curves: Option<Box<[[u16; 256]; 3]>>,
     float_scale: Option<f32>,
+    chunk_alloc_ceiling: Option<u64>,
     info: Option<DngInfo>,
 }
 
@@ -106,6 +133,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             cfa_phase: (0, 0),
             lossy_curves: None,
             float_scale: None,
+            chunk_alloc_ceiling: None,
             info: None,
         }
     }
@@ -136,9 +164,11 @@ impl<R: Read + Seek> DngDecoder<R> {
         let saved_dng = std::mem::take(&mut self.dng);
         let saved_byte_order = self.byte_order;
         let (saved_width, saved_height) = (self.width, self.height);
+        let saved_limits = self.limits.clone();
 
         let result = self.decode_preview_ifds();
 
+        self.limits = saved_limits;
         self.header = saved_header;
         self.dng = saved_dng;
         self.byte_order = saved_byte_order;
@@ -155,8 +185,9 @@ impl<R: Read + Seek> DngDecoder<R> {
         self.byte_order = file_header.byte_order;
 
         let mut previews = Vec::new();
-        let mut guard = IfdCycleGuard::default();
+        let mut guard = IfdCycleGuard::new(MAX_DNG_IFDS);
         let mut queue = vec![file_header.first_ifd_offset];
+        let mut queued = IfdQueueFilter::new(file_header.first_ifd_offset);
 
         while let Some(offset) = queue.pop() {
             if !guard.enter(offset) {
@@ -168,10 +199,8 @@ impl<R: Read + Seek> DngDecoder<R> {
             };
 
             let summary = self.summarize_ifd(ifd);
-            queue.extend(summary.sub_ifd_offsets.iter().copied());
-            if summary.ifd.next_ifd_offset != 0 {
-                queue.push(summary.ifd.next_ifd_offset);
-            }
+            queued.extend(&mut queue, summary.sub_ifd_offsets.iter().copied());
+            queued.extend(&mut queue, [summary.ifd.next_ifd_offset]);
 
             if summary.has_data && !summary.is_raw && summary.width > 0 && summary.height > 0 {
                 if let Some(image) = self.decode_preview_ifd(&summary.ifd, summary.width, summary.height) {
@@ -212,11 +241,40 @@ impl<R: Read + Seek> DngDecoder<R> {
             return None;
         }
 
+        let is_jpeg = matches!(compression, COMPRESSION_JPEG | COMPRESSION_OLD_JPEG | COMPRESSION_LOSSY_JPEG);
+        if !is_jpeg {
+            if compression != COMPRESSION_NONE || bps != 8 {
+                log_warn!("Unsupported DNG preview compression {} with {} bits per sample", compression, bps);
+                return None;
+            }
+            if !matches!(spp, 1 | 3 | 4) {
+                log_warn!("Unsupported DNG preview samples per pixel: {}", spp);
+                return None;
+            }
+        }
+
         self.limits.reserve_buffer(width, height, 4).ok()?;
 
-        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        let channels = if is_jpeg { 3 } else { spp as usize };
+        let target_bytes = (width as usize).saturating_mul(height as usize).saturating_mul(channels);
+        let mut read_budget = self.chunk_read_budget();
+
+        let jpeg_tables = if is_jpeg {
+            ifd.byte_data(TiffTags::JPEGTables, &mut self.reader, &mut self.limits).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let mut data: Vec<u8> = Vec::new();
         for (i, &offset) in offsets.iter().enumerate() {
-            let count = counts.get(i).copied().unwrap_or(0) as usize;
+            if data.len() >= target_bytes || read_budget == 0 {
+                break;
+            }
+            let mut count = counts.get(i).copied().unwrap_or(0) as usize;
+            if !is_jpeg {
+                count = count.min(target_bytes - data.len());
+            }
+            count = count.min(usize::try_from(read_budget).unwrap_or(usize::MAX));
             if count == 0 || self.reader.seek(SeekFrom::Start(offset as u64)).is_err() {
                 continue;
             }
@@ -225,58 +283,43 @@ impl<R: Read + Seek> DngDecoder<R> {
             }
             let chunk = self.reader.read_bytes(count);
             self.limits.free_usize(count);
-            if let Ok(chunk) = chunk {
-                chunks.push(chunk);
+            let Ok(chunk) = chunk else { continue };
+            read_budget = read_budget.saturating_sub(chunk.len() as u64);
+
+            if !is_jpeg {
+                data.extend_from_slice(&chunk);
+                continue;
+            }
+
+            let jpeg_data = if jpeg_tables.len() > 4 { splice_jpeg_tables(&jpeg_tables, &chunk) } else { chunk };
+            let mut decoder = JpegDecoder::new(Cursor::new(jpeg_data));
+            decoder.set_limits(self.limits.clone());
+            match decoder.decode() {
+                Ok(image) => data.extend(image.into_pixels().into_rgb8_bytes()),
+                Err(e) => log_warn!("Failed to decode DNG preview JPEG chunk: {}", e),
             }
         }
 
-        if chunks.is_empty() {
+        if data.is_empty() {
             return None;
         }
+        data.truncate(target_bytes);
 
-        let mut pixel_data = match compression {
-            COMPRESSION_JPEG | COMPRESSION_OLD_JPEG | COMPRESSION_LOSSY_JPEG => {
-                let jpeg_tables =
-                    ifd.byte_data(TiffTags::JPEGTables, &mut self.reader, &mut self.limits).unwrap_or_default();
-
-                let mut rgb = Vec::new();
-                for chunk in chunks {
-                    let data = if jpeg_tables.len() > 4 { splice_jpeg_tables(&jpeg_tables, &chunk) } else { chunk };
-
-                    let mut decoder = JpegDecoder::new(Cursor::new(data));
-                    decoder.set_limits(self.limits.clone());
-                    match decoder.decode() {
-                        Ok(image) => rgb.extend(image.into_pixels().into_rgb8_bytes()),
-                        Err(e) => log_warn!("Failed to decode DNG preview JPEG chunk: {}", e),
-                    }
-                }
-
-                if rgb.is_empty() {
-                    return None;
-                }
-
-                PixelData::RGB8(rgb)
-            }
-            COMPRESSION_NONE if bps == 8 => {
-                let data = chunks.concat();
-                match spp {
-                    1 => PixelData::L8(data),
-                    3 => PixelData::RGB8(data),
-                    4 => PixelData::RGBA8(data),
-                    _ => {
-                        log_warn!("Unsupported DNG preview samples per pixel: {}", spp);
-                        return None;
-                    }
-                }
-            }
-            _ => {
-                log_warn!("Unsupported DNG preview compression {} with {} bits per sample", compression, bps);
-                return None;
-            }
+        let mut pixel_data = match channels {
+            1 => PixelData::L8(data),
+            4 => PixelData::RGBA8(data),
+            _ => PixelData::RGB8(data),
         };
 
         pixel_data.correct_pixels(width, height);
         Some(Image::from_pixels(width, height, pixel_data))
+    }
+
+    fn chunk_read_budget(&mut self) -> u64 {
+        let saved_pos = self.reader.stream_position().unwrap_or(0);
+        let stream_len = self.reader.seek(SeekFrom::End(0)).unwrap_or(0);
+        let _ = self.reader.seek(SeekFrom::Start(saved_pos));
+        stream_len.saturating_mul(2).saturating_add(CHUNK_READ_SLACK)
     }
 
     fn summarize_ifd(&mut self, ifd: Ifd) -> IfdSummary {
@@ -463,8 +506,13 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
         if self.dng.black_level.is_none() {
             if let Some(entry) = ifd.entry(TiffTags::BlackLevel) {
-                let repeat_rows = self.dng.black_level_repeat_rows.max(1);
-                let repeat_cols = self.dng.black_level_repeat_cols.max(1);
+                let mut repeat_rows = self.dng.black_level_repeat_rows.max(1);
+                let mut repeat_cols = self.dng.black_level_repeat_cols.max(1);
+                if repeat_rows.saturating_mul(repeat_cols) > MAX_BLACK_REPEAT_VALUES {
+                    log_warn!("DNG BlackLevelRepeatDim {}x{} too large, using 1x1", repeat_rows, repeat_cols);
+                    repeat_rows = 1;
+                    repeat_cols = 1;
+                }
                 let spatial_count = repeat_rows * repeat_cols;
 
                 let values: Vec<f32> = if entry.field_type == 5 {
@@ -681,13 +729,18 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
     }
 
-    fn strip_context(&self) -> StripContext<'_> {
+    fn strip_context(&self, piece_bytes: usize) -> StripContext<'_> {
+        let mut jpeg_limits = self.limits.clone();
+        jpeg_limits.max_alloc = self
+            .chunk_alloc_ceiling
+            .map(|ceiling| ceiling.min(piece_bytes.saturating_mul(8).saturating_add(CHUNK_JPEG_ALLOC_SLACK) as u64));
         StripContext {
             header: &self.header,
             dng: &self.dng,
             byte_order: self.byte_order,
             lossy_curves: self.lossy_curves.as_deref(),
             float_scale: self.float_scale,
+            jpeg_limits,
         }
     }
 
@@ -720,13 +773,19 @@ impl<R: Read + Seek> DngDecoder<R> {
 
     fn prepare_lossy_curves(&mut self) {
         if self.header.compression == Compression::LossyJPEG && self.lossy_curves.is_none() {
-            let curves = self.strip_context().build_lossy_curves();
+            let curves = self.strip_context(0).build_lossy_curves();
             self.lossy_curves = Some(curves);
         }
     }
 
-    fn decompress_all(&mut self, pieces: Vec<(Vec<u8>, usize)>, width: usize, bps: u16) -> VexelResult<Vec<Vec<u16>>> {
-        let ctx = self.strip_context();
+    fn decompress_all(
+        &mut self,
+        pieces: Vec<(Vec<u8>, usize)>,
+        width: usize,
+        bps: u16,
+        piece_bytes: usize,
+    ) -> VexelResult<Vec<Vec<u16>>> {
+        let ctx = self.strip_context(piece_bytes);
 
         #[cfg(feature = "rayon")]
         {
@@ -735,6 +794,20 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
         #[cfg(not(feature = "rayon"))]
         pieces.into_iter().map(|(data, rows)| ctx.decompress_strip(data, rows, width, bps)).collect()
+    }
+
+    fn read_chunk(&mut self, offset: u32, count: u32, budget: &mut u64) -> Vec<u8> {
+        if *budget == 0 || count == 0 || self.reader.seek(SeekFrom::Start(offset as u64)).is_err() {
+            return Vec::new();
+        }
+        let available = self.reader.bytes_left().unwrap_or(0);
+        let len = u64::from(count).min(available).min(*budget);
+        if len < u64::from(count) {
+            log_warn!("DNG chunk at offset {} truncated from {} to {} bytes", offset, count, len);
+        }
+        let data = self.reader.read_bytes(len as usize).unwrap_or_default();
+        *budget = budget.saturating_sub(data.len() as u64);
+        data
     }
 
     fn read_raw_strip_data(&mut self) -> VexelResult<Vec<u16>> {
@@ -748,6 +821,7 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let offsets = self.header.strip_offsets.clone();
         let byte_counts = self.header.strip_byte_counts.clone();
+        let mut read_budget = self.chunk_read_budget();
 
         let num_strips = offsets.len().max(1);
         let mut rows_per_strip = (self.header.rows_per_strip as usize).max(1).min(image_height.max(1));
@@ -756,14 +830,14 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
 
         let used_strips = offsets.len().min(byte_counts.len()).min(image_height.div_ceil(rows_per_strip));
+        let piece_bytes = rows_per_strip * image_width * spp * 2;
 
         if used_strips == 1 {
-            self.reader.seek(SeekFrom::Start(offsets[0] as u64))?;
-            let mut strip_data = vec![0u8; byte_counts[0] as usize];
-            self.reader.read_exact(&mut strip_data)?;
+            let strip_data = self.read_chunk(offsets[0], byte_counts[0], &mut read_budget);
 
             let strip_rows = rows_per_strip.min(image_height);
-            let mut decompressed = self.decompress_all(vec![(strip_data, strip_rows)], image_width, bps)?;
+            let mut decompressed =
+                self.decompress_all(vec![(strip_data, strip_rows)], image_width, bps, piece_bytes)?;
 
             let mut strip = decompressed.pop().unwrap_or_default();
             strip.resize(sample_count, 0);
@@ -771,22 +845,26 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
 
         let mut raw = vec![0u16; sample_count];
-        let batch = batch_len(rows_per_strip * image_width * spp * 2);
+        let batch = batch_len(piece_bytes);
         let mut strip_idx = 0;
         while strip_idx < used_strips {
             let batch_end = (strip_idx + batch).min(used_strips);
 
             let mut strips_data: Vec<(Vec<u8>, usize)> = Vec::with_capacity(batch_end - strip_idx);
+            let mut batch_bytes = 0usize;
             for i in strip_idx..batch_end {
-                self.reader.seek(SeekFrom::Start(offsets[i] as u64))?;
-                let mut strip_data = vec![0u8; byte_counts[i] as usize];
-                self.reader.read_exact(&mut strip_data)?;
+                if batch_bytes >= TARGET_BATCH_BYTES {
+                    break;
+                }
+                let strip_data = self.read_chunk(offsets[i], byte_counts[i], &mut read_budget);
+                batch_bytes += strip_data.len();
 
                 let strip_rows = rows_per_strip.min(image_height - i * rows_per_strip);
                 strips_data.push((strip_data, strip_rows));
             }
+            let batch_end = strip_idx + strips_data.len();
 
-            let decompressed = self.decompress_all(strips_data, image_width, bps)?;
+            let decompressed = self.decompress_all(strips_data, image_width, bps, piece_bytes)?;
 
             for (k, strip) in decompressed.iter().enumerate() {
                 let base = (strip_idx + k) * rows_per_strip * image_width * spp;
@@ -812,46 +890,74 @@ impl<R: Read + Seek> DngDecoder<R> {
         let tile_height = (self.header.tile_length.unwrap_or(self.height) as usize).max(1);
         let tiles_x = image_width.div_ceil(tile_width);
         let tiles_y = image_height.div_ceil(tile_height);
-
-        let mut raw = vec![0u16; image_width * image_height * spp];
-
-        self.prepare_lossy_curves();
+        let sample_count = image_width * image_height * spp;
 
         let offsets = self.header.tile_offsets.clone();
         let byte_counts = self.header.tile_byte_counts.clone();
 
         let num_tiles = offsets.len().min(tiles_x.saturating_mul(tiles_y));
 
-        let batch = batch_len(tile_width * tile_height * spp * 2);
+        let tile_rows = tile_height.min(image_height);
+        let tile_limit_error = || {
+            VexelError::LimitExceeded(format!(
+                "DNG tile layout {}x{} is too large for a {}x{} image",
+                tile_width, tile_height, image_width, image_height
+            ))
+        };
+        let piece_bytes = tile_rows
+            .checked_mul(tile_width)
+            .and_then(|n| n.checked_mul(spp))
+            .and_then(|n| n.checked_mul(2))
+            .ok_or_else(tile_limit_error)?;
+        let padded_bytes = piece_bytes.saturating_mul(num_tiles);
+        let jpeg_piece_bytes = tile_height
+            .saturating_mul(tile_width)
+            .saturating_mul(spp)
+            .saturating_mul(2)
+            .min(piece_bytes.saturating_mul(4));
+        if padded_bytes > sample_count.saturating_mul(2 * 4).saturating_add(TILE_PADDING_SLACK) {
+            return Err(tile_limit_error());
+        }
+
+        let mut raw = vec![0u16; sample_count];
+
+        self.prepare_lossy_curves();
+
+        let mut read_budget = self.chunk_read_budget();
+
+        let batch = batch_len(piece_bytes);
         let mut tile_idx = 0;
         while tile_idx < num_tiles {
             let batch_end = (tile_idx + batch).min(num_tiles);
 
             let mut tiles_data: Vec<(Vec<u8>, usize)> = Vec::with_capacity(batch_end - tile_idx);
-            for offset in &offsets[tile_idx..batch_end] {
-                let i = tile_idx + tiles_data.len();
+            let mut batch_bytes = 0usize;
+            for (i, &offset) in offsets.iter().enumerate().take(batch_end).skip(tile_idx) {
+                if batch_bytes >= TARGET_BATCH_BYTES {
+                    break;
+                }
                 let byte_count = byte_counts.get(i).copied().unwrap_or(0);
-                self.reader.seek(SeekFrom::Start(*offset as u64))?;
-                let mut tile_data = vec![0u8; byte_count as usize];
-                self.reader.read_exact(&mut tile_data)?;
-                tiles_data.push((tile_data, tile_height));
+                let tile_data = self.read_chunk(offset, byte_count, &mut read_budget);
+                batch_bytes += tile_data.len();
+                tiles_data.push((tile_data, tile_rows));
             }
+            let batch_end = tile_idx + tiles_data.len();
 
-            let decompressed = self.decompress_all(tiles_data, tile_width, bps)?;
+            let decompressed = self.decompress_all(tiles_data, tile_width, bps, jpeg_piece_bytes)?;
 
             for (k, tile) in decompressed.iter().enumerate() {
                 let img_x = ((tile_idx + k) % tiles_x) * tile_width;
                 let img_y = ((tile_idx + k) / tiles_x) * tile_height;
                 let cols = tile_width.min(image_width - img_x);
 
-                for row in 0..tile_height {
+                for row in 0..tile_rows {
                     let py = img_y + row;
-                    if py >= image_height {
+                    let src = row * tile_width * spp;
+                    if py >= image_height || src >= tile.len() {
                         break;
                     }
-                    let src = row * tile_width * spp;
                     let dst = (py * image_width + img_x) * spp;
-                    let len = (cols * spp).min(tile.len().saturating_sub(src)).min(raw.len() - dst);
+                    let len = (cols * spp).min(tile.len() - src).min(raw.len() - dst);
                     raw[dst..dst + len].copy_from_slice(&tile[src..src + len]);
                 }
             }
@@ -1278,7 +1384,9 @@ impl<R: Read + Seek> DngDecoder<R> {
         let black_row_count = match &self.dng.black_level {
             None | Some(BlackLevel::Uniform(_)) => 1,
             Some(BlackLevel::PerChannel(_)) => channel_rows.len(),
-            Some(BlackLevel::Spatial { repeat_rows, .. }) => (*repeat_rows as usize).max(1),
+            Some(BlackLevel::Spatial { repeat_rows, .. }) => {
+                (*repeat_rows as usize).min(raw.len() / row_samples).max(1)
+            }
         };
         let black_rows: Vec<Vec<f32>> = (0..black_row_count)
             .map(|y| {
@@ -1297,12 +1405,15 @@ impl<R: Read + Seek> DngDecoder<R> {
             }
         };
 
-        let distinct_blacks: Vec<f32> = {
-            let mut v: Vec<f32> = black_rows.iter().flatten().copied().collect();
-            v.sort_by(f32::total_cmp);
-            v.dedup();
-            v
-        };
+        let mut distinct_blacks: Vec<f32> = Vec::new();
+        for &b in black_rows.iter().flatten() {
+            if let Err(pos) = distinct_blacks.binary_search_by(|p| p.total_cmp(&b)) {
+                distinct_blacks.insert(pos, b);
+                if distinct_blacks.len() > MAX_BLACK_LUTS {
+                    break;
+                }
+            }
+        }
 
         if distinct_blacks.len() > MAX_BLACK_LUTS || lcm(black_rows.len(), channel_rows.len()) > MAX_LUT_ROWS {
             self.scale_colors_direct(raw, pre_mul, row_samples, &channel_rows, &black_rows, lin_table);
@@ -1446,13 +1557,39 @@ impl<R: Read + Seek> DngDecoder<R> {
         raw.chunks_mut(band_samples).enumerate().for_each(apply_band);
     }
 
+    fn reserve_decode_buffers(&mut self, spp: usize, is_cfa: bool) -> VexelResult<()> {
+        self.chunk_alloc_ceiling = self.limits.max_alloc;
+        self.limits.check_dimensions(self.width, self.height)?;
+        if self.width > i32::MAX as u32 || self.height > i32::MAX as u32 {
+            return Err(VexelError::LimitExceeded(format!(
+                "DNG dimensions {}x{} are too large",
+                self.width, self.height
+            )));
+        }
+
+        let rgb_samples_per_pixel = if is_cfa || spp > 3 { 3 } else { 0 };
+        let bytes_per_pixel = (spp as u64 + rgb_samples_per_pixel) * 2;
+        let total = u64::from(self.width)
+            .checked_mul(u64::from(self.height))
+            .and_then(|n| n.checked_mul(bytes_per_pixel))
+            .filter(|&n| usize::try_from(n).is_ok())
+            .ok_or_else(|| {
+                VexelError::LimitExceeded(format!(
+                    "DNG buffer for {}x{} with {} samples per pixel is too large",
+                    self.width, self.height, spp
+                ))
+            })?;
+        self.limits.reserve(total)
+    }
+
     pub fn decode(&mut self) -> VexelResult<Image> {
         let file_header = ifd::read_file_header(&mut self.reader)?;
         self.byte_order = file_header.byte_order;
         let first_ifd_offset = file_header.first_ifd_offset;
 
         let mut queue: Vec<u32> = vec![first_ifd_offset];
-        let mut guard = IfdCycleGuard::default();
+        let mut guard = IfdCycleGuard::new(MAX_DNG_IFDS);
+        let mut queued = IfdQueueFilter::new(first_ifd_offset);
         let mut all_ifds: Vec<IfdSummary> = Vec::new();
 
         while let Some(ifd_offset) = queue.first().cloned() {
@@ -1467,12 +1604,8 @@ impl<R: Read + Seek> DngDecoder<R> {
 
             let summary = self.summarize_ifd(parsed);
 
-            for &sub in &summary.sub_ifd_offsets {
-                queue.push(sub);
-            }
-            if summary.ifd.next_ifd_offset != 0 {
-                queue.push(summary.ifd.next_ifd_offset);
-            }
+            queued.extend(&mut queue, summary.sub_ifd_offsets.iter().copied());
+            queued.extend(&mut queue, [summary.ifd.next_ifd_offset]);
             all_ifds.push(summary);
         }
 
@@ -1527,19 +1660,19 @@ impl<R: Read + Seek> DngDecoder<R> {
             return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
-        self.limits.reserve_buffer(self.width, self.height, 4)?;
+        let spp = (self.header.samples_per_pixel as usize).max(1);
+        let is_cfa = self.dng.photometric_cfa && spp == 1 && self.dng.cfa_pattern.is_some();
+        self.reserve_decode_buffers(spp, is_cfa)?;
 
         let is_tiled = self.header.tile_width.is_some() && !self.header.tile_offsets.is_empty();
 
         let mut raw_pixels = if is_tiled { self.read_raw_tile_data()? } else { self.read_raw_strip_data()? };
 
-        let spp = (self.header.samples_per_pixel as usize).max(1);
         self.crop_to_active_area(&mut raw_pixels, spp);
         self.apply_camera_quirks(&mut raw_pixels, spp);
 
         let w = self.width as usize;
         let h = self.height as usize;
-        let is_cfa = self.dng.photometric_cfa && spp == 1 && self.dng.cfa_pattern.is_some();
 
         let transform = self.build_color_transform();
 
@@ -1596,9 +1729,10 @@ impl<R: Read + Seek> DngDecoder<R> {
     }
 }
 
+const TARGET_BATCH_BYTES: usize = 32 * 1024 * 1024;
+
 #[cfg(feature = "rayon")]
 fn batch_len(piece_bytes: usize) -> usize {
-    const TARGET_BATCH_BYTES: usize = 32 * 1024 * 1024;
     (TARGET_BATCH_BYTES / piece_bytes.max(1)).max(rayon::current_num_threads()).max(1)
 }
 
@@ -1613,6 +1747,7 @@ struct StripContext<'a> {
     byte_order: ByteOrder,
     lossy_curves: Option<&'a [[u16; 256]; 3]>,
     float_scale: Option<f32>,
+    jpeg_limits: Limits,
 }
 
 impl StripContext<'_> {
@@ -1622,7 +1757,7 @@ impl StripContext<'_> {
         let mut filled = [false; 3];
         for poly in &self.dng.map_polynomials {
             let start = poly.plane as usize;
-            let end = (poly.plane + poly.planes.max(1)) as usize;
+            let end = poly.plane.saturating_add(poly.planes.max(1)) as usize;
             for c in start..end.min(3) {
                 for i in 0..256 {
                     let x = i as f64 / 255.0;
@@ -1650,16 +1785,19 @@ impl StripContext<'_> {
     }
 
     fn decompress_strip(&self, data: Vec<u8>, rows: usize, width: usize, bps: u16) -> VexelResult<Vec<u16>> {
+        let spp = (self.header.samples_per_pixel as usize).max(1);
+        let count = rows * width * spp;
+        let expected_bytes = count.saturating_mul(bps.clamp(16, 32) as usize / 8).max(1);
         let decompressed_bytes = match self.header.compression {
             Compression::None => data,
             Compression::LZW => {
-                let mut d = decompress_lzw(&data);
+                let mut d = decompress_lzw_with_capacity(&data, expected_bytes);
                 self.apply_row_predictor(&mut d, width, bps);
                 d
             }
-            Compression::PackBits => decompress_packbits(&data),
+            Compression::PackBits => decompress_packbits_with_capacity(&data, expected_bytes),
             Compression::AdobeDeflate | Compression::Deflate => {
-                let mut d = decompress_deflate(&data);
+                let mut d = decompress_deflate_with_capacity(&data, expected_bytes);
                 self.apply_row_predictor(&mut d, width, bps);
                 d
             }
@@ -1675,8 +1813,6 @@ impl StripContext<'_> {
             }
         };
 
-        let spp = (self.header.samples_per_pixel as usize).max(1);
-        let count = rows * width * spp;
         match self.float_scale {
             Some(scale) => Ok(self.unpack_float_pixels(&decompressed_bytes, count, bps, scale)),
             None => Ok(self.unpack_pixels(&decompressed_bytes, count, bps)),
@@ -1693,7 +1829,7 @@ impl StripContext<'_> {
             }
             Predictor::FloatingPoint | Predictor::FloatingPointX2 | Predictor::FloatingPointX4 => {
                 let x = predictor_x_factor(self.header.predictor);
-                apply_predictor_float(data, (width as u32 / x).max(1), spp * x as u16, bps, big_endian);
+                apply_predictor_float(data, (width as u32 / x).max(1), spp.saturating_mul(x as u16), bps, big_endian);
             }
         }
     }
@@ -1737,6 +1873,7 @@ impl StripContext<'_> {
 
         let cursor = Cursor::new(jpeg_data);
         let mut jpeg_decoder = JpegDecoder::new(cursor);
+        jpeg_decoder.set_limits(self.jpeg_limits.clone());
         jpeg_decoder.set_lossless_ssss16_is_min(self.dng.dng_version == 0 || self.dng.dng_version >= 0x01010000);
         jpeg_decoder.set_lossless_skip_color_transform(true);
         let image = match jpeg_decoder.decode() {
@@ -1788,6 +1925,7 @@ impl StripContext<'_> {
 
         let cursor = Cursor::new(tile_data);
         let mut jpeg_decoder = JpegDecoder::new(cursor);
+        jpeg_decoder.set_limits(self.jpeg_limits.clone());
         let image = match jpeg_decoder.decode() {
             Ok(img) => img,
             Err(e) => {

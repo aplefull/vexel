@@ -5,11 +5,12 @@ pub struct HeaderReader<'a> {
     pos: usize,
     buf: u32,
     ct: u32,
+    overrun: bool,
 }
 
 impl<'a> HeaderReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, buf: 0, ct: 0 }
+        Self { data, pos: 0, buf: 0, ct: 0, overrun: false }
     }
 
     fn bytein(&mut self) {
@@ -19,7 +20,13 @@ impl<'a> HeaderReader<'a> {
         if self.pos < self.data.len() {
             self.buf |= self.data[self.pos] as u32;
             self.pos += 1;
+        } else {
+            self.overrun = true;
         }
+    }
+
+    pub fn exhausted(&self) -> bool {
+        self.overrun
     }
 
     fn getbit(&mut self) -> u32 {
@@ -129,6 +136,9 @@ impl TagTree {
             }
 
             while low < threshold && low < self.values[node] {
+                if reader.exhausted() {
+                    break;
+                }
                 if reader.read(1) != 0 {
                     self.values[node] = low;
                 } else {
@@ -291,7 +301,7 @@ fn precinct_at(tile: &TileGeometry, comp: &ComponentGeometry, resno: u32, x: u32
     let prci = floor_div_pow2(ceil_div_u64(x as u64, dx_shifted), res.pdx) - floor_div_pow2(trx0, res.pdx);
     let prcj = floor_div_pow2(ceil_div_u64(y as u64, dy_shifted), res.pdy) - floor_div_pow2(try0, res.pdy);
 
-    Some(prci + prcj * res.pw)
+    prcj.checked_mul(res.pw)?.checked_add(prci)
 }
 
 fn position_step(components: &[ComponentGeometry], only: Option<usize>) -> (u32, u32) {
@@ -329,19 +339,74 @@ fn position_step(components: &[ComponentGeometry], only: Option<usize>) -> (u32,
     (step_x, step_y)
 }
 
-fn positions_along(start: u32, end: u32, step: u32) -> Vec<u32> {
-    let mut values = Vec::new();
-    if step == 0 {
-        return values;
+fn positions_along(start: u32, end: u32, step: u32) -> impl Iterator<Item = u32> {
+    let first = if step == 0 || start >= end { None } else { Some(start) };
+
+    std::iter::successors(first, move |&value| value.checked_add(step - (value % step)).filter(|&next| next < end))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EnumerationLimit {
+    pub max_positions: usize,
+    pub max_work: u64,
+}
+
+pub struct Enumeration {
+    pub positions: Vec<PacketPosition>,
+    pub truncated: bool,
+}
+
+struct Collector {
+    positions: Vec<PacketPosition>,
+    seen: Option<std::collections::HashSet<(u32, u32, u32, u32)>>,
+    max_positions: usize,
+    work_left: u64,
+    truncated: bool,
+}
+
+impl Collector {
+    fn new(limit: EnumerationLimit, deduplicate: bool) -> Self {
+        Self {
+            positions: Vec::new(),
+            seen: deduplicate.then(std::collections::HashSet::new),
+            max_positions: limit.max_positions,
+            work_left: limit.max_work,
+            truncated: false,
+        }
     }
 
-    let mut value = start;
-    while value < end {
-        values.push(value);
-        value += step - (value % step);
+    fn tick(&mut self) -> bool {
+        if self.work_left == 0 {
+            self.truncated = true;
+            return false;
+        }
+        self.work_left -= 1;
+        true
     }
 
-    values
+    fn push(&mut self, layer: u32, resolution: u32, component: u32, precinct: u32) -> bool {
+        if !self.tick() {
+            return false;
+        }
+
+        if let Some(seen) = self.seen.as_mut() {
+            if !seen.insert((layer, resolution, component, precinct)) {
+                return true;
+            }
+        }
+
+        if self.positions.len() >= self.max_positions {
+            self.truncated = true;
+            return false;
+        }
+
+        self.positions.push(PacketPosition { layer, resolution, component, precinct });
+        true
+    }
+
+    fn finish(self) -> Enumeration {
+        Enumeration { positions: self.positions, truncated: self.truncated }
+    }
 }
 
 pub fn enumerate_packets(
@@ -349,10 +414,23 @@ pub fn enumerate_packets(
     num_layers: u32,
     tile: &TileGeometry,
     components: &[ComponentGeometry],
-) -> Vec<PacketPosition> {
+    limit: EnumerationLimit,
+) -> Enumeration {
     let max_resolutions = components.iter().map(|c| c.resolutions.len() as u32).max().unwrap_or(0);
 
-    enumerate_range(order, tile, components, 0, components.len() as u32, 0, max_resolutions, num_layers)
+    let mut collector = Collector::new(limit, false);
+    enumerate_range(
+        order,
+        tile,
+        components,
+        0,
+        components.len() as u32,
+        0,
+        max_resolutions,
+        num_layers,
+        &mut collector,
+    );
+    collector.finish()
 }
 
 pub fn enumerate_packets_with_changes(
@@ -360,12 +438,16 @@ pub fn enumerate_packets_with_changes(
     num_layers: u32,
     tile: &TileGeometry,
     components: &[ComponentGeometry],
-) -> Vec<PacketPosition> {
-    let mut positions = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    limit: EnumerationLimit,
+) -> Enumeration {
+    let mut collector = Collector::new(limit, true);
 
     for change in changes {
-        let range = enumerate_range(
+        if !collector.tick() {
+            break;
+        }
+
+        let completed = enumerate_range(
             change.order,
             tile,
             components,
@@ -374,17 +456,15 @@ pub fn enumerate_packets_with_changes(
             change.resno0,
             change.resno1,
             change.layno1.min(num_layers),
+            &mut collector,
         );
 
-        for packet in range {
-            let key = (packet.layer, packet.resolution, packet.component, packet.precinct);
-            if seen.insert(key) {
-                positions.push(packet);
-            }
+        if !completed {
+            break;
         }
     }
 
-    positions
+    collector.finish()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -397,33 +477,41 @@ fn enumerate_range(
     resno0: u32,
     resno1: u32,
     num_layers: u32,
-) -> Vec<PacketPosition> {
-    let mut positions = Vec::new();
+    collector: &mut Collector,
+) -> bool {
     let num_components = components.len() as u32;
     let compno1 = compno1.min(num_components);
     let max_resolutions = components.iter().map(|c| c.resolutions.len() as u32).max().unwrap_or(0).min(resno1);
 
     let precinct_count = |component: usize, resolution: usize| -> u32 {
-        components.get(component).and_then(|c| c.resolutions.get(resolution)).map(|r| r.pw * r.ph).unwrap_or(0)
+        components
+            .get(component)
+            .and_then(|c| c.resolutions.get(resolution))
+            .map(|r| r.pw.saturating_mul(r.ph))
+            .unwrap_or(0)
     };
 
     let resolution_count =
         |component: usize| -> u32 { components.get(component).map(|c| c.resolutions.len() as u32).unwrap_or(0) };
 
-    let mut push = |layer: u32, resolution: u32, component: u32, precinct: u32| {
-        positions.push(PacketPosition { layer, resolution, component, precinct });
-    };
-
     match order {
         ProgressionOrder::Lrcp => {
             for layer in 0..num_layers {
+                if !collector.tick() {
+                    return false;
+                }
                 for resolution in resno0..max_resolutions {
                     for component in compno0..compno1 {
+                        if !collector.tick() {
+                            return false;
+                        }
                         if resolution >= resolution_count(component as usize) {
                             continue;
                         }
                         for precinct in 0..precinct_count(component as usize, resolution as usize) {
-                            push(layer, resolution, component, precinct);
+                            if !collector.push(layer, resolution, component, precinct) {
+                                return false;
+                            }
                         }
                     }
                 }
@@ -432,12 +520,20 @@ fn enumerate_range(
         ProgressionOrder::Rlcp => {
             for resolution in resno0..max_resolutions {
                 for layer in 0..num_layers {
+                    if !collector.tick() {
+                        return false;
+                    }
                     for component in compno0..compno1 {
+                        if !collector.tick() {
+                            return false;
+                        }
                         if resolution >= resolution_count(component as usize) {
                             continue;
                         }
                         for precinct in 0..precinct_count(component as usize, resolution as usize) {
-                            push(layer, resolution, component, precinct);
+                            if !collector.push(layer, resolution, component, precinct) {
+                                return false;
+                            }
                         }
                     }
                 }
@@ -448,8 +544,14 @@ fn enumerate_range(
 
             for resolution in resno0..max_resolutions {
                 for y in positions_along(tile.ty0, tile.ty1, step_y) {
+                    if !collector.tick() {
+                        return false;
+                    }
                     for x in positions_along(tile.tx0, tile.tx1, step_x) {
                         for (index, comp) in components.iter().enumerate() {
+                            if !collector.tick() {
+                                return false;
+                            }
                             let index = index as u32;
                             if index < compno0 || index >= compno1 {
                                 continue;
@@ -459,7 +561,9 @@ fn enumerate_range(
                             }
                             if let Some(precinct) = precinct_at(tile, comp, resolution, x, y) {
                                 for layer in 0..num_layers {
-                                    push(layer, resolution, index, precinct);
+                                    if !collector.push(layer, resolution, index, precinct) {
+                                        return false;
+                                    }
                                 }
                             }
                         }
@@ -471,16 +575,27 @@ fn enumerate_range(
             let (step_x, step_y) = position_step(components, None);
 
             for y in positions_along(tile.ty0, tile.ty1, step_y) {
+                if !collector.tick() {
+                    return false;
+                }
                 for x in positions_along(tile.tx0, tile.tx1, step_x) {
                     for (index, comp) in components.iter().enumerate() {
+                        if !collector.tick() {
+                            return false;
+                        }
                         let index = index as u32;
                         if index < compno0 || index >= compno1 {
                             continue;
                         }
                         for resolution in resno0..(comp.resolutions.len() as u32).min(resno1) {
+                            if !collector.tick() {
+                                return false;
+                            }
                             if let Some(precinct) = precinct_at(tile, comp, resolution, x, y) {
                                 for layer in 0..num_layers {
-                                    push(layer, resolution, index, precinct);
+                                    if !collector.push(layer, resolution, index, precinct) {
+                                        return false;
+                                    }
                                 }
                             }
                         }
@@ -490,6 +605,9 @@ fn enumerate_range(
         }
         ProgressionOrder::Cprl => {
             for (index, comp) in components.iter().enumerate() {
+                if !collector.tick() {
+                    return false;
+                }
                 if (index as u32) < compno0 || (index as u32) >= compno1 {
                     continue;
                 }
@@ -497,11 +615,19 @@ fn enumerate_range(
                 let (step_x, step_y) = position_step(components, Some(index));
 
                 for y in positions_along(tile.ty0, tile.ty1, step_y) {
+                    if !collector.tick() {
+                        return false;
+                    }
                     for x in positions_along(tile.tx0, tile.tx1, step_x) {
                         for resolution in resno0..(comp.resolutions.len() as u32).min(resno1) {
+                            if !collector.tick() {
+                                return false;
+                            }
                             if let Some(precinct) = precinct_at(tile, comp, resolution, x, y) {
                                 for layer in 0..num_layers {
-                                    push(layer, resolution, index as u32, precinct);
+                                    if !collector.push(layer, resolution, index as u32, precinct) {
+                                        return false;
+                                    }
                                 }
                             }
                         }
@@ -511,5 +637,5 @@ fn enumerate_range(
         }
     }
 
-    positions
+    true
 }

@@ -397,10 +397,11 @@ impl T1Decoder {
 
         self.allocate(w, h);
 
-        let mut bpno_plus_one = (roi_shift + cblk.num_bps) as i32;
-        if bpno_plus_one >= 31 {
+        let total_bitplanes = roi_shift.saturating_add(cblk.num_bps);
+        if total_bitplanes >= 31 {
             return false;
         }
+        let mut bpno_plus_one = total_bitplanes as i32;
 
         let mut passtype = PassType::Cleanup;
         self.mqc.reset_dec_states();

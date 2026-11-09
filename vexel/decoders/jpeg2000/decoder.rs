@@ -122,6 +122,21 @@ pub fn decode_codestream_planes(parsed: &Codestream, data: &[u8], limits: &mut L
         }
     }
 
+    let max_tiles = (MAX_TILE_COMPONENTS / num_components.max(1)).max(1);
+    let mut kept = 0usize;
+    let mut dropped = 0usize;
+    for bytes in tile_data.iter_mut().filter(|bytes| !bytes.is_empty()) {
+        if kept >= max_tiles {
+            *bytes = Vec::new();
+            dropped += 1;
+        } else {
+            kept += 1;
+        }
+    }
+    if dropped > 0 {
+        log_warn!("JPEG 2000: too many tile-components, skipping the last {} tiles", dropped);
+    }
+
     let mut decoded_any = false;
     let mut ppm_cursor = 0usize;
 
@@ -137,7 +152,8 @@ pub fn decode_codestream_planes(parsed: &Codestream, data: &[u8], limits: &mut L
             continue;
         }
 
-        let mut decoder = TileDecoder::new(parsed, limits, &mut ppm_cursor);
+        let mut tile_limits = limits.clone();
+        let mut decoder = TileDecoder::new(parsed, &mut tile_limits, &mut ppm_cursor);
 
         match decoder.decode_tile(tile_index as u32, bytes) {
             Ok(decoded) => {
@@ -178,7 +194,10 @@ fn decode_tiles_parallel(
     use rayon::prelude::*;
 
     let siz = &parsed.siz;
-    let budget = limits.clone();
+    let occupied = tile_data.iter().filter(|bytes| !bytes.is_empty()).count();
+    let concurrency = rayon::current_num_threads().min(occupied).max(1) as u64;
+    let mut budget = limits.clone();
+    budget.max_alloc = budget.max_alloc.map(|remaining| remaining / concurrency);
 
     let decoded: Vec<(usize, VexelResult<tile::DecodedTile>)> = tile_data
         .par_iter()
@@ -260,7 +279,9 @@ impl<R: Read + Seek> Jpeg2000Decoder<R> {
 
         if let Some(palette) = container.and_then(|c| c.palette.as_ref()) {
             let source_precision = precisions.first().copied().unwrap_or(8);
-            if let Some((expanded, expanded_precisions)) = apply_palette(palette, &upsampled, source_precision) {
+            if let Some((expanded, expanded_precisions)) =
+                apply_palette(palette, &upsampled, source_precision, &mut self.limits)?
+            {
                 upsampled = expanded;
                 precisions = expanded_precisions;
             }
@@ -507,14 +528,7 @@ fn convert_cielab_to_rgb(planes: &mut [Vec<i64>], precisions: &mut [u32], range:
         None => {
             let precision_a = precisions.get(1).copied().unwrap_or(8).clamp(1, 32);
             let precision_b = precisions.get(2).copied().unwrap_or(8).clamp(1, 32);
-            (
-                100.0,
-                0.0,
-                170.0,
-                (1u64 << (precision_a - 1)) as f64,
-                200.0,
-                (1u64 << (precision_b - 2)) as f64 + (1u64 << (precision_b - 3)) as f64,
-            )
+            (100.0, 0.0, 170.0, (1u64 << (precision_a - 1)) as f64, 200.0, (1u64 << precision_b) as f64 * 0.375)
         }
     };
 
@@ -664,18 +678,21 @@ fn maps_every_column(mapping: &[codestream::ComponentMapping], num_columns: usiz
     used.iter().all(|column| *column)
 }
 
+type PaletteExpansion = (Vec<Vec<i64>>, Vec<u32>);
+
 fn apply_palette(
     palette: &codestream::Palette,
     planes: &[Vec<i64>],
     source_precision: u32,
-) -> Option<(Vec<Vec<i64>>, Vec<u32>)> {
+    limits: &mut Limits,
+) -> VexelResult<Option<PaletteExpansion>> {
     if palette.entries.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let num_columns = palette.entries[0].len();
     if num_columns == 0 {
-        return None;
+        return Ok(None);
     }
 
     let identity_mapping = || -> Vec<codestream::ComponentMapping> {
@@ -698,7 +715,7 @@ fn apply_palette(
     };
 
     if mapping.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let top = palette.entries.len() as i64 - 1;
@@ -706,7 +723,11 @@ fn apply_palette(
     let mut channels: Vec<(Vec<i64>, u32, bool)> = Vec::with_capacity(mapping.len());
 
     for entry in &mapping {
-        let source = planes.get(entry.component as usize)?;
+        let Some(source) = planes.get(entry.component as usize) else {
+            return Ok(None);
+        };
+
+        limits.reserve_usize(source.len().saturating_mul(8))?;
 
         if entry.kind == codestream::MappingType::Direct {
             channels.push((source.clone(), source_precision, false));
@@ -715,7 +736,7 @@ fn apply_palette(
 
         let column = entry.palette_column as usize;
         if column >= num_columns {
-            return None;
+            return Ok(None);
         }
 
         let depth = palette.column_depths.get(column).copied().unwrap_or(8).clamp(1, 32);
@@ -751,7 +772,7 @@ fn apply_palette(
         })
         .collect();
 
-    Some((expanded, precisions))
+    Ok(Some((expanded, precisions)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -963,6 +984,7 @@ fn pack_pixels(
 }
 
 const PARALLEL_PIXEL_THRESHOLD: usize = 1 << 16;
+const MAX_TILE_COMPONENTS: usize = 1 << 20;
 const PARALLEL_TILE_THRESHOLD: usize = 4;
 
 fn fill_pixels<T, F>(pixel_count: usize, channels: usize, write: F) -> Vec<T>

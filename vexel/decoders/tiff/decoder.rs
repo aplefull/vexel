@@ -6,10 +6,10 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::ImageFrame;
 use crate::utils::info::{ColorModel, DataExtent, ImageSummary, SampleFormat as SummarySampleFormat};
 use crate::utils::tiff::compression::{
-    apply_predictor_float, apply_predictor_horizontal, decompress_deflate, decompress_jpeg2000, decompress_jpeg_xr,
-    decompress_lerc, decompress_lzma, decompress_lzw, decompress_next, decompress_packbits, decompress_png,
-    decompress_sgilog, decompress_sgilog24, decompress_sgilog_l16, decompress_thunderscan, decompress_zstd,
-    predictor_x_factor, ChunkLayout,
+    apply_predictor_float, apply_predictor_horizontal, decompress_deflate_with_capacity, decompress_jpeg2000,
+    decompress_jpeg_xr, decompress_lerc, decompress_lzma_with_capacity, decompress_lzw_with_capacity, decompress_next,
+    decompress_packbits_with_capacity, decompress_png, decompress_sgilog, decompress_sgilog24, decompress_sgilog_l16,
+    decompress_thunderscan, decompress_zstd_with_capacity, predictor_x_factor, ChunkLayout,
 };
 use crate::utils::tiff::fax::decompress_ccitt;
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
@@ -32,6 +32,7 @@ pub struct TiffDecoder<R: Read + Seek> {
     reader: BitReader<R>,
     info: Option<TiffInfo>,
     subfile_type: u32,
+    reserved_output: u64,
 }
 
 struct ChunkAssembler {
@@ -49,8 +50,14 @@ struct ChunkAssembler {
     chunks_z: usize,
     row_bytes: usize,
     plane_bytes: usize,
+    chunk_row_bytes: usize,
+    total_chunks: usize,
     slices: Vec<Vec<u8>>,
 }
+
+const MAX_IMAGE_DEPTH: usize = 65536;
+const MAX_OJPEG_TABLES: usize = 4;
+const MAX_QUEUED_IFDS: usize = 4096;
 
 impl ChunkAssembler {
     fn new(
@@ -68,10 +75,22 @@ impl ChunkAssembler {
         let chunk_w = chunk_w.max(1);
         let chunk_h = chunk_h.max(1);
         let chunk_d = chunk_d.max(1);
+        let overflow =
+            || VexelError::LimitExceeded(format!("TIFF chunk layout {}x{}x{} overflows", width, height, depth));
 
-        let row_bytes = (width * spp * bps).div_ceil(8);
-        let plane_bytes = row_bytes * height;
-        let slice_size = plane_bytes * planes;
+        let group_bits = spp.checked_mul(bps).ok_or_else(overflow)?;
+        let row_bytes = width.checked_mul(group_bits).ok_or_else(overflow)?.div_ceil(8);
+        let plane_bytes = row_bytes.checked_mul(height).ok_or_else(overflow)?;
+        let slice_size = plane_bytes.checked_mul(planes).ok_or_else(overflow)?;
+        let chunk_row_bytes = chunk_w.checked_mul(group_bits).ok_or_else(overflow)?.div_ceil(8);
+        let chunks_x = width.div_ceil(chunk_w);
+        let chunks_y = height.div_ceil(chunk_h);
+        let chunks_z = depth.div_ceil(chunk_d);
+        let total_chunks = chunks_x
+            .checked_mul(chunks_y)
+            .and_then(|n| n.checked_mul(chunks_z))
+            .and_then(|n| n.checked_mul(planes))
+            .ok_or_else(overflow)?;
         limits.reserve_usize(slice_size.saturating_mul(depth))?;
 
         Ok(ChunkAssembler {
@@ -84,11 +103,13 @@ impl ChunkAssembler {
             chunk_w,
             chunk_h,
             chunk_d,
-            chunks_x: width.div_ceil(chunk_w),
-            chunks_y: height.div_ceil(chunk_h),
-            chunks_z: depth.div_ceil(chunk_d),
+            chunks_x,
+            chunks_y,
+            chunks_z,
             row_bytes,
             plane_bytes,
+            chunk_row_bytes,
+            total_chunks,
             slices: vec![vec![0u8; slice_size]; depth],
         })
     }
@@ -98,21 +119,17 @@ impl ChunkAssembler {
     }
 
     fn total_chunks(&self) -> usize {
-        self.chunks_per_plane() * self.planes
+        self.total_chunks
     }
 
     fn chunk_row_bytes(&self) -> usize {
-        (self.chunk_w * self.spp * self.bps).div_ceil(8)
-    }
-
-    fn expected_chunk_bytes(&self) -> usize {
-        self.chunk_row_bytes() * self.chunk_h * self.chunk_d
+        self.chunk_row_bytes
     }
 
     fn rows_in_chunk(&self, chunk_idx: usize) -> usize {
         let within = if self.chunks_per_plane() > 0 { chunk_idx % self.chunks_per_plane() } else { 0 };
         let cy = (within % (self.chunks_x * self.chunks_y)) / self.chunks_x;
-        self.chunk_h.min(self.height.saturating_sub(cy * self.chunk_h))
+        self.chunk_h.min(self.height.saturating_sub(cy.saturating_mul(self.chunk_h)))
     }
 
     fn place(&mut self, chunk_idx: usize, data: &[u8]) {
@@ -149,8 +166,14 @@ impl ChunkAssembler {
                 if y >= self.height {
                     break;
                 }
-                let src_off = (dz * self.chunk_h + row) * chunk_row_bytes;
-                let src_end = (src_off + chunk_row_bytes).min(data.len());
+                let Some(src_off) = dz
+                    .checked_mul(self.chunk_h)
+                    .and_then(|r| r.checked_add(row))
+                    .and_then(|r| r.checked_mul(chunk_row_bytes))
+                else {
+                    break;
+                };
+                let src_end = src_off.saturating_add(chunk_row_bytes).min(data.len());
                 if src_off >= src_end {
                     continue;
                 }
@@ -201,6 +224,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             reader: BitReader::new(reader),
             info: None,
             subfile_type: 0,
+            reserved_output: 0,
         }
     }
 
@@ -361,7 +385,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 queue.push(ifd.next_ifd_offset);
             }
             if let Some(sub_ifds) = ifd.values::<u32, _>(TiffTags::SubIFDs, &mut self.reader, &mut self.limits) {
-                queue.extend(sub_ifds.into_iter().filter(|&o| o != 0));
+                let room = MAX_QUEUED_IFDS.saturating_sub(queue.len());
+                queue.extend(sub_ifds.into_iter().filter(|&o| o != 0).take(room));
             }
 
             let subfile_type: u32 = ifd.value(TiffTags::NewSubfileType, &mut self.reader).unwrap_or(0);
@@ -412,11 +437,58 @@ impl<R: Read + Seek> TiffDecoder<R> {
             return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
-        self.limits.reserve_buffer(self.width, self.height, 4)?;
+        let bytes_per_pixel = self.output_bytes_per_pixel();
+        self.limits.reserve_buffer(self.width, self.height, bytes_per_pixel)?;
+        self.reserved_output =
+            u64::from(self.width).saturating_mul(u64::from(self.height)).saturating_mul(u64::from(bytes_per_pixel));
 
         self.reader.seek(SeekFrom::Start(ifd_end))?;
 
         Ok(ifd.next_ifd_offset)
+    }
+
+    fn output_bytes_per_pixel(&self) -> u8 {
+        if matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG) {
+            return if self.bits_for(0) > 8 { 6 } else { 3 };
+        }
+
+        let spp = self.header.samples_per_pixel.max(1) as usize;
+        let sample_bytes = (0..spp)
+            .map(|c| match (PixelReader::sample_format_for(&self.header, c), self.bits_for(c)) {
+                (SampleFormat::Float, bits) if bits > 32 => 8,
+                (SampleFormat::Float, _) => 4,
+                (_, 0..=8) => 1,
+                (_, 9..=16) => 2,
+                (_, 17..=32) => 4,
+                _ => 8,
+            })
+            .max()
+            .unwrap_or(1);
+
+        match self.header.photometric_interpretation {
+            PhotometricInterpretation::WhiteIsZero
+            | PhotometricInterpretation::BlackIsZero
+            | PhotometricInterpretation::TransparencyMask => sample_bytes * if spp > 1 { 2 } else { 1 },
+            PhotometricInterpretation::LogL => 4,
+            PhotometricInterpretation::LogLuv => 12,
+            PhotometricInterpretation::Palette => {
+                if spp > 1 {
+                    8
+                } else {
+                    6
+                }
+            }
+            PhotometricInterpretation::YCbCr => {
+                let deep =
+                    self.bits_for(0) != 8 || PixelReader::sample_format_for(&self.header, 0) == SampleFormat::Float;
+                sample_bytes * 3 + if deep { 12 } else { 0 }
+            }
+            PhotometricInterpretation::RGB
+            | PhotometricInterpretation::CIELab
+            | PhotometricInterpretation::ICCLab
+            | PhotometricInterpretation::ITULab => sample_bytes * if spp > 3 { 4 } else { 3 },
+            PhotometricInterpretation::CMYK => sample_bytes * if spp > 4 { 4 } else { 3 },
+        }
     }
 
     fn bits_for(&self, channel: usize) -> u16 {
@@ -469,14 +541,21 @@ impl<R: Read + Seek> TiffDecoder<R> {
         Ok(data)
     }
 
-    fn decompress_chunk(&self, data: Vec<u8>, chunk_width: usize, chunk_rows: usize, chunk_spp: usize) -> Vec<u8> {
+    fn decompress_chunk(
+        &self,
+        data: Vec<u8>,
+        chunk_width: usize,
+        chunk_rows: usize,
+        chunk_spp: usize,
+        expected_bytes: usize,
+    ) -> Vec<u8> {
         match self.header.compression {
             Compression::None => data,
-            Compression::LZW => decompress_lzw(&data),
-            Compression::PackBits => decompress_packbits(&data),
-            Compression::AdobeDeflate | Compression::Deflate => decompress_deflate(&data),
-            Compression::LZMA => decompress_lzma(&data),
-            Compression::ZSTD => decompress_zstd(&data),
+            Compression::LZW => decompress_lzw_with_capacity(&data, expected_bytes),
+            Compression::PackBits => decompress_packbits_with_capacity(&data, expected_bytes),
+            Compression::AdobeDeflate | Compression::Deflate => decompress_deflate_with_capacity(&data, expected_bytes),
+            Compression::LZMA => decompress_lzma_with_capacity(&data, expected_bytes),
+            Compression::ZSTD => decompress_zstd_with_capacity(&data, expected_bytes),
             Compression::CCITTRLE | Compression::CCITTRLEWord | Compression::CCITTFax3 | Compression::CCITTFax4 => {
                 decompress_ccitt(&data, chunk_width as u32, chunk_rows, self.header.compression, self.header.t4_options)
             }
@@ -502,8 +581,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
             Compression::LERC => {
                 let blob = match self.header.lerc_additional_compression {
                     LercAdditionalCompression::None => data,
-                    LercAdditionalCompression::Deflate => decompress_deflate(&data),
-                    LercAdditionalCompression::Zstd => decompress_zstd(&data),
+                    LercAdditionalCompression::Deflate => decompress_deflate_with_capacity(&data, expected_bytes),
+                    LercAdditionalCompression::Zstd => decompress_zstd_with_capacity(&data, expected_bytes),
                 };
 
                 decompress_lerc(
@@ -536,7 +615,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 apply_predictor_float(
                     data,
                     (chunk_width as u32 / x).max(1),
-                    spp * x as u16,
+                    spp.saturating_mul(x as u16),
                     bps,
                     self.byte_order == ByteOrder::BigEndian,
                 );
@@ -578,11 +657,15 @@ impl<R: Read + Seek> TiffDecoder<R> {
             log_warn!("ImageDepth {} is only supported for tiled images, decoding a single slice", depth);
             depth = 1;
         }
+        if depth > MAX_IMAGE_DEPTH {
+            log_warn!("ImageDepth {} is implausibly large, decoding the first {} slices", depth, MAX_IMAGE_DEPTH);
+            depth = MAX_IMAGE_DEPTH;
+        }
 
         let (chunk_w, chunk_h, chunk_d, offsets, byte_counts) = if is_tiled {
             (
-                self.header.tile_width.unwrap_or(self.width) as usize,
-                self.header.tile_length.unwrap_or(self.height) as usize,
+                (self.header.tile_width.unwrap_or(self.width) as usize).max(1),
+                (self.header.tile_length.unwrap_or(self.height) as usize).max(1),
                 self.header.tile_depth.max(1) as usize,
                 self.header.tile_offsets.clone(),
                 self.header.tile_byte_counts.clone(),
@@ -633,6 +716,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 offsets.len()
             );
         }
+        let chunk_count = offsets.len().min(asm.total_chunks());
         if byte_counts.len() < offsets.len() {
             log_warn!(
                 "StripByteCounts/TileByteCounts has {} entries for {} chunks, estimating the missing sizes",
@@ -641,12 +725,42 @@ impl<R: Read + Seek> TiffDecoder<R> {
             );
         }
 
+        let tile_slices = chunk_d.min(depth);
+        let (codec_chunk_h, asm_rows) = if tile_slices > 1 {
+            (chunk_h.saturating_mul(tile_slices), asm.chunk_h.saturating_mul(tile_slices))
+        } else {
+            (chunk_h.min(height), asm.chunk_h.min(asm.height))
+        };
+
         let stream_len = self.stream_len();
-        let expected_bytes = asm.expected_chunk_bytes();
+        let expected_bytes = asm.chunk_row_bytes().saturating_mul(asm_rows);
         let is_sgilog = matches!(self.header.compression, Compression::SGILog | Compression::SGILog24);
         let has_predictor = self.header.predictor != Predictor::None && !is_sgilog;
 
-        for (chunk_idx, &offset) in offsets.iter().enumerate() {
+        let is_embedded_codec = matches!(
+            self.header.compression,
+            Compression::PNG | Compression::JPEG2000 | Compression::JPEGXR | Compression::LERC
+        );
+        let codec_output_bytes = if is_embedded_codec {
+            chunk_w
+                .saturating_mul(codec_chunk_h)
+                .saturating_mul(chunk_spp)
+                .saturating_mul((self.bits_for(0) as usize).div_ceil(8).max(1))
+        } else {
+            0
+        };
+        let gate_bytes = expected_bytes.max(codec_output_bytes);
+
+        let slices_bytes = asm.slices.iter().map(|s| s.len()).sum::<usize>();
+        if let Err(e) = self.limits.reserve_usize(gate_bytes) {
+            self.limits.free_usize(slices_bytes);
+            return Err(e);
+        }
+        self.limits.free_usize(gate_bytes);
+        let mut read_budget =
+            stream_len.saturating_add((expected_bytes as u64).saturating_mul(chunk_count as u64).saturating_mul(2));
+
+        for (chunk_idx, &offset) in offsets.iter().enumerate().take(chunk_count) {
             let byte_count = match byte_counts.get(chunk_idx) {
                 Some(&c) if c > 0 => c as usize,
                 _ => {
@@ -658,6 +772,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 }
             };
 
+            if (byte_count as u64).min(stream_len.saturating_sub(offset as u64)) > read_budget {
+                log_warn!("Strips/tiles read far more data than the file holds, stopping at chunk {}", chunk_idx);
+                break;
+            }
+
             let raw = match self.read_chunk_bytes(offset, byte_count, stream_len) {
                 Ok(raw) => raw,
                 Err(e) => {
@@ -665,11 +784,16 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     continue;
                 }
             };
+            read_budget = read_budget.saturating_sub(raw.len() as u64);
 
-            let chunk_rows = if is_tiled { chunk_h * chunk_d } else { asm.rows_in_chunk(chunk_idx) };
+            let chunk_rows = if is_tiled { codec_chunk_h } else { asm.rows_in_chunk(chunk_idx) };
 
-            let mut data = self.decompress_chunk(raw, chunk_w, chunk_rows, chunk_spp);
-            self.limits.reserve_usize(data.len())?;
+            let mut data = self.decompress_chunk(raw, chunk_w, chunk_rows, chunk_spp, expected_bytes);
+            let reserved = data.len();
+            if let Err(e) = self.limits.reserve_usize(reserved) {
+                log_warn!("Skipping chunk {}: {}", chunk_idx, e);
+                continue;
+            }
 
             if has_predictor {
                 data.truncate(expected_bytes);
@@ -677,11 +801,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
             }
 
             asm.place(chunk_idx, &data);
-            self.limits.free_usize(data.len());
+            self.limits.free_usize(reserved);
         }
-
-        let total: usize = asm.slices.iter().map(|s| s.len()).sum();
-        self.limits.free_usize(total);
 
         Ok(asm.slices)
     }
@@ -689,6 +810,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
     fn decode_jpeg_bytes(&self, jpeg_data: Vec<u8>, wide: bool) -> Option<Vec<u8>> {
         let cursor = Cursor::new(jpeg_data);
         let mut jpeg_decoder = JpegDecoder::new(cursor);
+        jpeg_decoder.set_limits(self.limits.clone());
         match jpeg_decoder.decode() {
             Ok(image) => Some(jpeg_rgb_bytes(image.into_pixels(), wide, self.byte_order)),
             Err(e) => {
@@ -713,7 +835,10 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         let wide = self.bits_for(0) > 8;
         let bytes_per_sample = if wide { 2 } else { 1 };
-        let image_len = width * height * 3 * bytes_per_sample;
+        let image_len =
+            width.checked_mul(height).and_then(|n| n.checked_mul(3 * bytes_per_sample)).ok_or_else(|| {
+                VexelError::LimitExceeded(format!("TIFF image {}x{} is too large to decode", width, height))
+            })?;
         self.limits.reserve_usize(image_len)?;
         let stream_len = self.stream_len();
 
@@ -769,14 +894,20 @@ impl<R: Read + Seek> TiffDecoder<R> {
             let mcu_height = 8 * v_sub.max(1) as usize;
             let mcus_per_row = width.div_ceil(mcu_width);
             let mcu_rows_per_strip = chunk_h.div_ceil(mcu_height);
-            let restart_interval = (mcus_per_row * mcu_rows_per_strip).min(u16::MAX as usize) as u16;
+            let restart_interval = mcus_per_row.saturating_mul(mcu_rows_per_strip).min(u16::MAX as usize) as u16;
 
             let mut scan_data = Vec::new();
-            for (strip_idx, &offset) in offsets.iter().enumerate() {
+            let mut read_budget = stream_len.saturating_mul(2);
+            for (strip_idx, &offset) in offsets.iter().enumerate().take(height.div_ceil(chunk_h)) {
                 let byte_count = byte_counts.get(strip_idx).copied().unwrap_or(0) as usize;
+                if (byte_count as u64).min(stream_len.saturating_sub(offset as u64)) > read_budget {
+                    log_warn!("JPEG strips read far more data than the file holds, stopping at strip {}", strip_idx);
+                    break;
+                }
                 let Ok(strip_data) = self.read_chunk_bytes(offset, byte_count, stream_len) else {
                     continue;
                 };
+                read_budget = read_budget.saturating_sub(strip_data.len() as u64);
                 if strip_idx > 0 {
                     scan_data.push(0xFF);
                     scan_data.push(0xD0 + ((strip_idx - 1) % 8) as u8);
@@ -794,18 +925,40 @@ impl<R: Read + Seek> TiffDecoder<R> {
             return Ok(jpeg_pixel_data(image_data, wide, self.byte_order));
         }
 
-        let mut asm =
-            ChunkAssembler::new(width, height, 1, 3, bytes_per_sample * 8, 1, chunk_w, chunk_h, 1, &mut self.limits)?;
+        let mut asm = match ChunkAssembler::new(
+            width,
+            height,
+            1,
+            3,
+            bytes_per_sample * 8,
+            1,
+            chunk_w,
+            chunk_h,
+            1,
+            &mut self.limits,
+        ) {
+            Ok(asm) => asm,
+            Err(e) => {
+                self.limits.free_usize(image_len);
+                return Err(e);
+            }
+        };
         let jpeg_tables = self.header.jpeg_tables.clone();
+        let mut read_budget = stream_len.saturating_add((image_len as u64).saturating_mul(2));
 
-        for (chunk_idx, &offset) in offsets.iter().enumerate() {
+        for (chunk_idx, &offset) in offsets.iter().enumerate().take(asm.total_chunks()) {
             let byte_count = match byte_counts.get(chunk_idx) {
                 Some(&c) if c > 0 => c as usize,
                 _ => stream_len.saturating_sub(offset as u64) as usize,
             };
+            if (byte_count as u64).min(stream_len.saturating_sub(offset as u64)) > read_budget {
+                log_warn!("JPEG strips/tiles read far more data than the file holds, stopping at chunk {}", chunk_idx);
+                break;
+            }
             let Ok(raw) = self.read_chunk_bytes(offset, byte_count, stream_len) else {
                 continue;
             };
+            read_budget = read_budget.saturating_sub(raw.len() as u64);
 
             let chunk_rows = if is_tiled { chunk_h } else { asm.rows_in_chunk(chunk_idx) };
             let jpeg_data = if is_ojpeg {
@@ -830,11 +983,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
     fn read_ojpeg_dqt_segments(&mut self) -> (Vec<u8>, Vec<u8>) {
         let mut out = Vec::new();
-        let mut table_ids = Vec::with_capacity(self.header.jpeg_q_tables.len());
+        let mut table_ids = Vec::with_capacity(self.header.jpeg_q_tables.len().min(MAX_OJPEG_TABLES));
         let mut last_offset = 0u32;
         let mut last_id = 0u8;
 
-        for (idx, &offset) in self.header.jpeg_q_tables.clone().iter().enumerate() {
+        for (idx, &offset) in self.header.jpeg_q_tables.clone().iter().enumerate().take(MAX_OJPEG_TABLES) {
             if offset == 0 || (idx > 0 && offset == last_offset) {
                 table_ids.push(last_id);
                 continue;
@@ -863,11 +1016,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
     fn read_ojpeg_dht_segments(&mut self, offsets: &[u32], is_ac: bool) -> (Vec<u8>, Vec<u8>) {
         let mut out = Vec::new();
-        let mut table_ids = Vec::with_capacity(offsets.len());
+        let mut table_ids = Vec::with_capacity(offsets.len().min(MAX_OJPEG_TABLES));
         let mut last_offset = 0u32;
         let mut last_id = 0u8;
 
-        for (idx, &offset) in offsets.iter().enumerate() {
+        for (idx, &offset) in offsets.iter().enumerate().take(MAX_OJPEG_TABLES) {
             if offset == 0 || (idx > 0 && offset == last_offset) {
                 table_ids.push(last_id);
                 continue;
@@ -911,7 +1064,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         height: u32,
         restart_interval_override: u16,
     ) -> Vec<u8> {
-        let spp = self.header.samples_per_pixel.max(1);
+        let spp = self.header.samples_per_pixel.clamp(1, 255);
         let [h_sub, v_sub] = self.header.ycbcr_sub_sampling;
         let h_sub = h_sub.max(1);
         let v_sub = v_sub.max(1);
@@ -989,17 +1142,58 @@ impl<R: Read + Seek> TiffDecoder<R> {
         }
 
         let slices = self.read_image_chunks()?;
+        let slices_bytes: usize = slices.iter().map(|s| s.len()).sum();
+        let result = self.convert_slices(slices);
+        self.limits.free_usize(slices_bytes);
+        result
+    }
 
+    fn convert_slices(&mut self, slices: Vec<Vec<u8>>) -> VexelResult<Vec<ImageFrame>> {
         let pixel_reader = PixelReader { byte_order: self.byte_order, width: self.width, height: self.height };
+        let is_planar = self.header.planar_configuration == PlanarConfiguration::Planar
+            && self.header.samples_per_pixel > 1
+            && self.header.photometric_interpretation != PhotometricInterpretation::YCbCr;
 
         let mut frames = Vec::with_capacity(slices.len());
-        for slice in slices {
-            let mut pixel_data = pixel_reader.convert_to_pixel_data(slice, &self.header)?;
-            pixel_data.correct_pixels(self.width, self.height);
-            frames.push(ImageFrame::new(self.width, self.height, pixel_data, 0));
+        for (index, slice) in slices.into_iter().enumerate() {
+            let extra_output = if index > 0 { self.reserved_output } else { 0 };
+            let scratch = if is_planar { slice.len() } else { 0 };
+            let converted = self.convert_slice(&pixel_reader, slice, extra_output, scratch);
+
+            match converted {
+                Ok(mut pixel_data) => {
+                    pixel_data.correct_pixels(self.width, self.height);
+                    frames.push(ImageFrame::new(self.width, self.height, pixel_data, 0));
+                }
+                Err(e) if index == 0 => return Err(e),
+                Err(e) => {
+                    log_warn!("Failed to decode TIFF slice {}: {}, keeping {} slices", index, e, index);
+                    break;
+                }
+            }
         }
 
         Ok(frames)
+    }
+
+    fn convert_slice(
+        &mut self,
+        pixel_reader: &PixelReader,
+        slice: Vec<u8>,
+        extra_output: u64,
+        scratch: usize,
+    ) -> VexelResult<PixelData> {
+        self.limits.reserve(extra_output)?;
+        if let Err(e) = self.limits.reserve_usize(scratch) {
+            self.limits.free(extra_output);
+            return Err(e);
+        }
+        let converted = pixel_reader.convert_to_pixel_data(slice, &self.header);
+        self.limits.free_usize(scratch);
+        if converted.is_err() {
+            self.limits.free(extra_output);
+        }
+        converted
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -1023,6 +1217,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let mut guard = IfdCycleGuard::default();
 
         while next_ifd_offset != 0 {
+            if first_only && !pages.is_empty() {
+                break;
+            }
             if !guard.enter(next_ifd_offset) {
                 log_warn!("Cyclic or excessively long IFD chain detected at offset {}, stopping", next_ifd_offset);
                 break;
@@ -1040,7 +1237,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             };
 
             let is_reduced_resolution = self.subfile_type & 1 != 0;
-            if (is_reduced_resolution && !reduced_only) || (first_only && !pages.is_empty()) {
+            if is_reduced_resolution && !reduced_only {
                 self.release_ifd_reservation();
                 continue;
             }
@@ -1072,7 +1269,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
     }
 
     fn release_ifd_reservation(&mut self) {
-        self.limits.free(u64::from(self.width).saturating_mul(u64::from(self.height)).saturating_mul(4));
+        self.limits.free(std::mem::take(&mut self.reserved_output));
     }
 
     fn chain_has_full_res(&mut self, first_ifd_offset: u32) -> bool {

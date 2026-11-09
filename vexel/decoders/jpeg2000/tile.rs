@@ -151,10 +151,11 @@ impl<'a> TileDecoder<'a> {
         }
 
         let mut components = Vec::with_capacity(siz.components.len());
+        let fallback = ComponentCoding::default();
 
         for (index, component) in siz.components.iter().enumerate() {
-            let params = coding.get(index).cloned().unwrap_or_default();
-            let tilec = self.build_component(tx0, ty0, tx1, ty1, component, &params)?;
+            let params = coding.get(index).unwrap_or(&fallback);
+            let tilec = self.build_component(tx0, ty0, tx1, ty1, component, params)?;
             components.push(tilec);
         }
 
@@ -165,12 +166,12 @@ impl<'a> TileDecoder<'a> {
             ty1: ty1.max(0) as u32,
         };
 
-        self.read_packets(&mut components, &coding, data, tile_index, tile_bounds)?;
+        self.read_packets(&mut components, coding, data, tile_index, tile_bounds)?;
 
         for (index, tilec) in components.iter_mut().enumerate() {
-            let params = coding.get(index).cloned().unwrap_or_default();
-            decode_code_blocks(tilec, &params);
-            inverse_dwt(tilec, &params)?;
+            let params = coding.get(index).unwrap_or(&fallback);
+            decode_code_blocks(tilec, params);
+            inverse_dwt(tilec, params)?;
         }
 
         let mut planes: Vec<TilePlane> = Vec::with_capacity(components.len());
@@ -204,12 +205,13 @@ impl<'a> TileDecoder<'a> {
         Ok(DecodedTile { x0: tx0, y0: ty0, x1: tx1, y1: ty1, components: planes })
     }
 
-    fn tile_coding(&self, tile_index: u32) -> Vec<ComponentCoding> {
-        self.codestream
+    fn tile_coding(&self, tile_index: u32) -> &'a [ComponentCoding] {
+        let codestream: &'a Codestream = self.codestream;
+        codestream
             .tile_overrides
             .get(tile_index as usize)
-            .and_then(|entry| entry.clone())
-            .unwrap_or_else(|| self.codestream.defaults.clone())
+            .and_then(|entry| entry.as_deref())
+            .unwrap_or(&codestream.defaults)
     }
 
     fn build_component(
@@ -233,9 +235,12 @@ impl<'a> TileDecoder<'a> {
         let height = (y1 - y0).max(0) as u32;
 
         self.limits.check_dimensions(width, height)?;
-        self.limits.reserve_usize((width as usize) * (height as usize) * 4)?;
+
+        let sample_bytes = if params.coding.reversible { 8 } else { 4 };
+        self.limits.reserve_usize((width as usize).saturating_mul(height as usize).saturating_mul(sample_bytes))?;
 
         let num_resolutions = params.coding.num_resolutions.max(1);
+        self.limits.reserve(num_resolutions as u64 * RESOLUTION_BYTES)?;
         let mut resolutions = Vec::with_capacity(num_resolutions as usize);
 
         for resno in 0..num_resolutions {
@@ -247,6 +252,7 @@ impl<'a> TileDecoder<'a> {
             let ry1 = ceil_div_pow2(y1, level);
 
             let (pdx, pdy) = params.coding.precinct_exponents(resno as usize);
+            let (pdx, pdy) = if resno == 0 { (pdx, pdy) } else { (pdx.max(1), pdy.max(1)) };
 
             let prc_x0 = floor_div_pow2_signed(rx0, pdx) << pdx;
             let prc_y0 = floor_div_pow2_signed(ry0, pdy) << pdy;
@@ -295,7 +301,8 @@ impl<'a> TileDecoder<'a> {
                 let step_size = ((1.0 + step.mant as f64 / 2048.0) * 2f64.powi(rb - step.expn)) as f32;
                 let num_bps = step.expn + params.quant.guard_bits as i32 - 1;
 
-                let precincts = build_precincts(bx0, by0, bx1, by1, pw, ph, tlcbgx, tlcbgy, ppx, ppy, params);
+                let precincts =
+                    build_precincts(bx0, by0, bx1, by1, pw, ph, tlcbgx, tlcbgy, ppx, ppy, params, self.limits)?;
 
                 bands.push(Band { orient, x0: bx0, y0: by0, x1: bx1, y1: by1, step_size, num_bps, precincts });
             }
@@ -343,12 +350,6 @@ impl<'a> TileDecoder<'a> {
         let progression = settings.map(|s| s.progression).unwrap_or(self.codestream.progression);
         let num_layers = settings.map(|s| s.num_layers).unwrap_or(self.codestream.num_layers);
 
-        let positions = if changes.is_empty() {
-            t2::enumerate_packets(progression, num_layers, &tile_bounds, &geometry)
-        } else {
-            t2::enumerate_packets_with_changes(changes, num_layers, &tile_bounds, &geometry)
-        };
-
         let packed: Option<&[u8]> = if !self.codestream.ppm_data.is_empty() {
             Some(&self.codestream.ppm_data)
         } else {
@@ -362,49 +363,95 @@ impl<'a> TileDecoder<'a> {
         let mut ppt_cursor = 0usize;
         let uses_ppm = !self.codestream.ppm_data.is_empty();
 
-        for packet in positions {
-            let header_pos = if uses_ppm { *self.ppm_cursor } else { ppt_cursor };
+        let header_len = match packed {
+            Some(buffer) if uses_ppm => buffer.len().saturating_sub(*self.ppm_cursor),
+            Some(buffer) => buffer.len(),
+            None => data.len(),
+        };
 
-            let header_exhausted = match packed {
-                Some(buffer) => header_pos >= buffer.len(),
-                None => pos >= data.len(),
+        let tile_samples =
+            components.iter().fold(0u64, |total, c| total.saturating_add(c.width() as u64 * c.height() as u64));
+        let max_positions = header_len.saturating_add(1);
+        let max_work = (header_len as u64).saturating_add(tile_samples).saturating_mul(64).saturating_add(1 << 16);
+        let mut cblk_budget =
+            tile_samples.saturating_mul(32).saturating_add((header_len as u64).saturating_mul(8)).saturating_add(4096);
+
+        let mut limit = t2::EnumerationLimit {
+            max_positions: INITIAL_POSITIONS.min(max_positions),
+            max_work: INITIAL_WORK.min(max_work),
+        };
+        let mut processed = 0usize;
+        let fallback = ComponentCoding::default();
+
+        loop {
+            let enumeration = if changes.is_empty() {
+                t2::enumerate_packets(progression, num_layers, &tile_bounds, &geometry, limit)
+            } else {
+                t2::enumerate_packets_with_changes(changes, num_layers, &tile_bounds, &geometry, limit)
             };
 
-            if header_exhausted || pos > data.len() {
+            for packet in enumeration.positions.iter().skip(processed) {
+                let header_pos = if uses_ppm { *self.ppm_cursor } else { ppt_cursor };
+
+                let header_exhausted = match packed {
+                    Some(buffer) => header_pos >= buffer.len(),
+                    None => pos >= data.len(),
+                };
+
+                if header_exhausted || pos > data.len() {
+                    return Ok(());
+                }
+
+                let params = coding.get(packet.component as usize).unwrap_or(&fallback);
+
+                match read_packet(
+                    components,
+                    packet,
+                    params,
+                    data,
+                    pos,
+                    packed,
+                    header_pos,
+                    settings.map(|s| s.sop).unwrap_or(self.codestream.sop),
+                    settings.map(|s| s.eph).unwrap_or(self.codestream.eph),
+                    &mut cblk_budget,
+                ) {
+                    Ok(consumed) => {
+                        pos += consumed.body;
+                        if uses_ppm {
+                            *self.ppm_cursor += consumed.header;
+                        } else {
+                            ppt_cursor += consumed.header;
+                        }
+                    }
+                    Err(error) => {
+                        log_warn!("JPEG 2000: stopping packet parsing: {}", error);
+                        return Ok(());
+                    }
+                }
+            }
+
+            processed = processed.max(enumeration.positions.len());
+
+            if !enumeration.truncated {
                 break;
             }
 
-            let params = coding.get(packet.component as usize).cloned().unwrap_or_default();
-
-            match read_packet(
-                components,
-                &packet,
-                &params,
-                data,
-                pos,
-                packed,
-                header_pos,
-                settings.map(|s| s.sop).unwrap_or(self.codestream.sop),
-                settings.map(|s| s.eph).unwrap_or(self.codestream.eph),
-            ) {
-                Ok(consumed) => {
-                    pos += consumed.body;
-                    if uses_ppm {
-                        *self.ppm_cursor += consumed.header;
-                    } else {
-                        ppt_cursor += consumed.header;
-                    }
-                }
-                Err(error) => {
-                    log_warn!("JPEG 2000: stopping packet parsing: {}", error);
-                    break;
-                }
+            if limit.max_positions >= max_positions && limit.max_work >= max_work {
+                log_warn!("JPEG 2000: tile {} packet enumeration exceeds its work budget, stopping", tile_index);
+                break;
             }
+
+            limit.max_positions = limit.max_positions.saturating_mul(4).min(max_positions);
+            limit.max_work = limit.max_work.saturating_mul(4).min(max_work);
         }
 
         Ok(())
     }
 }
+
+const INITIAL_POSITIONS: usize = 64;
+const INITIAL_WORK: u64 = 1 << 13;
 
 fn ceil_div_pow2_i64(value: i64, exp: u32) -> i32 {
     let divisor = 1i64 << exp;
@@ -448,19 +495,23 @@ fn build_precincts(
     ppx: u32,
     ppy: u32,
     params: &ComponentCoding,
-) -> Vec<Precinct> {
+    limits: &mut Limits,
+) -> VexelResult<Vec<Precinct>> {
     let mut precincts = Vec::new();
 
     if pw == 0 || ph == 0 {
-        return precincts;
+        return Ok(precincts);
     }
 
     let cblk_w_exp = params.coding.cblk_width_exp.min(ppx);
     let cblk_h_exp = params.coding.cblk_height_exp.min(ppy);
 
-    for precno in 0..pw * ph {
-        let cbgx0 = tlcbgx + ((precno % pw) as i32) * (1 << ppx);
-        let cbgy0 = tlcbgy + ((precno / pw) as i32) * (1 << ppy);
+    let num_precincts = (pw as u64) * (ph as u64);
+    limits.reserve(num_precincts.saturating_mul(PRECINCT_BYTES))?;
+
+    for precno in 0..num_precincts {
+        let cbgx0 = tlcbgx + ((precno % pw as u64) as i32) * (1 << ppx);
+        let cbgy0 = tlcbgy + ((precno / pw as u64) as i32) * (1 << ppy);
 
         let px0 = cbgx0.max(bx0);
         let py0 = cbgy0.max(by0);
@@ -475,6 +526,9 @@ fn build_precincts(
 
             let cw = ((cbx1 - cbx0) >> cblk_w_exp).max(0) as u32;
             let ch = ((cby1 - cby0) >> cblk_h_exp).max(0) as u32;
+
+            let num_cblks = (cw as u64) * (ch as u64);
+            limits.reserve(num_cblks.saturating_mul(CBLK_BYTES))?;
 
             let mut cblks = Vec::with_capacity((cw as usize) * (ch as usize));
 
@@ -515,8 +569,14 @@ fn build_precincts(
         });
     }
 
-    precincts
+    Ok(precincts)
 }
+
+const RESOLUTION_BYTES: u64 = (std::mem::size_of::<Resolution>()
+    + 3 * std::mem::size_of::<Band>()
+    + std::mem::size_of::<t2::ResolutionGeometry>()) as u64;
+const PRECINCT_BYTES: u64 = (std::mem::size_of::<Precinct>() + 6 * 24) as u64;
+const CBLK_BYTES: u64 = (std::mem::size_of::<CblkState>() + 4 * 24) as u64;
 
 struct PacketConsumed {
     body: usize,
@@ -546,6 +606,7 @@ fn read_packet(
     header_start: usize,
     expect_sop: bool,
     expect_eph: bool,
+    cblk_budget: &mut u64,
 ) -> VexelResult<PacketConsumed> {
     let component = components
         .get_mut(packet.component as usize)
@@ -619,6 +680,11 @@ fn read_packet(
 
         let num_cblks = (precinct.cw * precinct.ch) as usize;
 
+        if *cblk_budget < num_cblks as u64 {
+            return Err(VexelError::Custom("JPEG 2000: packet headers exceed the code-block work budget".to_string()));
+        }
+        *cblk_budget -= num_cblks as u64;
+
         for cblkno in 0..num_cblks {
             let first_inclusion = precinct.cblks[cblkno].segments.is_empty();
 
@@ -643,7 +709,7 @@ fn read_packet(
 
                 let cblk = &mut precinct.cblks[cblkno];
                 cblk.included = true;
-                cblk.num_bps = (band_num_bps + 1 - zero_planes as i32) as u32;
+                cblk.num_bps = (band_num_bps + 1 - zero_planes as i32).max(0) as u32;
                 cblk.mb = band_num_bps.max(0) as u32;
                 cblk.num_len_bits = 3;
             }
@@ -652,7 +718,7 @@ fn read_packet(
             let increment = t2::get_comma_code(&mut reader);
 
             let cblk = &mut precinct.cblks[cblkno];
-            cblk.num_len_bits += increment;
+            cblk.num_len_bits = cblk.num_len_bits.saturating_add(increment);
 
             let mut added: Vec<SegmentAddition> = Vec::new();
 
@@ -738,10 +804,11 @@ fn read_packet(
         };
 
         for addition in contribution.additions {
-            let take = addition.length.min(data.len().saturating_sub(body));
+            let available = data.get(body..).unwrap_or(&[]);
+            let take = addition.length.min(available.len());
 
             let start = cblk.data.len();
-            cblk.data.extend_from_slice(&data[body..body + take]);
+            cblk.data.extend_from_slice(&available[..take]);
             body += take;
 
             if let Some(segment) = cblk.segments.get_mut(addition.segment) {
@@ -1297,9 +1364,9 @@ fn inverse_rct_tile(planes: &mut [TilePlane]) {
             let len = y.len().min(u.len()).min(v.len());
 
             for index in 0..len {
-                let green = y[index] - ((u[index] + v[index]) >> 2);
-                let red = v[index] + green;
-                let blue = u[index] + green;
+                let green = y[index].wrapping_sub(u[index].wrapping_add(v[index]) >> 2);
+                let red = v[index].wrapping_add(green);
+                let blue = u[index].wrapping_add(green);
 
                 y[index] = red;
                 u[index] = green;

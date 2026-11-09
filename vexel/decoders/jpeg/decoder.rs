@@ -42,8 +42,8 @@ impl ComponentPlane {
     }
 
     fn get_block_mut(&mut self, block_x: u32, block_y: u32) -> Option<&mut [i16; 64]> {
-        let block_idx = block_y * self.blocks_per_line + block_x;
-        let start = (block_idx * 64) as usize;
+        let block_idx = block_y as usize * self.blocks_per_line as usize + block_x as usize;
+        let start = block_idx * 64;
         if start + 64 <= self.data.len() {
             (&mut self.data[start..start + 64]).try_into().ok()
         } else {
@@ -118,13 +118,21 @@ fn run_progressive_blocks<'a, 'b, F>(
     reader: &mut JpegBitReader<'a>,
     previous_dc: &mut [i32],
     mut body: F,
-) where
+) -> u64
+where
     F: FnMut(&mut JpegBitReader<'a>, &mut [i16; 64], &ProgressiveScanComp<'b>, &mut [i32]),
 {
     let mut restart_counter = restart_interval;
+    let mut processed_mcus = 0u64;
 
     for mcu_y in 0..mcu_height {
         for mcu_x in 0..mcu_width {
+            if reader.is_exhausted() {
+                log_warn!("Scan data exhausted at MCU ({}, {}), leaving the rest of the scan empty", mcu_x, mcu_y);
+                return processed_mcus;
+            }
+            processed_mcus += 1;
+
             if restart_interval > 0 {
                 if restart_counter == 0 {
                     previous_dc.fill(0);
@@ -157,6 +165,8 @@ fn run_progressive_blocks<'a, 'b, F>(
             }
         }
     }
+
+    processed_mcus
 }
 
 fn dezigzag_blocks(blocks: &mut [i16]) {
@@ -205,7 +215,7 @@ fn prog_dc_first(
     if is_differential {
         *prev_dc = value;
     } else {
-        value += *prev_dc;
+        value = value.wrapping_add(*prev_dc);
         *prev_dc = value;
     }
 
@@ -418,6 +428,13 @@ fn prog_ac_refine(
 #[rustfmt::skip]
 const SCAN_BLOCK_SIZE: usize = 64 * 1024;
 
+const MAX_SCANS: usize = 500;
+const MAX_SCAN_COMPONENTS: usize = 4;
+const MAX_HIERARCHICAL_FRAMES: usize = 32;
+const PROGRESSIVE_PASS_BUDGET: u64 = 128;
+const LOSSLESS_PASS_BUDGET: u64 = 4;
+const HIERARCHICAL_PIXEL_BUDGET: u64 = 4;
+
 #[cfg(feature = "rayon")]
 const PARALLEL_LOSSLESS_MIN_SAMPLES: usize = 256 * 256;
 
@@ -462,11 +479,18 @@ struct ArithmeticDecoder<'a> {
     ct: i32,
     fixed_bin: u8,
     error: bool,
+    overrun: u32,
 }
+
+const ARITH_EXHAUSTED_PADDING_BYTES: u32 = 4;
 
 impl<'a> ArithmeticDecoder<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, c: 0, a: 0, ct: -16, fixed_bin: 113, error: false }
+        Self { data, pos: 0, c: 0, a: 0, ct: -16, fixed_bin: 113, error: false, overrun: 0 }
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.overrun > ARITH_EXHAUSTED_PADDING_BYTES
     }
 
     fn reset(&mut self) {
@@ -478,6 +502,7 @@ impl<'a> ArithmeticDecoder<'a> {
 
     fn read_byte(&mut self) -> u32 {
         if self.pos >= self.data.len() {
+            self.overrun = self.overrun.saturating_add(1);
             return 0;
         }
         let b = self.data[self.pos];
@@ -1101,6 +1126,8 @@ pub struct JpegDecoder<R: Read + Seek> {
     lossless_ssss16_is_min: bool,
     lossless_skip_color_transform: bool,
     icc: IccAssembler,
+    collected_scans: usize,
+    frame_has_scan: bool,
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
@@ -1141,6 +1168,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             lossless_ssss16_is_min: true,
             lossless_skip_color_transform: false,
             icc: IccAssembler::default(),
+            collected_scans: 0,
+            frame_has_scan: false,
         }
     }
 
@@ -1197,6 +1226,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.pending_expand_v = false;
         self.hierarchical_frames.clear();
         self.icc.clear();
+        self.collected_scans = 0;
+        self.frame_has_scan = false;
     }
 
     pub fn precision(&self) -> u8 {
@@ -1428,6 +1459,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
         if number_of_lines == 0 {
             log_warn!("DNL specifies 0 lines, ignoring");
         } else {
+            if self.walk_mode == WalkMode::Decode {
+                self.limits.reserve_buffer(self.width, u32::from(number_of_lines), 4)?;
+                self.limits.free(u64::from(self.width).saturating_mul(u64::from(number_of_lines)).saturating_mul(4));
+            }
             self.height = number_of_lines as u32;
             self.mcu_height = self.height.div_ceil(8);
             log_debug!("DNL: updated height to {}", self.height);
@@ -1524,6 +1559,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         if total_symbols > 256 {
             log_warn!("Too many symbols in Huffman table: {}", total_symbols);
             total_symbols = 256;
+            for offset in offsets.iter_mut() {
+                *offset = (*offset).min(total_symbols);
+            }
         }
 
         let mut symbols = Vec::with_capacity(total_symbols as usize);
@@ -1690,7 +1728,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
             self.ensure_default_huffman_tables();
         }
 
-        let collect = self.walk_mode == WalkMode::Decode;
+        let collect = self.walk_mode == WalkMode::Decode && self.collected_scans < MAX_SCANS;
+        if self.walk_mode == WalkMode::Decode && !collect {
+            log_warn!("More than {} scans in the image, ignoring the rest", MAX_SCANS);
+        }
+        if self.width > 0 && !self.components.is_empty() {
+            self.frame_has_scan = true;
+        }
 
         let length = self.reader.read_u16()?;
 
@@ -1862,6 +1906,25 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let actual_scan_size = scan_data.len();
         self.limits.free_usize(scan_data_limit.saturating_sub(actual_scan_size));
+        scan_data.shrink_to_fit();
+
+        if scan_components.len() > MAX_SCAN_COMPONENTS {
+            log_warn!("Scan lists {} components, using the first {}", scan_components.len(), MAX_SCAN_COMPONENTS);
+            scan_components.truncate(MAX_SCAN_COMPONENTS);
+        }
+
+        let dc_tables = self
+            .dc_huffman_tables
+            .iter()
+            .filter(|t| scan_components.iter().any(|c| c.dc_table_selector == t.id))
+            .cloned()
+            .collect();
+        let ac_tables = self
+            .ac_huffman_tables
+            .iter()
+            .filter(|t| scan_components.iter().any(|c| c.ac_table_selector == t.id))
+            .cloned()
+            .collect();
 
         let scan = ScanData {
             start_spectral,
@@ -1869,8 +1932,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             successive_high,
             successive_low,
             components: scan_components,
-            dc_tables: self.dc_huffman_tables.clone(),
-            ac_tables: self.ac_huffman_tables.clone(),
+            dc_tables,
+            ac_tables,
             arith_dc_tables: self.dc_arithmetic_tables.clone(),
             arith_ac_tables: self.ac_arithmetic_tables.clone(),
             data: scan_data,
@@ -1878,6 +1941,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         };
 
         self.scans.push(scan);
+        self.collected_scans += 1;
 
         Ok(())
     }
@@ -2066,7 +2130,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             *previous_dc = dc_coeff;
             dc_coeff
         } else {
-            let v = dc_coeff + *previous_dc;
+            let v = dc_coeff.wrapping_add(*previous_dc);
             *previous_dc = v;
             v
         };
@@ -2100,7 +2164,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let max_coefficient_length = if self.precision > 8 { 16 } else { 10 };
             if coefficient_length > max_coefficient_length {
                 log_warn!("Invalid coefficient length: {}, replacing with 0", coefficient_length);
-                coefficient_length = 0;
+                i += 1;
+                continue;
             }
 
             if coefficient_length != 0 {
@@ -2156,8 +2221,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut previous_dc = vec![0i32; planes.len()];
         let is_differential = matches!(self.mode, JpegMode::DifferentialProgressive | JpegMode::DifferentialSequential);
         let max_ac_len: u8 = if self.precision > 8 { 15 } else { 10 };
+        let block_budget = Self::progressive_block_budget(planes);
+        let mut blocks_visited = 0u64;
 
         for scan in &self.scans {
+            if blocks_visited > block_budget {
+                log_warn!("Progressive scans exceed the decoding work budget, ignoring the remaining scans");
+                break;
+            }
+
             let mut reader = JpegBitReader::new(scan.data.as_slice());
             let mut skips: u32 = 0;
             let restart_interval = self.restart_interval;
@@ -2234,7 +2306,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 };
             }
 
-            match (has_dc, has_ac, is_first_pass) {
+            let blocks_per_mcu: u64 =
+                scan_comp_infos.iter().map(|info| u64::from(info.h_blocks) * u64::from(info.v_blocks)).sum();
+
+            let processed_mcus = match (has_dc, has_ac, is_first_pass) {
                 (true, false, true) => run_scan!(|reader, block, info, previous_dc| {
                     prog_dc_first(
                         reader,
@@ -2306,10 +2381,16 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         negative,
                     );
                 }),
-                (false, false, _) => {}
-            }
+                (false, false, _) => 0,
+            };
+            blocks_visited = blocks_visited.saturating_add(processed_mcus.saturating_mul(blocks_per_mcu));
         }
         Ok(())
+    }
+
+    fn progressive_block_budget(planes: &[ComponentPlane]) -> u64 {
+        let total_blocks: u64 = planes.iter().map(|plane| plane.data.len() as u64 / 64).sum();
+        total_blocks.saturating_mul(PROGRESSIVE_PASS_BUDGET)
     }
 
     fn decode_differences(&mut self, scan: &ScanData) -> VexelResult<Vec<Vec<i32>>> {
@@ -2330,7 +2411,25 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let restart_interval = self.restart_interval as usize;
         let mut mcus_until_restart = restart_interval;
 
+        let default_table = Self::default_lossless_dc_table();
+        let tables: Vec<&HuffmanTable> = scan
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, scan_component)| {
+                scan.dc_tables.iter().find(|t| t.id == scan_component.dc_table_selector).unwrap_or_else(|| {
+                    log_warn!("No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.", i);
+                    &default_table
+                })
+            })
+            .collect();
+
         for _ in 0..height {
+            if reader.is_exhausted() {
+                log_warn!("Lossless scan data exhausted, filling the remaining differences with zeros");
+                break;
+            }
+
             for _ in 0..width {
                 if restart_interval > 0 {
                     if mcus_until_restart == 0 {
@@ -2340,15 +2439,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     mcus_until_restart -= 1;
                 }
 
-                for (i, scan_component) in scan.components.iter().enumerate() {
-                    let dc_table = match scan.dc_tables.iter().find(|t| t.id == scan_component.dc_table_selector) {
-                        Some(table) => table,
-                        None => {
-                            log_warn!("No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.", i);
-                            &Self::default_lossless_dc_table()
-                        }
-                    };
-
+                for (i, &dc_table) in tables.iter().enumerate() {
                     let bits_to_read = get_next_symbol(&mut reader, dc_table);
 
                     let diff = match bits_to_read {
@@ -2380,6 +2471,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     differences[i].push(diff);
                 }
             }
+        }
+
+        for diffs in &mut differences {
+            diffs.resize(width * height, 0);
         }
 
         Ok(differences)
@@ -2432,6 +2527,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut db: Vec<Vec<i32>> = vec![vec![0i32; width]; num_components];
 
         for y in 0..height {
+            if arith.is_exhausted() {
+                log_warn!("Lossless arithmetic scan data exhausted, filling the remaining differences with zeros");
+                break;
+            }
+
             da.iter_mut().for_each(|d| *d = 0);
 
             for x in 0..width {
@@ -2661,10 +2761,24 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let h_max = self.components.iter().map(|c| c.horizontal_sampling_factor).max().unwrap_or(1).max(1) as usize;
         let v_max = self.components.iter().map(|c| c.vertical_sampling_factor).max().unwrap_or(1).max(1) as usize;
 
+        let sample_budget = (width as u64)
+            .saturating_mul(height as u64)
+            .saturating_mul(num_components as u64)
+            .saturating_mul(LOSSLESS_PASS_BUDGET);
+        let mut samples_scheduled = 0u64;
+
         let scans = std::mem::take(&mut self.scans);
         for scan in &scans {
             if scan.components.is_empty() {
                 continue;
+            }
+
+            samples_scheduled = samples_scheduled.saturating_add(
+                (width as u64).saturating_mul(height as u64).saturating_mul(scan.components.len() as u64),
+            );
+            if samples_scheduled > sample_budget {
+                log_warn!("Lossless scans exceed the decoding work budget, ignoring the remaining scans");
+                break;
             }
 
             let component_indices: Vec<usize> = scan
@@ -2769,8 +2883,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let plane_dims: Vec<(usize, usize)> = sampling.iter().map(|&(h, v)| (mcu_cols * h, mcu_rows * v)).collect();
 
-        let total_plane_samples: usize = plane_dims.iter().map(|&(w, h)| w * h).sum();
-        if self.limits.reserve_usize(total_plane_samples * 2).is_err() {
+        let total_plane_samples =
+            plane_dims.iter().fold(0usize, |total, &(w, h)| total.saturating_add(w.saturating_mul(h)));
+        if self.limits.reserve_usize(total_plane_samples.saturating_mul(2)).is_err() {
             log_warn!("Subsampled interleaved lossless scan exceeds limits, skipping");
             return;
         }
@@ -2820,7 +2935,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut mcu = 0usize;
         let mut restart_row_start = 0usize;
 
-        while mcu < total_mcus {
+        'mcus: while mcu < total_mcus {
             if mcu > 0 {
                 reader.clear_buffer();
                 restart_row_start = mcu / mcu_cols;
@@ -2828,6 +2943,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let end = (mcu + interval).min(total_mcus);
 
             while mcu < end {
+                if reader.is_exhausted() {
+                    log_warn!("Lossless scan data exhausted after {} of {} MCUs", mcu, total_mcus);
+                    break 'mcus;
+                }
                 let mcu_x = mcu % mcu_cols;
                 let mcu_y = mcu / mcu_cols;
 
@@ -2891,7 +3010,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        self.limits.free_usize(total_plane_samples * 2);
+        self.limits.free_usize(total_plane_samples.saturating_mul(2));
     }
 
     fn decode_lossless_scan(
@@ -3165,6 +3284,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut mcu = 0usize;
 
         while mcu < total {
+            if reader.is_exhausted() {
+                log_warn!("Lossless scan data exhausted after {} of {} samples", mcu, total);
+                return;
+            }
             if mcu > 0 {
                 reader.clear_buffer();
             }
@@ -3192,6 +3315,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
 
             while mcu < end {
+                if reader.is_exhausted() {
+                    log_warn!("Lossless scan data exhausted after {} of {} samples", mcu, total);
+                    return;
+                }
                 let row_end = (mcu + sw).min(end);
 
                 for c in components.iter_mut() {
@@ -3366,6 +3493,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let row_strides: Vec<usize> = views.iter().map(|&(_, stride)| sw * stride).collect();
 
         for y in 0..sh {
+            if arith.is_exhausted() {
+                log_warn!("Lossless arithmetic scan data exhausted at row {} of {}", y, sh);
+                break;
+            }
+
             for v in da.iter_mut() {
                 *v = 0;
             }
@@ -3510,8 +3642,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let mut restart_counter = self.restart_interval as u32;
 
-        for mcu_y in 0..mcu_height {
+        'mcus: for mcu_y in 0..mcu_height {
             for mcu_x in 0..mcu_width {
+                if arith.is_exhausted() {
+                    log_warn!("Arithmetic scan data exhausted at MCU ({}, {})", mcu_x, mcu_y);
+                    break 'mcus;
+                }
+
                 if self.restart_interval > 0 {
                     if restart_counter == 0 {
                         dc_context.fill(0);
@@ -3580,8 +3717,15 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut per_scan_ac_stats: Vec<Vec<u8>> = (0..4).map(|_| vec![0u8; 256]).collect();
         let mut per_scan_dc_context = vec![0usize; planes.len()];
         let mut per_scan_last_dc_val = vec![0i32; planes.len()];
+        let block_budget = Self::progressive_block_budget(planes);
+        let mut blocks_visited = 0u64;
 
         for scan in &self.scans {
+            if blocks_visited > block_budget {
+                log_warn!("Progressive scans exceed the decoding work budget, ignoring the remaining scans");
+                break;
+            }
+
             let is_dc_scan = scan.start_spectral == 0;
             let is_first_scan = scan.successive_high == 0;
             let is_first_dc_scan = is_dc_scan && is_first_scan;
@@ -3656,8 +3800,13 @@ impl<R: Read + Seek> JpegDecoder<R> {
             let restart_interval = self.restart_interval;
             let mut restart_counter = restart_interval as u32;
 
-            for mcu_y in 0..mcu_height {
+            'mcus: for mcu_y in 0..mcu_height {
                 for mcu_x in 0..mcu_width {
+                    if arith.is_exhausted() {
+                        log_warn!("Arithmetic scan data exhausted at MCU ({}, {})", mcu_x, mcu_y);
+                        break 'mcus;
+                    }
+
                     if restart_interval > 0 {
                         if restart_counter == 0 {
                             per_scan_dc_context.fill(0);
@@ -3706,6 +3855,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                                 let block_data_ptr = planes[plane_index].get_block_mut(block_x, block_y);
                                 if let Some(block) = block_data_ptr {
+                                    blocks_visited += 1;
                                     if is_dc_scan {
                                         if is_first_scan {
                                             arith.decode_dc_first(
@@ -3840,9 +3990,34 @@ impl<R: Read + Seek> JpegDecoder<R> {
             .collect();
 
         let mut restart_counter = self.restart_interval as u32;
+        let is_differential = matches!(self.mode, JpegMode::DifferentialSequential | JpegMode::DifferentialProgressive);
+        let mut padding_blocks: Option<Vec<([i16; 64], i32, bool)>> = None;
 
         for mcu_y in 0..mcu_height {
             for mcu_x in 0..mcu_width {
+                if padding_blocks.is_none() && reader.is_exhausted() {
+                    log_warn!("Scan data exhausted at MCU ({}, {}), padding the rest of the image", mcu_x, mcu_y);
+                    padding_blocks = Some(
+                        comp_infos
+                            .iter()
+                            .map(|info| {
+                                let dc_written = get_next_symbol(&mut JpegBitReader::new(&[]), &info.dc_table) <= 15;
+                                let mut block = [0i16; 64];
+                                let mut dc_difference = 0;
+                                let _ = self.decode_mcu(
+                                    &mut JpegBitReader::new(&[]),
+                                    &mut block,
+                                    &info.dc_table,
+                                    &info.ac_table,
+                                    &mut dc_difference,
+                                    is_differential,
+                                );
+                                (block, dc_difference, dc_written)
+                            })
+                            .collect(),
+                    );
+                }
+
                 if self.restart_interval > 0 {
                     if restart_counter == 0 {
                         previous_dc.fill(0);
@@ -3869,10 +4044,22 @@ impl<R: Read + Seek> JpegDecoder<R> {
                             }
 
                             if let Some(block) = planes[comp_idx].get_block_mut(block_x, block_y) {
-                                let is_differential = matches!(
-                                    self.mode,
-                                    JpegMode::DifferentialSequential | JpegMode::DifferentialProgressive
-                                );
+                                if let Some((padding, dc_difference, dc_written)) =
+                                    padding_blocks.as_ref().and_then(|blocks| blocks.get(comp_idx))
+                                {
+                                    *block = *padding;
+                                    if *dc_written {
+                                        let dc = if is_differential {
+                                            *dc_difference
+                                        } else {
+                                            dc_difference.wrapping_add(previous_dc[comp_idx])
+                                        };
+                                        block[0] = dc as i16;
+                                        previous_dc[comp_idx] = dc;
+                                    }
+                                    continue;
+                                }
+
                                 match self.decode_mcu(
                                     &mut reader,
                                     block,
@@ -3938,8 +4125,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
                 let process_band = |scratch: &mut [i16], by: usize, band: &mut [i16]| {
                     let row_start = by * bpl * 64;
-                    let avail = plane.data.len().saturating_sub(row_start).min(row_len);
-                    scratch[..avail].copy_from_slice(&plane.data[row_start..row_start + avail]);
+                    let src = plane.data.get(row_start..).unwrap_or(&[]);
+                    let avail = src.len().min(row_len);
+                    scratch[..avail].copy_from_slice(&src[..avail]);
                     scratch[avail..].fill(0);
 
                     if zigzag_order {
@@ -4540,6 +4728,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let h = self.height as usize;
         let nc = self.components.len();
 
+        if w == 0 || h == 0 {
+            log_warn!("Hierarchical frame has dimensions {}x{}, skipping it", w, h);
+            return Ok(vec![Vec::new(); nc]);
+        }
+
         match self.mode.clone() {
             JpegMode::DifferentialLossless => {
                 let scan = match self.scans.first() {
@@ -4685,52 +4878,59 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     fn expand_2x(src: &[i32], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<i32> {
-        if src_w == dst_w && src_h == dst_h {
+        if src_w == dst_w && src_h == dst_h && src.len() == dst_w * dst_h {
             return src.to_vec();
-        }
-        let expand_h = dst_w > src_w;
-        let expand_v = dst_h > src_h;
-        let h_w = if expand_h { dst_w } else { src_w };
-
-        let mut h_buf = vec![0i32; h_w * src_h];
-        if expand_h {
-            for y in 0..src_h {
-                let row = &src[y * src_w..(y + 1) * src_w];
-                let out = &mut h_buf[y * h_w..(y + 1) * h_w];
-                for x in 0..src_w {
-                    let xi2 = x * 2;
-                    let next = if x + 1 < src_w { row[x + 1] } else { row[x] };
-                    if xi2 < h_w {
-                        out[xi2] = row[x];
-                    }
-                    if xi2 + 1 < h_w {
-                        out[xi2 + 1] = (row[x] + next) >> 1;
-                    }
-                }
-            }
-        } else {
-            h_buf.copy_from_slice(src);
         }
 
         let mut out = vec![0i32; dst_w * dst_h];
+        if src_w == 0 || src_h == 0 || dst_w == 0 || src.len() < src_w * src_h {
+            return out;
+        }
+
+        let expand_h = dst_w > src_w;
+        let expand_v = dst_h > src_h;
+
+        let mut h_buf = vec![0i32; dst_w * src_h];
+        for (row, h_row) in src.chunks_exact(src_w).zip(h_buf.chunks_exact_mut(dst_w)) {
+            if expand_h {
+                for x in 0..src_w {
+                    let xi2 = x * 2;
+                    let next = if x + 1 < src_w { row[x + 1] } else { row[x] };
+                    if xi2 < dst_w {
+                        h_row[xi2] = row[x];
+                    }
+                    if xi2 + 1 < dst_w {
+                        h_row[xi2 + 1] = (row[x] + next) >> 1;
+                    }
+                }
+            } else {
+                h_row.copy_from_slice(&row[..dst_w]);
+            }
+        }
+
         if expand_v {
-            for y in 0..dst_h {
+            for (y, out_row) in out.chunks_exact_mut(dst_w).enumerate() {
                 let sy = (y / 2).min(src_h - 1);
                 let ny = (sy + 1).min(src_h - 1);
+                let ra = &h_buf[sy * dst_w..(sy + 1) * dst_w];
                 if y % 2 == 0 {
-                    out[y * dst_w..(y + 1) * dst_w].copy_from_slice(&h_buf[sy * h_w..(sy + 1) * h_w]);
+                    out_row.copy_from_slice(ra);
                 } else {
-                    let ra = &h_buf[sy * h_w..(sy + 1) * h_w];
-                    let rb = &h_buf[ny * h_w..(ny + 1) * h_w];
-                    for x in 0..dst_w {
-                        out[y * dst_w + x] = (ra[x] + rb[x]) >> 1;
+                    let rb = &h_buf[ny * dst_w..(ny + 1) * dst_w];
+                    for (o, (a, b)) in out_row.iter_mut().zip(ra.iter().zip(rb.iter())) {
+                        *o = (a + b) >> 1;
                     }
                 }
             }
         } else {
-            out.copy_from_slice(&h_buf);
+            let len = dst_h * dst_w;
+            out.copy_from_slice(&h_buf[..len]);
         }
         out
+    }
+
+    fn expansion_bytes(components: usize, dst_w: usize, dst_h: usize, src_h: usize) -> usize {
+        dst_w.saturating_mul(dst_h.saturating_add(src_h)).saturating_mul(components).saturating_mul(4)
     }
 
     fn decode_hierarchical(&mut self) -> VexelResult<Image> {
@@ -4758,12 +4958,26 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut current_w = base.width as usize;
         let mut current_h = base.height as usize;
 
+        let frame_pixel_budget = u64::from(final_width.max(base.width))
+            .saturating_mul(u64::from(final_height.max(base.height)))
+            .saturating_mul(HIERARCHICAL_PIXEL_BUDGET);
+        let mut frame_pixels = u64::from(base.width).saturating_mul(u64::from(base.height));
+
         for frame in frames.iter().skip(1) {
             let dst_w = frame.width as usize;
             let dst_h = frame.height as usize;
 
+            frame_pixels = frame_pixels.saturating_add(u64::from(frame.width).saturating_mul(u64::from(frame.height)));
+            if frame_pixels > frame_pixel_budget {
+                log_warn!("Hierarchical frames exceed the decoding work budget, ignoring the remaining frames");
+                break;
+            }
+
+            let expand_bytes = Self::expansion_bytes(current_pixels.len(), dst_w, dst_h, current_h);
+            self.limits.reserve_usize(expand_bytes)?;
             let mut upsampled: Vec<Vec<i32>> =
                 current_pixels.iter().map(|comp| Self::expand_2x(comp, current_w, current_h, dst_w, dst_h)).collect();
+            self.limits.free_usize(expand_bytes);
 
             let diff_raw = self.decode_frame_to_pixels(frame)?;
 
@@ -4788,14 +5002,31 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         self.hierarchical_frames = frames;
 
+        let (final_width, final_height) = if final_width == 0 || final_height == 0 {
+            log_warn!("DHP dimensions are {}x{}, using the last frame size", final_width, final_height);
+            (current_w as u32, current_h as u32)
+        } else {
+            (final_width, final_height)
+        };
         let out_w = final_width as usize;
         let out_h = final_height as usize;
 
+        if out_w == 0 || out_h == 0 {
+            return Err(VexelError::InvalidDimensions { width: final_width, height: final_height });
+        }
+
         if current_w != out_w || current_h != out_h {
+            let expand_bytes = Self::expansion_bytes(current_pixels.len(), out_w, out_h, current_h);
+            self.limits.reserve_usize(expand_bytes)?;
             current_pixels = current_pixels
                 .into_iter()
                 .map(|comp| Self::expand_2x(&comp, current_w, current_h, out_w, out_h))
                 .collect();
+            self.limits.free_usize(expand_bytes);
+        }
+
+        if current_pixels.len() < 4 {
+            current_pixels.resize(4, Vec::new());
         }
 
         let max_val = if precision <= 8 { 255i32 } else { 65535i32 };
@@ -4819,9 +5050,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         } else if nc == 4 {
             let mut pixels = vec![0u8; npixels * 3];
             for i in 0..npixels {
-                let c0 = current_pixels[0].get(i).copied().unwrap_or(128);
-                let c1 = current_pixels[1].get(i).copied().unwrap_or(128);
-                let c2 = current_pixels[2].get(i).copied().unwrap_or(128);
+                let c0 = current_pixels[0].get(i).copied().unwrap_or(128).clamp(0, 255);
+                let c1 = current_pixels[1].get(i).copied().unwrap_or(128).clamp(0, 255);
+                let c2 = current_pixels[2].get(i).copied().unwrap_or(128).clamp(0, 255);
                 let k_inv = current_pixels[3].get(i).copied().unwrap_or(128).clamp(0, 255);
                 let (c_inv, m_inv, y_inv) = if colorspace == JpegColorspace::YCCK {
                     let cb = c1 - 128;
@@ -4848,9 +5079,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
             if precision <= 8 {
                 let mut pixels = vec![0u8; npixels * 3];
                 for i in 0..npixels {
-                    let c0 = current_pixels[0].get(i).copied().unwrap_or(128);
-                    let c1 = current_pixels[1].get(i).copied().unwrap_or(128);
-                    let c2 = current_pixels[2].get(i).copied().unwrap_or(128);
+                    let c0 = current_pixels[0].get(i).copied().unwrap_or(128).clamp(0, 255);
+                    let c1 = current_pixels[1].get(i).copied().unwrap_or(128).clamp(0, 255);
+                    let c2 = current_pixels[2].get(i).copied().unwrap_or(128).clamp(0, 255);
                     if convert_ycbcr {
                         let cb = c1 - 128;
                         let cr = c2 - 128;
@@ -4872,6 +5103,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                     let c1 = current_pixels[1].get(i).copied().unwrap_or(2048);
                     let c2 = current_pixels[2].get(i).copied().unwrap_or(2048);
                     if convert_ycbcr {
+                        let (c0, c1, c2) = (c0.clamp(0, 4095), c1.clamp(0, 4095), c2.clamp(0, 4095));
                         let cb = c1 - 2048;
                         let cr = c2 - 2048;
                         let y2048 = c0 << 16;
@@ -4955,6 +5187,12 @@ impl<R: Read + Seek> JpegDecoder<R> {
             return;
         }
 
+        if self.hierarchical_frames.len() >= MAX_HIERARCHICAL_FRAMES {
+            log_warn!("More than {} hierarchical frames, ignoring the rest", MAX_HIERARCHICAL_FRAMES);
+            self.scans.clear();
+            return;
+        }
+
         let frame = HierarchicalFrame {
             width: self.width,
             height: self.height,
@@ -4975,6 +5213,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         if self.is_hierarchical {
             self.finalize_current_frame();
         }
+        self.frame_has_scan = false;
 
         let mode = match marker & 0x07 {
             1 => Some(JpegMode::ExtendedSequential),
@@ -5059,7 +5298,16 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 | JpegMarker::SOF11
                 | JpegMarker::SOF13
                 | JpegMarker::SOF14
-                | JpegMarker::SOF15 => self.start_frame((code & 0xFF) as u8, segment_start),
+                | JpegMarker::SOF15 => {
+                    if !self.is_hierarchical && self.frame_has_scan {
+                        log_warn!("Frame header {:?} after a completed scan, ignoring the rest of the file", marker);
+                        if self.reader.seek(SeekFrom::Start(segment_start)).is_ok() {
+                            self.record_trailing_data(segment_start);
+                        }
+                        break;
+                    }
+                    self.start_frame((code & 0xFF) as u8, segment_start)
+                }
                 JpegMarker::DHP => self.read_dhp(segment_start),
                 JpegMarker::EXP => self.read_exp(segment_start),
                 JpegMarker::DRI => self.read_restart_interval(segment_start),
@@ -5205,8 +5453,10 @@ fn scan_thumbnail_segments<R: Read + Seek>(reader: &mut BitReader<R>, limits: &L
     reader.seek(SeekFrom::Start(0))?;
 
     let mut thumbnails = Vec::new();
+    let mut budget = limits.clone();
 
     while let Ok(Some(marker)) = reader.next_marker(&JPEG_MARKERS) {
+        let decoded_before = thumbnails.len();
         match marker {
             JpegMarker::SOI
             | JpegMarker::TEM
@@ -5231,13 +5481,20 @@ fn scan_thumbnail_segments<R: Read + Seek>(reader: &mut BitReader<R>, limits: &L
                 };
 
                 if marker == JpegMarker::APP0 {
-                    extract_app0_thumbnail(&payload, limits, &mut thumbnails);
+                    extract_app0_thumbnail(&payload, &budget, &mut thumbnails);
                 } else if payload.starts_with(b"Exif\0\0") {
                     if let Some(bytes) = crate::utils::exif::exif_thumbnail(&payload[6..]) {
-                        if let Some(image) = decode_embedded_jpeg(bytes, limits) {
+                        if let Some(image) = decode_embedded_jpeg(bytes, &budget) {
                             thumbnails.push(image);
                         }
                     }
+                }
+
+                let new_bytes: usize = thumbnails[decoded_before..].iter().map(|t| t.pixels().as_bytes().len()).sum();
+                if budget.reserve_usize(new_bytes).is_err() {
+                    log_warn!("Embedded thumbnails exceed the allocation limit, ignoring the rest");
+                    thumbnails.truncate(decoded_before);
+                    break;
                 }
             }
             _ => {

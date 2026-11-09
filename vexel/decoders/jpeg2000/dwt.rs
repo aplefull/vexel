@@ -43,13 +43,15 @@ pub fn decode_line_53(a: &mut [i64], line: &Line) {
         for i in 0..sn {
             let left = clamp_d(a, i - 1, dn);
             let right = clamp_d(a, i, dn);
-            a[s_index(i)] -= (left + right + 2) >> 2;
+            let index = s_index(i);
+            a[index] = a[index].wrapping_sub(left.wrapping_add(right).wrapping_add(2) >> 2);
         }
 
         for i in 0..dn {
             let left = clamp_s(a, i, sn);
             let right = clamp_s(a, i + 1, sn);
-            a[d_index(i)] += (left + right) >> 1;
+            let index = d_index(i);
+            a[index] = a[index].wrapping_add(left.wrapping_add(right) >> 1);
         }
     } else {
         if sn == 0 && dn == 1 {
@@ -60,13 +62,15 @@ pub fn decode_line_53(a: &mut [i64], line: &Line) {
         for i in 0..sn {
             let left = clamp_ss(a, i, dn);
             let right = clamp_ss(a, i + 1, dn);
-            a[d_index(i)] -= (left + right + 2) >> 2;
+            let index = d_index(i);
+            a[index] = a[index].wrapping_sub(left.wrapping_add(right).wrapping_add(2) >> 2);
         }
 
         for i in 0..dn {
             let left = clamp_dd(a, i, sn);
             let right = clamp_dd(a, i - 1, sn);
-            a[s_index(i)] += (left + right) >> 1;
+            let index = s_index(i);
+            a[index] = a[index].wrapping_add(left.wrapping_add(right) >> 1);
         }
     }
 }

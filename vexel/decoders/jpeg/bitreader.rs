@@ -3,12 +3,13 @@ pub struct JpegBitReader<'a> {
     pos: usize,
     buf: u64,
     bits: u32,
+    overrun: bool,
 }
 
 impl<'a> JpegBitReader<'a> {
     #[inline(always)]
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, buf: 0, bits: 0 }
+        Self { data, pos: 0, buf: 0, bits: 0, overrun: false }
     }
 
     #[inline(always)]
@@ -80,12 +81,18 @@ impl<'a> JpegBitReader<'a> {
             self.refill();
             if self.bits < n {
                 self.bits = n;
+                self.overrun = true;
             }
         }
         let v = (self.buf >> (64 - n)) as u32;
         self.buf <<= n;
         self.bits -= n;
         v
+    }
+
+    #[inline(always)]
+    pub fn is_exhausted(&self) -> bool {
+        self.overrun
     }
 
     #[inline(always)]
@@ -98,6 +105,7 @@ impl<'a> JpegBitReader<'a> {
         while self.pos + 1 < self.data.len() {
             if self.data[self.pos] == 0xFF && self.data[self.pos + 1] >= 0xD0 && self.data[self.pos + 1] <= 0xD7 {
                 self.pos += 2;
+                self.overrun = false;
                 return;
             }
             self.pos += 1;

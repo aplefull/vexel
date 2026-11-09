@@ -173,10 +173,6 @@ fn max_output_for(capacity_hint: usize) -> usize {
     }
 }
 
-pub fn decompress_lzw(data: &[u8]) -> Vec<u8> {
-    decompress_lzw_with_capacity(data, 0)
-}
-
 pub fn decompress_lzw_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
     let max_output = max_output_for(capacity_hint);
     if data.is_empty() {
@@ -307,10 +303,6 @@ fn decompress_lzw_lsb(data: &[u8], max_output: usize) -> Vec<u8> {
     output
 }
 
-pub fn decompress_packbits(data: &[u8]) -> Vec<u8> {
-    decompress_packbits_with_capacity(data, 0)
-}
-
 pub fn decompress_packbits_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
     let max_output = max_output_for(capacity_hint);
     let mut output = Vec::new();
@@ -339,24 +331,12 @@ pub fn decompress_packbits_with_capacity(data: &[u8], capacity_hint: usize) -> V
     output
 }
 
-pub fn decompress_deflate(data: &[u8]) -> Vec<u8> {
-    decompress_deflate_with_capacity(data, 0)
-}
-
 pub fn decompress_deflate_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
     ZlibDecoder::from_slice(data).decode_with_capacity(capacity_hint)
 }
 
-pub fn decompress_lzma(data: &[u8]) -> Vec<u8> {
-    decompress_lzma_with_capacity(data, 0)
-}
-
 pub fn decompress_lzma_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
     XzDecoder::from_slice(data).decode_with_capacity(capacity_hint)
-}
-
-pub fn decompress_zstd(data: &[u8]) -> Vec<u8> {
-    decompress_zstd_with_capacity(data, 0)
 }
 
 pub fn decompress_zstd_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {

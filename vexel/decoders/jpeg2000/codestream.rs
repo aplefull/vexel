@@ -211,6 +211,7 @@ pub fn parse(data: &[u8]) -> VexelResult<Codestream> {
 
     let mut current_tile: Option<u32> = None;
     let mut current_tile_part_end: Option<usize> = None;
+    let mut override_entries = 0usize;
 
     loop {
         if reader.remaining() < 2 {
@@ -313,9 +314,12 @@ pub fn parse(data: &[u8]) -> VexelResult<Codestream> {
                     }
                 }
 
-                let target = coding_target(&mut defaults, &mut tile_overrides, current_tile);
-                for component in target.iter_mut() {
-                    component.coding = cod.style.clone();
+                if let Some(target) =
+                    coding_target(&mut defaults, &mut tile_overrides, current_tile, &mut override_entries)
+                {
+                    for component in target.iter_mut() {
+                        component.coding = cod.style.clone();
+                    }
                 }
             }
             Marker::Coc => {
@@ -327,8 +331,9 @@ pub fn parse(data: &[u8]) -> VexelResult<Codestream> {
 
                 match parse_coc(segment, num_components) {
                     Ok((index, style)) => {
-                        let target = coding_target(&mut defaults, &mut tile_overrides, current_tile);
-                        if let Some(component) = target.get_mut(index) {
+                        let target =
+                            coding_target(&mut defaults, &mut tile_overrides, current_tile, &mut override_entries);
+                        if let Some(component) = target.and_then(|target| target.get_mut(index)) {
                             component.coding = style;
                         }
                     }
@@ -337,9 +342,12 @@ pub fn parse(data: &[u8]) -> VexelResult<Codestream> {
             }
             Marker::Qcd => match parse_qcd(segment) {
                 Ok(quant) => {
-                    let target = coding_target(&mut defaults, &mut tile_overrides, current_tile);
-                    for component in target.iter_mut() {
-                        component.quant = quant.clone();
+                    if let Some(target) =
+                        coding_target(&mut defaults, &mut tile_overrides, current_tile, &mut override_entries)
+                    {
+                        for component in target.iter_mut() {
+                            component.quant = quant.clone();
+                        }
                     }
                 }
                 Err(error) => log_warn!("JPEG 2000: ignoring malformed QCD marker: {}", error),
@@ -353,8 +361,9 @@ pub fn parse(data: &[u8]) -> VexelResult<Codestream> {
 
                 match parse_qcc(segment, num_components) {
                     Ok((index, quant)) => {
-                        let target = coding_target(&mut defaults, &mut tile_overrides, current_tile);
-                        if let Some(component) = target.get_mut(index) {
+                        let target =
+                            coding_target(&mut defaults, &mut tile_overrides, current_tile, &mut override_entries);
+                        if let Some(component) = target.and_then(|target| target.get_mut(index)) {
                             component.quant = quant;
                         }
                     }
@@ -369,8 +378,8 @@ pub fn parse(data: &[u8]) -> VexelResult<Codestream> {
                 };
 
                 if let Some((index, shift)) = parse_rgn(segment, num_components) {
-                    let target = coding_target(&mut defaults, &mut tile_overrides, current_tile);
-                    if let Some(component) = target.get_mut(index) {
+                    let target = coding_target(&mut defaults, &mut tile_overrides, current_tile, &mut override_entries);
+                    if let Some(component) = target.and_then(|target| target.get_mut(index)) {
                         component.roi_shift = shift;
                     }
                 }
@@ -507,17 +516,35 @@ pub fn parse(data: &[u8]) -> VexelResult<Codestream> {
     })
 }
 
+const MAX_OVERRIDE_ENTRIES: usize = 1 << 18;
+
 fn coding_target<'a>(
     defaults: &'a mut Vec<ComponentCoding>,
     tile_overrides: &'a mut [Option<Vec<ComponentCoding>>],
     current_tile: Option<u32>,
-) -> &'a mut Vec<ComponentCoding> {
+    override_entries: &mut usize,
+) -> Option<&'a mut Vec<ComponentCoding>> {
     match current_tile {
         Some(index) => {
-            let slot = &mut tile_overrides[index as usize % tile_overrides.len().max(1)];
-            slot.get_or_insert_with(|| defaults.clone())
+            if tile_overrides.is_empty() {
+                log_warn!("JPEG 2000: tile-part header marker before SIZ, ignoring it");
+                return None;
+            }
+
+            let count = tile_overrides.len();
+            let slot = &mut tile_overrides[index as usize % count];
+
+            if slot.is_none() {
+                if override_entries.saturating_add(defaults.len()) > MAX_OVERRIDE_ENTRIES {
+                    log_warn!("JPEG 2000: too many tile-specific coding overrides, using defaults for tile {}", index);
+                    return None;
+                }
+                *override_entries += defaults.len();
+            }
+
+            Some(slot.get_or_insert_with(|| defaults.clone()))
         }
-        None => defaults,
+        None => Some(defaults),
     }
 }
 
@@ -631,7 +658,43 @@ fn parse_siz(segment: &[u8]) -> VexelResult<SizInfo> {
         siz.yt0siz = siz.y0siz;
     }
 
+    if siz.xsiz > MAX_COORDINATE || siz.ysiz > MAX_COORDINATE {
+        log_warn!(
+            "JPEG 2000: reference grid {}x{} exceeds the supported coordinate range, shifting the origin",
+            siz.xsiz,
+            siz.ysiz
+        );
+        rebase_origin(&mut siz);
+
+        if siz.xsiz > MAX_COORDINATE || siz.ysiz > MAX_COORDINATE {
+            siz.xt0siz = siz.x0siz;
+            siz.yt0siz = siz.y0siz;
+            rebase_origin(&mut siz);
+            siz.xtsiz = siz.xsiz - siz.xt0siz;
+            siz.ytsiz = siz.ysiz - siz.yt0siz;
+        }
+
+        if siz.xsiz > MAX_COORDINATE || siz.ysiz > MAX_COORDINATE {
+            return Err(VexelError::InvalidDimensions { width: siz.width(), height: siz.height() });
+        }
+    }
+
     Ok(siz)
+}
+
+const MAX_COORDINATE: u32 = 1 << 30;
+const REBASE_ALIGNMENT: u32 = 1 << 20;
+
+fn rebase_origin(siz: &mut SizInfo) {
+    let shift_x = siz.xt0siz & !(REBASE_ALIGNMENT - 1);
+    let shift_y = siz.yt0siz & !(REBASE_ALIGNMENT - 1);
+
+    siz.xsiz -= shift_x;
+    siz.x0siz -= shift_x;
+    siz.xt0siz -= shift_x;
+    siz.ysiz -= shift_y;
+    siz.y0siz -= shift_y;
+    siz.yt0siz -= shift_y;
 }
 
 const CAP_PART15_BIT: u32 = 1 << (32 - 15);
@@ -750,6 +813,8 @@ fn parse_qcc(segment: &[u8], num_components: usize) -> VexelResult<(usize, Quant
     Ok((index, quant))
 }
 
+const MAX_BANDS: usize = 3 * 32 + 1;
+
 fn parse_quant(reader: &mut Reader<'_>) -> VexelResult<QuantInfo> {
     let sqcd = reader.u8()?;
     let guard_bits = (sqcd >> 5) as u32;
@@ -765,11 +830,17 @@ fn parse_quant(reader: &mut Reader<'_>) -> VexelResult<QuantInfo> {
     match style {
         QuantStyle::NoQuantization => {
             while let Ok(value) = reader.u8() {
+                if step_sizes.len() >= MAX_BANDS {
+                    break;
+                }
                 step_sizes.push(StepSize { expn: (value >> 3) as i32, mant: 0 });
             }
         }
         QuantStyle::ScalarDerived | QuantStyle::ScalarExpounded => {
             while let Ok(value) = reader.u16() {
+                if step_sizes.len() >= MAX_BANDS {
+                    break;
+                }
                 step_sizes.push(StepSize { expn: (value >> 11) as i32, mant: (value & 0x7FF) as i32 });
             }
         }

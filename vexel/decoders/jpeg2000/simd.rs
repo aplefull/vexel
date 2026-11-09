@@ -144,9 +144,9 @@ fn inverse_rct_row_scalar(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
         let cu = u[i] as i32;
         let cv = v[i] as i32;
 
-        let g = cy - ((cu + cv) >> 2);
-        let r = cv + g;
-        let b = cu + g;
+        let g = cy.wrapping_sub(cu.wrapping_add(cv) >> 2);
+        let r = cv.wrapping_add(g);
+        let b = cu.wrapping_add(g);
 
         y[i] = r as f32;
         u[i] = g as f32;
@@ -363,11 +363,11 @@ unsafe fn inverse_rct_row_avx2(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
         let cu = u[i] as i32;
         let cv = v[i] as i32;
 
-        let g = cy - ((cu + cv) >> 2);
+        let g = cy.wrapping_sub(cu.wrapping_add(cv) >> 2);
 
-        y[i] = (cv + g) as f32;
+        y[i] = cv.wrapping_add(g) as f32;
         u[i] = g as f32;
-        v[i] = (cu + g) as f32;
+        v[i] = cu.wrapping_add(g) as f32;
         i += 1;
     }
 }
@@ -420,7 +420,7 @@ unsafe fn scale_stride2_avx2(a: &mut [f32], offset: usize, count: usize, c: f32)
     let mut i = 0;
     let factor = _mm256_set1_ps(c);
 
-    while i + 8 <= count {
+    while i + 8 <= count && offset + i * 2 + 16 <= a.len() {
         let base = a.as_ptr().add(offset + i * 2);
 
         let lo = _mm256_loadu_ps(base);
@@ -451,7 +451,7 @@ unsafe fn lift_stride2_avx2(a: &mut [f32], write: usize, count: usize, c: f32) {
     let mut i = 0;
     let factor = _mm256_set1_ps(c);
 
-    while i + 8 <= count {
+    while i + 8 <= count && write + i * 2 + 16 <= a.len() {
         let read = a.as_ptr().add(write + i * 2 - 2);
 
         let lo = _mm256_loadu_ps(read);
@@ -627,11 +627,11 @@ unsafe fn inverse_rct_row_wasm(y: &mut [f32], u: &mut [f32], v: &mut [f32]) {
         let cu = u[i] as i32;
         let cv = v[i] as i32;
 
-        let g = cy - ((cu + cv) >> 2);
+        let g = cy.wrapping_sub(cu.wrapping_add(cv) >> 2);
 
-        y[i] = (cv + g) as f32;
+        y[i] = cv.wrapping_add(g) as f32;
         u[i] = g as f32;
-        v[i] = (cu + g) as f32;
+        v[i] = cu.wrapping_add(g) as f32;
         i += 1;
     }
 }
