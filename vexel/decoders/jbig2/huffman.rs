@@ -92,12 +92,12 @@ fn assign_codes(lines: &[HuffmanLine]) -> Vec<u32> {
     len_count[0] = 0;
 
     for cur_len in 1..=max_len {
-        first_code = (first_code + len_count[cur_len as usize - 1]) << 1;
+        first_code = first_code.wrapping_add(len_count[cur_len as usize - 1]).wrapping_shl(1);
         let mut cur_code = first_code;
         for (index, line) in lines.iter().enumerate() {
             if line.pref_len == cur_len {
                 codes[index] = cur_code;
-                cur_code += 1;
+                cur_code = cur_code.wrapping_add(1);
             }
         }
     }
@@ -131,7 +131,7 @@ impl<'a> HuffmanReader<'a> {
     }
 
     pub fn align(&mut self) {
-        self.bit_pos = self.bit_pos.div_ceil(8) * 8;
+        self.bit_pos = self.bit_pos.div_ceil(8).saturating_mul(8);
     }
 
     pub fn byte_offset(&self) -> usize {
@@ -140,7 +140,7 @@ impl<'a> HuffmanReader<'a> {
 
     pub fn advance_bytes(&mut self, count: usize) {
         self.align();
-        self.bit_pos += count * 8;
+        self.bit_pos = self.bit_pos.saturating_add(count.saturating_mul(8));
     }
 
     pub fn data(&self) -> &'a [u8] {

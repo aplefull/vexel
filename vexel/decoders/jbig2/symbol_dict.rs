@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::decoders::jbig2::arith::{ArithDecoder, Cx, IntCtx};
-use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp};
+use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp, WorkBudget};
 use crate::decoders::jbig2::generic::{decode_generic_region, GenericParams};
 use crate::decoders::jbig2::huffman::{HuffmanReader, HuffmanTable, HuffmanValue};
 use crate::decoders::jbig2::refinement::{decode_refinement_region, RefinementParams};
@@ -10,6 +10,9 @@ use crate::decoders::jbig2::text::{
 };
 use crate::log_warn;
 use crate::utils::tiff::fax;
+
+const MAX_EMPTY_HEIGHT_CLASSES: u32 = 64;
+const SYMBOL_COST: u64 = 512;
 
 pub struct SymbolDictHuffman {
     pub dh: HuffmanTable,
@@ -36,8 +39,11 @@ pub fn decode_symbol_dict(
     huffman_tables: Option<&SymbolDictHuffman>,
     gb_stats: &mut [Cx],
     gr_stats: &mut [Cx],
+    budget: &mut WorkBudget,
 ) -> Vec<Arc<Bitmap>> {
     let mut new_symbols: Vec<Arc<Bitmap>> = Vec::new();
+    let mut refagg_symbols: Vec<Arc<Bitmap>> = if params.refagg { input_symbols.to_vec() } else { Vec::new() };
+    let mut empty_height_classes = 0u32;
 
     let total_symbols = input_symbols.len() as u64 + params.num_new_syms as u64;
     let mut sym_code_len = 0u32;
@@ -76,7 +82,12 @@ pub fn decode_symbol_dict(
     let mut height_class_height = 0i32;
     let mut symbol_widths: Vec<u32> = Vec::new();
 
-    while (new_symbols.len() as u32) < params.num_new_syms {
+    'height_classes: while (new_symbols.len() as u32) < params.num_new_syms {
+        if !params.huffman && arith.exhausted() {
+            log_warn!("JBIG2 symbol dictionary data exhausted after {} symbols", new_symbols.len());
+            break;
+        }
+
         let delta_height = if params.huffman {
             match huffman_tables.and_then(|tables| tables.dh.decode(&mut reader)) {
                 Some(HuffmanValue::Value(value)) => value,
@@ -117,12 +128,31 @@ pub fn decode_symbol_dict(
                 break;
             }
 
+            if !params.huffman && arith.exhausted() {
+                log_warn!("JBIG2 symbol dictionary data exhausted after {} symbols", new_symbols.len());
+                break 'height_classes;
+            }
+
+            if !budget.charge(SYMBOL_COST) {
+                log_warn!("JBIG2 symbol dictionary exceeds the decode work budget, stopping");
+                break 'height_classes;
+            }
+
             symbol_width = symbol_width.wrapping_add(delta_width);
             if symbol_width <= 0 || height_class_height == 0 {
                 log_warn!("JBIG2 symbol dictionary produced empty symbol, substituting 1x1");
-                new_symbols.push(Arc::new(Bitmap::new(1, 1)));
+                let symbol = Arc::new(Bitmap::new(1, 1));
+                if params.refagg {
+                    refagg_symbols.push(symbol.clone());
+                }
+                new_symbols.push(symbol);
                 symbol_widths.push(1);
                 continue;
+            }
+
+            if !budget.charge_area(symbol_width as u32, height_class_height as u32) {
+                log_warn!("JBIG2 symbol dictionary exceeds the decode work budget, stopping");
+                break 'height_classes;
             }
             total_width = total_width.saturating_add(symbol_width);
 
@@ -145,18 +175,12 @@ pub fn decode_symbol_dict(
                     }
                 };
 
-                let all_symbols: Vec<&Bitmap> = input_symbols
-                    .iter()
-                    .map(|symbol| symbol.as_ref())
-                    .chain(new_symbols.iter().map(|symbol| symbol.as_ref()))
-                    .collect();
-
                 if num_instances == 1 {
                     decode_single_refinement(
                         &mut arith,
                         &mut reader,
                         params,
-                        &all_symbols,
+                        &refagg_symbols,
                         sym_code_len,
                         symbol_width as u32,
                         height_class_height as u32,
@@ -187,7 +211,7 @@ pub fn decode_symbol_dict(
                     } else {
                         TextCoder::Arith { arith: &mut arith, contexts: &mut text_contexts }
                     };
-                    decode_text_region(&mut target, &all_symbols, &text_params, &mut coder, gr_stats);
+                    decode_text_region(&mut target, &refagg_symbols, &text_params, &mut coder, gr_stats, budget);
                     target
                 }
             } else {
@@ -204,7 +228,21 @@ pub fn decode_symbol_dict(
             };
 
             symbol_widths.push(bitmap.width);
-            new_symbols.push(Arc::new(bitmap));
+            let symbol = Arc::new(bitmap);
+            if params.refagg {
+                refagg_symbols.push(symbol.clone());
+            }
+            new_symbols.push(symbol);
+        }
+
+        if new_symbols.len() == height_class_first {
+            empty_height_classes += 1;
+            if empty_height_classes > MAX_EMPTY_HEIGHT_CLASSES {
+                log_warn!("JBIG2 symbol dictionary has too many empty height classes, stopping");
+                break;
+            }
+        } else {
+            empty_height_classes = 0;
         }
 
         if params.huffman && !params.refagg {
@@ -213,6 +251,7 @@ pub fn decode_symbol_dict(
                 huffman_tables,
                 total_width.max(0) as u32,
                 height_class_height as u32,
+                budget,
             );
 
             if let Some(collective) = collective {
@@ -235,7 +274,7 @@ fn decode_single_refinement(
     arith: &mut ArithDecoder,
     reader: &mut HuffmanReader,
     params: &SymbolDictParams,
-    all_symbols: &[&Bitmap],
+    all_symbols: &[Arc<Bitmap>],
     sym_code_len: u32,
     width: u32,
     height: u32,
@@ -276,8 +315,14 @@ fn decode_single_refinement(
         return target;
     };
 
-    let refine_params =
-        RefinementParams { template: params.rtemplate, reference, dx: rdx, dy: rdy, tpgron: false, at: params.rat };
+    let refine_params = RefinementParams {
+        template: params.rtemplate,
+        reference: reference.as_ref(),
+        dx: rdx,
+        dy: rdy,
+        tpgron: false,
+        at: params.rat,
+    };
 
     if params.huffman {
         let start = reader.byte_offset().min(reader.data().len());
@@ -297,6 +342,7 @@ fn decode_collective_bitmap(
     huffman_tables: Option<&SymbolDictHuffman>,
     width: u32,
     height: u32,
+    budget: &mut WorkBudget,
 ) -> Option<Bitmap> {
     let bmsize = match huffman_tables.and_then(|tables| tables.bmsize.decode(reader)) {
         Some(HuffmanValue::Value(value)) => value.max(0) as usize,
@@ -309,12 +355,16 @@ fn decode_collective_bitmap(
     if start >= data.len() || width == 0 || height == 0 {
         return None;
     }
+    if !budget.charge_area(width, height) {
+        log_warn!("JBIG2 symbol dictionary collective bitmap exceeds the decode work budget");
+        return None;
+    }
 
     let mut bitmap = Bitmap::new(width, height);
 
     if bmsize == 0 {
         let stride = (width as usize).div_ceil(8);
-        let needed = stride * height as usize;
+        let needed = stride.saturating_mul(height as usize);
         let available = data.len() - start;
         if available < needed {
             log_warn!("JBIG2 collective bitmap truncated, filling what is available");

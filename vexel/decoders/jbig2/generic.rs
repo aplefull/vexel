@@ -1,5 +1,6 @@
 use crate::decoders::jbig2::arith::{ArithDecoder, Cx};
 use crate::decoders::jbig2::bitmap::Bitmap;
+use crate::log_warn;
 
 pub struct GenericParams {
     pub template: u8,
@@ -126,6 +127,10 @@ pub fn decode_generic_region(arith: &mut ArithDecoder, stats: &mut [Cx], bitmap:
     let mut ltp = false;
 
     for y in 0..height {
+        if arith.exhausted() {
+            log_warn!("JBIG2 generic region data exhausted at row {} of {}, leaving the rest blank", y, height);
+            break;
+        }
         if params.tpgdon {
             let cx = tpgdon_context(params);
             if let Some(slot) = stats.get_mut(cx) {

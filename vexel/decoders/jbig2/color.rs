@@ -89,7 +89,7 @@ pub fn decode_t45(data: &[u8], expected: usize) -> Option<ColorValues> {
         return None;
     }
 
-    let count = if count == 0 { expected } else { count };
+    let count = if count == 0 { expected } else { count.min(expected) };
     let mut rgb = vec![[0u8; 3]; count];
     let mut ids = vec![0u32; count];
     let mut offset = 6usize;

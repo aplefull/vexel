@@ -10,6 +10,6 @@ mod reader;
 mod types;
 mod values;
 
-pub use decoder::{decode_blob, LercDecoder};
+pub use decoder::{decode_blob_with_limits, LercDecoder};
 pub use info::LercInfo;
 pub use types::{LERC1_MAGIC, LERC2_MAGIC};

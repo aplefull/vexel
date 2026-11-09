@@ -149,9 +149,11 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     decoder.set_limits(build_limits(cli));
 
     if cli.void {
-        if let Ok(frames) = decoder.decode_frames() {
-            for frame in frames {
-                drop(frame);
+        if cli.pages {
+            decoder.decode_pages()?;
+        } else {
+            for frame in decoder.decode_frames()? {
+                frame?;
             }
         }
         return Ok(());
@@ -251,11 +253,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let mut failed = false;
     for file in files {
         if let Err(err) = process_file(&file, &cli) {
             eprintln!("Error processing file: {:?}", err);
-            continue;
+            failed = true;
         }
+    }
+
+    if failed {
+        std::process::exit(1);
     }
 
     Ok(())

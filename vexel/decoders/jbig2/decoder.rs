@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use crate::decoders::jbig2::arith::{ArithDecoder, Cx};
-use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp};
+use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp, WorkBudget};
 use crate::decoders::jbig2::color::{self, ColorValues, DEFAULT_PALETTE};
 use crate::decoders::jbig2::generic::{
     decode_generic_region, stats_size as generic_stats_size, GenericParams, NOMINAL_AT,
@@ -28,6 +28,12 @@ use crate::{log_debug, log_warn};
 
 pub(super) const JBIG2_FILE_ID: [u8; 8] = [0x97, 0x4a, 0x42, 0x32, 0x0d, 0x0a, 0x1a, 0x0a];
 
+const MAX_INPUT_SYMBOLS: usize = 1 << 20;
+const SYMBOL_REFERENCE_COST: u64 = 64;
+const BASE_WORK_BUDGET: u64 = 64 * 1024 * 1024;
+const WORK_PER_INPUT_BYTE: u64 = 1024;
+const WORK_PER_PAGE_PIXEL: u64 = 4;
+
 enum SegmentResult {
     Symbols(Vec<Arc<Bitmap>>),
     Patterns(Arc<PatternDict>),
@@ -37,7 +43,6 @@ enum SegmentResult {
 }
 
 struct Page {
-    number: u32,
     bitmap: Bitmap,
     color: Option<Vec<[u8; 3]>>,
     default_pixel: bool,
@@ -84,7 +89,7 @@ impl<R: Read + Seek> Jbig2Decoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        let pages = self.decode_all_pages()?;
+        let pages = self.decode_all_pages(1)?;
         pages
             .into_iter()
             .next()
@@ -92,13 +97,14 @@ impl<R: Read + Seek> Jbig2Decoder<R> {
     }
 
     pub fn decode_pages(&mut self) -> VexelResult<Vec<Image>> {
-        self.decode_all_pages()
+        self.decode_all_pages(usize::MAX)
     }
 
-    fn decode_all_pages(&mut self) -> VexelResult<Vec<Image>> {
+    fn decode_all_pages(&mut self, max_pages: usize) -> VexelResult<Vec<Image>> {
         let data = self.read_all()?;
 
-        let mut context = DecodeContext::new(&self.limits);
+        let budget = (data.len() as u64).saturating_mul(WORK_PER_INPUT_BYTE).saturating_add(BASE_WORK_BUDGET);
+        let mut context = DecodeContext::new(self.limits.clone(), WorkBudget::new(budget), max_pages);
 
         let has_file_header = data.len() >= 8 && data[..8] == JBIG2_FILE_ID;
         let segments = parse_segments(&data, has_file_header);
@@ -223,27 +229,36 @@ fn resolve_length(header: &SegmentHeader, data: &[u8], start: usize) -> usize {
     region.len()
 }
 
-struct DecodeContext<'a> {
-    limits: &'a Limits,
+struct DecodeContext {
+    limits: Limits,
+    budget: WorkBudget,
+    max_pages: usize,
     results: HashMap<u32, SegmentResult>,
     symbol_order: Vec<u32>,
     pages: Vec<Page>,
+    page_index: HashMap<u32, usize>,
     current_page: Option<usize>,
 }
 
-impl<'a> DecodeContext<'a> {
-    fn new(limits: &'a Limits) -> DecodeContext<'a> {
+impl DecodeContext {
+    fn new(limits: Limits, budget: WorkBudget, max_pages: usize) -> DecodeContext {
         DecodeContext {
             limits,
+            budget,
+            max_pages,
             results: HashMap::new(),
             symbol_order: Vec::new(),
             pages: Vec::new(),
+            page_index: HashMap::new(),
             current_page: None,
         }
     }
 
     fn run(&mut self, segments: &[ParsedSegment], data: &[u8]) {
         for segment in segments {
+            if segment.header.segment_type == SegmentType::PageInfo && self.pages.len() >= self.max_pages {
+                break;
+            }
             let body = data.get(segment.start..segment.end).unwrap_or(&[]);
             self.select_page(&segment.header);
             self.process(&segment.header, body);
@@ -254,7 +269,7 @@ impl<'a> DecodeContext<'a> {
         if header.segment_type == SegmentType::PageInfo || header.page_association == 0 {
             return;
         }
-        if let Some(index) = self.pages.iter().position(|page| page.number == header.page_association) {
+        if let Some(&index) = self.page_index.get(&header.page_association) {
             self.current_page = Some(index);
         }
     }
@@ -335,14 +350,21 @@ impl<'a> DecodeContext<'a> {
 
         if let Err(error) = self.limits.check_dimensions(width, initial_height.max(1)) {
             log_warn!("JBIG2 page exceeds limits: {}", error);
+            self.current_page = None;
             return;
         }
+
+        if let Err(error) = self.limits.reserve(page_bytes(width, initial_height, color_ext)) {
+            log_warn!("JBIG2 page exceeds limits: {}", error);
+            self.current_page = None;
+            return;
+        }
+        self.grant_page_work(width, initial_height);
 
         let mut bitmap = Bitmap::new(width, initial_height);
         bitmap.fill(default_pixel);
 
         self.pages.push(Page {
-            number: header.page_association,
             bitmap,
             color: if color_ext {
                 Some(vec![[255u8; 3]; (width as usize).saturating_mul(initial_height as usize)])
@@ -355,7 +377,39 @@ impl<'a> DecodeContext<'a> {
             combination_operator_overridden: flags & 0x40 != 0,
             default_op,
         });
+        self.page_index.entry(header.page_association).or_insert(self.pages.len() - 1);
         self.current_page = Some(self.pages.len() - 1);
+    }
+
+    fn grant_page_work(&mut self, width: u32, height: u32) {
+        let area = u64::from(width).saturating_mul(u64::from(height));
+        self.budget.grant(area.saturating_mul(WORK_PER_PAGE_PIXEL));
+    }
+
+    fn grow_page(&mut self, index: usize, needed: u32) -> bool {
+        let page = &self.pages[index];
+        let width = page.bitmap.width;
+        let current = page.bitmap.height;
+        if current >= needed {
+            return true;
+        }
+        if self.limits.check_dimensions(width, needed).is_err() {
+            log_warn!("JBIG2 page growth to {} rows exceeds limits", needed);
+            return false;
+        }
+        let extra_rows = needed - current;
+        if let Err(error) = self.limits.reserve(page_bytes(width, extra_rows, page.color.is_some())) {
+            log_warn!("JBIG2 page growth to {} rows exceeds limits: {}", needed, error);
+            return false;
+        }
+        self.grant_page_work(width, extra_rows);
+
+        let page = &mut self.pages[index];
+        page.bitmap.resize_height(needed, page.default_pixel);
+        if let Some(plane) = page.color.as_mut() {
+            plane.resize((width as usize).saturating_mul(needed as usize), [255u8; 3]);
+        }
+        true
     }
 
     fn handle_end_of_stripe(&mut self, body: &[u8]) {
@@ -364,12 +418,8 @@ impl<'a> DecodeContext<'a> {
         }
         let end_row = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
         if let Some(index) = self.current_page {
-            let page = &mut self.pages[index];
-            if page.declared_height == u32::MAX {
-                let needed = end_row.saturating_add(1);
-                if page.bitmap.height < needed {
-                    page.bitmap.resize_height(needed, page.default_pixel);
-                }
+            if self.pages[index].declared_height == u32::MAX {
+                self.grow_page(index, end_row.saturating_add(1));
             }
         }
     }
@@ -380,50 +430,44 @@ impl<'a> DecodeContext<'a> {
             return;
         };
 
-        let page = &mut self.pages[index];
+        let page = &self.pages[index];
         let op = if page.combination_operator_overridden { page.default_op } else { op };
 
-        if page.declared_height == u32::MAX || page.striped {
-            let needed = y.saturating_add(bitmap.height);
-            if page.bitmap.height < needed {
-                if self.limits.check_dimensions(page.bitmap.width, needed).is_err() {
-                    log_warn!("JBIG2 page growth to {} rows exceeds limits", needed);
-                    return;
-                }
-                page.bitmap.resize_height(needed, page.default_pixel);
-                if let Some(plane) = page.color.as_mut() {
-                    plane.resize(page.bitmap.width as usize * needed as usize, [255u8; 3]);
-                }
-            }
+        if (page.declared_height == u32::MAX || page.striped) && !self.grow_page(index, y.saturating_add(bitmap.height))
+        {
+            return;
         }
 
-        page.bitmap.compose(bitmap, x as i64, y as i64, op);
+        self.pages[index].bitmap.compose(bitmap, x as i64, y as i64, op);
     }
 
     fn collect_all_symbols(&self) -> Vec<Arc<Bitmap>> {
-        let mut symbols = Vec::new();
-        for number in &self.symbol_order {
-            if let Some(SegmentResult::Symbols(list)) = self.results.get(number) {
-                symbols.extend(list.iter().cloned());
-            }
-        }
-        symbols
+        self.gather_symbols(&self.symbol_order)
     }
 
     fn collect_symbols(&self, header: &SegmentHeader) -> Vec<Arc<Bitmap>> {
+        self.gather_symbols(&unique_references(header))
+    }
+
+    fn gather_symbols(&self, numbers: &[u32]) -> Vec<Arc<Bitmap>> {
         let mut symbols = Vec::new();
-        for reference in &header.referred_to {
-            if let Some(SegmentResult::Symbols(list)) = self.results.get(reference) {
+        for number in numbers {
+            if let Some(SegmentResult::Symbols(list)) = self.results.get(number) {
+                let room = MAX_INPUT_SYMBOLS - symbols.len();
+                if list.len() > room {
+                    log_warn!("JBIG2 segment refers to more than {} symbols, ignoring the rest", MAX_INPUT_SYMBOLS);
+                    symbols.extend(list.iter().take(room).cloned());
+                    break;
+                }
                 symbols.extend(list.iter().cloned());
             }
         }
-
         symbols
     }
 
     fn collect_tables(&self, header: &SegmentHeader) -> Vec<Arc<HuffmanTable>> {
         let mut tables = Vec::new();
-        for reference in &header.referred_to {
+        for reference in &unique_references(header) {
             if let Some(SegmentResult::Table(table)) = self.results.get(reference) {
                 tables.push(table.clone());
             }
@@ -487,6 +531,10 @@ impl<'a> DecodeContext<'a> {
         }
 
         let input_symbols = self.collect_symbols(header);
+        if !self.charge_symbol_references(input_symbols.len()) {
+            log_warn!("JBIG2 symbol dictionary {} input symbols exceed the decode work budget", header.number);
+            return;
+        }
         let custom_tables = self.collect_tables(header);
         let mut table_index = 0usize;
 
@@ -564,7 +612,13 @@ impl<'a> DecodeContext<'a> {
             huffman_tables.as_ref(),
             &mut gb_stats,
             &mut gr_stats,
+            &mut self.budget,
         );
+
+        if !self.charge_symbol_references(symbols.len()) {
+            log_warn!("JBIG2 symbol dictionary {} exceeds the decode work budget, dropping it", header.number);
+            return;
+        }
 
         self.symbol_order.push(header.number);
         self.results.insert(header.number, SegmentResult::Symbols(symbols));
@@ -592,7 +646,7 @@ impl<'a> DecodeContext<'a> {
 
         let mut gb_stats = vec![Cx::default(); generic_stats_size(params.template)];
 
-        match decode_pattern_dict(&body[7..], &params, &mut gb_stats) {
+        match decode_pattern_dict(&body[7..], &params, &mut gb_stats, &mut self.budget) {
             Some(dict) => {
                 self.results.insert(header.number, SegmentResult::Patterns(Arc::new(dict)));
             }
@@ -640,6 +694,11 @@ impl<'a> DecodeContext<'a> {
 
         if self.limits.check_dimensions(region.width, region.height).is_err() {
             log_warn!("JBIG2 generic region {}x{} exceeds limits", region.width, region.height);
+            return;
+        }
+
+        if !self.charge_region(region.width, region.height, if mmr { 2 } else { 1 }) {
+            log_warn!("JBIG2 generic region {}x{} exceeds the decode work budget", region.width, region.height);
             return;
         }
 
@@ -732,6 +791,10 @@ impl<'a> DecodeContext<'a> {
 
         let mut symbols = self.collect_symbols(header);
         if symbols.is_empty() {
+            if !self.budget.charge(self.symbol_order.len() as u64) {
+                log_warn!("JBIG2 text region {} exceeds the decode work budget", header.number);
+                return;
+            }
             symbols = self.collect_all_symbols();
             if symbols.is_empty() {
                 log_warn!("JBIG2 text region refers to no symbols");
@@ -744,7 +807,10 @@ impl<'a> DecodeContext<'a> {
             }
         }
 
-        let symbol_refs: Vec<&Bitmap> = symbols.iter().map(|symbol| symbol.as_ref()).collect();
+        if !self.charge_symbol_references(symbols.len()) {
+            log_warn!("JBIG2 text region {} symbols exceed the decode work budget", header.number);
+            return;
+        }
 
         let mut sym_code_len = 0u32;
         while (1u64 << sym_code_len) < symbols.len() as u64 {
@@ -753,6 +819,11 @@ impl<'a> DecodeContext<'a> {
 
         if self.limits.check_dimensions(region.width, region.height).is_err() {
             log_warn!("JBIG2 text region {}x{} exceeds limits", region.width, region.height);
+            return;
+        }
+
+        if !self.charge_region(region.width, region.height, 1) {
+            log_warn!("JBIG2 text region {}x{} exceeds the decode work budget", region.width, region.height);
             return;
         }
 
@@ -773,7 +844,7 @@ impl<'a> DecodeContext<'a> {
         let mut gr_stats = vec![Cx::default(); refine_stats_size(rtemplate)];
 
         let mut body_end = body.len();
-        let mut instance_colors: Option<ColorValues> = None;
+        let mut color_section: Option<&[u8]> = None;
         if color_ext {
             if body.len() >= 4 {
                 let section_size = u32::from_be_bytes([
@@ -784,19 +855,19 @@ impl<'a> DecodeContext<'a> {
                 ]) as usize;
                 if section_size >= 4 && section_size <= body.len() {
                     let section_start = body.len() - section_size;
-                    instance_colors = color::decode_t45(&body[section_start..body.len() - 4], num_instances as usize);
+                    color_section = Some(&body[section_start..body.len() - 4]);
                     body_end = section_start;
                 } else {
                     log_warn!("JBIG2 text region colour section size {} is implausible", section_size);
                 }
             }
-            if instance_colors.is_none() {
+            if color_section.is_none() {
                 log_warn!("JBIG2 text region colour section could not be decoded");
             }
         }
 
         let data = &body[offset.min(body_end)..body_end];
-        let mut placements: Option<Vec<Placement>> = if instance_colors.is_some() { Some(Vec::new()) } else { None };
+        let mut placements: Option<Vec<Placement>> = if color_section.is_some() { Some(Vec::new()) } else { None };
 
         if huffman {
             let custom_tables = self.collect_tables(header);
@@ -817,11 +888,12 @@ impl<'a> DecodeContext<'a> {
             let mut coder = TextCoder::Huffman { reader: &mut reader, tables: &tables };
             decode_text_region_tracked(
                 &mut bitmap,
-                &symbol_refs,
+                &symbols,
                 &params,
                 &mut coder,
                 &mut gr_stats,
                 placements.as_mut(),
+                &mut self.budget,
             );
         } else {
             let mut arith = ArithDecoder::new(data);
@@ -829,13 +901,25 @@ impl<'a> DecodeContext<'a> {
             let mut coder = TextCoder::Arith { arith: &mut arith, contexts: &mut contexts };
             decode_text_region_tracked(
                 &mut bitmap,
-                &symbol_refs,
+                &symbols,
                 &params,
                 &mut coder,
                 &mut gr_stats,
                 placements.as_mut(),
+                &mut self.budget,
             );
         }
+
+        let instance_colors: Option<ColorValues> = match (color_section, placements.as_ref()) {
+            (Some(section), Some(list)) => {
+                let colors = color::decode_t45(section, list.len());
+                if colors.is_none() {
+                    log_warn!("JBIG2 text region colour section could not be decoded");
+                }
+                colors
+            }
+            _ => None,
+        };
 
         if header.segment_type.is_intermediate() {
             self.results.insert(header.number, SegmentResult::Bitmap(Arc::new(bitmap)));
@@ -848,9 +932,18 @@ impl<'a> DecodeContext<'a> {
         }
     }
 
+    fn charge_symbol_references(&mut self, count: usize) -> bool {
+        self.budget.charge((count as u64).saturating_mul(SYMBOL_REFERENCE_COST))
+    }
+
+    fn charge_region(&mut self, width: u32, height: u32, passes: u64) -> bool {
+        let area = u64::from(width).saturating_mul(u64::from(height));
+        self.budget.charge(area.saturating_mul(passes).max(1))
+    }
+
     fn palette_for(&self, header: &SegmentHeader) -> Vec<[u8; 3]> {
         let mut palette: Vec<[u8; 3]> = DEFAULT_PALETTE.to_vec();
-        for reference in &header.referred_to {
+        for reference in &unique_references(header) {
             if let Some(SegmentResult::Palette(colors)) = self.results.get(reference) {
                 palette.extend(colors.iter().copied());
             }
@@ -954,6 +1047,11 @@ impl<'a> DecodeContext<'a> {
             return;
         }
 
+        if !self.charge_region(region.width, region.height, 1) {
+            log_warn!("JBIG2 halftone region {}x{} exceeds the decode work budget", region.width, region.height);
+            return;
+        }
+
         let params = HalftoneParams {
             mmr: flags & 1 != 0,
             template: (flags >> 1) & 3,
@@ -971,7 +1069,7 @@ impl<'a> DecodeContext<'a> {
         let mut bitmap = Bitmap::new(region.width, region.height);
         let mut gb_stats = vec![Cx::default(); generic_stats_size(params.template)];
 
-        decode_halftone_region(&body[offset..], &params, &patterns, &mut bitmap, &mut gb_stats);
+        decode_halftone_region(&body[offset..], &params, &patterns, &mut bitmap, &mut gb_stats, &mut self.budget);
 
         if header.segment_type.is_intermediate() {
             self.results.insert(header.number, SegmentResult::Bitmap(Arc::new(bitmap)));
@@ -1012,6 +1110,11 @@ impl<'a> DecodeContext<'a> {
             return;
         }
 
+        if !self.charge_region(region.width, region.height, 2) {
+            log_warn!("JBIG2 refinement region {}x{} exceeds the decode work budget", region.width, region.height);
+            return;
+        }
+
         let mut reference = None;
         for referred in &header.referred_to {
             if let Some(SegmentResult::Bitmap(bitmap)) = self.results.get(referred) {
@@ -1047,6 +1150,18 @@ impl<'a> DecodeContext<'a> {
             self.compose_to_page(&bitmap, region.x, region.y, ComposeOp::Replace);
         }
     }
+}
+
+fn unique_references(header: &SegmentHeader) -> Vec<u32> {
+    let mut seen = HashSet::new();
+    header.referred_to.iter().copied().filter(|number| seen.insert(*number)).collect()
+}
+
+fn page_bytes(width: u32, height: u32, color: bool) -> u64 {
+    let area = u64::from(width).saturating_mul(u64::from(height));
+    let packed = u64::from(width).div_ceil(8).saturating_mul(u64::from(height));
+    let per_pixel = if color { 6 } else { 1 };
+    packed.saturating_add(area.saturating_mul(per_pixel))
 }
 
 fn take_table(tables: &[Arc<HuffmanTable>], index: &mut usize) -> Option<HuffmanTable> {

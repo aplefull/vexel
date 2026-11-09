@@ -592,6 +592,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                     chunk_spp,
                     self.bits_for(0),
                     self.header.sample_format.first().copied().unwrap_or_default(),
+                    &self.limits,
                 )
             }
             _ => {

@@ -38,9 +38,9 @@ fn band_mask(masks: Vec<BitMask>) -> Option<BitMask> {
     }
 }
 
-pub fn decode_blob(data: &[u8]) -> VexelResult<LercRaster> {
+pub fn decode_blob_with_limits(data: &[u8], limits: &mut Limits) -> VexelResult<LercRaster> {
     if data.len() >= LERC2_MAGIC.len() && &data[..LERC2_MAGIC.len()] == LERC2_MAGIC {
-        let bands = lerc2::decode_bands(data)?;
+        let bands = lerc2::decode_bands(data, limits)?;
         let first = &bands[0].header;
 
         let width = first.n_cols as u32;
@@ -49,11 +49,17 @@ pub fn decode_blob(data: &[u8]) -> VexelResult<LercRaster> {
         let data_type = first.data_type()?;
         let band_count = bands.len();
 
-        let mut values = Vec::with_capacity(width as usize * height as usize * n_depth as usize * band_count);
+        let total: usize = bands.iter().map(|band| band.values.len()).sum();
+        let mut values = Vec::new();
         let mut masks = Vec::with_capacity(band_count);
 
         for band in bands {
-            values.extend_from_slice(&band.values);
+            if masks.is_empty() {
+                values = band.values;
+                values.reserve_exact(total - values.len());
+            } else {
+                values.extend_from_slice(&band.values);
+            }
             masks.push(band.mask);
         }
 
@@ -61,18 +67,24 @@ pub fn decode_blob(data: &[u8]) -> VexelResult<LercRaster> {
     }
 
     if data.len() >= LERC1_MAGIC.len() && &data[..LERC1_MAGIC.len()] == LERC1_MAGIC {
-        let bands = lerc1::decode_bands(data)?;
+        let bands = lerc1::decode_bands(data, limits)?;
         let first = &bands[0].header;
 
         let width = first.width as u32;
         let height = first.height as u32;
         let band_count = bands.len();
 
-        let mut values = Vec::with_capacity(width as usize * height as usize * band_count);
+        let total: usize = bands.iter().map(|band| band.values.len()).sum();
+        let mut values = Vec::new();
         let mut masks = Vec::with_capacity(band_count);
 
         for band in bands {
-            values.extend_from_slice(&band.values);
+            if masks.is_empty() {
+                values = band.values;
+                values.reserve_exact(total - values.len());
+            } else {
+                values.extend_from_slice(&band.values);
+            }
             masks.push(band.mask);
         }
 
@@ -122,11 +134,16 @@ fn normalized_alpha(raster: &LercRaster) -> Option<Vec<bool>> {
     Some((0..pixels).map(|k| mask.is_valid(k)).collect())
 }
 
-fn to_pixel_data(raster: &LercRaster) -> PixelData {
+fn to_pixel_data(raster: &LercRaster, limits: &mut Limits) -> VexelResult<PixelData> {
     let pixels = raster.width as usize * raster.height as usize;
     let channels = raster.channels();
-    let values = interleave(raster);
-    let alpha = normalized_alpha(raster);
+    let interleaved;
+    let values: &[f64] = if raster.bands == 1 {
+        &raster.values
+    } else {
+        interleaved = interleave(raster);
+        &interleaved
+    };
 
     let usable = match channels {
         1..=4 => channels,
@@ -139,20 +156,25 @@ fn to_pixel_data(raster: &LercRaster) -> PixelData {
         }
     };
 
-    let mut selected = Vec::with_capacity(pixels * usable);
-    for pixel in 0..pixels {
-        for c in 0..usable {
-            selected.push(values.get(pixel * channels + c).copied().unwrap_or(0.0));
-        }
-    }
+    let sample = |pixel: usize, c: usize| values.get(pixel * channels + c).copied().unwrap_or(0.0);
 
-    let with_alpha = matches!((usable, alpha.is_some()), (1, true) | (3, true));
+    let with_alpha = matches!((usable, raster.mask.is_some()), (1, true) | (3, true));
 
     let final_channels = if with_alpha { usable + 1 } else { usable };
 
     let dt = raster.data_type;
 
-    match dt {
+    let bytes_per_sample = match dt {
+        LercDataType::Byte | LercDataType::Char => 1,
+        LercDataType::UShort | LercDataType::Short => 2,
+        LercDataType::Double => 8,
+        _ => 4,
+    };
+    limits.reserve_buffer(raster.width, raster.height, (final_channels * bytes_per_sample) as u8)?;
+
+    let alpha = if with_alpha { normalized_alpha(raster) } else { None };
+
+    let pixel_data = match dt {
         LercDataType::Byte | LercDataType::Char => {
             let max = if dt == LercDataType::Char { i8::MAX as f64 } else { u8::MAX as f64 };
             let bias = if dt == LercDataType::Char { 128.0 } else { 0.0 };
@@ -161,7 +183,7 @@ fn to_pixel_data(raster: &LercRaster) -> PixelData {
 
             for pixel in 0..pixels {
                 for c in 0..usable {
-                    let v = selected[pixel * usable + c] + bias;
+                    let v = sample(pixel, c) + bias;
                     out.push(v.clamp(0.0, if bias > 0.0 { 255.0 } else { max }) as u8);
                 }
 
@@ -184,7 +206,7 @@ fn to_pixel_data(raster: &LercRaster) -> PixelData {
 
             for pixel in 0..pixels {
                 for c in 0..usable {
-                    let v = selected[pixel * usable + c] + bias;
+                    let v = sample(pixel, c) + bias;
                     out.push(v.clamp(0.0, u16::MAX as f64) as u16);
                 }
 
@@ -206,7 +228,7 @@ fn to_pixel_data(raster: &LercRaster) -> PixelData {
 
             for pixel in 0..pixels {
                 for c in 0..usable {
-                    out.push(selected[pixel * usable + c]);
+                    out.push(sample(pixel, c));
                 }
 
                 if with_alpha {
@@ -227,7 +249,7 @@ fn to_pixel_data(raster: &LercRaster) -> PixelData {
 
             for pixel in 0..pixels {
                 for c in 0..usable {
-                    out.push(selected[pixel * usable + c] as f32);
+                    out.push(sample(pixel, c) as f32);
                 }
 
                 if with_alpha {
@@ -243,7 +265,9 @@ fn to_pixel_data(raster: &LercRaster) -> PixelData {
                 _ => PixelData::RGBA32F(out),
             }
         }
-    }
+    };
+
+    Ok(pixel_data)
 }
 
 pub struct LercDecoder<R: Read + Seek> {
@@ -270,11 +294,9 @@ impl<R: Read + Seek> LercDecoder<R> {
 
     pub fn decode(&mut self) -> VexelResult<Image> {
         let data = self.read_blob()?;
-        let raster = decode_blob(&data)?;
-
-        self.limits.check_dimensions(raster.width, raster.height)?;
-
-        let pixels = to_pixel_data(&raster);
+        let mut limits = self.limits.clone();
+        let raster = decode_blob_with_limits(&data, &mut limits)?;
+        let pixels = to_pixel_data(&raster, &mut limits)?;
 
         Ok(Image::from_pixels(raster.width, raster.height, pixels))
     }

@@ -2,8 +2,9 @@ use super::bitstuffer::decode_bit_stuffed_lerc1;
 use super::mask::{rle_decompress, BitMask};
 use super::reader::ByteReader;
 use super::types::{Lerc1Header, LERC1_MAGIC};
-use crate::log_warn;
+use super::values::reserve_elements;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::{log_warn, Limits};
 
 const LERC1_VERSION: i32 = 11;
 const LERC1_MAX_DIM: i32 = 40000;
@@ -121,7 +122,7 @@ fn read_cnt_tile(
     let n = if bits67 == 0 { 4 } else { 3 - bits67 as usize };
     let offset = read_flt(reader, n)?;
 
-    let buffer = decode_bit_stuffed_lerc1(reader)?;
+    let buffer = decode_bit_stuffed_lerc1(reader, (i1 - i0) * (j1 - j0))?;
     let mut idx = 0usize;
 
     for i in i0..i1 {
@@ -198,7 +199,7 @@ fn read_z_tile(
         return Ok(());
     }
 
-    let buffer = decode_bit_stuffed_lerc1(reader)?;
+    let buffer = decode_bit_stuffed_lerc1(reader, (i1 - i0) * (j1 - j0))?;
     let inv_scale = 2.0 * max_z_error;
     let mut idx = 0usize;
 
@@ -345,17 +346,33 @@ fn read_image(
     Ok(())
 }
 
-pub fn decode_bands(data: &[u8]) -> VexelResult<Vec<Lerc1Band>> {
+pub fn decode_bands(data: &[u8], limits: &mut Limits) -> VexelResult<Vec<Lerc1Band>> {
     let mut reader = ByteReader::new(data);
     let header = read_header(&mut reader)?;
 
+    limits.check_dimensions(header.width as u32, header.height as u32)?;
+
     let width = header.width as usize;
     let height = header.height as usize;
+    let pixels = (width * height) as u64;
 
     let mut bands = Vec::new();
     let mut only_z_part = false;
 
     loop {
+        let reserved = reserve_elements(limits, pixels.div_ceil(8), 1)
+            .and_then(|_| reserve_elements(limits, pixels, 8))
+            .and_then(|_| reserve_elements(limits, pixels, 8));
+
+        if let Err(e) = reserved {
+            if bands.is_empty() {
+                return Err(e);
+            }
+
+            log_warn!("LERC1 band {} exceeds limits: {}, keeping {} bands", bands.len(), e, bands.len());
+            break;
+        }
+
         let mut image = CntZImage {
             cnt: vec![0.0; width * height],
             z: vec![0.0; width * height],
@@ -390,6 +407,7 @@ pub fn decode_bands(data: &[u8]) -> VexelResult<Vec<Lerc1Band>> {
         }
 
         bands.push(Lerc1Band { values: image.z.iter().map(|&z| z as f64).collect(), mask, header: header.clone() });
+        limits.free(pixels * 8);
 
         only_z_part = true;
 

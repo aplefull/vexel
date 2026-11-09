@@ -1,8 +1,12 @@
+use std::sync::Arc;
+
 use crate::decoders::jbig2::arith::{ArithDecoder, IaidCtx, IntCtx};
-use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp};
+use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp, WorkBudget};
 use crate::decoders::jbig2::huffman::{HuffmanReader, HuffmanTable, HuffmanValue};
 use crate::decoders::jbig2::refinement::{decode_refinement_region, RefinementParams};
 use crate::log_warn;
+
+const PLACEMENT_COST: u64 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefCorner {
@@ -101,21 +105,23 @@ pub struct Placement {
 
 pub fn decode_text_region(
     bitmap: &mut Bitmap,
-    symbols: &[&Bitmap],
+    symbols: &[Arc<Bitmap>],
     params: &TextRegionParams,
     coder: &mut TextCoder,
     refine_stats: &mut [crate::decoders::jbig2::arith::Cx],
+    budget: &mut WorkBudget,
 ) {
-    decode_text_region_tracked(bitmap, symbols, params, coder, refine_stats, None);
+    decode_text_region_tracked(bitmap, symbols, params, coder, refine_stats, None, budget);
 }
 
 pub fn decode_text_region_tracked(
     bitmap: &mut Bitmap,
-    symbols: &[&Bitmap],
+    symbols: &[Arc<Bitmap>],
     params: &TextRegionParams,
     coder: &mut TextCoder,
     refine_stats: &mut [crate::decoders::jbig2::arith::Cx],
     mut placements: Option<&mut Vec<Placement>>,
+    budget: &mut WorkBudget,
 ) {
     bitmap.fill(params.def_pixel);
 
@@ -158,6 +164,18 @@ pub fn decode_text_region_tracked(
                 break;
             }
 
+            if let TextCoder::Arith { arith, .. } = coder {
+                if arith.exhausted() {
+                    log_warn!("JBIG2 text region data exhausted after {} instances", instances);
+                    return;
+                }
+            }
+
+            if !budget.charge(if placements.is_some() { PLACEMENT_COST } else { 1 }) {
+                log_warn!("JBIG2 text region exceeds the decode work budget after {} instances", instances);
+                return;
+            }
+
             let cur_t = if strips == 1 {
                 0
             } else {
@@ -172,7 +190,7 @@ pub fn decode_text_region_tracked(
                 return;
             };
 
-            let symbol = symbols.get(id as usize).copied();
+            let symbol = symbols.get(id as usize).map(|symbol| symbol.as_ref());
             if symbol.is_none() {
                 log_warn!("JBIG2 text region references out of range symbol ID {}", id);
             }
@@ -195,13 +213,17 @@ pub fn decode_text_region_tracked(
                 if let Some(reference) = symbol {
                     let new_width = (reference.width as i32).saturating_add(rdw);
                     let new_height = (reference.height as i32).saturating_add(rdh);
+                    if new_width > 0 && new_height > 0 && !budget.charge_area(new_width as u32, new_height as u32) {
+                        log_warn!("JBIG2 text region refinement exceeds the decode work budget");
+                        return;
+                    }
                     if new_width > 0 && new_height > 0 {
                         let mut target = Bitmap::new(new_width as u32, new_height as u32);
                         let refine_params = RefinementParams {
                             template: params.rtemplate,
                             reference,
-                            dx: (rdw >> 1) + rdx,
-                            dy: (rdh >> 1) + rdy,
+                            dx: (rdw >> 1).wrapping_add(rdx),
+                            dy: (rdh >> 1).wrapping_add(rdy),
                             tpgron: false,
                             at: params.rat,
                         };
@@ -240,16 +262,22 @@ pub fn decode_text_region_tracked(
 
             let s = cur_s;
             let (x, y) = if !params.transposed {
-                let x = if params.ref_corner.is_right() { s - sym_width + 1 } else { s };
-                let y = if params.ref_corner.is_bottom() { t - sym_height + 1 } else { t };
+                let x = if params.ref_corner.is_right() { s.wrapping_sub(sym_width).wrapping_add(1) } else { s };
+                let y = if params.ref_corner.is_bottom() { t.wrapping_sub(sym_height).wrapping_add(1) } else { t };
                 (x, y)
             } else {
-                let x = if params.ref_corner.is_right() { t - sym_width + 1 } else { t };
-                let y = if params.ref_corner.is_bottom() { s - sym_height + 1 } else { s };
+                let x = if params.ref_corner.is_right() { t.wrapping_sub(sym_width).wrapping_add(1) } else { t };
+                let y = if params.ref_corner.is_bottom() { s.wrapping_sub(sym_height).wrapping_add(1) } else { s };
                 (x, y)
             };
 
             if let Some(instance) = instance {
+                let copies = if placements.is_some() { 2 } else { 1 };
+                let area = u64::from(instance.width).saturating_mul(u64::from(instance.height));
+                if !budget.charge(area.saturating_mul(copies)) {
+                    log_warn!("JBIG2 text region exceeds the decode work budget after {} instances", instances);
+                    return;
+                }
                 if let Some(list) = placements.as_deref_mut() {
                     list.push(Placement {
                         x,

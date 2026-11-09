@@ -39,6 +39,32 @@ impl ComposeOp {
     }
 }
 
+pub struct WorkBudget {
+    remaining: u64,
+}
+
+impl WorkBudget {
+    pub fn new(units: u64) -> WorkBudget {
+        WorkBudget { remaining: units }
+    }
+
+    pub fn grant(&mut self, units: u64) {
+        self.remaining = self.remaining.saturating_add(units);
+    }
+
+    pub fn charge(&mut self, units: u64) -> bool {
+        if units > self.remaining {
+            return false;
+        }
+        self.remaining -= units;
+        true
+    }
+
+    pub fn charge_area(&mut self, width: u32, height: u32) -> bool {
+        self.charge(u64::from(width).saturating_mul(u64::from(height)).max(1))
+    }
+}
+
 #[derive(Clone)]
 pub struct Bitmap {
     pub width: u32,

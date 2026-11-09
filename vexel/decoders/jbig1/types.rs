@@ -22,7 +22,7 @@ pub const TPB3CX: usize = 0x0e5;
 pub const TPDCX: usize = 0xc3f;
 
 #[rustfmt::skip]
-pub const DEFAULT_DPPRIV: [u8; 6912] = [
+pub static DEFAULT_DPPRIV: [u8; 6912] = [
     /* phase 0: offset=0, 256 entries */
     0,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,0,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
     0,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,0,2,0,2,2,2,2,2,2,2,2,2,2,2,2,2,

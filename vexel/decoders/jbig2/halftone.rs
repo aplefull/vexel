@@ -1,5 +1,5 @@
 use crate::decoders::jbig2::arith::{ArithDecoder, Cx};
-use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp};
+use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp, WorkBudget};
 use crate::decoders::jbig2::generic::{decode_generic_region, GenericParams};
 use crate::log_warn;
 use crate::utils::tiff::fax;
@@ -18,13 +18,23 @@ pub struct PatternDictParams {
     pub gray_max: u32,
 }
 
-pub fn decode_pattern_dict(data: &[u8], params: &PatternDictParams, gb_stats: &mut [Cx]) -> Option<PatternDict> {
+pub fn decode_pattern_dict(
+    data: &[u8],
+    params: &PatternDictParams,
+    gb_stats: &mut [Cx],
+    budget: &mut WorkBudget,
+) -> Option<PatternDict> {
     let count = params.gray_max.checked_add(1)?;
     if params.width == 0 || params.height == 0 {
         return None;
     }
 
     let collective_width = params.width.checked_mul(count)?;
+    let area = u64::from(collective_width).saturating_mul(u64::from(params.height));
+    if !budget.charge(area.saturating_mul(2)) {
+        log_warn!("JBIG2 pattern dictionary exceeds the decode work budget");
+        return None;
+    }
     let mut collective = Bitmap::new(collective_width, params.height);
 
     let generic_params = GenericParams {
@@ -81,6 +91,7 @@ pub fn decode_halftone_region(
     patterns: &PatternDict,
     bitmap: &mut Bitmap,
     gb_stats: &mut [Cx],
+    budget: &mut WorkBudget,
 ) {
     bitmap.fill(params.def_pixel);
 
@@ -101,13 +112,26 @@ pub fn decode_halftone_region(
         return;
     }
 
+    let grid_area = u64::from(params.grid_width).saturating_mul(u64::from(params.grid_height));
+    if !budget.charge(grid_area.saturating_mul(u64::from(bits_per_value) + 18)) {
+        log_warn!("JBIG2 halftone grid {}x{} exceeds the decode work budget", params.grid_width, params.grid_height);
+        return;
+    }
+
     let skip = if params.enable_skip { Some(build_skip_bitmap(params, patterns, bitmap)) } else { None };
 
     let Some(gray) = decode_gray_scale_image(data, params, bits_per_value, skip.as_ref(), gb_stats) else {
         return;
     };
 
+    let pattern_area = u64::from(patterns.width).saturating_mul(u64::from(patterns.height));
+    let row_cost = pattern_area.saturating_mul(u64::from(params.grid_width));
+
     for m in 0..params.grid_height as i64 {
+        if !budget.charge(row_cost) {
+            log_warn!("JBIG2 halftone region exceeds the decode work budget at grid row {}", m);
+            return;
+        }
         for n in 0..params.grid_width as i64 {
             if let Some(skip) = &skip {
                 if skip.get(n, m) != 0 {
@@ -195,7 +219,7 @@ fn decode_gray_scale_image(
         }
     }
 
-    let mut values = vec![0u16; width as usize * height as usize];
+    let mut values = vec![0u16; (width as usize).saturating_mul(height as usize)];
     for y in 0..height as i64 {
         for x in 0..width as i64 {
             let mut value = 0u32;

@@ -1,11 +1,15 @@
 use std::io::Cursor;
 
-use vexel::{Image, ImageFrame, Vexel};
+use vexel::{Image, ImageFrame, Limits, Vexel};
 
 const MAX_CONVERTED_BYTES: usize = 16 * 1024 * 1024;
 
+const FUZZ_MAX_ALLOC: u64 = 512 * 1024 * 1024;
+
 fn open(data: &[u8]) -> Option<Vexel<Cursor<&[u8]>>> {
-    Vexel::new(Cursor::new(data)).ok()
+    let mut decoder = Vexel::new(Cursor::new(data)).ok()?;
+    decoder.set_limits(Limits { max_alloc: Some(FUZZ_MAX_ALLOC), ..Limits::default() });
+    Some(decoder)
 }
 
 fn touch_image(image: &Image) {

@@ -8,6 +8,7 @@ use super::segment::SegmentType;
 use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter};
 
 const MAX_SEGMENT_SECTIONS: usize = 1024;
+const MAX_LISTED_REFERENCES: usize = 256;
 const UNKNOWN_LENGTH: u32 = 0xFFFF_FFFF;
 
 const FILE_SEQUENTIAL: u8 = 0x01;
@@ -421,9 +422,10 @@ impl InfoSection for Jbig2Section {
                     out.field("Retained", "yes");
                 }
                 if !segment.referred_to.is_empty() {
-                    let referred: Vec<String> = segment
+                    let mut referred: Vec<String> = segment
                         .referred_to
                         .iter()
+                        .take(MAX_LISTED_REFERENCES)
                         .enumerate()
                         .map(|(index, number)| {
                             let retained = segment.retention.get(index + 1).copied().unwrap_or(false);
@@ -434,6 +436,9 @@ impl InfoSection for Jbig2Section {
                             }
                         })
                         .collect();
+                    if segment.referred_to.len() > MAX_LISTED_REFERENCES {
+                        referred.push(format!("... ({} more)", segment.referred_to.len() - MAX_LISTED_REFERENCES));
+                    }
                     out.field("Refers to", referred.join(", "));
                 }
                 out.field("Header length", format!("{} bytes", segment.header_length));

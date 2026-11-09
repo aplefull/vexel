@@ -70,19 +70,27 @@ impl Cx {
     }
 }
 
+const MAX_SYNTHETIC_BYTES: u32 = 64;
+const MAX_SYMBOL_CODE_LENGTH: u32 = 22;
+
 pub struct ArithDecoder<'a> {
     data: &'a [u8],
     bp: usize,
     c: u32,
     a: u32,
     ct: i32,
+    synthetic: u32,
 }
 
 impl<'a> ArithDecoder<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        let mut dec = ArithDecoder { data, bp: 0, c: 0, a: 0, ct: 0 };
+        let mut dec = ArithDecoder { data, bp: 0, c: 0, a: 0, ct: 0, synthetic: 0 };
         dec.init();
         dec
+    }
+
+    pub fn exhausted(&self) -> bool {
+        self.synthetic > MAX_SYNTHETIC_BYTES
     }
 
     fn byte_at(&self, index: usize) -> u8 {
@@ -101,16 +109,17 @@ impl<'a> ArithDecoder<'a> {
     fn byte_in(&mut self) {
         if self.byte_at(self.bp) == 0xff {
             if self.byte_at(self.bp + 1) > 0x8f {
-                self.c += 0xff00;
+                self.c = self.c.wrapping_add(0xff00);
                 self.ct = 8;
+                self.synthetic = self.synthetic.saturating_add(1);
             } else {
                 self.bp += 1;
-                self.c += (self.byte_at(self.bp) as u32) << 9;
+                self.c = self.c.wrapping_add((self.byte_at(self.bp) as u32) << 9);
                 self.ct = 7;
             }
         } else {
             self.bp += 1;
-            self.c += (self.byte_at(self.bp) as u32) << 8;
+            self.c = self.c.wrapping_add((self.byte_at(self.bp) as u32) << 8);
             self.ct = 8;
         }
     }
@@ -225,7 +234,7 @@ pub struct IaidCtx {
 
 impl IaidCtx {
     pub fn new(sym_code_len: u32) -> Self {
-        let sym_code_len = sym_code_len.min(31);
+        let sym_code_len = sym_code_len.min(MAX_SYMBOL_CODE_LENGTH);
         IaidCtx { cx: vec![Cx::default(); 1usize << sym_code_len], sym_code_len }
     }
 

@@ -199,7 +199,7 @@ pub fn decode_bit_stuffed(
     Ok(indexes)
 }
 
-pub fn decode_bit_stuffed_lerc1(reader: &mut ByteReader) -> VexelResult<Vec<u32>> {
+pub fn decode_bit_stuffed_lerc1(reader: &mut ByteReader, max_element_count: usize) -> VexelResult<Vec<u32>> {
     let num_bits_byte = reader.read_u8()?;
 
     let bits67 = num_bits_byte >> 6;
@@ -211,6 +211,13 @@ pub fn decode_bit_stuffed_lerc1(reader: &mut ByteReader) -> VexelResult<Vec<u32>
     }
 
     let num_elements = reader.read_uint_sized(nb)?;
+
+    if num_elements as usize > max_element_count {
+        return Err(VexelError::Custom(format!(
+            "LERC1 bit stuffed block claims {} elements, expected at most {}",
+            num_elements, max_element_count
+        )));
+    }
 
     if num_bits == 0 {
         return Ok(vec![0; num_elements as usize]);

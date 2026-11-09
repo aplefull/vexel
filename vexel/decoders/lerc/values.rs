@@ -1,6 +1,7 @@
 use super::reader::ByteReader;
 use super::types::LercDataType;
-use crate::utils::error::VexelResult;
+use crate::utils::error::{VexelError, VexelResult};
+use crate::Limits;
 
 pub struct ValueBuffer {
     values: Vec<f64>,
@@ -31,6 +32,14 @@ impl ValueBuffer {
             *slot = value;
         }
     }
+}
+
+pub fn reserve_elements(limits: &mut Limits, count: u64, bytes_each: u64) -> VexelResult<()> {
+    let bytes = count.checked_mul(bytes_each).filter(|&bytes| bytes <= isize::MAX as u64).ok_or_else(|| {
+        VexelError::LimitExceeded(format!("LERC buffer of {} x {} bytes is too large", count, bytes_each))
+    })?;
+
+    limits.reserve(bytes)
 }
 
 pub fn read_value(reader: &mut ByteReader, dt: LercDataType) -> VexelResult<f64> {

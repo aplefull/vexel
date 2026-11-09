@@ -470,7 +470,7 @@ fn lerc2_summary(blobs: &[Lerc2Blob], data_len: usize) -> Option<ImageSummary> {
     let pixels = first.rows as i64 * first.columns as i64;
     let masked = (first.valid_pixels as i64) < pixels && first.mask_bytes.is_some_and(|bytes| bytes > 0);
 
-    let (color_model, channels, has_alpha) = channel_layout(bands.len() as u32 * depth, masked);
+    let (color_model, channels, has_alpha) = channel_layout((bands.len() as u32).saturating_mul(depth), masked);
     let (bits, sample_format) = sample_layout(dt);
     let mut summary = ImageSummary::new(first.columns as u32, first.rows as u32, color_model, channels, bits);
     summary.sample_format = sample_format;

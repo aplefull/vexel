@@ -4,9 +4,9 @@ use super::huffman::{Huffman, HuffmanBitStream};
 use super::mask::{rle_decompress, BitMask};
 use super::reader::ByteReader;
 use super::types::{ImageEncodeMode, Lerc2Header, LercDataType, CURRENT_VERSION, LERC2_MAGIC, MAX_MICRO_BLOCK_SIZE};
-use super::values::{read_value, ValueBuffer};
-use crate::log_warn;
+use super::values::{read_value, reserve_elements, ValueBuffer};
 use crate::utils::error::{VexelError, VexelResult};
+use crate::{log_warn, Limits};
 
 pub struct DecodedBand {
     pub values: Vec<f64>,
@@ -137,6 +137,11 @@ pub fn read_header(reader: &mut ByteReader) -> VexelResult<Lerc2Header> {
         return Err(VexelError::Custom(format!("LERC image too large: {} pixels", num_pixel)));
     }
 
+    let num_values = num_pixel as u64 * header.n_depth as u64;
+    if num_values > (isize::MAX as u64) / 8 {
+        return Err(VexelError::Custom(format!("LERC image too large: {} values", num_values)));
+    }
+
     if header.num_valid_pixel < 0 || header.num_valid_pixel as i64 > num_pixel {
         log_warn!("LERC valid pixel count {} out of range for {} pixels, clamping", header.num_valid_pixel, num_pixel);
         header.num_valid_pixel = header.num_valid_pixel.clamp(0, num_pixel as i32);
@@ -218,13 +223,14 @@ fn read_min_max_ranges(
     dt: LercDataType,
 ) -> VexelResult<(Vec<f64>, Vec<f64>)> {
     let n_depth = header.n_depth as usize;
+    let capacity = n_depth.min(reader.remaining());
 
-    let mut z_mins = Vec::with_capacity(n_depth);
+    let mut z_mins = Vec::with_capacity(capacity);
     for _ in 0..n_depth {
         z_mins.push(read_value(reader, dt)?);
     }
 
-    let mut z_maxs = Vec::with_capacity(n_depth);
+    let mut z_maxs = Vec::with_capacity(capacity);
     for _ in 0..n_depth {
         z_maxs.push(read_value(reader, dt)?);
     }
@@ -602,10 +608,14 @@ fn remap_no_data(values: &mut ValueBuffer, header: &Lerc2Header, mask: &BitMask)
     }
 }
 
-pub fn decode_band(data: &[u8], offset: usize) -> VexelResult<DecodedBand> {
+pub fn decode_band(data: &[u8], offset: usize, limits: &mut Limits) -> VexelResult<DecodedBand> {
     let mut reader = ByteReader::at(data, offset);
     let header = read_header(&mut reader)?;
     let dt = header.data_type()?;
+
+    limits.check_dimensions(header.n_cols as u32, header.n_rows as u32)?;
+    reserve_elements(limits, header.num_pixels().div_ceil(8) as u64, 1)?;
+    reserve_elements(limits, header.num_values() as u64, 8)?;
 
     if header.version >= 3 {
         let skip = LERC2_MAGIC.len() + 4 + 4;
@@ -712,7 +722,7 @@ pub fn decode_band(data: &[u8], offset: usize) -> VexelResult<DecodedBand> {
     Ok(DecodedBand { values: values.into_values(), mask, header })
 }
 
-pub fn decode_bands(data: &[u8]) -> VexelResult<Vec<DecodedBand>> {
+pub fn decode_bands(data: &[u8], limits: &mut Limits) -> VexelResult<Vec<DecodedBand>> {
     let mut bands = Vec::new();
     let mut offset = 0usize;
 
@@ -725,7 +735,7 @@ pub fn decode_bands(data: &[u8]) -> VexelResult<Vec<DecodedBand>> {
             break;
         }
 
-        let band = match decode_band(data, offset) {
+        let band = match decode_band(data, offset, limits) {
             Ok(band) => band,
             Err(e) => {
                 if bands.is_empty() {

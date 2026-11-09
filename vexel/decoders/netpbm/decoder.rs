@@ -321,10 +321,24 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         }
 
         if mode != WalkMode::InfoOnly {
-            self.limits.reserve_buffer(self.width, self.height, 4)?;
+            self.limits.reserve_buffer(self.width, self.height, self.output_bytes_per_pixel())?;
         }
 
         Ok(())
+    }
+
+    fn output_bytes_per_pixel(&self) -> u8 {
+        let bytes_per_sample = if self.max_value > 255 { 2 } else { 1 };
+        let channels = match &self.format {
+            Some(NetpbmFormat::P1 | NetpbmFormat::P4) => return 1,
+            Some(NetpbmFormat::P2 | NetpbmFormat::P5) => 1,
+            Some(NetpbmFormat::P7) => match self.depth {
+                0 => 3,
+                depth => depth.min(4),
+            },
+            Some(NetpbmFormat::P3 | NetpbmFormat::P6) | None => 3,
+        };
+        channels * bytes_per_sample
     }
 
     fn read_standard_header(&mut self, format: NetpbmFormat) -> VexelResult<()> {
@@ -394,13 +408,13 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                         Ok::<u32, VexelError>(255)
                     })?
                 }
-                "TUPLTYPE" => {
-                    let concatenated = match &self.tuple_type_raw {
-                        Some(existing) => format!("{} {}", existing, value),
-                        None => value.clone(),
-                    };
-                    self.tuple_type_raw = Some(concatenated);
-                }
+                "TUPLTYPE" => match &mut self.tuple_type_raw {
+                    Some(existing) => {
+                        existing.push(' ');
+                        existing.push_str(&value);
+                    }
+                    None => self.tuple_type_raw = Some(value),
+                },
                 _ => {}
             }
         }
@@ -433,15 +447,19 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn read_binary_frame_data(&mut self, byte_count: usize) -> VexelResult<Vec<u8>> {
-        let mut buf = Vec::new();
-        buf.try_reserve_exact(byte_count).map_err(|_| {
-            VexelError::LimitExceeded(format!("Netpbm frame of {} bytes cannot be allocated", byte_count))
-        })?;
-        buf.resize(byte_count, 0);
-        if self.reader.read_exact(&mut buf).is_err() {
-            let available = self.reader.read_to_end().unwrap_or_default();
-            let n = available.len().min(buf.len());
-            buf[..n].copy_from_slice(&available[..n]);
+        let mut buf = Vec::with_capacity(byte_count.min(1 << 20));
+        let mut chunk = [0u8; 8192];
+        while buf.len() < byte_count {
+            let wanted = (byte_count - buf.len()).min(chunk.len());
+            match self.reader.read(&mut chunk[..wanted]) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        if buf.len() < byte_count {
+            log_warn!("Truncated Netpbm pixel data: expected {} bytes, got {}", byte_count, buf.len());
         }
         Ok(buf)
     }
@@ -455,11 +473,12 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                 Ok(v) => v.clamp(0, self.max_value),
                 Err(e) => {
                     log_warn!("Error reading ASCII number: {:?}", e);
-                    0
+                    break;
                 }
             };
             image_data.push(!(value as u8) & 1);
         }
+        image_data.resize(pixel_count, 1);
 
         Ok(PixelData::L1(image_data))
     }
@@ -468,11 +487,13 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
         let max_value = self.max_value;
         let mut samples = Vec::with_capacity(count.min(1 << 20));
         for _ in 0..count {
-            let v = self.read_ascii_number().map(|v| v.clamp(0, max_value)).unwrap_or_else(|e| {
-                log_warn!("Error reading ASCII number: {:?}", e);
-                0
-            });
-            samples.push(v);
+            match self.read_ascii_number() {
+                Ok(v) => samples.push(v.clamp(0, max_value)),
+                Err(e) => {
+                    log_warn!("Error reading ASCII number: {:?}", e);
+                    break;
+                }
+            }
         }
         samples
     }
@@ -735,7 +756,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                     }
                     (_, false) => {
                         let mut image_data = vec![0u8; pixel_count * 3];
-                        let src = &data[..pixel_count * depth];
+                        let src = &data[..(pixel_count * depth).min(data.len())];
                         for (px, chunk) in src.chunks_exact(depth).zip(image_data.chunks_exact_mut(3)) {
                             chunk[0] = Self::scale_to_8bit(px[0] as u32, max_value);
                             chunk[1] = Self::scale_to_8bit(px[1] as u32, max_value);
@@ -745,14 +766,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                     }
                     (_, true) => {
                         let mut image_data = vec![0u16; pixel_count * 3];
-                        let mut reader = BitReader::new(Cursor::new(data));
-                        for chunk in image_data.chunks_exact_mut(3) {
-                            #[allow(clippy::needless_range_loop)]
-                            for i in 0..depth {
-                                let v = reader.read_u16().unwrap_or(0);
-                                if i < 3 {
-                                    chunk[i] = Self::scale_to_16bit(v as u32, max_value);
-                                }
+                        for (px, chunk) in data.chunks_exact(depth * 2).zip(image_data.chunks_exact_mut(3)) {
+                            for (i, sample) in chunk.iter_mut().enumerate() {
+                                let v = u16::from_be_bytes([px[i * 2], px[i * 2 + 1]]);
+                                *sample = Self::scale_to_16bit(v as u32, max_value);
                             }
                         }
                         Ok(PixelData::RGB16(image_data))
@@ -847,7 +864,8 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             Some(NetpbmFormat::P4) => {
                 let bytes_per_row = self.width.div_ceil(8) as usize;
                 let byte_count = bytes_per_row.saturating_mul(self.height as usize);
-                let data = self.read_binary_frame_data(byte_count)?;
+                let mut data = self.read_binary_frame_data(byte_count)?;
+                data.resize(byte_count, 0);
                 self.decode_binary_bitmap(&data)
             }
             Some(NetpbmFormat::P5) => {

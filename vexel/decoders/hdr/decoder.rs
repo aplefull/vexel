@@ -7,6 +7,8 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::{ColorModel, ImageSummary, SampleFormat};
 use crate::{log_warn, Image, Limits};
 
+const MAX_LINE_LENGTH: usize = 64 * 1024;
+
 pub struct HdrDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
@@ -42,7 +44,9 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 break;
             }
 
-            buffer.push(byte);
+            if buffer.len() < MAX_LINE_LENGTH {
+                buffer.push(byte);
+            }
         }
 
         Ok(buffer)
@@ -229,7 +233,16 @@ impl<R: Read + Seek> HdrDecoder<R> {
             return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
-        self.limits.reserve_buffer(self.width, self.height, 4)?;
+        let rgb_copies = if self.format == HdrFormat::XYZE { 2 } else { 1 };
+        let bytes_per_pixel = 4 + 12 * rgb_copies;
+        let total = (u64::from(self.width) * u64::from(self.height)).saturating_mul(u64::from(bytes_per_pixel));
+        if total > isize::MAX as u64 {
+            return Err(VexelError::LimitExceeded(format!(
+                "HDR image {}x{} is too large to allocate",
+                self.width, self.height
+            )));
+        }
+        self.limits.reserve_buffer(self.width, self.height, bytes_per_pixel)?;
 
         Ok(())
     }

@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_xr::JpegXrDecoder;
-use crate::decoders::lerc::decode_blob;
+use crate::decoders::lerc::decode_blob_with_limits;
 use crate::decoders::png::PngDecoder;
 use crate::log_warn;
 use crate::utils::deflate::ZlibDecoder;
@@ -350,6 +350,7 @@ pub fn decompress_lerc(
     samples_per_pixel: usize,
     bits_per_sample: u16,
     sample_format: SampleFormat,
+    limits: &Limits,
 ) -> Vec<u8> {
     let bytes_per_sample = (bits_per_sample as usize).div_ceil(8).max(1);
     let Some(expected_bytes) = chunk_width
@@ -361,7 +362,7 @@ pub fn decompress_lerc(
         return Vec::new();
     };
 
-    let raster = match decode_blob(data) {
+    let raster = match decode_blob_with_limits(data, &mut limits.clone()) {
         Ok(raster) => raster,
         Err(e) => {
             log_warn!("Failed to decode LERC-compressed TIFF chunk: {}, filling with zeros", e);

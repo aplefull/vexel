@@ -1,5 +1,6 @@
 pub fn scale_u32_to_u8(src: &[u32], dst: &mut [u8], max_value: u32) {
-    debug_assert_eq!(src.len(), dst.len());
+    let n = src.len().min(dst.len());
+    let (src, dst) = (&src[..n], &mut dst[..n]);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
@@ -14,7 +15,8 @@ pub fn scale_u32_to_u8(src: &[u32], dst: &mut [u8], max_value: u32) {
 }
 
 pub fn scale_u32_to_u16(src: &[u32], dst: &mut [u16], max_value: u32) {
-    debug_assert_eq!(src.len(), dst.len());
+    let n = src.len().min(dst.len());
+    let (src, dst) = (&src[..n], &mut dst[..n]);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
@@ -29,7 +31,8 @@ pub fn scale_u32_to_u16(src: &[u32], dst: &mut [u16], max_value: u32) {
 }
 
 pub fn scale_u8(src: &[u8], dst: &mut [u8], max_value: u8) {
-    debug_assert_eq!(src.len(), dst.len());
+    let n = src.len().min(dst.len());
+    let (src, dst) = (&src[..n], &mut dst[..n]);
 
     if max_value == 255 {
         dst.copy_from_slice(src);
@@ -49,7 +52,8 @@ pub fn scale_u8(src: &[u8], dst: &mut [u8], max_value: u8) {
 }
 
 pub fn scale_u16_be(src: &[u8], dst: &mut [u16], max_value: u16) {
-    debug_assert_eq!(src.len(), dst.len() * 2);
+    let n = (src.len() / 2).min(dst.len());
+    let (src, dst) = (&src[..n * 2], &mut dst[..n]);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
@@ -64,7 +68,7 @@ pub fn scale_u16_be(src: &[u8], dst: &mut [u16], max_value: u16) {
 }
 
 pub fn unpack_bits(src: &[u8], dst: &mut [u8], width: u32, height: u32) {
-    debug_assert_eq!(dst.len(), (width * height) as usize);
+    debug_assert_eq!(dst.len(), width as usize * height as usize);
 
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("ssse3") {
@@ -434,7 +438,7 @@ fn scale_u16_be_wasm(src: &[u8], dst: &mut [u16], max_value: u16) {
 fn unpack_bits_wasm(src: &[u8], dst: &mut [u8], width: u32, height: u32) {
     use std::arch::wasm32::*;
 
-    let bytes_per_row = ((width + 7) / 8) as usize;
+    let bytes_per_row = width.div_ceil(8) as usize;
     let width = width as usize;
 
     let bit_mask = i8x16(-128i8, 64, 32, 16, 8, 4, 2, 1, -128i8, 64, 32, 16, 8, 4, 2, 1);

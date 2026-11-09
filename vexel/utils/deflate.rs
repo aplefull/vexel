@@ -715,7 +715,7 @@ impl<'a> DeflateDecoder<'a> {
                     if len != !nlen {
                         break;
                     }
-                    output.reserve(len as usize);
+                    output.reserve((len as usize).min(max_output.saturating_sub(output.len())));
                     let mut ok = true;
                     for _ in 0..len {
                         if output.len() >= max_output {

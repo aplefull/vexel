@@ -331,12 +331,15 @@ fn decode_slice(reader: &mut ByteReader, is_double: bool, n_cols: usize, n_rows:
         }
     }
 
+    drop(planes);
+
     let delta = predictor.int_delta();
     let use_cross = predictor == PredictorType::RowsCols;
 
     let values = if is_double {
         let mut words: Vec<u64> =
             raw.chunks_exact(8).map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])).collect();
+        drop(raw);
 
         if use_cross {
             restore_cross_bytes_f64(&mut words, n_cols, n_rows, delta);
@@ -347,6 +350,7 @@ fn decode_slice(reader: &mut ByteReader, is_double: bool, n_cols: usize, n_rows:
         words.into_iter().map(f64::from_bits).collect()
     } else {
         let mut words: Vec<u32> = raw.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        drop(raw);
 
         if use_cross {
             restore_cross_bytes_f32(&mut words, n_cols, n_rows, delta);

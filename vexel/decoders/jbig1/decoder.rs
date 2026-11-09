@@ -7,20 +7,49 @@ use crate::decoders::jbig1::types::{self, *};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::{log_warn, Image, Limits, PixelData};
 
+const MAX_AT_MOVES_PER_STRIPE: usize = 64;
+const MAX_DECODED_PLANES: u8 = 8;
+
 fn at_pixel(plane_data: &[u8], row_offset: usize, x: usize, tx: i32) -> u32 {
-    let o = (x as i32 - tx) - (x as i32 & !7);
-    let byte_idx = (row_offset + x / 8) as i32 + (o >> 3);
-    if byte_idx < 0 {
+    let o = (x as i64 - i64::from(tx)) - (x as i64 & !7);
+    let byte_idx = (row_offset + x / 8) as i64 + (o >> 3);
+    let Ok(byte_idx) = usize::try_from(byte_idx) else {
         return 0;
-    }
-    match plane_data.get(byte_idx as usize) {
+    };
+    match plane_data.get(byte_idx) {
         Some(byte) => ((byte >> (7 - (o & 7))) as u32) & 1,
         None => 0,
     }
 }
 
 fn ceil_half(x: u32, n: u32) -> u32 {
-    (x + (1 << n) - 1) >> n
+    if n >= 32 {
+        return u32::from(x > 0);
+    }
+    ((u64::from(x) + (1u64 << n) - 1) >> n) as u32
+}
+
+fn find_newlen(data: &[u8]) -> Option<u32> {
+    let mut pos = 0usize;
+    while pos + 1 < data.len() {
+        if data[pos] != MARKER_ESC {
+            pos += 1;
+            continue;
+        }
+        match data[pos + 1] {
+            MARKER_NEWLEN => {
+                return data.get(pos + 2..pos + 6).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+            }
+            MARKER_ATMOVE => pos += 8,
+            MARKER_COMMENT => {
+                let len = data.get(pos + 2..pos + 6).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))?;
+                pos = pos.saturating_add(6).saturating_add(len as usize);
+            }
+            MARKER_ABORT => return None,
+            _ => pos += 2,
+        }
+    }
+    None
 }
 
 pub struct Jbig1Decoder<R: Read + Seek> {
@@ -54,6 +83,7 @@ pub struct Jbig1Decoder<R: Read + Seek> {
     current_line: u32,
     current_x: u32,
     pseudo: bool,
+    finished: bool,
 
     line_h1: u32,
     line_h2: u32,
@@ -95,6 +125,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             current_line: 0,
             current_x: 0,
             pseudo: true,
+            finished: false,
             line_h1: 0,
             line_h2: 0,
             line_h3: 0,
@@ -153,8 +184,6 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             return Err(VexelError::InvalidDimensions { width: self.xd, height: self.yd });
         }
 
-        self.limits.reserve_buffer(self.xd, self.yd, 1)?;
-
         if self.l0 == 0 {
             log_warn!("JBIG1: L0=0, defaulting to full image height at layer 0");
             self.l0 = ceil_half(self.yd, self.d as u32);
@@ -163,8 +192,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             }
         }
 
-        let num_layers = (self.d - self.dl + 1) as usize;
-        let planes = self.planes as usize;
+        let num_layers = (self.d - self.dl) as usize + 1;
+        let planes = self.decoded_planes();
 
         self.ar_decoders = (0..planes).map(|_| (0..num_layers).map(|_| ArithDecoder::new()).collect()).collect();
         self.tx = vec![vec![0i32; num_layers]; planes];
@@ -185,17 +214,63 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         self.current_line = 0;
         self.current_x = 0;
         self.pseudo = true;
+        self.finished = false;
 
         Ok(())
     }
 
+    fn decoded_planes(&self) -> usize {
+        if self.planes > MAX_DECODED_PLANES {
+            1
+        } else {
+            self.planes as usize
+        }
+    }
+
+    fn layer_buffer_len(&self, layer: u8) -> Option<usize> {
+        let hx = ceil_half(self.xd, (self.d - layer) as u32);
+        let hy = ceil_half(self.yd, (self.d - layer) as u32);
+        (hx.div_ceil(8) as usize).checked_mul(hy as usize)
+    }
+
+    fn reserve_buffers(&mut self) -> VexelResult<()> {
+        self.limits.check_dimensions(self.xd, self.yd)?;
+        let output = (self.xd as usize).checked_mul(self.yd as usize);
+        let top = self.layer_buffer_len(self.d);
+        let below = if self.d > self.dl { self.layer_buffer_len(self.d - 1) } else { Some(0) };
+        let total = top
+            .zip(below)
+            .and_then(|(top, below)| top.checked_add(below))
+            .and_then(|planes_len| planes_len.checked_mul(self.decoded_planes()))
+            .zip(output)
+            .and_then(|(planes_len, output)| planes_len.checked_add(output));
+        match total {
+            Some(total) => self.limits.reserve_usize(total),
+            None => Err(VexelError::LimitExceeded(format!(
+                "JBIG1 buffers for {}x{} with {} planes exceed addressable memory",
+                self.xd, self.yd, self.planes
+            ))),
+        }
+    }
+
+    fn stripe_height(&self, layer: u8) -> u64 {
+        if layer >= 32 {
+            u64::MAX
+        } else {
+            u64::from(self.l0) << layer
+        }
+    }
+
+    fn stripe_height_usize(&self, layer: u8) -> usize {
+        usize::try_from(self.stripe_height(layer)).unwrap_or(usize::MAX)
+    }
+
     fn allocate_layer_buffers(&mut self) {
-        let planes = self.planes as usize;
+        let planes = self.decoded_planes();
         for layer in self.dl..=self.d {
             let hx = ceil_half(self.xd, (self.d - layer) as u32);
             let hy = ceil_half(self.yd, (self.d - layer) as u32);
-            let hbpl = hx.div_ceil(8) as usize;
-            let total = hbpl * hy as usize;
+            let total = hx.div_ceil(8) as usize * hy as usize;
             for plane in 0..planes {
                 self.lhp[layer as usize & 1][plane] = vec![0u8; total];
             }
@@ -208,9 +283,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
     }
 
     fn stripes_for_layer(&self, layer: u8) -> u32 {
-        let hy = ceil_half(self.yd, (self.d - layer) as u32);
-        let hl = self.l0 << layer;
-        hy.div_ceil(hl)
+        let hy = u64::from(ceil_half(self.yd, (self.d - layer) as u32));
+        hy.div_ceil(self.stripe_height(layer).max(1)) as u32
     }
 
     fn process_stream(&mut self, data: &[u8]) -> VexelResult<()> {
@@ -239,6 +313,12 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             let sde_data = &data[sde_start..pos];
 
             match marker {
+                MARKER_SDNORM | MARKER_SDRST if self.finished => {
+                    log_warn!("JBIG1: stripe data after the last stripe, ignoring");
+                    pos += 2;
+                    sde_start = pos;
+                    at_moves.clear();
+                }
                 MARKER_SDNORM | MARKER_SDRST => {
                     let is_reset = marker == MARKER_SDRST;
 
@@ -253,15 +333,17 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     let layer_idx = (self.current_layer - self.dl) as usize;
 
                     let total_stripes = self.stripes_for_layer(self.current_layer);
-                    let is_last_stripe = self.current_stripe + 1 >= total_stripes;
+                    let is_last_stripe = self.current_stripe.saturating_add(1) >= total_stripes;
                     let reuse_st = !is_last_stripe && !is_reset;
-                    self.ar_decoders[plane][layer_idx].reset(reuse_st);
+                    if plane < self.decoded_planes() {
+                        self.ar_decoders[plane][layer_idx].reset(reuse_st);
 
-                    self.reset_flags[plane][layer_idx] = is_reset;
-                    if is_reset {
-                        self.tx[plane][layer_idx] = 0;
-                        self.ty[plane][layer_idx] = 0;
-                        self.lntp[plane][layer_idx] = true;
+                        self.reset_flags[plane][layer_idx] = is_reset;
+                        if is_reset {
+                            self.tx[plane][layer_idx] = 0;
+                            self.ty[plane][layer_idx] = 0;
+                            self.lntp[plane][layer_idx] = true;
+                        }
                     }
 
                     self.advance_stripe();
@@ -287,7 +369,11 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     let line = u32::from_be_bytes([data[pos + 2], data[pos + 3], data[pos + 4], data[pos + 5]]);
                     let tx = data[pos + 6] as i8;
                     let ty = data[pos + 7] as i8;
-                    at_moves.push(AtMove { line, tx, ty });
+                    if at_moves.len() < MAX_AT_MOVES_PER_STRIPE {
+                        at_moves.push(AtMove { line, tx, ty });
+                    } else {
+                        log_warn!("JBIG1: too many ATMOVE markers in one stripe, ignoring");
+                    }
                     pos += 8;
                     sde_start = pos;
                 }
@@ -298,9 +384,12 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
                     let new_yd = u32::from_be_bytes([data[pos + 2], data[pos + 3], data[pos + 4], data[pos + 5]]);
                     if self.options & OPT_VLENGTH != 0 {
-                        log_warn!("JBIG1: NEWLEN updating height from {} to {}", self.yd, new_yd);
-                        self.yd = new_yd;
-                        self.allocate_layer_buffers();
+                        if new_yd == 0 || new_yd > self.yd {
+                            log_warn!("JBIG1: ignoring NEWLEN {} that does not shrink height {}", new_yd, self.yd);
+                        } else if new_yd < self.yd {
+                            log_warn!("JBIG1: NEWLEN updating height from {} to {}", self.yd, new_yd);
+                            self.yd = new_yd;
+                        }
                     }
                     pos += 6;
                     sde_start = pos;
@@ -312,7 +401,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
                     let comment_len =
                         u32::from_be_bytes([data[pos + 2], data[pos + 3], data[pos + 4], data[pos + 5]]) as usize;
-                    pos += 6 + comment_len;
+                    pos = pos.saturating_add(6).saturating_add(comment_len);
                     if pos > data.len() {
                         pos = data.len();
                     }
@@ -331,7 +420,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             }
         }
 
-        if !aborted && sde_start < data.len() {
+        if !aborted && !self.finished && sde_start < data.len() {
             let remaining = &data[sde_start..];
             if !remaining.is_empty() {
                 let plane = self.current_plane as usize;
@@ -364,7 +453,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         let mut is = [0u32; 3];
         let mut ie = [0u32; 3];
         is[iindex[0]] = 0;
-        ie[iindex[0]] = stripes - 1;
+        ie[iindex[0]] = stripes.saturating_sub(1);
         is[iindex[1]] = self.dl as u32;
         ie[iindex[1]] = self.d as u32;
         is[iindex[2]] = 0;
@@ -377,6 +466,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 self.ii[i as usize] = is[i as usize];
                 i -= 1;
                 if i < 0 {
+                    self.finished = true;
                     break;
                 }
             } else {
@@ -390,7 +480,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
     }
 
     fn decode_pscd(&mut self, plane: usize, layer: usize, data: &[u8], at_moves: &[AtMove]) {
-        if layer > self.d as usize {
+        if layer > self.d as usize || plane >= self.decoded_planes() {
             return;
         }
 
@@ -412,7 +502,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         let ly = ceil_half(hy, 1);
         let lbpl = lx.div_ceil(8) as usize;
 
-        let hl = (self.l0 << layer) as usize;
+        let hl = self.stripe_height_usize(layer as u8);
         let ll = hl >> 1;
 
         let stripe = self.current_stripe as usize;
@@ -432,8 +522,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             self.lhp[lhp_lo][plane].resize(total_lo, 0);
         }
 
-        let stripe_start_line = stripe * hl;
-        let stripe_end_line = ((stripe + 1) * hl).min(hy as usize);
+        let stripe_start_line = stripe.saturating_mul(hl);
+        let stripe_end_line = stripe_start_line.saturating_add(hl).min(hy as usize);
 
         if stripe_start_line >= hy as usize {
             return;
@@ -747,7 +837,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         }
 
         let cx = if tx != 0 {
-            let a = ((line_h1 << 2) >> (tx as u32).wrapping_sub(3)) & 0x010;
+            let a = (line_h1 << 2).checked_shr((tx as u32).wrapping_sub(3)).unwrap_or(0) & 0x010;
             (line_h1 & 0x003) | a | ((line_h2 >> 12) & 0x00c) | ((line_h3 >> 10) & 0x020)
         } else {
             (line_h1 & 0x003) | ((line_h2 >> 12) & 0x01c) | ((line_h3 >> 10) & 0x020)
@@ -770,7 +860,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         let hx = ceil_half(self.xd, (self.d as u32).saturating_sub(layer as u32));
         let hy = ceil_half(self.yd, (self.d as u32).saturating_sub(layer as u32));
         let hbpl = hx.div_ceil(8) as usize;
-        let hl = (self.l0 << layer) as usize;
+        let hl = self.stripe_height_usize(layer as u8);
 
         let stripe = self.current_stripe as usize;
 
@@ -781,8 +871,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             self.lhp[lhp_idx][plane] = vec![0u8; total];
         }
 
-        let stripe_start_line = stripe * hl;
-        let stripe_end_line = ((stripe + 1) * hl).min(hy as usize);
+        let stripe_start_line = stripe.saturating_mul(hl);
+        let stripe_end_line = stripe_start_line.saturating_add(hl).min(hy as usize);
 
         if stripe_start_line >= hy as usize {
             return;
@@ -889,7 +979,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                         let a = if tx as usize > x {
                             0u32
                         } else if tx < 8 {
-                            (line_h1 >> (tx as u32).wrapping_sub(5)) & 0x010
+                            line_h1.checked_shr((tx as u32).wrapping_sub(5)).unwrap_or(0) & 0x010
                         } else {
                             at_pixel(&self.lhp[lhp_idx][plane], row_offset, x, tx) << 4
                         };
@@ -901,7 +991,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     let a = if tx as usize > x {
                         0u32
                     } else if tx < 8 {
-                        (line_h1 >> (tx as u32).wrapping_sub(3)) & 0x004
+                        line_h1.checked_shr((tx as u32).wrapping_sub(3)).unwrap_or(0) & 0x004
                     } else {
                         at_pixel(&self.lhp[lhp_idx][plane], row_offset, x, tx) << 2
                     };
@@ -959,7 +1049,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 vec![0u8; hbpl * hy as usize]
             };
 
-            let mut pixels = vec![0u8; (hx * hy) as usize];
+            let mut pixels = vec![0u8; hx as usize * hy as usize];
             for row in 0..hy as usize {
                 for col in 0..hx as usize {
                     let byte_idx = row * hbpl + col / 8;
@@ -981,7 +1071,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 return self.build_single_plane_image(0, layer, hx, hy, hbpl);
             }
 
-            let mut gray_pixels = vec![0u8; (hx * hy) as usize];
+            let mut gray_pixels = vec![0u8; hx as usize * hy as usize];
 
             for p in 0..num_planes {
                 if !plane_data_available(&self.lhp[lhp_idx], p) {
@@ -1022,7 +1112,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             vec![0u8; hbpl * hy as usize]
         };
 
-        let mut pixels = vec![0u8; (hx * hy) as usize];
+        let mut pixels = vec![0u8; hx as usize * hy as usize];
         for row in 0..hy as usize {
             for col in 0..hx as usize {
                 let byte_idx = row * hbpl + col / 8;
@@ -1054,9 +1144,18 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             }
         }
 
-        self.allocate_layer_buffers();
-
         let data = self.read_all_data()?;
+
+        if self.options & OPT_VLENGTH != 0 {
+            if let Some(new_yd) = find_newlen(&data) {
+                if new_yd > 0 && new_yd < self.yd {
+                    self.yd = new_yd;
+                }
+            }
+        }
+
+        self.reserve_buffers()?;
+        self.allocate_layer_buffers();
         self.process_stream(&data)?;
 
         self.build_image()
