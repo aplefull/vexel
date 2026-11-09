@@ -1,8 +1,8 @@
-use super::pixels::PixelDecoder;
+use super::pixels::{filtered_data_size, PixelDecoder};
 use super::types::{ColorType, FctlChunk, PngFrame, TransparencyData};
 use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::{ImageFrame, PixelData};
+use crate::{log_warn, ImageFrame, Limits, PixelData};
 
 pub struct AnimationDecoder {
     width: u32,
@@ -12,6 +12,17 @@ pub struct AnimationDecoder {
 impl AnimationDecoder {
     pub fn new(width: u32, height: u32) -> Self {
         Self { width, height }
+    }
+
+    fn canvas_offset(&self, x: u32, y: u32) -> usize {
+        (y as usize * self.width as usize + x as usize) * 4
+    }
+
+    fn frame_fits(&self, fctl: &FctlChunk) -> bool {
+        fctl.width > 0
+            && fctl.height > 0
+            && u64::from(fctl.x_offset) + u64::from(fctl.width) <= u64::from(self.width)
+            && u64::from(fctl.y_offset) + u64::from(fctl.height) <= u64::from(self.height)
     }
 
     fn compose_frame(&self, pixels: PixelData, fctl: &FctlChunk, canvas: PixelData) -> VexelResult<PixelData> {
@@ -25,7 +36,7 @@ impl AnimationDecoder {
         if fctl.blend_op == 0 {
             for y in 0..fctl.height {
                 let frame_row_start = y as usize * frame_row_bytes;
-                let output_row_start = ((y + fctl.y_offset) * self.width + fctl.x_offset) as usize * 4;
+                let output_row_start = self.canvas_offset(fctl.x_offset, fctl.y_offset + y);
 
                 if frame_row_start + frame_row_bytes > frame_data.len()
                     || output_row_start + frame_row_bytes > output_data.len()
@@ -39,7 +50,7 @@ impl AnimationDecoder {
         } else {
             for y in 0..fctl.height {
                 let frame_row_start = y as usize * frame_row_bytes;
-                let output_row_start = ((y + fctl.y_offset) * self.width + fctl.x_offset) as usize * 4;
+                let output_row_start = self.canvas_offset(fctl.x_offset, fctl.y_offset + y);
 
                 for x in 0..fctl.width as usize {
                     let fp = frame_row_start + x * 4;
@@ -73,6 +84,7 @@ impl AnimationDecoder {
     pub fn decode_apng_frames(
         &mut self,
         frames: &[PngFrame],
+        limits: &mut Limits,
         bit_depth: u8,
         color_type: ColorType,
         interlace: bool,
@@ -86,7 +98,7 @@ impl AnimationDecoder {
 
         let decoded_pixels = self.pre_decode_frames(frames, bit_depth, color_type, interlace, &palette, &transparency);
 
-        let blank = PixelData::RGBA8(vec![0; (self.width * self.height * 4) as usize]);
+        let blank = PixelData::RGBA8(vec![0; self.width as usize * self.height as usize * 4]);
         let mut canvas = blank.clone();
         let mut output_frames: Vec<ImageFrame> = Vec::with_capacity(frames.len());
         let mut restore_canvas: Option<PixelData> = None;
@@ -96,12 +108,15 @@ impl AnimationDecoder {
         for (frame, pixels) in frames.iter().zip(decoded_pixels) {
             let fctl = &frame.fctl_info;
 
-            if fctl.width == 0
-                || fctl.height == 0
-                || fctl.x_offset + fctl.width > self.width
-                || fctl.y_offset + fctl.height > self.height
-            {
-                return Err(VexelError::Custom("Invalid frame dimensions".into()));
+            if !self.frame_fits(fctl) {
+                log_warn!(
+                    "Skipping APNG frame with invalid dimensions: {}x{} at ({}, {})",
+                    fctl.width,
+                    fctl.height,
+                    fctl.x_offset,
+                    fctl.y_offset
+                );
+                continue;
             }
 
             if prev_dispose_op == 2 {
@@ -114,7 +129,7 @@ impl AnimationDecoder {
                     let row_bytes = pf.width as usize * 4;
                     let data = canvas.as_bytes_mut();
                     for y in 0..pf.height {
-                        let row_start = ((y + pf.y_offset) * self.width + pf.x_offset) as usize * 4;
+                        let row_start = self.canvas_offset(pf.x_offset, pf.y_offset + y);
                         if row_start + row_bytes <= data.len() {
                             data[row_start..row_start + row_bytes].fill(0);
                         }
@@ -133,6 +148,14 @@ impl AnimationDecoder {
                 None => continue,
             };
 
+            if let Err(e) = limits.reserve_buffer(self.width, self.height, 4) {
+                if output_frames.is_empty() {
+                    return Err(e);
+                }
+                log_warn!("Stopping APNG decode after {} frames: {}", output_frames.len(), e);
+                break;
+            }
+
             canvas = self.compose_frame(pixels, fctl, canvas)?;
 
             prev_dispose_op = fctl.dispose_op;
@@ -148,6 +171,10 @@ impl AnimationDecoder {
                     (fctl.delay_num as f32 / fctl.delay_den as f32 * 1000.0).round() as u32
                 },
             ));
+        }
+
+        if output_frames.is_empty() {
+            return Err(VexelError::Custom("No APNG frame fits the canvas".into()));
         }
 
         Ok(output_frames)
@@ -170,6 +197,9 @@ impl AnimationDecoder {
                 .par_iter()
                 .map(|frame| {
                     let fctl = &frame.fctl_info;
+                    if !self.frame_fits(fctl) {
+                        return None;
+                    }
                     decode_frame_pixels(
                         &frame.fdat,
                         bit_depth,
@@ -190,6 +220,9 @@ impl AnimationDecoder {
                 .iter()
                 .map(|frame| {
                     let fctl = &frame.fctl_info;
+                    if !self.frame_fits(fctl) {
+                        return None;
+                    }
                     decode_frame_pixels(
                         &frame.fdat,
                         bit_depth,
@@ -225,9 +258,8 @@ fn decode_frame_pixels(
         ColorType::RGBA => 4,
     };
     let bits_per_pixel = u64::from(bit_depth) * channels;
-    let bytes_per_row = (bits_per_pixel * u64::from(width)).div_ceil(8) + 1;
-    let capacity = usize::try_from(bytes_per_row.saturating_mul(u64::from(height))).unwrap_or(usize::MAX / 8);
-    let decompressed = ZlibDecoder::from_slice(fdat).decode_with_capacity(capacity);
+    let capacity = filtered_data_size(bits_per_pixel, width, height, interlace);
+    let decompressed = ZlibDecoder::from_slice(fdat).decode_with_max(capacity);
     let frame_pixels = decoder.deinterlace_scan_lines_owned(decompressed, width, height).ok()?;
     let mut pixels = decoder.decode_pixels_by_type(frame_pixels).ok()?;
     pixels.correct_pixels(width, height);

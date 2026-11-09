@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::bitreader::BitReader;
@@ -18,6 +18,7 @@ use crate::{log_error, log_warn, Limits};
 const DIRECTORY_SIZE: u64 = 6;
 const ENTRY_SIZE: u64 = 16;
 const MAX_DETAILED_IMAGES: usize = 256;
+const MAX_READ_AMPLIFICATION: u64 = 16;
 
 pub struct IcoDecoder<R: Read + Seek> {
     width: u32,
@@ -29,6 +30,8 @@ pub struct IcoDecoder<R: Read + Seek> {
     declared_count: u16,
     entries: Vec<IconDirEntry>,
     entry_offsets: Vec<u64>,
+    sorted_offsets: Vec<u64>,
+    bytes_read: u64,
     info: Option<IcoInfo>,
     reader: BitReader<R>,
 }
@@ -45,6 +48,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
             declared_count: 0,
             entries: Vec::new(),
             entry_offsets: Vec::new(),
+            sorted_offsets: Vec::new(),
+            bytes_read: 0,
             info: None,
             reader: BitReader::with_le(reader),
         }
@@ -214,8 +219,18 @@ impl<R: Read + Seek> IcoDecoder<R> {
     fn read_entry_bytes(&mut self, entry: &IconDirEntry) -> VexelResult<Vec<u8>> {
         self.reader.seek(SeekFrom::Start(entry.image_offset as u64))?;
         let bytes_available = self.reader.bytes_left().unwrap_or(0);
-        let bytes_to_read = self.max_readable_bytes(entry, bytes_available) as usize;
-        Ok(self.reader.read_bytes(bytes_to_read)?)
+        let bytes_to_read = self.max_readable_bytes(entry, bytes_available);
+
+        let file_length = u64::from(entry.image_offset).saturating_add(bytes_available);
+        let read_budget = file_length.saturating_mul(MAX_READ_AMPLIFICATION);
+        if self.bytes_read.saturating_add(bytes_to_read) > read_budget {
+            return Err(VexelError::Custom(
+                "ICO entries re-read the same image data too many times, skipping the rest".to_string(),
+            ));
+        }
+        self.bytes_read += bytes_to_read;
+
+        Ok(self.reader.read_bytes(bytes_to_read as usize)?)
     }
 
     fn inspect_bmp(bytes: &[u8]) -> EmbeddedBmp {
@@ -360,12 +375,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
     }
 
     fn max_readable_bytes(&self, entry: &IconDirEntry, bytes_available: u64) -> u64 {
-        let next_entry_offset = self
-            .entries
-            .iter()
-            .map(|e| e.image_offset as u64)
-            .filter(|&offset| offset > entry.image_offset as u64)
-            .min();
+        let start = u64::from(entry.image_offset);
+        let next_entry_offset = self.sorted_offsets.get(self.sorted_offsets.partition_point(|&o| o <= start)).copied();
 
         let bound = match next_entry_offset {
             Some(offset) => offset - entry.image_offset as u64,
@@ -389,7 +400,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let bmp_bytes = self.read_entry_bytes(entry)?;
 
         let (image, and_mask, actual_bpp) =
-            BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height)?;
+            BmpDecoder::<Cursor<&[u8]>>::decode_ico_bmp(&bmp_bytes, entry.width, entry.height, &self.limits)?;
 
         let mut pixels = apply_and_mask(image.into_pixels(), &and_mask, entry.width, entry.height, actual_bpp);
         pixels.correct_pixels(entry.width, entry.height);
@@ -401,6 +412,8 @@ impl<R: Read + Seek> IcoDecoder<R> {
         self.reader.seek(SeekFrom::Start(0))?;
         self.entries.clear();
         self.entry_offsets.clear();
+        self.sorted_offsets.clear();
+        self.bytes_read = 0;
         self.type_raw = 0;
         self.reserved = 0;
         self.declared_count = 0;
@@ -423,6 +436,10 @@ impl<R: Read + Seek> IcoDecoder<R> {
                 log_error!("Error reading ICO entries: {}", e);
             }
         }
+
+        self.sorted_offsets = self.entries.iter().map(|entry| u64::from(entry.image_offset)).collect();
+        self.sorted_offsets.sort_unstable();
+        self.sorted_offsets.dedup();
 
         match self.detect_image_formats() {
             Ok(_) => {}
@@ -449,22 +466,31 @@ impl<R: Read + Seek> IcoDecoder<R> {
             return None;
         }
 
-        match entry.image_format {
+        let frame = match entry.image_format {
             IcoImageFormat::Png => match self.decode_png_frame(entry) {
-                Ok(f) => Some(f),
+                Ok(f) => f,
                 Err(e) => {
                     log_warn!("Error decoding PNG frame in ICO: {}", e);
-                    None
+                    return None;
                 }
             },
             IcoImageFormat::Bmp => match self.decode_bmp_frame(entry) {
-                Ok(f) => Some(f),
+                Ok(f) => f,
                 Err(e) => {
                     log_warn!("Error decoding BMP frame in ICO: {}", e);
-                    None
+                    return None;
                 }
             },
+        };
+
+        let reserved = u64::from(entry.width) * u64::from(entry.height) * 4;
+        let actual = frame.pixels().as_bytes().len() as u64;
+        if let Err(e) = self.limits.reserve(actual.saturating_sub(reserved)) {
+            log_warn!("ICO entry {}x{} exceeds limits, skipping: {}", frame.width(), frame.height(), e);
+            return None;
         }
+
+        Some(frame)
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -473,7 +499,11 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let mut candidates = self.entries.clone();
         candidates.sort_by_key(|e| std::cmp::Reverse((e.width * e.height, e.bit_count)));
 
+        let mut attempted = HashSet::new();
         for entry in &candidates {
+            if !attempted.insert(entry_key(entry)) {
+                continue;
+            }
             if let Some(frame) = self.decode_entry(entry) {
                 self.width = frame.width();
                 self.height = frame.height();
@@ -489,10 +519,18 @@ impl<R: Read + Seek> IcoDecoder<R> {
 
         let entries = self.entries.clone();
         let mut pages = Vec::with_capacity(entries.len());
+        let mut failed = HashSet::new();
 
         for entry in &entries {
-            if let Some(frame) = self.decode_entry(entry) {
-                pages.push(Image::from_frame(frame));
+            let key = entry_key(entry);
+            if failed.contains(&key) {
+                continue;
+            }
+            match self.decode_entry(entry) {
+                Some(frame) => pages.push(Image::from_frame(frame)),
+                None => {
+                    failed.insert(key);
+                }
             }
         }
 
@@ -505,6 +543,10 @@ impl<R: Read + Seek> IcoDecoder<R> {
 
         Ok(pages)
     }
+}
+
+fn entry_key(entry: &IconDirEntry) -> (u32, u32, u32) {
+    (entry.image_offset, entry.width, entry.height)
 }
 
 fn apply_and_mask(pixels: PixelData, and_mask: &[u8], width: u32, height: u32, bpp: u16) -> PixelData {

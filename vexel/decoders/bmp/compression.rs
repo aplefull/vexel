@@ -12,7 +12,7 @@ impl RleDecoder {
     pub fn decode_rle8(data: &[u8], width: u32, height: u32) -> VexelResult<Vec<u8>> {
         let mut decoded = vec![0u8; width as usize * height as usize];
         let mut reader = BitReader::new(std::io::Cursor::new(data));
-        let mut x = 0;
+        let mut x = 0u32;
         let mut y = 0;
 
         while y < height {
@@ -39,9 +39,10 @@ impl RleDecoder {
                     }
                     2 => {
                         // Delta - move current position
-                        let dx = reader.read_u8()?;
-                        let dy = reader.read_u8()?;
-                        x += dx as u32;
+                        let (Ok(dx), Ok(dy)) = (reader.read_u8(), reader.read_u8()) else {
+                            break;
+                        };
+                        x = x.saturating_add(dx as u32);
                         y += dy as u32;
                     }
                     n => {
@@ -51,11 +52,13 @@ impl RleDecoder {
                                 Ok(v) => v,
                                 Err(_) => break,
                             };
-                            let pos = (y * width + x) as usize;
-                            if x < width && pos < decoded.len() {
-                                decoded[pos] = byte;
+                            if x < width {
+                                let pos = y as usize * width as usize + x as usize;
+                                if pos < decoded.len() {
+                                    decoded[pos] = byte;
+                                }
                             }
-                            x += 1;
+                            x = x.saturating_add(1);
                         }
                         // Pad to word boundary
                         if (n % 2) == 1 {
@@ -65,8 +68,8 @@ impl RleDecoder {
                 }
             } else {
                 // Encoded mode - repeat value count times
-                let start = (y * width + x) as usize;
-                let available = (width - x) as usize;
+                let start = y as usize * width as usize + x as usize;
+                let available = width.saturating_sub(x) as usize;
                 let fill_count = (count as usize).min(available);
                 if start + fill_count <= decoded.len() {
                     simd::fill_bytes(&mut decoded[start..start + fill_count], value);
@@ -84,7 +87,7 @@ impl RleDecoder {
     pub fn decode_rle4(data: &[u8], width: u32, height: u32) -> VexelResult<Vec<u8>> {
         let mut decoded = vec![0u8; width as usize * height as usize];
         let mut reader = BitReader::new(std::io::Cursor::new(data));
-        let mut x = 0;
+        let mut x = 0u32;
         let mut y = 0;
 
         while y < height {
@@ -111,9 +114,10 @@ impl RleDecoder {
                     }
                     2 => {
                         // Delta - move current position
-                        let dx = reader.read_u8()?;
-                        let dy = reader.read_u8()?;
-                        x += dx as u32;
+                        let (Ok(dx), Ok(dy)) = (reader.read_u8(), reader.read_u8()) else {
+                            break;
+                        };
+                        x = x.saturating_add(dx as u32);
                         y += dy as u32;
                     }
                     n => {
@@ -127,11 +131,13 @@ impl RleDecoder {
                             for shift in [4u8, 0u8] {
                                 if pixels_remaining > 0 {
                                     let pixel = (byte >> shift) & 0x0F;
-                                    let pos = (y * width + x) as usize;
-                                    if x < width && pos < decoded.len() {
-                                        decoded[pos] = pixel;
+                                    if x < width {
+                                        let pos = y as usize * width as usize + x as usize;
+                                        if pos < decoded.len() {
+                                            decoded[pos] = pixel;
+                                        }
                                     }
-                                    x += 1;
+                                    x = x.saturating_add(1);
                                     pixels_remaining -= 1;
                                 }
                             }
@@ -148,7 +154,7 @@ impl RleDecoder {
                 let low = value & 0x0F;
                 for i in 0..count {
                     if x < width {
-                        let pos = (y * width + x) as usize;
+                        let pos = y as usize * width as usize + x as usize;
                         if pos < decoded.len() {
                             decoded[pos] = if i % 2 == 0 { high } else { low };
                         }
@@ -197,7 +203,7 @@ impl RleDecoder {
                             Ok(v) => v,
                             Err(_) => break,
                         };
-                        x += dx as u32;
+                        x = x.saturating_add(dx as u32);
                         y += dy as u32;
                     }
                     n => {
@@ -214,7 +220,7 @@ impl RleDecoder {
                                 let pos = y as usize * stride + x as usize * 3;
                                 decoded[pos..pos + 3].copy_from_slice(&pixel);
                             }
-                            x += 1;
+                            x = x.saturating_add(1);
                         }
                         if truncated {
                             break;
@@ -234,7 +240,7 @@ impl RleDecoder {
                         let pos = y as usize * stride + x as usize * 3;
                         decoded[pos..pos + 3].copy_from_slice(&pixel);
                     }
-                    x += 1;
+                    x = x.saturating_add(1);
                 }
             }
         }
@@ -269,7 +275,9 @@ impl RleDecoder {
         for row in 0..height as usize {
             let src_offset = row * src_stride;
             let dst_offset = row * dst_stride;
-            padded[dst_offset..dst_offset + src_stride].copy_from_slice(&packed[src_offset..src_offset + src_stride]);
+            if let Some(src) = packed.get(src_offset..src_offset + src_stride) {
+                padded[dst_offset..dst_offset + src_stride].copy_from_slice(src);
+            }
         }
 
         padded

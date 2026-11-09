@@ -132,7 +132,8 @@ impl<R: Read + Seek> BmpDecoder<R> {
             BmpSection::DibHeader(self.dib_header.clone()),
         );
         if mode == ScanMode::Decode {
-            self.limits.reserve_buffer(self.width, self.height, 4)?;
+            let bytes_per_pixel = if self.dib_header.bits_per_pixel == 64 { 16 } else { 4 };
+            self.limits.reserve_buffer(self.width, self.height, bytes_per_pixel)?;
         }
         Ok(())
     }
@@ -442,37 +443,38 @@ impl<R: Read + Seek> BmpDecoder<R> {
         }
     }
 
-    fn decode_jpeg(&mut self) -> VexelResult<Image> {
+    fn read_embedded_bytes(&mut self) -> VexelResult<Vec<u8>> {
         self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
-        let image_size = self.dib_header.image_size;
-        let jpeg_bytes = if image_size > 0 {
-            self.limits.reserve(u64::from(image_size))?;
-            self.reader.read_bytes(image_size as usize)?
-        } else {
-            let bytes_left = self.reader.bytes_left().unwrap_or(0);
-            self.limits.reserve(bytes_left)?;
-            self.reader.read_to_end()?
-        };
+        let bytes_left = self.reader.bytes_left().unwrap_or(0);
+        let image_size = u64::from(self.dib_header.image_size);
+        let length = if image_size > 0 { image_size.min(bytes_left) } else { bytes_left };
+        if image_size > bytes_left {
+            log_warn!("Embedded image claims {} bytes but only {} are available", image_size, bytes_left);
+        }
+        self.limits.reserve(length)?;
+        Ok(self.reader.read_bytes(length as usize)?)
+    }
+
+    fn decode_jpeg(&mut self) -> VexelResult<Image> {
+        let jpeg_bytes = self.read_embedded_bytes()?;
         let mut jpeg_decoder = JpegDecoder::new(Cursor::new(jpeg_bytes));
+        jpeg_decoder.set_limits(self.limits.clone());
         jpeg_decoder.decode()
     }
 
     fn decode_png(&mut self) -> VexelResult<Image> {
-        self.reader.seek(SeekFrom::Start(self.file_header.pixel_offset as u64))?;
-        let image_size = self.dib_header.image_size;
-        let png_bytes = if image_size > 0 {
-            self.limits.reserve(u64::from(image_size))?;
-            self.reader.read_bytes(image_size as usize)?
-        } else {
-            let bytes_left = self.reader.bytes_left().unwrap_or(0);
-            self.limits.reserve(bytes_left)?;
-            self.reader.read_to_end()?
-        };
+        let png_bytes = self.read_embedded_bytes()?;
         let mut png_decoder = PngDecoder::new(Cursor::new(png_bytes));
+        png_decoder.set_limits(self.limits.clone());
         png_decoder.decode()
     }
 
-    pub fn decode_ico_bmp(data: &[u8], dir_width: u32, dir_height: u32) -> VexelResult<(Image, Vec<u8>, u16)> {
+    pub fn decode_ico_bmp(
+        data: &[u8],
+        dir_width: u32,
+        dir_height: u32,
+        limits: &Limits,
+    ) -> VexelResult<(Image, Vec<u8>, u16)> {
         if data.len() < 4 {
             return Err(VexelError::Custom("ICO BMP data too short".to_string()));
         }
@@ -560,20 +562,18 @@ impl<R: Read + Seek> BmpDecoder<R> {
 
         full_bmp.extend_from_slice(pixel_data);
 
+        let w_offset = 18usize;
         let h_offset = if is_core { 20usize } else { 22usize };
         if is_core && full_bmp.len() >= h_offset + 2 {
-            let bytes = (dir_height as u16).to_le_bytes();
-            full_bmp[h_offset] = bytes[0];
-            full_bmp[h_offset + 1] = bytes[1];
+            full_bmp[w_offset..w_offset + 2].copy_from_slice(&(dir_width as u16).to_le_bytes());
+            full_bmp[h_offset..h_offset + 2].copy_from_slice(&(dir_height as u16).to_le_bytes());
         } else if !is_core && full_bmp.len() >= h_offset + 4 {
-            let bytes = (dir_height as i32).to_le_bytes();
-            full_bmp[h_offset] = bytes[0];
-            full_bmp[h_offset + 1] = bytes[1];
-            full_bmp[h_offset + 2] = bytes[2];
-            full_bmp[h_offset + 3] = bytes[3];
+            full_bmp[w_offset..w_offset + 4].copy_from_slice(&(dir_width as i32).to_le_bytes());
+            full_bmp[h_offset..h_offset + 4].copy_from_slice(&(dir_height as i32).to_le_bytes());
         }
 
         let mut decoder = BmpDecoder::new(Cursor::new(full_bmp));
+        decoder.set_limits(limits.clone());
         let image = decoder.decode()?;
 
         Ok((image, and_mask, bpp))
@@ -582,6 +582,10 @@ impl<R: Read + Seek> BmpDecoder<R> {
     pub fn decode(&mut self) -> VexelResult<Image> {
         self.info = None;
         let extent = self.scan(ScanMode::Decode)?;
+
+        if self.width == 0 || self.height == 0 {
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+        }
 
         let embedded = matches!(self.dib_header.compression, BitmapCompression::BiJpeg | BitmapCompression::BiPng);
         if let Some(extent) = extent.filter(|_| !embedded) {

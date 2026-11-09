@@ -3,6 +3,34 @@ use super::types::{ColorType, TransparencyData};
 use crate::utils::error::VexelResult;
 use crate::{log_warn, PixelData};
 
+const ADAM7_COL_START: [usize; 7] = [0, 4, 0, 2, 0, 1, 0];
+const ADAM7_ROW_START: [usize; 7] = [0, 0, 4, 0, 2, 0, 1];
+const ADAM7_COL_DELTA: [usize; 7] = [8, 8, 4, 4, 2, 2, 1];
+const ADAM7_ROW_DELTA: [usize; 7] = [8, 8, 8, 4, 4, 2, 2];
+
+pub fn filtered_data_size(bits_per_pixel: u64, width: u32, height: u32, interlace: bool) -> usize {
+    let scanlines_size = |width: u64, height: u64| {
+        if width == 0 || height == 0 {
+            return 0;
+        }
+        (bits_per_pixel.saturating_mul(width).div_ceil(8) + 1).saturating_mul(height)
+    };
+
+    let total = if interlace {
+        (0..7).fold(0u64, |total, pass| {
+            let pass_width = (u64::from(width) + (ADAM7_COL_DELTA[pass] - 1 - ADAM7_COL_START[pass]) as u64)
+                / ADAM7_COL_DELTA[pass] as u64;
+            let pass_height = (u64::from(height) + (ADAM7_ROW_DELTA[pass] - 1 - ADAM7_ROW_START[pass]) as u64)
+                / ADAM7_ROW_DELTA[pass] as u64;
+            total.saturating_add(scanlines_size(pass_width, pass_height))
+        })
+    } else {
+        scanlines_size(u64::from(width), u64::from(height))
+    };
+
+    usize::try_from(total).unwrap_or(usize::MAX)
+}
+
 pub struct PixelDecoder {
     bit_depth: u8,
     pub(crate) color_type: ColorType,
@@ -60,6 +88,19 @@ impl PixelDecoder {
                     }
                 }
             }
+            16 => {
+                log_warn!("Invalid bit depth for indexed color: 16, reading 16-bit indices");
+                for pair in input.chunks_exact(2) {
+                    let index = usize::from(u16::from_be_bytes([pair[0], pair[1]]));
+                    let color = palette.get(index).unwrap_or(&[0, 0, 0]);
+                    match trans {
+                        Some(alpha) => {
+                            output.extend_from_slice(&[color[0], color[1], color[2], *alpha.get(index).unwrap_or(&255)])
+                        }
+                        None => output.extend_from_slice(&[color[0], color[1], color[2]]),
+                    }
+                }
+            }
             1 | 2 | 4 => {
                 let bits_per_pixel = self.bit_depth as usize;
                 let pixels_per_byte = 8 / bits_per_pixel;
@@ -90,7 +131,9 @@ impl PixelDecoder {
                     }
                 }
             }
-            _ => unreachable!(),
+            other => {
+                log_warn!("Invalid bit depth for indexed color: {}", other);
+            }
         };
 
         if has_trans {
@@ -185,7 +228,10 @@ impl PixelDecoder {
                     Ok(PixelData::L8(output))
                 }
             }
-            _ => unreachable!(),
+            other => {
+                log_warn!("Invalid bit depth for grayscale: {}, assuming 8 bits", other);
+                Ok(PixelData::L8(input))
+            }
         }
     }
 
@@ -293,11 +339,6 @@ impl PixelDecoder {
         if !self.interlace {
             return filter_decoder.unfilter_scanlines(data, width);
         }
-
-        const ADAM7_COL_START: [usize; 7] = [0, 4, 0, 2, 0, 1, 0];
-        const ADAM7_ROW_START: [usize; 7] = [0, 0, 4, 0, 2, 0, 1];
-        const ADAM7_COL_DELTA: [usize; 7] = [8, 8, 4, 4, 2, 2, 1];
-        const ADAM7_ROW_DELTA: [usize; 7] = [8, 8, 8, 4, 4, 2, 2];
 
         let bits_per_pixel = self.get_bits_per_pixel();
 

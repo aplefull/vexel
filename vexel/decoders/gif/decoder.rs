@@ -6,7 +6,7 @@ use super::info::{
     GifApplicationExtension, GifApplicationKind, GifColorTable, GifComment, GifGraphicsControl, GifHeader,
     GifImageData, GifImageDescriptor, GifInfo, GifPlainText, GifSection, GifUnknownExtension,
 };
-use super::lzw::decompress_lzw;
+use super::lzw::{decompress_lzw, LinearSink, WindowSink};
 use super::types::{DisposalMethod, GifDecoder, GifFrameInfo, GraphicsControlExtension};
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
@@ -120,10 +120,11 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         }
         let buf = &buf[..n];
         let sig_offset = (0..4).find(|&i| {
-            buf[i..].starts_with(b"GIF87a")
-                || buf[i..].starts_with(b"GIF89a")
-                || buf[i..].starts_with(b"IF87a")
-                || buf[i..].starts_with(b"IF89a")
+            let tail = buf.get(i..).unwrap_or(&[]);
+            tail.starts_with(b"GIF87a")
+                || tail.starts_with(b"GIF89a")
+                || tail.starts_with(b"IF87a")
+                || tail.starts_with(b"IF89a")
         });
         let offset = sig_offset.unwrap_or(0);
         if offset > 0 || (!buf.starts_with(b"GIF87a") && !buf.starts_with(b"GIF89a")) {
@@ -537,6 +538,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             data.resize(start + block_size, 0);
             if let Err(e) = self.reader.read_exact(&mut data[start..]) {
                 log_warn!("Error reading image sub-block data: {:?}", e);
+                data.truncate(start);
                 break;
             }
         }
@@ -565,6 +567,15 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         };
 
         if self.frames.is_empty() {
+            if self.canvas_width == 0 || self.canvas_height == 0 {
+                log_warn!("GIF canvas is {}x{}, using the first frame's extent", self.canvas_width, self.canvas_height);
+                if self.canvas_width == 0 {
+                    self.canvas_width = left + width;
+                }
+                if self.canvas_height == 0 {
+                    self.canvas_height = top + height;
+                }
+            }
             self.width = self.canvas_width;
             self.height = self.canvas_height;
         }
@@ -615,33 +626,6 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(GraphicsControlExtension { disposal_method, user_input, transparency, delay, transparent_color_index })
     }
 
-    fn deinterlace_indices(width: u32, height: u32, indices: &[u8]) -> Vec<u8> {
-        let mut result = vec![0u8; indices.len()];
-        let passes = [(0usize, 8usize), (4, 8), (2, 4), (1, 2)];
-        let row_stride = width as usize;
-        let mut source_pos = 0;
-
-        for (start, step) in passes {
-            let mut y = start;
-            while y < height as usize {
-                let dst_start = y * row_stride;
-                let dst_end = dst_start + row_stride;
-                let src_end = source_pos + row_stride;
-
-                if src_end <= indices.len() && dst_end <= result.len() {
-                    result[dst_start..dst_end].copy_from_slice(&indices[source_pos..src_end]);
-                } else {
-                    log_warn!("Interlace index out of bounds at row {}", y);
-                }
-
-                source_pos += row_stride;
-                y += step;
-            }
-        }
-
-        result
-    }
-
     fn read_structure(&mut self) -> VexelResult<()> {
         self.reader.seek(SeekFrom::Start(0))?;
         self.collected = GifInfo::default();
@@ -690,17 +674,23 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(())
     }
 
-    fn decode_frame_indices(frame: &GifFrameInfo) -> VexelResult<Vec<u8>> {
-        let max_output = (frame.width as usize).saturating_mul(frame.height as usize).max(1);
-        let mut indices = decompress_lzw(frame, max_output).inspect_err(|e| {
-            log_warn!("Error decoding frame: {:?}", e);
-        })?;
-
-        if frame.interlace_flag {
-            indices = Self::deinterlace_indices(frame.width, frame.height, &indices);
+    fn decode_frame_indices(frame: &GifFrameInfo, canvas_width: u32, canvas_height: u32) -> Vec<u8> {
+        let (visible_width, visible_height) = visible_size(frame, canvas_width, canvas_height);
+        if visible_width == 0 || visible_height == 0 {
+            return Vec::new();
         }
 
-        Ok(indices)
+        let frame_width = frame.width as usize;
+        if !frame.interlace_flag && frame_width == visible_width {
+            let mut sink = LinearSink::new(visible_width * visible_height);
+            decompress_lzw(frame, &mut sink);
+            return sink.out;
+        }
+
+        let mut sink =
+            WindowSink::new(frame_width, frame.height as usize, visible_width, visible_height, frame.interlace_flag);
+        decompress_lzw(frame, &mut sink);
+        sink.finish()
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -709,7 +699,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.resolve_dimensions()?;
 
         let indices = match self.frames.first() {
-            Some(frame) => Self::decode_frame_indices(frame)?,
+            Some(frame) => Self::decode_frame_indices(frame, self.width, self.height),
             None => {
                 let canvas_size = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
                 self.limits.reserve_usize(canvas_size)?;
@@ -724,6 +714,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     }
 
     pub(crate) fn into_frame_source(mut self) -> VexelResult<GifFrames<R>> {
+        let base_budget = self.limits.max_alloc.map(|max_alloc| max_alloc.saturating_mul(FRAME_OUTPUT_ALLOC_FACTOR));
+
         self.collect_frame_data = true;
         self.read_structure()?;
         self.resolve_dimensions()?;
@@ -731,6 +723,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let needs_scratch = self.frames.iter().any(|f| matches!(f.disposal_method, DisposalMethod::Previous));
         let composer = GifComposer::new(self.width, self.height, needs_scratch, &mut self.limits)?;
         let frames = std::sync::Arc::new(std::mem::take(&mut self.frames));
+
+        let compressed_bytes = frames.iter().map(|frame| frame.data.len() as u64).fold(0u64, u64::saturating_add);
+        let output_budget = base_budget
+            .map(|budget| budget.saturating_add(compressed_bytes.saturating_mul(FRAME_OUTPUT_PER_INPUT_BYTE)));
 
         Ok(GifFrames {
             decoder: self,
@@ -741,8 +737,15 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             decoded_upto: 0,
             pending: None,
             exhausted: false,
+            output_budget,
         })
     }
+}
+
+fn visible_size(frame: &GifFrameInfo, canvas_width: u32, canvas_height: u32) -> (usize, usize) {
+    let width = frame.width.min(canvas_width.saturating_sub(frame.left));
+    let height = frame.height.min(canvas_height.saturating_sub(frame.top));
+    (width as usize, height as usize)
 }
 
 struct GifComposer {
@@ -756,6 +759,7 @@ struct GifComposer {
 
 impl GifComposer {
     fn new(width: u32, height: u32, needs_scratch: bool, limits: &mut Limits) -> VexelResult<GifComposer> {
+        limits.check_dimensions(width, height)?;
         let canvas_size = (width as usize).saturating_mul(height as usize).saturating_mul(4);
         limits.reserve_usize(canvas_size)?;
         let canvas = vec![0u8; canvas_size];
@@ -789,6 +793,7 @@ impl GifComposer {
 
         let width = self.width as usize;
         let height = self.height as usize;
+        let (visible_width, visible_height) = visible_size(frame, self.width, self.height);
 
         compose_frame(
             indices,
@@ -796,8 +801,8 @@ impl GifComposer {
             frame.transparent_index,
             frame.left as usize,
             frame.top as usize,
-            frame.width as usize,
-            frame.height as usize,
+            visible_width,
+            visible_height,
             width,
             height,
             &mut self.canvas,
@@ -835,6 +840,9 @@ impl GifComposer {
 }
 
 const LOOKAHEAD_BATCH: usize = 16;
+const LOOKAHEAD_BATCH_BYTES: usize = 64 * 1024 * 1024;
+const FRAME_OUTPUT_ALLOC_FACTOR: u64 = 8;
+const FRAME_OUTPUT_PER_INPUT_BYTE: u64 = 1024;
 
 pub(crate) struct GifFrames<R: Read + Seek + Sync> {
     decoder: GifDecoder<R>,
@@ -845,18 +853,36 @@ pub(crate) struct GifFrames<R: Read + Seek + Sync> {
     decoded_upto: usize,
     pending: Option<std::sync::mpsc::Receiver<VexelResult<Vec<Vec<u8>>>>>,
     exhausted: bool,
+    output_budget: Option<u64>,
 }
 
 impl<R: Read + Seek + Sync> GifFrames<R> {
-    fn decode_range(frames: &[GifFrameInfo]) -> VexelResult<Vec<Vec<u8>>> {
+    fn decode_range(frames: &[GifFrameInfo], canvas_width: u32, canvas_height: u32) -> VexelResult<Vec<Vec<u8>>> {
+        let decode = |frame: &GifFrameInfo| GifDecoder::<R>::decode_frame_indices(frame, canvas_width, canvas_height);
+
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
-            frames.par_iter().map(GifDecoder::<R>::decode_frame_indices).collect()
+            Ok(frames.par_iter().map(decode).collect())
         }
 
         #[cfg(not(feature = "rayon"))]
-        frames.iter().map(GifDecoder::<R>::decode_frame_indices).collect()
+        Ok(frames.iter().map(decode).collect())
+    }
+
+    fn batch_end(&self, start: usize) -> usize {
+        let limit = (start + LOOKAHEAD_BATCH).min(self.frames.len());
+        let mut bytes = 0usize;
+        let mut end = start;
+        while end < limit {
+            let (width, height) = visible_size(&self.frames[end], self.composer.width, self.composer.height);
+            bytes = bytes.saturating_add(width.saturating_mul(height));
+            if end > start && bytes > LOOKAHEAD_BATCH_BYTES {
+                break;
+            }
+            end += 1;
+        }
+        end
     }
 
     #[cfg(feature = "rayon")]
@@ -866,15 +892,18 @@ impl<R: Read + Seek + Sync> GifFrames<R> {
         }
 
         let start = self.decoded_upto;
-        let end = (start + LOOKAHEAD_BATCH).min(self.frames.len());
+        let end = self.batch_end(start);
         self.decoded_upto = end;
 
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.pending = Some(rx);
 
         let frames = self.frames.clone();
+        let (canvas_width, canvas_height) = (self.composer.width, self.composer.height);
         rayon::spawn(move || {
-            let _ = tx.send(Self::decode_range(&frames[start..end]));
+            let decoded =
+                crate::catch_decoder_panic(|| Self::decode_range(&frames[start..end], canvas_width, canvas_height));
+            let _ = tx.send(decoded);
         });
     }
 
@@ -888,9 +917,9 @@ impl<R: Read + Seek + Sync> GifFrames<R> {
         }
 
         let start = self.next_index;
-        let end = (start + LOOKAHEAD_BATCH).min(self.frames.len());
+        let end = self.batch_end(start);
         self.decoded_upto = end;
-        self.batch = Self::decode_range(&self.frames[start..end])?.into();
+        self.batch = Self::decode_range(&self.frames[start..end], self.composer.width, self.composer.height)?.into();
 
         #[cfg(feature = "rayon")]
         self.start_prefetch();
@@ -923,6 +952,18 @@ impl<R: Read + Seek + Sync> FrameSource for GifFrames<R> {
         };
 
         let frame = &self.frames[self.next_index];
+
+        if let Some(budget) = self.output_budget.as_mut() {
+            let copies = if matches!(frame.disposal_method, DisposalMethod::Previous) { 3 } else { 1 };
+            let cost = (self.composer.canvas.len() as u64).saturating_mul(copies);
+            if cost > *budget && self.next_index > 0 {
+                log_warn!("GIF frames exceed the composition work budget, stopping after {} frames", self.next_index);
+                self.exhausted = true;
+                return Ok(None);
+            }
+            *budget = budget.saturating_sub(cost);
+        }
+
         let composed = self.composer.compose(frame, &indices, &self.decoder.global_color_table);
         self.next_index += 1;
 

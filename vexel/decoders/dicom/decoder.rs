@@ -496,8 +496,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
                 TransferSyntax::EncapsulatedUncompressed | TransferSyntax::DeflatedImageFrameCompression => {
                     let raw;
                     let data: &[u8] = if transfer_syntax == TransferSyntax::DeflatedImageFrameCompression {
-                        let max_output = self.limits.max_alloc.unwrap_or(1 << 30) as usize;
-                        raw = DeflateDecoder::from_slice(frame_bytes).decode_with_max(max_output);
+                        raw = DeflateDecoder::from_slice(frame_bytes).decode_with_max(params.frame_size_bytes());
                         &raw
                     } else {
                         frame_bytes
@@ -513,6 +512,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
                     let mut decoder = JpegLsDecoder::new(Cursor::new(frame_bytes.clone()));
                     decoder.set_limits(self.limits.clone());
                     let image = decoder.decode()?;
+                    self.charge_codec_frame(&image, params)?;
                     let precision = decoder.precision();
                     absorb_codec_frame(
                         image,
@@ -529,6 +529,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
                     let mut decoder = Jpeg2000Decoder::new(Cursor::new(frame_bytes.clone()));
                     decoder.set_limits(self.limits.clone());
                     let image = decoder.decode()?;
+                    self.charge_codec_frame(&image, params)?;
                     let precision = decoder.precision();
                     let signed = decoder.is_signed();
                     absorb_codec_frame(
@@ -546,6 +547,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
                     let mut decoder = JpegDecoder::new(Cursor::new(frame_bytes.clone()));
                     decoder.set_limits(self.limits.clone());
                     let image = decoder.decode()?;
+                    self.charge_codec_frame(&image, params)?;
                     let dct = transfer_syntax == TransferSyntax::JpegDct;
                     let precision = decoder.precision();
                     absorb_codec_frame(
@@ -596,21 +598,42 @@ impl<R: Read + Seek> DicomDecoder<R> {
     }
 
     fn reserve_output(&mut self, params: &PixelParams, num_frames: usize) -> VexelResult<()> {
-        let bytes_per_pixel: u64 = if params.photometric.is_monochrome() && params.samples_per_pixel <= 1 {
-            if params.bits_stored > 8 {
-                2
-            } else {
-                1
-            }
-        } else if params.bits_stored > 8 {
-            6
-        } else {
-            3
-        };
-
-        let total = params.pixels_per_frame() as u64 * bytes_per_pixel * num_frames as u64;
+        let pixels = params.pixels_per_frame() as u64;
+        let output = pixels.saturating_mul(output_bytes_per_pixel(params)).saturating_mul(num_frames as u64);
+        let total = output.saturating_add(pixels.saturating_mul(working_bytes_per_pixel(params)));
         self.limits.reserve(total)
     }
+
+    fn charge_codec_frame(&mut self, image: &Image, params: &PixelParams) -> VexelResult<()> {
+        let expected = (params.pixels_per_frame() as u64).saturating_mul(output_bytes_per_pixel(params));
+        let actual = image.pixels().as_bytes().len() as u64;
+        self.limits.reserve(actual.saturating_sub(expected))
+    }
+}
+
+fn output_bytes_per_pixel(params: &PixelParams) -> u64 {
+    if params.photometric.is_monochrome() && params.samples_per_pixel <= 1 {
+        if params.bits_stored > 8 {
+            2
+        } else {
+            1
+        }
+    } else if params.bits_stored > 8 {
+        6
+    } else {
+        3
+    }
+}
+
+fn working_bytes_per_pixel(params: &PixelParams) -> u64 {
+    let samples = params.samples_per_pixel.max(1) as u64;
+    let container = match params.bits_allocated {
+        0..=8 => 1,
+        9..=16 => 2,
+        _ => 4,
+    };
+    let color = if params.photometric.is_monochrome() && params.samples_per_pixel <= 1 { 0 } else { 4 * samples + 8 };
+    samples * container * 2 + color
 }
 
 fn rebase_signed_samples(samples: Vec<u16>, precision: u16, shift: u32, params: &PixelParams) -> Vec<u16> {
@@ -695,7 +718,14 @@ pub(super) fn read_pixel_params(dataset: &DataSet, transfer_syntax: TransferSynt
         return Err(VexelError::InvalidDimensions { width: cols, height: rows });
     }
 
-    let samples_per_pixel = dataset.u16_value(tags::SAMPLES_PER_PIXEL).unwrap_or(1).max(1);
+    let samples_per_pixel = match dataset.u16_value(tags::SAMPLES_PER_PIXEL) {
+        Some(v) if v > 4 => {
+            log_warn!("DICOM: unusual SamplesPerPixel {}, clamping to 4", v);
+            4
+        }
+        Some(v) => v.max(1),
+        None => 1,
+    };
 
     let photometric = match dataset.string(tags::PHOTOMETRIC_INTERPRETATION) {
         Some(s) if !s.is_empty() => Photometric::from_str(&s),
@@ -927,26 +957,28 @@ fn group_fragments(offset_table: &[u32], fragments: &[Vec<u8>], num_frames: usiz
         return fragments.to_vec();
     }
 
-    if offset_table.len() == num_frames {
-        let mut cumulative = Vec::with_capacity(fragments.len());
+    if offset_table.len() == num_frames && offset_table.windows(2).all(|w| w[0] <= w[1]) {
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        let mut current = None;
+        let mut frame_index = 0;
         let mut pos = 0u64;
         for fragment in fragments {
-            cumulative.push(pos);
-            pos += 8 + fragment.len() as u64;
-        }
-
-        let mut frames = Vec::with_capacity(num_frames);
-        for f in 0..num_frames {
-            let start_offset = offset_table[f] as u64;
-            let end_offset = if f + 1 < num_frames { offset_table[f + 1] as u64 } else { u64::MAX };
-
-            let mut frame = Vec::new();
-            for (i, fragment) in fragments.iter().enumerate() {
-                if cumulative[i] >= start_offset && cumulative[i] < end_offset {
+            while frame_index + 1 < num_frames && pos >= offset_table[frame_index + 1] as u64 {
+                frame_index += 1;
+            }
+            if pos >= offset_table[frame_index] as u64 {
+                if current != Some(frame_index) {
+                    frames.push(Vec::new());
+                    current = Some(frame_index);
+                }
+                if let Some(frame) = frames.last_mut() {
                     frame.extend_from_slice(fragment);
                 }
             }
-            frames.push(frame);
+            pos += 8 + fragment.len() as u64;
+        }
+        if frames.len() != num_frames {
+            log_warn!("DICOM: offset table maps fragments to {} of {} frames", frames.len(), num_frames);
         }
         return frames;
     }

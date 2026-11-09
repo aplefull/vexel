@@ -80,7 +80,10 @@ fn sanitized_keyword(bytes: &[u8], chunk_name: &str) -> String {
 fn decompress_text(compressed: &[u8], limits: &mut Limits) -> VexelResult<String> {
     let max_decompress = decompress_ceiling(compressed.len(), MAX_DECOMPRESSED_TEXT, limits);
     let text_bytes = ZlibDecoder::from_slice(compressed).decode_with_max(max_decompress);
-    limits.reserve_usize(text_bytes.len() * 3)?;
+    if let Err(e) = limits.reserve_usize(text_bytes.len().saturating_mul(3)) {
+        log_warn!("Skipping compressed text: {}", e);
+        return Ok(String::new());
+    }
 
     Ok(String::from_utf8_lossy(&text_bytes).to_string())
 }
@@ -348,14 +351,19 @@ pub fn parse_iccp(data: &[u8], limits: &mut Limits) -> VexelResult<(IccpChunk, O
     let compressed = cursor.rest();
     let max_decompress = decompress_ceiling(compressed.len(), MAX_DECOMPRESSED_ICC, limits);
     let profile_data = ZlibDecoder::from_slice(compressed).decode_with_max(max_decompress);
-    limits.reserve_usize(profile_data.len())?;
 
-    let profile = match ICCProfile::new(&profile_data) {
-        Ok(profile) => Some(profile),
+    let profile = match limits.reserve_usize(profile_data.len()) {
         Err(e) => {
-            log_warn!("Failed to parse iCCP profile: {}", e);
+            log_warn!("Skipping iCCP profile: {}", e);
             None
         }
+        Ok(()) => match ICCProfile::new(&profile_data) {
+            Ok(profile) => Some(profile),
+            Err(e) => {
+                log_warn!("Failed to parse iCCP profile: {}", e);
+                None
+            }
+        },
     };
 
     let chunk = IccpChunk {

@@ -16,8 +16,14 @@ pub struct FileHeaders {
 
 pub struct HeaderReader;
 
+const MAX_BITMAP_ARRAY_DEPTH: u32 = 16;
+
 impl HeaderReader {
     pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<FileHeaders> {
+        Self::read_file_header_at_depth(reader, 0)
+    }
+
+    fn read_file_header_at_depth<R: Read + Seek>(reader: &mut BitReader<R>, depth: u32) -> VexelResult<FileHeaders> {
         let peeked = reader.peek_bytes(16).unwrap_or_default();
         if peeked.len() >= 16 && Self::looks_like_headerless_dib(&peeked) {
             log_warn!("No BMP file header found; treating file as a headerless DIB");
@@ -42,7 +48,11 @@ impl HeaderReader {
                 screen_width: reader.read_u16()?,
                 screen_height: reader.read_u16()?,
             };
-            let inner = Self::read_file_header(reader)?;
+            if depth >= MAX_BITMAP_ARRAY_DEPTH {
+                log_warn!("BMP bitmap array headers nested deeper than {}, ignoring the rest", MAX_BITMAP_ARRAY_DEPTH);
+                return Ok(FileHeaders { file_header: None, array_header: Some(ba), vendor_prefix_len });
+            }
+            let inner = Self::read_file_header_at_depth(reader, depth + 1)?;
             return Ok(FileHeaders {
                 file_header: inner.file_header,
                 array_header: Some(ba),

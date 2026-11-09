@@ -1,8 +1,125 @@
 use super::types::GifFrameInfo;
 use crate::log_warn;
-use crate::utils::error::VexelResult;
 
-pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Vec<u8>> {
+pub trait IndexSink {
+    fn push(&mut self, bytes: &[u8]) -> bool;
+}
+
+pub struct LinearSink {
+    pub out: Vec<u8>,
+    cap: usize,
+}
+
+impl LinearSink {
+    pub fn new(cap: usize) -> LinearSink {
+        LinearSink { out: Vec::with_capacity(cap), cap }
+    }
+}
+
+impl IndexSink for LinearSink {
+    #[inline]
+    fn push(&mut self, bytes: &[u8]) -> bool {
+        let room = self.cap - self.out.len();
+        if bytes.len() >= room {
+            self.out.extend_from_slice(&bytes[..room]);
+            return false;
+        }
+        self.out.extend_from_slice(bytes);
+        true
+    }
+}
+
+const INTERLACE_PASSES: [(usize, usize); 4] = [(0, 8), (4, 8), (2, 4), (1, 2)];
+
+pub struct WindowSink {
+    out: Vec<u8>,
+    frame_width: usize,
+    frame_height: usize,
+    visible_width: usize,
+    visible_height: usize,
+    interlaced: bool,
+    pass: usize,
+    row: usize,
+    col: usize,
+    done: bool,
+}
+
+impl WindowSink {
+    pub fn new(
+        frame_width: usize,
+        frame_height: usize,
+        visible_width: usize,
+        visible_height: usize,
+        interlaced: bool,
+    ) -> WindowSink {
+        WindowSink {
+            out: vec![0u8; visible_width * visible_height],
+            frame_width,
+            frame_height,
+            visible_width,
+            visible_height,
+            interlaced,
+            pass: 0,
+            row: 0,
+            col: 0,
+            done: frame_width == 0 || visible_width == 0 || visible_height == 0,
+        }
+    }
+
+    fn advance_row(&mut self) {
+        if !self.interlaced {
+            self.row += 1;
+            self.done = self.row >= self.visible_height;
+            return;
+        }
+
+        self.row += INTERLACE_PASSES[self.pass].1;
+        while self.row >= self.frame_height {
+            self.pass += 1;
+            if self.pass >= INTERLACE_PASSES.len() {
+                self.done = true;
+                return;
+            }
+            self.row = INTERLACE_PASSES[self.pass].0;
+        }
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        if !self.interlaced && !self.done {
+            let rows = self.row + usize::from(self.col >= self.visible_width);
+            self.out.truncate(rows.min(self.visible_height) * self.visible_width);
+        }
+        self.out
+    }
+}
+
+impl IndexSink for WindowSink {
+    fn push(&mut self, bytes: &[u8]) -> bool {
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            if self.done {
+                return false;
+            }
+
+            let take = rest.len().min(self.frame_width - self.col);
+            if self.row < self.visible_height && self.col < self.visible_width {
+                let count = take.min(self.visible_width - self.col);
+                let dst = self.row * self.visible_width + self.col;
+                self.out[dst..dst + count].copy_from_slice(&rest[..count]);
+            }
+
+            self.col += take;
+            rest = &rest[take..];
+            if self.col == self.frame_width {
+                self.col = 0;
+                self.advance_row();
+            }
+        }
+        !self.done
+    }
+}
+
+pub fn decompress_lzw<S: IndexSink>(frame: &GifFrameInfo, sink: &mut S) {
     let min_code_size = frame.lzw_minimum_code_size.clamp(2, 8) as u32;
     let clear_code = 1u32 << min_code_size;
     let end_code = clear_code + 1;
@@ -48,9 +165,6 @@ pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Ve
         Some(code)
     };
 
-    let initial_capacity = (frame.width as usize).saturating_mul(frame.height as usize).min(max_output);
-    let mut result: Vec<u8> = Vec::with_capacity(initial_capacity);
-
     let mut code_size = min_code_size + 1;
     let mut next_code = end_code + 1;
     let mut prev_code: Option<u32> = None;
@@ -84,7 +198,9 @@ pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Ve
                 };
 
                 let first = arena[offset as usize];
-                result.extend_from_slice(&arena[offset as usize..offset as usize + len as usize]);
+                if !sink.push(&arena[offset as usize..offset as usize + len as usize]) {
+                    break;
+                }
 
                 if next_code < 4096 {
                     if let Some(&(prev_off, prev_len)) = table.get(prev as usize) {
@@ -107,7 +223,9 @@ pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Ve
                         arena.reserve(new_len as usize);
                         arena.extend_from_within(prev_off as usize..prev_off as usize + prev_len as usize);
                         arena.push(first);
-                        result.extend_from_slice(&arena[new_offset as usize..new_offset as usize + new_len as usize]);
+                        if !sink.push(&arena[new_offset as usize..new_offset as usize + new_len as usize]) {
+                            break;
+                        }
                         if next_code < 4096 {
                             table.push((new_offset, new_len));
                             next_code += 1;
@@ -118,7 +236,9 @@ pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Ve
                 log_warn!("Invalid LZW code: {}", code);
             }
         } else if let Some(&(offset, len)) = table.get(code as usize) {
-            result.extend_from_slice(&arena[offset as usize..offset as usize + len as usize]);
+            if !sink.push(&arena[offset as usize..offset as usize + len as usize]) {
+                break;
+            }
         }
 
         prev_code = Some(code);
@@ -127,6 +247,4 @@ pub fn decompress_lzw(frame: &GifFrameInfo, max_output: usize) -> VexelResult<Ve
             code_size += 1;
         }
     }
-
-    Ok(result)
 }

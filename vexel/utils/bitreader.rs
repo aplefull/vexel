@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::utils::marker::Marker;
-use crate::utils::read::read_vec;
+use crate::utils::read::{read_vec, read_vec_up_to};
 use crate::utils::types::ByteOrder;
 
 pub struct BitReader<R: Read + Seek> {
@@ -228,8 +228,11 @@ impl<R: Read + Seek> BitReader<R> {
     // TODO: use this in places where we read bytes and go back
     #[allow(dead_code)]
     pub fn peek_bytes(&mut self, n: usize) -> Result<Vec<u8>, std::io::Error> {
-        let bytes = read_vec(&mut self.reader, n)?;
-        self.reader.seek(SeekFrom::Current(-(n as i64)))?;
+        let bytes = read_vec_up_to(&mut self.reader, n)?;
+        self.reader.seek(SeekFrom::Current(-(bytes.len() as i64)))?;
+        if bytes.len() < n {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
 
         Ok(bytes)
     }

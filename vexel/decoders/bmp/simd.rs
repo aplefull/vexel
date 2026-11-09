@@ -14,6 +14,7 @@ pub fn bgr_to_rgb_row(src: &[u8], dst: &mut [u8], width: usize) {
 }
 
 pub fn apply_palette_row(indices: &[u8], palette: &[ColorEntry], dst: &mut [u8], width: usize) {
+    let width = width.min(dst.len() / 3);
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
         return unsafe { apply_palette_row_avx2(indices, palette, dst, width) };
@@ -46,6 +47,7 @@ pub fn expand_rgb16_masked_row(
 }
 
 pub fn expand_rgb555_row(src: &[u8], dst: &mut [u8], width: usize) {
+    let width = width.min(dst.len() / 3);
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
         return unsafe { expand_rgb555_row_avx2(src, dst, width) };
@@ -69,6 +71,7 @@ pub fn extract_channels_rgb_row(
     b_shift: u32,
     b_bits: u32,
 ) {
+    let width = width.min(dst.len() / 3);
     let byte_aligned = r_bits == 8 && g_bits == 8 && b_bits == 8;
 
     #[cfg(target_arch = "x86_64")]
@@ -97,6 +100,7 @@ pub fn extract_channels_rgba_row(
     a_shift: u32,
     a_bits: u32,
 ) {
+    let width = width.min(dst.len() / 4);
     let byte_aligned = r_bits == 8 && g_bits == 8 && b_bits == 8 && a_bits == 8;
 
     #[cfg(target_arch = "x86_64")]
@@ -199,12 +203,12 @@ fn extract_channel_scalar(pixel: u32, shift: u32, bits: u32) -> u8 {
     if bits == 0 {
         return 0;
     }
-    let mask = ((1u32 << bits) - 1) << shift;
-    let raw = (pixel & mask) >> shift;
+    let max_value = u32::MAX >> (u32::BITS - bits);
+    let raw = (pixel >> shift) & max_value;
     if bits >= 8 {
         (raw >> (bits - 8)) as u8
     } else {
-        ((raw * 255) / ((1u32 << bits) - 1)) as u8
+        ((raw * 255) / max_value) as u8
     }
 }
 
@@ -284,7 +288,7 @@ unsafe fn bgr_to_rgb_row_avx2(src: &[u8], dst: &mut [u8], width: usize) {
 unsafe fn apply_palette_row_avx2(indices: &[u8], palette: &[ColorEntry], dst: &mut [u8], width: usize) {
     use std::arch::x86_64::*;
 
-    let mut flat = [0u8; 256 * 3];
+    let mut flat = [0u8; 256 * 3 + 3];
     let max = palette.len().min(256);
     for i in 0..max {
         flat[i * 3] = palette[i].red;

@@ -1,9 +1,13 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use crate::decoders::dicom::types::{tag_group, tags, Vr};
 use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
 
 const MAX_SEQUENCE_DEPTH: u8 = 12;
 const PREVIEW_LIMIT: usize = 256;
+const MAX_NODES: usize = 1 << 20;
 pub const UNDEFINED_LENGTH: u32 = 0xFFFF_FFFF;
 
 pub struct DataCursor<'a> {
@@ -243,11 +247,25 @@ fn keep_full_value(tag: u32) -> bool {
 
 pub struct Parser {
     pub explicit_vr: bool,
+    nodes_left: Rc<Cell<usize>>,
 }
 
 impl Parser {
     pub fn new(explicit_vr: bool) -> Self {
-        Self { explicit_vr }
+        Self { explicit_vr, nodes_left: Rc::new(Cell::new(MAX_NODES)) }
+    }
+
+    fn with_explicit_vr(&self, explicit_vr: bool) -> Self {
+        Self { explicit_vr, nodes_left: Rc::clone(&self.nodes_left) }
+    }
+
+    fn take_node(&self) -> VexelResult<()> {
+        let left = self.nodes_left.get();
+        if left == 0 {
+            return Err(VexelError::Custom(format!("DICOM: more than {} elements, stopping", MAX_NODES)));
+        }
+        self.nodes_left.set(left - 1);
+        Ok(())
     }
 
     pub fn parse_meta(&self, cursor: &mut DataCursor) -> DataSet {
@@ -296,6 +314,7 @@ impl Parser {
     }
 
     fn parse_element(&self, cursor: &mut DataCursor, depth: u8) -> VexelResult<Option<Element>> {
+        self.take_node()?;
         let offset = cursor.absolute();
         let group = cursor.read_u16()?;
         let element = cursor.read_u16()?;
@@ -401,6 +420,10 @@ impl Parser {
             if length == UNDEFINED_LENGTH { usize::MAX } else { cursor.position().saturating_add(length as usize) };
 
         while cursor.remaining() >= 8 && cursor.position() < end {
+            if let Err(e) = self.take_node() {
+                log_warn!("{}", e);
+                break;
+            }
             let item_offset = cursor.absolute();
             let item_tag = cursor.read_u16().map(|g| (g as u32) << 16)? | cursor.read_u16()? as u32;
             let item_len = cursor.read_u32()?;
@@ -408,7 +431,7 @@ impl Parser {
             match item_tag {
                 tags::SEQUENCE_DELIMITER => break,
                 tags::ITEM => {
-                    let item_parser = if implicit_content { Parser::new(false) } else { Parser::new(self.explicit_vr) };
+                    let item_parser = self.with_explicit_vr(!implicit_content && self.explicit_vr);
                     if item_len == UNDEFINED_LENGTH {
                         let mut item = item_parser.parse_dataset(cursor, depth);
                         if cursor.peek_tag() == Some(tags::ITEM_DELIMITER) {
@@ -449,6 +472,10 @@ impl Parser {
         let mut first = true;
 
         while cursor.remaining() >= 8 {
+            if let Err(e) = self.take_node() {
+                log_warn!("{}", e);
+                break;
+            }
             let item_offset = cursor.absolute();
             let item_tag = cursor.read_u16().map(|g| (g as u32) << 16)? | cursor.read_u16()? as u32;
             let item_len = cursor.read_u32()?;

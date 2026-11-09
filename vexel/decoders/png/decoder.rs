@@ -4,7 +4,7 @@ use super::animation::AnimationDecoder;
 use super::chunks;
 use super::crc_simd::update_crc;
 use super::info::{FdatChunk, IhdrChunk, PngChunk, PngChunkBody, PngInfo, PngSection, PngSignature};
-use super::pixels::PixelDecoder;
+use super::pixels::{filtered_data_size, PixelDecoder};
 use super::types::*;
 use crate::bitreader::BitReader;
 use crate::utils::deflate::ZlibDecoder;
@@ -276,7 +276,9 @@ impl<R: Read + Seek> PngDecoder<R> {
         let body = match kind {
             ChunkKind::IHDR => {
                 let ihdr = chunks::parse_ihdr(data);
-                if complete {
+                if complete && self.bit_depth != 0 {
+                    log_warn!("Duplicate IHDR chunk, ignoring");
+                } else if complete {
                     self.apply_ihdr(&ihdr, mode)?;
                 }
                 PngChunkBody::Ihdr(ihdr)
@@ -326,7 +328,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                 if complete {
                     let sanitized = chunks::sanitize_fctl(&fctl, self.width, self.height);
                     if mode == WalkMode::Decode {
-                        self.limits.reserve_buffer(sanitized.width, sanitized.height, 4)?;
+                        self.limits.reserve_buffer(sanitized.width, sanitized.height, self.output_bytes_per_pixel())?;
                     }
                     self.frames.push(PngFrame { fctl_info: sanitized, fdat: Vec::new() });
                 }
@@ -383,10 +385,18 @@ impl<R: Read + Seek> PngDecoder<R> {
                 return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
             }
 
-            self.limits.reserve_buffer(self.width, self.height, 4)?;
+            self.limits.reserve_buffer(self.width, self.height, self.output_bytes_per_pixel())?;
         }
 
         Ok(())
+    }
+
+    fn output_bytes_per_pixel(&self) -> u8 {
+        if self.bit_depth == 16 {
+            8
+        } else {
+            4
+        }
     }
 
     fn process_chunk(&mut self, chunk_type: [u8; 4], length: u32, mode: WalkMode) -> VexelResult<()> {
@@ -488,12 +498,10 @@ impl<R: Read + Seek> PngDecoder<R> {
                 ColorType::GrayscaleAlpha => self.bit_depth as u32 * 2,
                 ColorType::RGBA => self.bit_depth as u32 * 4,
             };
-            let bytes_per_row = (u64::from(bits_per_pixel) * u64::from(self.width)).div_ceil(8) + 1;
-            let capacity =
-                usize::try_from(bytes_per_row.saturating_mul(u64::from(self.height))).unwrap_or(usize::MAX / 8);
+            let capacity = filtered_data_size(u64::from(bits_per_pixel), self.width, self.height, self.interlace);
             let compressed = std::mem::take(&mut self.idat_data);
             let compressed_len = compressed.len();
-            self.idat_data = ZlibDecoder::from_slice(&compressed).decode_with_capacity(capacity);
+            self.idat_data = ZlibDecoder::from_slice(&compressed).decode_with_max(capacity);
             drop(compressed);
             self.limits.free_usize(compressed_len);
         }
@@ -555,10 +563,15 @@ impl<R: Read + Seek> PngDecoder<R> {
         self.walk_chunks(WalkMode::Decode)?;
         self.finish_info();
 
+        if self.width == 0 || self.height == 0 {
+            return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
+        }
+
         if self.actl_info.is_some() {
             let mut anim_decoder = AnimationDecoder::new(self.width, self.height);
             let result = anim_decoder.decode_apng_frames(
                 &self.frames,
+                &mut self.limits,
                 self.bit_depth,
                 self.color_type,
                 self.interlace,
