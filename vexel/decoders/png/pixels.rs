@@ -73,23 +73,14 @@ impl PixelDecoder {
 
         let trans = if let Some(TransparencyData::Palette(alpha)) = &self.transparency { Some(alpha) } else { None };
 
-        let mut output = Vec::new();
-        let has_trans = trans.is_some();
-
         match self.bit_depth {
-            8 => {
-                for &index in &input {
-                    let color = palette.get(index as usize).unwrap_or(&[0, 0, 0]);
-                    if has_trans {
-                        let alpha = trans.as_ref().unwrap().get(index as usize).unwrap_or(&255);
-                        output.extend_from_slice(&[color[0], color[1], color[2], *alpha]);
-                    } else {
-                        output.extend_from_slice(&[color[0], color[1], color[2]]);
-                    }
-                }
-            }
+            8 => Ok(match trans {
+                Some(alpha) => PixelData::RGBA8(expand_bytes::<4>(&input, &palette_table(palette, Some(alpha)))),
+                None => PixelData::RGB8(expand_bytes::<3>(&input, &palette_table(palette, None))),
+            }),
             16 => {
                 log_warn!("Invalid bit depth for indexed color: 16, reading 16-bit indices");
+                let mut output = Vec::new();
                 for pair in input.chunks_exact(2) {
                     let index = usize::from(u16::from_be_bytes([pair[0], pair[1]]));
                     let color = palette.get(index).unwrap_or(&[0, 0, 0]);
@@ -100,46 +91,25 @@ impl PixelDecoder {
                         None => output.extend_from_slice(&[color[0], color[1], color[2]]),
                     }
                 }
+                Ok(if trans.is_some() { PixelData::RGBA8(output) } else { PixelData::RGB8(output) })
             }
-            1 | 2 | 4 => {
-                let bits_per_pixel = self.bit_depth as usize;
-                let pixels_per_byte = 8 / bits_per_pixel;
-                let mask = (1 << bits_per_pixel) - 1;
-                let width = self.width as usize;
-                let mut pixel_count = 0;
-
-                for &byte in &input {
-                    for shift in (0..pixels_per_byte).rev() {
-                        if pixel_count >= width {
-                            break;
-                        }
-
-                        let index = (byte >> (shift * bits_per_pixel)) & mask;
-                        let color = palette.get(index as usize).unwrap_or(&[0, 0, 0]);
-
-                        if has_trans {
-                            let alpha = trans.as_ref().unwrap().get(index as usize).unwrap_or(&255);
-                            output.extend_from_slice(&[color[0], color[1], color[2], *alpha]);
-                        } else {
-                            output.extend_from_slice(&[color[0], color[1], color[2]]);
-                        }
-
-                        pixel_count += 1;
-                    }
-                    if pixel_count >= width {
-                        pixel_count = 0;
-                    }
+            bits @ (1 | 2 | 4) => {
+                let mut pixels = [[0u8; 4]; 16];
+                for (index, pixel) in pixels.iter_mut().enumerate() {
+                    let color = palette.get(index).copied().unwrap_or([0, 0, 0]);
+                    let alpha = trans.and_then(|alpha| alpha.get(index)).copied().unwrap_or(255);
+                    *pixel = [color[0], color[1], color[2], alpha];
                 }
+                let width = self.width as usize;
+                Ok(match trans {
+                    Some(_) => PixelData::RGBA8(expand_low_bit(&input, width, bits as usize, 4, &pixels)),
+                    None => PixelData::RGB8(expand_low_bit(&input, width, bits as usize, 3, &pixels)),
+                })
             }
             other => {
                 log_warn!("Invalid bit depth for indexed color: {}", other);
+                Ok(if trans.is_some() { PixelData::RGBA8(Vec::new()) } else { PixelData::RGB8(Vec::new()) })
             }
-        };
-
-        if has_trans {
-            Ok(PixelData::RGBA8(output))
-        } else {
-            Ok(PixelData::RGB8(output))
         }
     }
 
@@ -150,83 +120,45 @@ impl PixelDecoder {
         };
 
         match self.bit_depth {
-            8 => {
-                if let Some(key) = trans_key {
+            8 => match trans_key {
+                Some(key) => {
                     let key8 = key as u8;
-                    let mut output = Vec::with_capacity(input.len() * 2);
-                    for &v in &input {
-                        output.push(v);
-                        output.push(if v == key8 { 0 } else { 255 });
+                    let mut table = [[0u8; 4]; 256];
+                    for (value, entry) in table.iter_mut().enumerate() {
+                        *entry = [value as u8, if value as u8 == key8 { 0 } else { 255 }, 0, 0];
                     }
-                    Ok(PixelData::LA8(output))
-                } else {
-                    Ok(PixelData::L8(input))
+                    Ok(PixelData::LA8(expand_bytes::<2>(&input, &table)))
                 }
-            }
+                None => Ok(PixelData::L8(input)),
+            },
             16 => match trans_key {
                 Some(key) => {
-                    let mut output = Vec::with_capacity(input.len());
-                    for gray in input.chunks_exact(2) {
-                        let v = u16::from_be_bytes([gray[0], gray[1]]);
-                        let alpha: u16 = if v == key { 0 } else { 65535 };
-                        output.push(v);
-                        output.push(alpha);
+                    let samples = be_u16_samples(&input, 2);
+                    let mut output = vec![0u16; samples.len() * 2];
+                    for (dst, &value) in output.chunks_exact_mut(2).zip(&samples) {
+                        dst[0] = value;
+                        dst[1] = if value == key { 0 } else { 65535 };
                     }
                     Ok(PixelData::LA16(output))
                 }
-                None => {
-                    let mut output = Vec::with_capacity(input.len() / 2);
-                    for gray in input.chunks_exact(2) {
-                        output.push(u16::from_be_bytes([gray[0], gray[1]]));
-                    }
-                    Ok(PixelData::L16(output))
-                }
+                None => Ok(PixelData::L16(be_u16_samples(&input, 2))),
             },
-            1 | 2 | 4 => {
-                let bits_per_pixel = self.bit_depth as usize;
-                let pixels_per_byte = 8 / bits_per_pixel;
-                let mask = (1 << bits_per_pixel) - 1;
-                let max_value = mask;
-                let width = self.width as usize;
-                let mut pixel_count = 0;
-
-                if let Some(key) = trans_key {
-                    let key_raw = key as u8;
-                    let mut output = Vec::new();
-                    for &byte in &input {
-                        for shift in (0..pixels_per_byte).rev() {
-                            if pixel_count >= width {
-                                break;
-                            }
-                            let value = (byte >> (shift * bits_per_pixel)) & mask;
-                            let scaled = (value as u16 * 255 / max_value as u16) as u8;
-                            output.push(scaled);
-                            output.push(if value == key_raw { 0 } else { 255 });
-                            pixel_count += 1;
-                        }
-                        if pixel_count >= width {
-                            pixel_count = 0;
-                        }
-                    }
-                    Ok(PixelData::LA8(output))
-                } else {
-                    let mut output = Vec::new();
-                    for &byte in &input {
-                        for shift in (0..pixels_per_byte).rev() {
-                            if pixel_count >= width {
-                                break;
-                            }
-                            let value = (byte >> (shift * bits_per_pixel)) & mask;
-                            let scaled = (value as u16 * 255 / max_value as u16) as u8;
-                            output.push(scaled);
-                            pixel_count += 1;
-                        }
-                        if pixel_count >= width {
-                            pixel_count = 0;
-                        }
-                    }
-                    Ok(PixelData::L8(output))
+            bits @ (1 | 2 | 4) => {
+                let max_value = (1u16 << bits) - 1;
+                let mut pixels = [[0u8; 4]; 16];
+                for (value, pixel) in pixels.iter_mut().enumerate().take(usize::from(max_value) + 1) {
+                    let scaled = (value as u16 * 255 / max_value) as u8;
+                    let alpha = match trans_key {
+                        Some(key) if value as u8 == key as u8 => 0,
+                        _ => 255,
+                    };
+                    *pixel = [scaled, alpha, 0, 0];
                 }
+                let width = self.width as usize;
+                Ok(match trans_key {
+                    Some(_) => PixelData::LA8(expand_low_bit(&input, width, bits as usize, 2, &pixels)),
+                    None => PixelData::L8(expand_low_bit(&input, width, bits as usize, 1, &pixels)),
+                })
             }
             other => {
                 log_warn!("Invalid bit depth for grayscale: {}, assuming 8 bits", other);
@@ -238,16 +170,7 @@ impl PixelDecoder {
     pub fn decode_grayscale_alpha(&self, input: Vec<u8>) -> VexelResult<PixelData> {
         match self.bit_depth {
             8 => Ok(PixelData::LA8(input)),
-            16 => {
-                let mut output = Vec::with_capacity((input.len() / 4) * 2);
-
-                for ga in input.chunks_exact(4) {
-                    output.push(u16::from_be_bytes([ga[0], ga[1]]));
-                    output.push(u16::from_be_bytes([ga[2], ga[3]]));
-                }
-
-                Ok(PixelData::LA16(output))
-            }
+            16 => Ok(PixelData::LA16(be_u16_samples(&input, 4))),
             _ => {
                 log_warn!("Invalid bit depth for grayscale alpha: {}, assuming 8 bits", self.bit_depth);
 
@@ -260,11 +183,11 @@ impl PixelDecoder {
         match self.bit_depth {
             8 => match &self.transparency {
                 Some(TransparencyData::RGB(key_r, key_g, key_b)) => {
-                    let (kr, kg, kb) = (*key_r as u8, *key_g as u8, *key_b as u8);
-                    let mut output = Vec::with_capacity(input.len() / 3 * 4);
-                    for rgb in input.chunks_exact(3) {
-                        let alpha = if rgb[0] == kr && rgb[1] == kg && rgb[2] == kb { 0 } else { 255 };
-                        output.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
+                    let key = [*key_r as u8, *key_g as u8, *key_b as u8];
+                    let mut output = vec![0u8; input.len() / 3 * 4];
+                    for (dst, rgb) in output.chunks_exact_mut(4).zip(input.chunks_exact(3)) {
+                        let alpha = if rgb == key { 0 } else { 255 };
+                        dst.copy_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
                     }
                     Ok(PixelData::RGBA8(output))
                 }
@@ -272,29 +195,16 @@ impl PixelDecoder {
             },
             16 => match &self.transparency {
                 Some(TransparencyData::RGB(key_r, key_g, key_b)) => {
-                    let (kr, kg, kb) = (*key_r, *key_g, *key_b);
-                    let mut output = Vec::with_capacity((input.len() / 6) * 4);
-                    for rgb in input.chunks_exact(6) {
-                        let r = u16::from_be_bytes([rgb[0], rgb[1]]);
-                        let g = u16::from_be_bytes([rgb[2], rgb[3]]);
-                        let b = u16::from_be_bytes([rgb[4], rgb[5]]);
-                        let alpha: u16 = if r == kr && g == kg && b == kb { 0 } else { 65535 };
-                        output.push(r);
-                        output.push(g);
-                        output.push(b);
-                        output.push(alpha);
+                    let key = [*key_r, *key_g, *key_b];
+                    let samples = be_u16_samples(&input, 6);
+                    let mut output = vec![0u16; samples.len() / 3 * 4];
+                    for (dst, rgb) in output.chunks_exact_mut(4).zip(samples.chunks_exact(3)) {
+                        let alpha = if rgb == key { 0 } else { 65535 };
+                        dst.copy_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
                     }
                     Ok(PixelData::RGBA16(output))
                 }
-                _ => {
-                    let mut output = Vec::with_capacity((input.len() / 6) * 3);
-                    for rgb in input.chunks_exact(6) {
-                        output.push(u16::from_be_bytes([rgb[0], rgb[1]]));
-                        output.push(u16::from_be_bytes([rgb[2], rgb[3]]));
-                        output.push(u16::from_be_bytes([rgb[4], rgb[5]]));
-                    }
-                    Ok(PixelData::RGB16(output))
-                }
+                _ => Ok(PixelData::RGB16(be_u16_samples(&input, 6))),
             },
             _ => {
                 log_warn!("Invalid bit depth for RGB color: {}, assuming 8 bits", self.bit_depth);
@@ -306,17 +216,7 @@ impl PixelDecoder {
     pub fn decode_rgba(&self, input: Vec<u8>) -> VexelResult<PixelData> {
         match self.bit_depth {
             8 => Ok(PixelData::RGBA8(input)),
-            16 => {
-                let mut output = Vec::with_capacity((input.len() / 8) * 4);
-                for rgba in input.chunks_exact(8) {
-                    output.push(u16::from_be_bytes([rgba[0], rgba[1]]));
-                    output.push(u16::from_be_bytes([rgba[2], rgba[3]]));
-                    output.push(u16::from_be_bytes([rgba[4], rgba[5]]));
-                    output.push(u16::from_be_bytes([rgba[6], rgba[7]]));
-                }
-
-                Ok(PixelData::RGBA16(output))
-            }
+            16 => Ok(PixelData::RGBA16(be_u16_samples(&input, 8))),
             _ => {
                 log_warn!("Invalid bit depth for RGBA color: {}, assuming 8 bits", self.bit_depth);
                 Ok(PixelData::RGBA8(input))
@@ -324,20 +224,11 @@ impl PixelDecoder {
         }
     }
 
-    pub fn deinterlace_scan_lines_owned(&self, data: Vec<u8>, width: u32, height: u32) -> VexelResult<Vec<u8>> {
-        if !self.interlace {
-            let filter_decoder = FilterDecoder::new(self.bit_depth, self.color_type);
-            return filter_decoder.unfilter_scanlines_owned(data, width);
-        }
-
-        self.deinterlace_scan_lines(&data, width, height)
-    }
-
-    pub fn deinterlace_scan_lines(&self, data: &[u8], width: u32, height: u32) -> VexelResult<Vec<u8>> {
+    pub fn deinterlace_scan_lines_owned(&self, mut data: Vec<u8>, width: u32, height: u32) -> VexelResult<Vec<u8>> {
         let filter_decoder = FilterDecoder::new(self.bit_depth, self.color_type);
 
         if !self.interlace {
-            return filter_decoder.unfilter_scanlines(data, width);
+            return filter_decoder.unfilter_scanlines_owned(data, width);
         }
 
         let bits_per_pixel = self.get_bits_per_pixel();
@@ -365,11 +256,12 @@ impl PixelDecoder {
                 break;
             }
 
-            let pass_data = &data[data_offset..data_offset + pass_size];
-            let unfiltered = filter_decoder.unfilter_scanlines(pass_data, pass_width as u32)?;
-            let mut unfiltered_idx = 0;
+            let pass_data = &mut data[data_offset..data_offset + pass_size];
+            let pass_rows = filter_decoder.unfilter_strided(pass_data, pass_width as u32);
+            let stride = pass_bytes_per_row + 1;
 
-            for row in 0..pass_height {
+            for row in 0..pass_height.min(pass_rows) {
+                let unfiltered = &pass_data[row * stride + 1..(row + 1) * stride];
                 let out_y = row * ADAM7_ROW_DELTA[pass] + ADAM7_ROW_START[pass];
                 if out_y >= height as usize {
                     break;
@@ -385,7 +277,7 @@ impl PixelDecoder {
                             break;
                         }
 
-                        let in_byte_idx = unfiltered_idx + (col / pixels_per_byte);
+                        let in_byte_idx = col / pixels_per_byte;
                         let in_bit_shift = (pixels_per_byte - 1 - (col % pixels_per_byte)) * bits_per_pixel as usize;
 
                         if in_byte_idx >= unfiltered.len() {
@@ -405,29 +297,134 @@ impl PixelDecoder {
                     }
                 } else {
                     let bytes_per_pixel = (bits_per_pixel as usize) / 8;
-
-                    for col in 0..pass_width {
-                        let out_x = col * ADAM7_COL_DELTA[pass] + ADAM7_COL_START[pass];
-                        if out_x >= width as usize {
-                            break;
-                        }
-
-                        let out_pos = (out_y * out_bytes) + (out_x * bytes_per_pixel);
-                        let in_pos = unfiltered_idx + (col * bytes_per_pixel);
-
-                        if out_pos + bytes_per_pixel <= output.len() && in_pos + bytes_per_pixel <= unfiltered.len() {
-                            output[out_pos..out_pos + bytes_per_pixel]
-                                .copy_from_slice(&unfiltered[in_pos..in_pos + bytes_per_pixel]);
+                    let src = &unfiltered[..(pass_width * bytes_per_pixel).min(unfiltered.len())];
+                    let dst = &mut output[out_y * out_bytes..(out_y + 1) * out_bytes];
+                    let (start, step) = (ADAM7_COL_START[pass], ADAM7_COL_DELTA[pass]);
+                    match bytes_per_pixel {
+                        1 => scatter_row::<1>(src, dst, start, step),
+                        2 => scatter_row::<2>(src, dst, start, step),
+                        3 => scatter_row::<3>(src, dst, start, step),
+                        4 => scatter_row::<4>(src, dst, start, step),
+                        6 => scatter_row::<6>(src, dst, start, step),
+                        8 => scatter_row::<8>(src, dst, start, step),
+                        _ => {
+                            for (out, pixel) in dst
+                                .chunks_exact_mut(bytes_per_pixel)
+                                .skip(start)
+                                .step_by(step)
+                                .zip(src.chunks_exact(bytes_per_pixel))
+                            {
+                                out.copy_from_slice(pixel);
+                            }
                         }
                     }
                 }
-
-                unfiltered_idx += pass_bytes_per_row;
             }
 
             data_offset += pass_size;
         }
 
         Ok(output)
+    }
+}
+
+fn be_u16_samples(input: &[u8], group_bytes: usize) -> Vec<u16> {
+    let usable = input.len() / group_bytes * group_bytes;
+    input[..usable].chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]])).collect()
+}
+
+fn palette_table(palette: &[[u8; 3]], alpha: Option<&Vec<u8>>) -> [[u8; 4]; 256] {
+    let mut table = [[0u8; 4]; 256];
+    for (index, entry) in table.iter_mut().enumerate() {
+        let [r, g, b] = palette.get(index).copied().unwrap_or([0, 0, 0]);
+        let a = alpha.and_then(|alpha| alpha.get(index)).copied().unwrap_or(255);
+        *entry = [r, g, b, a];
+    }
+    table
+}
+
+fn expand_bytes<const C: usize>(input: &[u8], table: &[[u8; 4]; 256]) -> Vec<u8> {
+    let len = input.len() * C;
+    let mut output = Vec::with_capacity(len + 4);
+    let dst = output.spare_capacity_mut().as_mut_ptr() as *mut u8;
+    for (i, &index) in input.iter().enumerate() {
+        unsafe { (dst.add(i * C) as *mut [u8; 4]).write_unaligned(table[index as usize]) };
+    }
+    unsafe { output.set_len(len) };
+    output
+}
+
+fn expand_low_bit(input: &[u8], width: usize, bits: usize, pixel_bytes: usize, pixels: &[[u8; 4]; 16]) -> Vec<u8> {
+    match (8 / bits) * pixel_bytes {
+        2 => expand_packed::<2, 2>(input, width, bits, pixel_bytes, pixels),
+        4 => expand_packed::<4, 4>(input, width, bits, pixel_bytes, pixels),
+        6 => expand_packed::<6, 8>(input, width, bits, pixel_bytes, pixels),
+        8 => expand_packed::<8, 8>(input, width, bits, pixel_bytes, pixels),
+        12 => expand_packed::<12, 16>(input, width, bits, pixel_bytes, pixels),
+        16 => expand_packed::<16, 16>(input, width, bits, pixel_bytes, pixels),
+        24 => expand_packed::<24, 32>(input, width, bits, pixel_bytes, pixels),
+        32 => expand_packed::<32, 32>(input, width, bits, pixel_bytes, pixels),
+        _ => Vec::new(),
+    }
+}
+
+fn expand_packed<const N: usize, const STORE: usize>(
+    input: &[u8],
+    width: usize,
+    bits: usize,
+    pixel_bytes: usize,
+    pixels: &[[u8; 4]; 16],
+) -> Vec<u8> {
+    let per_byte = 8 / bits;
+    let mask = (1usize << bits) - 1;
+    let mut byte_table = [[0u8; STORE]; 256];
+    for (byte, entry) in byte_table.iter_mut().enumerate() {
+        for k in 0..per_byte {
+            let index = (byte >> (8 - bits * (k + 1))) & mask;
+            entry[k * pixel_bytes..(k + 1) * pixel_bytes].copy_from_slice(&pixels[index][..pixel_bytes]);
+        }
+    }
+
+    let row_bytes = (width * bits).div_ceil(8);
+    if row_bytes == 0 {
+        return Vec::new();
+    }
+    let out_row = width * pixel_bytes;
+    let rows = input.len() / row_bytes;
+    let whole_len = rows * out_row;
+
+    let mut output = Vec::with_capacity(whole_len + STORE);
+    let dst = output.spare_capacity_mut().as_mut_ptr() as *mut u8;
+    for (row, src) in input.chunks_exact(row_bytes).enumerate() {
+        let row_dst = unsafe { dst.add(row * out_row) };
+        for (j, &byte) in src.iter().enumerate() {
+            unsafe { (row_dst.add(j * N) as *mut [u8; STORE]).write_unaligned(byte_table[byte as usize]) };
+        }
+    }
+    unsafe { output.set_len(whole_len) };
+
+    let partial = &input[rows * row_bytes..];
+    let count = (partial.len() * per_byte).min(width);
+    for x in 0..count {
+        let entry = &byte_table[partial[x / per_byte] as usize];
+        output.extend_from_slice(&entry[(x % per_byte) * pixel_bytes..][..pixel_bytes]);
+    }
+    output
+}
+
+fn scatter_row<const BPP: usize>(src: &[u8], dst: &mut [u8], start: usize, step: usize) {
+    if step == 1 {
+        let offset = (start * BPP).min(dst.len());
+        let count = src.len().min(dst.len() - offset) / BPP * BPP;
+        dst[offset..offset + count].copy_from_slice(&src[..count]);
+        return;
+    }
+    let pixels = dst.len() / BPP;
+    for (col, pixel) in src.chunks_exact(BPP).enumerate() {
+        let x = start + col * step;
+        if x >= pixels {
+            break;
+        }
+        dst[x * BPP..x * BPP + BPP].copy_from_slice(pixel);
     }
 }

@@ -1,18 +1,37 @@
-use std::io;
-
 mod simd;
 
-const MAX_BITS: usize = 15;
+const MAX_CODE_LEN: u32 = 15;
 const CODELEN_SYMBOLS: usize = 19;
+const MAX_MATCH_LEN: usize = 258;
+const MAX_DEFLATE_RATIO: usize = 1032;
 
-const LITLEN_PRIMARY_BITS: u32 = 11;
-const LITLEN_PRIMARY_SIZE: usize = 1 << LITLEN_PRIMARY_BITS;
+const LITLEN_BITS: u32 = 11;
+const LITLEN_SIZE: usize = 1 << LITLEN_BITS;
+const LITLEN_MASK: u64 = LITLEN_SIZE as u64 - 1;
 
-const DIST_PRIMARY_BITS: u32 = 9;
-const DIST_PRIMARY_SIZE: usize = 1 << DIST_PRIMARY_BITS;
+const DIST_BITS: u32 = 9;
+const DIST_SIZE: usize = 1 << DIST_BITS;
+const DIST_MASK: u64 = DIST_SIZE as u64 - 1;
 
-const CL_PRIMARY_BITS: u32 = 7;
-const CL_PRIMARY_SIZE: usize = 1 << CL_PRIMARY_BITS;
+const CL_BITS: u32 = 7;
+const CL_SIZE: usize = 1 << CL_BITS;
+const CL_MASK: u64 = CL_SIZE as u64 - 1;
+
+const MAX_EXTRA_DIST_BITS: u32 = 13;
+const FAST_IN_MARGIN: usize = 32;
+const FAST_OUT_MARGIN: usize = 2 * 2 + MAX_MATCH_LEN + 40;
+const FAST_OUT_LOGICAL: usize = 2 * 2 + MAX_MATCH_LEN;
+const OUT_SLACK: usize = FAST_OUT_MARGIN;
+const PAIRING_MIN_INPUT: usize = 2 * LITLEN_SIZE;
+const DEFAULT_INITIAL_MIN: usize = 64 * 1024;
+
+const TOTAL_BITS: u32 = 0x3F;
+const SECOND_LITERAL: u32 = 1 << 7;
+const LITERAL: u32 = 1 << 12;
+const END_OF_BLOCK: u32 = 1 << 13;
+const SUBTABLE: u32 = 1 << 14;
+const EXCEPTIONAL: u32 = 1 << 15;
+const INVALID: u32 = EXCEPTIONAL;
 
 #[rustfmt::skip]
 const LENGTH_BASE: [u32; 29] = [
@@ -65,123 +84,55 @@ const FIXED_LITLEN_LENGTHS: [u8; 288] = {
     lengths
 };
 
-const FIXED_DIST_LENGTHS: [u8; 32] = [5u8; 32];
-const MAX_DEFLATE_RATIO: usize = 1032;
+const FIXED_DIST_LENGTHS: [u8; 30] = [5u8; 30];
 
-const TAG_INVALID: u32 = 0;
-const TAG_LITERAL: u32 = 1;
-const TAG_LIT_PAIR: u32 = 2;
-const TAG_LENGTH: u32 = 3;
-const TAG_DIST: u32 = 4;
-const TAG_EOB: u32 = 5;
-const TAG_REDIRECT: u32 = 6;
-const TAG_CL_SYM: u32 = 7;
+#[inline(always)]
+fn literal_entry(byte: u32, len: u32) -> u32 {
+    (byte << 16) | LITERAL | (len << 8) | len
+}
 
-#[derive(Clone, Copy, Debug)]
-struct Entry(u32);
+#[inline(always)]
+fn base_entry(base: u32, len: u32, extra: u32) -> u32 {
+    (base << 16) | (len << 8) | (len + extra)
+}
 
-impl Entry {
-    const INVALID: Entry = Entry(TAG_INVALID << 28);
+#[inline(always)]
+fn end_of_block_entry(len: u32) -> u32 {
+    EXCEPTIONAL | END_OF_BLOCK | (len << 8) | len
+}
 
-    #[inline(always)]
-    fn tag(self) -> u32 {
-        self.0 >> 28
-    }
+#[inline(always)]
+fn subtable_entry(start: usize, sub_bits: u32, primary_bits: u32) -> u32 {
+    ((start as u32) << 16) | EXCEPTIONAL | SUBTABLE | (sub_bits << 8) | primary_bits
+}
 
-    #[inline(always)]
-    fn is_invalid(self) -> bool {
-        self.tag() == TAG_INVALID
-    }
-    #[inline(always)]
-    fn is_literal(self) -> bool {
-        self.tag() == TAG_LITERAL
-    }
-    #[inline(always)]
-    fn is_lit_pair(self) -> bool {
-        self.tag() == TAG_LIT_PAIR
-    }
-    #[inline(always)]
-    fn is_length(self) -> bool {
-        self.tag() == TAG_LENGTH
-    }
-    #[inline(always)]
-    fn is_dist(self) -> bool {
-        self.tag() == TAG_DIST
-    }
-    #[inline(always)]
-    fn is_eob(self) -> bool {
-        self.tag() == TAG_EOB
-    }
-    #[inline(always)]
-    fn is_redirect(self) -> bool {
-        self.tag() == TAG_REDIRECT
-    }
+#[inline(always)]
+fn total_bits(entry: u32) -> u32 {
+    entry & TOTAL_BITS
+}
 
-    #[inline(always)]
-    fn full_len(self) -> u32 {
-        (self.0 >> 6) & 0x3F
-    }
-    #[inline(always)]
-    fn base_len(self) -> u32 {
-        self.0 & 0x3F
-    }
+#[inline(always)]
+fn code_bits(entry: u32) -> u32 {
+    (entry >> 8) & 0xF
+}
 
-    #[inline(always)]
-    fn lit_a(self) -> u8 {
-        (self.0 >> 20) as u8
-    }
-    #[inline(always)]
-    fn lit_b(self) -> u8 {
-        (self.0 >> 12) as u8
-    }
+#[inline(always)]
+fn extra_value(saved: u64, entry: u32) -> usize {
+    ((saved & ((1u64 << total_bits(entry)) - 1)) >> code_bits(entry)) as usize
+}
 
-    #[inline(always)]
-    fn base_value(self) -> u32 {
-        (self.0 >> 12) & 0xFFFF
-    }
+#[inline(always)]
+fn subtable_lookup(entries: &[u32], pointer: u32, bits: u64) -> u32 {
+    let start = (pointer >> 16) as usize;
+    let index = (bits & ((1u64 << code_bits(pointer)) - 1)) as usize;
+    entries.get(start + index).copied().unwrap_or(INVALID)
+}
 
-    #[inline(always)]
-    fn redirect_base(self) -> usize {
-        ((self.0 >> 12) & 0xFFFF) as usize
-    }
-    #[inline(always)]
-    fn redirect_sub_bits(self) -> u32 {
-        self.full_len() - self.base_len()
-    }
-
-    #[inline(always)]
-    fn cl_sym(self) -> u8 {
-        (self.0 >> 20) as u8
-    }
-
-    fn make_literal(byte: u8, code_len: u32) -> Self {
-        Entry((TAG_LITERAL << 28) | ((byte as u32) << 20) | (code_len << 6) | code_len)
-    }
-
-    fn make_lit_pair(a: u8, b: u8, len_a: u32, len_b: u32) -> Self {
-        let total = len_a + len_b;
-        Entry((TAG_LIT_PAIR << 28) | ((a as u32) << 20) | ((b as u32) << 12) | (total << 6) | total)
-    }
-
-    fn make_length(base_val: u32, code_len: u32, extra_bits: u32) -> Self {
-        Entry((TAG_LENGTH << 28) | (base_val << 12) | ((code_len + extra_bits) << 6) | code_len)
-    }
-
-    fn make_dist(base_val: u32, code_len: u32, extra_bits: u32) -> Self {
-        Entry((TAG_DIST << 28) | (base_val << 12) | ((code_len + extra_bits) << 6) | code_len)
-    }
-
-    fn make_eob(code_len: u32) -> Self {
-        Entry((TAG_EOB << 28) | (code_len << 6) | code_len)
-    }
-
-    fn make_redirect(sub_base: u32, sub_bits: u32, primary_bits: u32) -> Self {
-        Entry((TAG_REDIRECT << 28) | (sub_base << 12) | ((primary_bits + sub_bits) << 6) | primary_bits)
-    }
-
-    fn make_cl_sym(sym: u8, code_len: u32) -> Self {
-        Entry((TAG_CL_SYM << 28) | ((sym as u32) << 20) | (code_len << 6) | code_len)
-    }
+#[inline(always)]
+unsafe fn subtable_lookup_unchecked(entries: &[u32], pointer: u32, bits: u64) -> u32 {
+    let start = (pointer >> 16) as usize;
+    let index = (bits & ((1u64 << code_bits(pointer)) - 1)) as usize;
+    *entries.get_unchecked(start + index)
 }
 
 #[inline(always)]
@@ -192,475 +143,799 @@ fn reverse_bits(code: u32, len: u32) -> u32 {
     (code << (32 - len)).reverse_bits()
 }
 
-struct HuffTable {
-    primary: Vec<Entry>,
-    secondary: Vec<Entry>,
-    primary_bits: u32,
-}
-
+#[derive(Clone, Copy)]
 enum SymbolKind {
     Literal,
     Dist,
     CodeLen,
 }
 
+impl SymbolKind {
+    fn entry(self, symbol: usize, len: u32) -> Option<u32> {
+        match self {
+            SymbolKind::Literal => match symbol {
+                0..=255 => Some(literal_entry(symbol as u32, len)),
+                256 => Some(end_of_block_entry(len)),
+                257..=285 => Some(base_entry(LENGTH_BASE[symbol - 257], len, LENGTH_EXTRA[symbol - 257])),
+                _ => None,
+            },
+            SymbolKind::Dist => {
+                (symbol < DIST_BASE.len()).then(|| base_entry(DIST_BASE[symbol], len, DIST_EXTRA[symbol]))
+            }
+            SymbolKind::CodeLen => Some(base_entry(symbol as u32, len, 0)),
+        }
+    }
+}
+
+struct HuffTable {
+    entries: Vec<u32>,
+    primary_bits: u32,
+    length_counts: [u32; MAX_CODE_LEN as usize + 1],
+}
+
 impl HuffTable {
-    fn new(primary_bits: u32, primary_size: usize) -> Box<Self> {
-        Box::new(HuffTable { primary: vec![Entry::INVALID; primary_size], secondary: Vec::new(), primary_bits })
+    fn new(primary_bits: u32) -> Self {
+        HuffTable {
+            entries: vec![INVALID; 1 << primary_bits],
+            primary_bits,
+            length_counts: [0; MAX_CODE_LEN as usize + 1],
+        }
     }
 
     fn reset(&mut self) {
-        self.primary.fill(Entry::INVALID);
-        self.secondary.clear();
+        self.entries.truncate(1 << self.primary_bits);
+        self.entries.fill(INVALID);
     }
 
-    fn build(&mut self, lengths: &[u8], kind: SymbolKind) -> Result<(), io::Error> {
-        let n = lengths.len();
-        let mut bl_count = [0u32; MAX_BITS + 1];
+    fn build(&mut self, lengths: &[u8], kind: SymbolKind) -> bool {
+        let mut bl_count = [0u32; MAX_CODE_LEN as usize + 1];
         for &l in lengths {
-            if l as usize > MAX_BITS {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "code length > 15"));
+            if u32::from(l) > MAX_CODE_LEN {
+                return false;
             }
             if l > 0 {
                 bl_count[l as usize] += 1;
             }
         }
 
-        let mut next_code = [0u32; MAX_BITS + 1];
+        let mut next_code = [0u32; MAX_CODE_LEN as usize + 1];
         let mut code = 0u32;
-        for bits in 1..=MAX_BITS {
+        for bits in 1..=MAX_CODE_LEN as usize {
             code = (code + bl_count[bits - 1]) << 1;
             next_code[bits] = code;
         }
 
-        for i in 0..n {
-            let len = lengths[i] as u32;
+        self.length_counts = bl_count;
+        let kraft: u32 = (1..=MAX_CODE_LEN as usize).map(|len| bl_count[len] << (MAX_CODE_LEN as usize - len)).sum();
+        if kraft <= 1 << MAX_CODE_LEN {
+            return self.build_prefix_free(lengths, kind, &bl_count, &mut next_code);
+        }
+
+        self.reset();
+        let primary_bits = self.primary_bits;
+        for (symbol, &l) in lengths.iter().enumerate() {
+            let len = u32::from(l);
             if len == 0 {
                 continue;
             }
-            let sym_code = next_code[len as usize];
+            let symbol_code = next_code[len as usize];
             next_code[len as usize] += 1;
 
-            let entry = match kind {
-                SymbolKind::Literal => {
-                    if i < 256 {
-                        Entry::make_literal(i as u8, len)
-                    } else if i == 256 {
-                        Entry::make_eob(len)
-                    } else if i <= 285 {
-                        let idx = i - 257;
-                        Entry::make_length(LENGTH_BASE[idx], len, LENGTH_EXTRA[idx])
-                    } else {
-                        continue;
-                    }
-                }
-                SymbolKind::Dist => {
-                    if i < 30 {
-                        Entry::make_dist(DIST_BASE[i], len, DIST_EXTRA[i])
-                    } else {
-                        continue;
-                    }
-                }
-                SymbolKind::CodeLen => Entry::make_cl_sym(i as u8, len),
+            let Some(full) = kind.entry(symbol, len) else {
+                continue;
             };
-
-            self.insert(sym_code, len, entry)?;
-        }
-        Ok(())
-    }
-
-    fn insert(&mut self, code: u32, len: u32, entry: Entry) -> Result<(), io::Error> {
-        let pb = self.primary_bits;
-        if len <= pb {
-            let fill = 1u32 << (pb - len);
-            let rev = reverse_bits(code, len);
-            for k in 0..fill {
-                let idx = (rev | (k << len)) as usize;
-                if idx < self.primary.len() {
-                    self.primary[idx] = entry;
-                }
-            }
-        } else {
-            let overflow_bits = len - pb;
-            let primary_rev = reverse_bits(code >> overflow_bits, pb) as usize;
-            let overflow_rev = reverse_bits(code & ((1 << overflow_bits) - 1), overflow_bits);
-
-            let (sub_base, sub_bits) = if self.primary[primary_rev].is_redirect() {
-                let e = self.primary[primary_rev];
-                (e.redirect_base(), e.redirect_sub_bits())
-            } else if self.primary[primary_rev].is_invalid() {
-                let base = self.secondary.len();
-                let bits = (MAX_BITS as u32) - pb;
-                let size = 1usize << bits;
-                self.secondary.resize(base + size, Entry::INVALID);
-                self.primary[primary_rev] = Entry::make_redirect(base as u32, bits, pb);
-                (base, bits)
+            let inserted = if len <= primary_bits {
+                self.insert_primary(symbol_code, len, full);
+                true
             } else {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Huffman conflict"));
+                let sub = kind.entry(symbol, len - primary_bits).unwrap_or(INVALID);
+                self.insert_secondary(symbol_code, len, sub)
             };
+            if !inserted {
+                return false;
+            }
+        }
+        true
+    }
 
-            let fill = 1u32 << (sub_bits - overflow_bits);
-            for k in 0..fill {
-                let idx = sub_base + ((overflow_rev | (k << overflow_bits)) as usize & ((1 << sub_bits) - 1));
-                if idx < sub_base + (1 << sub_bits) && idx < self.secondary.len() {
-                    self.secondary[idx] = entry;
+    fn build_prefix_free(
+        &mut self,
+        lengths: &[u8],
+        kind: SymbolKind,
+        bl_count: &[u32; MAX_CODE_LEN as usize + 1],
+        next_code: &mut [u32; MAX_CODE_LEN as usize + 1],
+    ) -> bool {
+        let mut offsets = [0usize; MAX_CODE_LEN as usize + 2];
+        for len in 1..=MAX_CODE_LEN as usize {
+            offsets[len + 1] = offsets[len] + bl_count[len] as usize;
+        }
+        let mut sorted = [0u16; 320];
+        let mut cursor = offsets;
+        for (symbol, &l) in lengths.iter().enumerate() {
+            if l > 0 {
+                sorted[cursor[l as usize]] = symbol as u16;
+                cursor[l as usize] += 1;
+            }
+        }
+
+        let primary_bits = self.primary_bits;
+        self.entries.clear();
+        self.entries.extend_from_slice(&[INVALID, INVALID]);
+        for len in 1..=primary_bits {
+            if len > 1 {
+                self.entries.extend_from_within(..);
+            }
+            for &symbol in &sorted[offsets[len as usize]..offsets[len as usize + 1]] {
+                let symbol_code = next_code[len as usize];
+                next_code[len as usize] += 1;
+                if let Some(entry) = kind.entry(usize::from(symbol), len) {
+                    self.entries[reverse_bits(symbol_code, len) as usize] = entry;
                 }
             }
         }
-        Ok(())
+
+        for len in primary_bits + 1..=MAX_CODE_LEN {
+            for &symbol in &sorted[offsets[len as usize]..offsets[len as usize + 1]] {
+                let symbol_code = next_code[len as usize];
+                next_code[len as usize] += 1;
+                if let Some(entry) = kind.entry(usize::from(symbol), len - primary_bits) {
+                    if !self.insert_secondary(symbol_code, len, entry) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
-    #[inline(always)]
-    fn lookup(&self, bits: u64) -> (Entry, u32) {
-        let mask = (1u64 << self.primary_bits) - 1;
-        let idx = (bits & mask) as usize;
-        let e = self.primary[idx];
+    fn insert_primary(&mut self, code: u32, len: u32, entry: u32) {
+        let reversed = reverse_bits(code, len) as usize;
+        for k in 0..1usize << (self.primary_bits - len) {
+            self.entries[reversed | (k << len)] = entry;
+        }
+    }
 
-        if e.is_redirect() {
-            let sub_base = e.redirect_base();
-            let sub_bits = e.redirect_sub_bits();
-            let pb = e.base_len();
-            let sub_mask = (1u64 << sub_bits) - 1;
-            let sub_idx = sub_base + (((bits >> pb) & sub_mask) as usize);
-            let se = if sub_idx < self.secondary.len() { self.secondary[sub_idx] } else { Entry::INVALID };
-            (se, se.base_len())
+    fn insert_secondary(&mut self, code: u32, len: u32, entry: u32) -> bool {
+        let primary_bits = self.primary_bits;
+        let overflow_bits = len - primary_bits;
+        let primary_index = reverse_bits(code >> overflow_bits, primary_bits) as usize;
+        let overflow_reversed = reverse_bits(code & ((1 << overflow_bits) - 1), overflow_bits) as usize;
+
+        let current = self.entries[primary_index];
+        let (start, sub_bits) = if current & SUBTABLE != 0 {
+            ((current >> 16) as usize, code_bits(current))
+        } else if current == INVALID {
+            let start = self.entries.len();
+            let sub_bits = MAX_CODE_LEN - primary_bits;
+            self.entries.resize(start + (1 << sub_bits), INVALID);
+            self.entries[primary_index] = subtable_entry(start, sub_bits, primary_bits);
+            (start, sub_bits)
         } else {
-            (e, e.base_len())
+            return false;
+        };
+
+        let sub_mask = (1usize << sub_bits) - 1;
+        for k in 0..1usize << (sub_bits - overflow_bits) {
+            self.entries[start + ((overflow_reversed | (k << overflow_bits)) & sub_mask)] = entry;
         }
-    }
-}
-
-fn build_fast_table(table: &mut HuffTable) {
-    let primary_bits = table.primary_bits;
-    let size = table.primary.len();
-
-    for i in 0..size {
-        let e = table.primary[i];
-        if !e.is_literal() {
-            continue;
-        }
-        let len_a = e.base_len();
-        if len_a == 0 || len_a >= primary_bits {
-            continue;
-        }
-
-        let next_idx = (i >> len_a) & (size - 1);
-        let e2 = table.primary[next_idx];
-        if !e2.is_literal() {
-            continue;
-        }
-        let len_b = e2.base_len();
-        if len_a + len_b > primary_bits {
-            continue;
-        }
-
-        table.primary[i] = Entry::make_lit_pair(e.lit_a(), e2.lit_a(), len_a, len_b);
-    }
-}
-
-struct TableScratch {
-    litlen: Box<HuffTable>,
-    dist: Box<HuffTable>,
-    cl: Box<HuffTable>,
-    lengths: Vec<u8>,
-}
-
-impl TableScratch {
-    fn new() -> Self {
-        TableScratch {
-            litlen: HuffTable::new(LITLEN_PRIMARY_BITS, LITLEN_PRIMARY_SIZE),
-            dist: HuffTable::new(DIST_PRIMARY_BITS, DIST_PRIMARY_SIZE),
-            cl: HuffTable::new(CL_PRIMARY_BITS, CL_PRIMARY_SIZE),
-            lengths: Vec::new(),
-        }
-    }
-}
-
-fn build_dynamic_tables(bits: &mut BitBuffer<'_>, scratch: &mut TableScratch) -> Result<(), io::Error> {
-    let hlit = bits.read_bits(5)? as usize + 257;
-    let hdist = bits.read_bits(5)? as usize + 1;
-    let hclen = bits.read_bits(4)? as usize + 4;
-
-    let mut cl_lengths = [0u8; CODELEN_SYMBOLS];
-    for i in 0..hclen {
-        cl_lengths[CODE_LENGTH_ORDER[i]] = bits.read_bits(3)? as u8;
+        true
     }
 
-    scratch.cl.reset();
-    scratch.cl.build(&cl_lengths, SymbolKind::CodeLen)?;
-
-    let TableScratch { cl: cl_table, lengths, litlen, dist } = scratch;
-
-    let total = hlit + hdist;
-    lengths.clear();
-    lengths.resize(total, 0);
-    let mut i = 0;
-    while i < total {
-        if bits.count < 7 {
-            bits.fill();
-        }
-        let (entry, consumed) = cl_table.lookup(bits.buf);
-        if consumed == 0 || entry.is_invalid() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad cl code"));
-        }
-        bits.consume(consumed);
-
-        let sym = entry.cl_sym();
-        match sym {
-            0..=15 => {
-                lengths[i] = sym;
-                i += 1;
+    fn pair_literals(&mut self, literal_counts: &[u32; MAX_CODE_LEN as usize + 1]) -> bool {
+        let bits = self.primary_bits;
+        let mut paired = 0u64;
+        for a in 1..bits {
+            for b in 1..=bits - a {
+                paired +=
+                    (u64::from(literal_counts[a as usize]) * u64::from(literal_counts[b as usize])) << (bits - a - b);
             }
-            16 => {
-                if i == 0 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Repeat w/o prior"));
-                }
-                let rep = bits.read_bits(2)? as usize + 3;
-                let prev = lengths[i - 1];
-                let end = (i + rep).min(total);
-                lengths[i..end].fill(prev);
-                i = end;
-            }
-            17 => {
-                let rep = bits.read_bits(3)? as usize + 3;
-                let end = (i + rep).min(total);
-                lengths[i..end].fill(0);
-                i = end;
-            }
-            18 => {
-                let rep = bits.read_bits(7)? as usize + 11;
-                let end = (i + rep).min(total);
-                lengths[i..end].fill(0);
-                i = end;
-            }
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad cl sym")),
         }
-    }
+        if paired < (1 << bits) / 4 {
+            return false;
+        }
 
-    litlen.reset();
-    litlen.build(&lengths[..hlit], SymbolKind::Literal)?;
-    build_fast_table(litlen);
-
-    dist.reset();
-    if hdist > 0 && lengths[hlit..].iter().any(|&l| l != 0) {
-        dist.build(&lengths[hlit..], SymbolKind::Dist)?;
-    }
-
-    Ok(())
-}
-
-fn build_fixed_tables() -> (Box<HuffTable>, Box<HuffTable>) {
-    let mut litlen = HuffTable::new(LITLEN_PRIMARY_BITS, LITLEN_PRIMARY_SIZE);
-    litlen.build(&FIXED_LITLEN_LENGTHS, SymbolKind::Literal).expect("fixed litlen");
-    build_fast_table(&mut litlen);
-
-    let mut dist = HuffTable::new(DIST_PRIMARY_BITS, DIST_PRIMARY_SIZE);
-    dist.build(&FIXED_DIST_LENGTHS[..30], SymbolKind::Dist).expect("fixed dist");
-
-    (litlen, dist)
-}
-
-struct BitBuffer<'a> {
-    buf: u64,
-    count: u32,
-    src: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> BitBuffer<'a> {
-    fn new(src: &'a [u8]) -> Self {
-        BitBuffer { buf: 0, count: 0, src, pos: 0 }
+        let Some(primary) = self.entries.first_chunk_mut::<LITLEN_SIZE>() else {
+            return false;
+        };
+        for i in (0..LITLEN_SIZE).rev() {
+            let first = primary[i];
+            let first_len = total_bits(first);
+            let second = primary[i >> first_len];
+            let total = first_len + total_bits(second);
+            let fits = (first & second & LITERAL != 0) & (total <= bits);
+            let paired = (first & !TOTAL_BITS) | ((second & 0xFF_0000) << 8) | SECOND_LITERAL | total;
+            primary[i] = if fits { paired } else { first };
+        }
+        true
     }
 
     #[inline(always)]
-    fn fill(&mut self) {
-        if self.count <= 56 && self.pos + 8 <= self.src.len() {
-            let chunk = u64::from_le_bytes(self.src[self.pos..self.pos + 8].try_into().unwrap());
-            self.buf |= chunk << self.count;
-            let consumed = (64 - self.count) >> 3;
-            self.pos += consumed as usize;
-            self.count += consumed * 8;
+    fn primary_litlen(&self) -> &[u32; LITLEN_SIZE] {
+        self.entries[..LITLEN_SIZE].try_into().unwrap()
+    }
+
+    #[inline(always)]
+    fn primary_dist(&self) -> &[u32; DIST_SIZE] {
+        self.entries[..DIST_SIZE].try_into().unwrap()
+    }
+}
+
+struct BlockTables {
+    litlen: HuffTable,
+    dist: HuffTable,
+    paired: bool,
+}
+
+impl BlockTables {
+    fn new() -> Self {
+        BlockTables { litlen: HuffTable::new(LITLEN_BITS), dist: HuffTable::new(DIST_BITS), paired: false }
+    }
+
+    fn fixed() -> Self {
+        let mut tables = BlockTables::new();
+        tables.litlen.build(&FIXED_LITLEN_LENGTHS, SymbolKind::Literal);
+        tables.dist.build(&FIXED_DIST_LENGTHS, SymbolKind::Dist);
+        tables
+    }
+}
+
+enum Step {
+    Continue,
+    EndOfBlock,
+    Stop,
+}
+
+enum FastExit {
+    Margin,
+    EndOfBlock,
+    Stop,
+}
+
+struct Inflater<'a> {
+    input: &'a [u8],
+    in_pos: usize,
+    bitbuf: u64,
+    bits_left: u32,
+    out: Vec<u8>,
+    max_output: usize,
+}
+
+impl<'a> Inflater<'a> {
+    fn new(input: &'a [u8], initial: usize, max_output: usize) -> Self {
+        let initial = initial.min(max_output).min(input.len().saturating_mul(MAX_DEFLATE_RATIO));
+        Inflater {
+            input,
+            in_pos: 0,
+            bitbuf: 0,
+            bits_left: 0,
+            out: Vec::with_capacity(initial.saturating_add(OUT_SLACK)),
+            max_output,
+        }
+    }
+
+    #[inline(always)]
+    fn refill(&mut self) {
+        if self.in_pos + 8 <= self.input.len() {
+            let word = u64::from_le_bytes(self.input[self.in_pos..self.in_pos + 8].try_into().unwrap());
+            self.bitbuf |= word << self.bits_left;
+            self.in_pos += 7 - ((self.bits_left >> 3) & 7) as usize;
+            self.bits_left |= 56;
             return;
         }
-
-        while self.count <= 56 && self.pos < self.src.len() {
-            self.buf |= (self.src[self.pos] as u64) << self.count;
-            self.count += 8;
-            self.pos += 1;
+        while self.bits_left < 56 && self.in_pos < self.input.len() {
+            self.bitbuf |= u64::from(self.input[self.in_pos]) << self.bits_left;
+            self.bits_left += 8;
+            self.in_pos += 1;
         }
-    }
-
-    #[inline(always)]
-    fn peek(&self, n: u32) -> u32 {
-        (self.buf & ((1u64 << n) - 1)) as u32
     }
 
     #[inline(always)]
     fn consume(&mut self, n: u32) {
-        self.buf >>= n;
-        self.count = self.count.wrapping_sub(n);
+        self.bitbuf >>= n;
+        self.bits_left -= n;
     }
 
-    #[inline(always)]
-    fn overrun(&self) -> bool {
-        self.count > 64
-    }
-
-    fn align_to_byte(&mut self) {
-        let rem = self.count % 8;
-        if rem != 0 {
-            self.buf >>= rem;
-            self.count -= rem;
+    fn read_bits(&mut self, n: u32) -> Option<u32> {
+        if self.bits_left < n {
+            self.refill();
+            if self.bits_left < n {
+                return None;
+            }
         }
-    }
-
-    fn read_byte_aligned(&mut self) -> Result<u8, io::Error> {
-        if self.count >= 8 {
-            let b = (self.buf & 0xFF) as u8;
-            self.buf >>= 8;
-            self.count -= 8;
-            return Ok(b);
-        }
-        if self.pos >= self.src.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF"));
-        }
-        let b = self.src[self.pos];
-        self.pos += 1;
-        Ok(b)
-    }
-
-    fn read_u16_le_aligned(&mut self) -> Result<u16, io::Error> {
-        let lo = self.read_byte_aligned()? as u16;
-        let hi = self.read_byte_aligned()? as u16;
-        Ok(lo | (hi << 8))
-    }
-
-    fn read_bits(&mut self, n: u32) -> Result<u32, io::Error> {
-        if n == 0 {
-            return Ok(0);
-        }
-        if self.count < n {
-            self.fill();
-        }
-        if self.count < n {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Not enough bits"));
-        }
-        let val = self.peek(n);
+        let value = (self.bitbuf & ((1u64 << n) - 1)) as u32;
         self.consume(n);
-        Ok(val)
+        Some(value)
+    }
+
+    fn ensure_room(&mut self, needed: usize) {
+        let len = self.out.len();
+        let want = len.saturating_add(needed).min(self.max_output).saturating_add(OUT_SLACK);
+        if want <= self.out.capacity() {
+            return;
+        }
+        let ceiling = self.max_output.saturating_add(OUT_SLACK);
+        let grown = self.out.capacity().saturating_mul(2).max(DEFAULT_INITIAL_MIN);
+        self.out.reserve_exact(want.max(grown).min(ceiling) - len);
+    }
+
+    fn fast_out_end(&self) -> usize {
+        self.out.capacity().saturating_sub(FAST_OUT_MARGIN).min(self.max_output.saturating_sub(FAST_OUT_LOGICAL))
+    }
+
+    fn inflate(mut self) -> Vec<u8> {
+        let mut dynamic: Option<Box<BlockTables>> = None;
+        let mut fixed: Option<Box<BlockTables>> = None;
+        let mut cl = HuffTable::new(CL_BITS);
+        let mut lengths = Vec::new();
+
+        loop {
+            if self.out.len() >= self.max_output {
+                break;
+            }
+            let Some(bfinal) = self.read_bits(1) else {
+                break;
+            };
+            let Some(btype) = self.read_bits(2) else {
+                break;
+            };
+
+            let ok = match btype {
+                0 => self.stored_block(),
+                1 => {
+                    let tables = fixed.get_or_insert_with(|| Box::new(BlockTables::fixed()));
+                    self.huffman_block(tables)
+                }
+                2 => {
+                    let tables = dynamic.get_or_insert_with(|| Box::new(BlockTables::new()));
+                    self.read_dynamic_tables(tables, &mut cl, &mut lengths) && self.huffman_block(tables)
+                }
+                _ => false,
+            };
+
+            if bfinal == 1 || !ok {
+                break;
+            }
+        }
+
+        self.out
+    }
+
+    fn stored_block(&mut self) -> bool {
+        let partial = self.bits_left & 7;
+        self.consume(partial);
+        self.in_pos -= (self.bits_left >> 3) as usize;
+        self.bitbuf = 0;
+        self.bits_left = 0;
+
+        let Some(header) = self.input.get(self.in_pos..self.in_pos + 4) else {
+            return false;
+        };
+        let len = u16::from_le_bytes([header[0], header[1]]);
+        let nlen = u16::from_le_bytes([header[2], header[3]]);
+        if len != !nlen {
+            return false;
+        }
+        self.in_pos += 4;
+
+        let available = self.input.len() - self.in_pos;
+        let room = self.max_output - self.out.len();
+        let count = usize::from(len).min(available).min(room);
+        self.ensure_room(count);
+        self.out.extend_from_slice(&self.input[self.in_pos..self.in_pos + count]);
+        self.in_pos += count;
+        count == usize::from(len) || count == room
+    }
+
+    fn read_dynamic_tables(&mut self, tables: &mut BlockTables, cl: &mut HuffTable, lengths: &mut Vec<u8>) -> bool {
+        let (Some(hlit), Some(hdist), Some(hclen)) = (self.read_bits(5), self.read_bits(5), self.read_bits(4)) else {
+            return false;
+        };
+        let hlit = hlit as usize + 257;
+        let hdist = hdist as usize + 1;
+        let hclen = hclen as usize + 4;
+
+        let mut cl_lengths = [0u8; CODELEN_SYMBOLS];
+        for &symbol in &CODE_LENGTH_ORDER[..hclen] {
+            let Some(len) = self.read_bits(3) else {
+                return false;
+            };
+            cl_lengths[symbol] = len as u8;
+        }
+
+        if !cl.build(&cl_lengths, SymbolKind::CodeLen) {
+            return false;
+        }
+
+        let total = hlit + hdist;
+        lengths.clear();
+        lengths.resize(total, 0);
+        let mut i = 0;
+        while i < total {
+            self.refill();
+            let entry = cl.entries[(self.bitbuf & CL_MASK) as usize];
+            let consumed = total_bits(entry);
+            if entry & EXCEPTIONAL != 0 || consumed == 0 || consumed > self.bits_left {
+                return false;
+            }
+            self.consume(consumed);
+
+            let symbol = (entry >> 16) as u8;
+            let (fill, repeat) = match symbol {
+                0..=15 => {
+                    lengths[i] = symbol;
+                    i += 1;
+                    continue;
+                }
+                16 => {
+                    if i == 0 {
+                        return false;
+                    }
+                    (lengths[i - 1], self.read_bits(2).map(|r| r as usize + 3))
+                }
+                17 => (0, self.read_bits(3).map(|r| r as usize + 3)),
+                18 => (0, self.read_bits(7).map(|r| r as usize + 11)),
+                _ => return false,
+            };
+            let Some(repeat) = repeat else {
+                return false;
+            };
+            let end = (i + repeat).min(total);
+            lengths[i..end].fill(fill);
+            i = end;
+        }
+
+        if !tables.litlen.build(&lengths[..hlit], SymbolKind::Literal) {
+            return false;
+        }
+
+        let mut literal_counts = tables.litlen.length_counts;
+        for &l in lengths[256..hlit].iter().filter(|&&l| l != 0) {
+            literal_counts[l as usize] -= 1;
+        }
+        let remaining_input = self.input.len() - self.in_pos;
+        tables.paired = remaining_input >= PAIRING_MIN_INPUT && tables.litlen.pair_literals(&literal_counts);
+
+        if lengths[hlit..].iter().all(|&l| l == 0) {
+            tables.dist.reset();
+        } else if !tables.dist.build(&lengths[hlit..], SymbolKind::Dist) {
+            return false;
+        }
+
+        true
+    }
+
+    fn huffman_block(&mut self, tables: &BlockTables) -> bool {
+        loop {
+            if self.in_pos + FAST_IN_MARGIN < self.input.len() {
+                if self.out.len() >= self.fast_out_end() {
+                    self.ensure_room(FAST_OUT_MARGIN.max(self.out.capacity() - self.out.len()));
+                }
+                let out_end = self.fast_out_end();
+                if self.out.len() < out_end {
+                    let exit = self.run_fast_loop(tables, out_end);
+                    match exit {
+                        FastExit::Margin => {}
+                        FastExit::EndOfBlock => return true,
+                        FastExit::Stop => return false,
+                    }
+                }
+            }
+
+            match self.slow_symbol(tables) {
+                Step::Continue => {}
+                Step::EndOfBlock => return true,
+                Step::Stop => return false,
+            }
+        }
+    }
+
+    fn push_literal(&mut self, byte: u8) -> bool {
+        if self.out.len() >= self.max_output {
+            return false;
+        }
+        self.ensure_room(1);
+        self.out.push(byte);
+        true
+    }
+
+    fn slow_symbol(&mut self, tables: &BlockTables) -> Step {
+        let litlen = &tables.litlen.entries;
+        self.refill();
+        let mut entry = litlen[(self.bitbuf & LITLEN_MASK) as usize];
+        if entry & SUBTABLE != 0 {
+            if total_bits(entry) > self.bits_left {
+                return Step::Stop;
+            }
+            self.consume(total_bits(entry));
+            entry = subtable_lookup(litlen, entry, self.bitbuf);
+        }
+
+        if entry & EXCEPTIONAL != 0 {
+            if entry & END_OF_BLOCK != 0 && total_bits(entry) <= self.bits_left {
+                self.consume(total_bits(entry));
+                return Step::EndOfBlock;
+            }
+            return Step::Stop;
+        }
+
+        if entry & LITERAL != 0 {
+            let first_len = code_bits(entry);
+            if first_len > self.bits_left || !self.push_literal((entry >> 16) as u8) {
+                return Step::Stop;
+            }
+            if entry & SECOND_LITERAL == 0 {
+                self.consume(first_len);
+                return Step::Continue;
+            }
+            if total_bits(entry) > self.bits_left || !self.push_literal((entry >> 24) as u8) {
+                return Step::Stop;
+            }
+            self.consume(total_bits(entry));
+            return Step::Continue;
+        }
+
+        if total_bits(entry) > self.bits_left {
+            return Step::Stop;
+        }
+        let saved = self.bitbuf;
+        self.consume(total_bits(entry));
+        let length = (entry >> 16) as usize + extra_value(saved, entry);
+
+        let dist = &tables.dist.entries;
+        self.refill();
+        let mut entry = dist[(self.bitbuf & DIST_MASK) as usize];
+        if entry & SUBTABLE != 0 {
+            if total_bits(entry) > self.bits_left {
+                return Step::Stop;
+            }
+            self.consume(total_bits(entry));
+            entry = subtable_lookup(dist, entry, self.bitbuf);
+        }
+        if entry & EXCEPTIONAL != 0 || total_bits(entry) > self.bits_left {
+            return Step::Stop;
+        }
+        let saved = self.bitbuf;
+        self.consume(total_bits(entry));
+        let distance = (entry >> 16) as usize + extra_value(saved, entry);
+
+        let out_len = self.out.len();
+        if distance > out_len || out_len >= self.max_output {
+            return Step::Stop;
+        }
+        let length = length.min(self.max_output - out_len);
+        self.ensure_room(length);
+        for i in out_len..out_len + length {
+            let byte = self.out[i - distance];
+            self.out.push(byte);
+        }
+        Step::Continue
     }
 
     #[inline(always)]
-    fn decode_litlen(&mut self, table: &HuffTable) -> Result<Entry, io::Error> {
-        if self.count < 15 {
-            self.fill();
+    fn fast_loop<const PAIRED: bool>(&mut self, tables: &BlockTables, out_end: usize) -> FastExit {
+        let litlen_entries = tables.litlen.entries.as_slice();
+        let litlen = tables.litlen.primary_litlen();
+        let dist_entries = tables.dist.entries.as_slice();
+        let dist = tables.dist.primary_dist();
+
+        let input = self.input.as_ptr();
+        let in_end = unsafe { input.add(self.input.len() - FAST_IN_MARGIN) };
+        let mut in_next = unsafe { input.add(self.in_pos) };
+        let out = self.out.as_mut_ptr();
+        let out_end = unsafe { out.add(out_end) };
+        let mut out_next = unsafe { out.add(self.out.len()) };
+        let mut bitbuf = self.bitbuf;
+        let mut bits_left = self.bits_left;
+        let mut saved;
+        let exit;
+
+        macro_rules! refill {
+            () => {
+                bitbuf |= u64::from_le(unsafe { (in_next as *const u64).read_unaligned() }) << bits_left;
+                in_next = unsafe { in_next.add(7 - ((bits_left >> 3) & 7) as usize) };
+                bits_left |= 56;
+            };
         }
-        let (entry, consumed) = table.lookup(self.buf);
-        if entry.is_invalid() || consumed == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Bad litlen code"));
+
+        macro_rules! consume {
+            ($entry:expr) => {
+                saved = bitbuf;
+                bitbuf >>= total_bits($entry);
+                bits_left -= total_bits($entry);
+            };
         }
-        if self.overrun() || consumed > self.count {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Deflate stream ends inside a code"));
+
+        macro_rules! write_literal {
+            ($entry:expr) => {
+                if PAIRED {
+                    unsafe { (out_next as *mut u16).write_unaligned(((($entry) >> 16) as u16).to_le()) };
+                    out_next = unsafe { out_next.add(1 + ((($entry) & SECOND_LITERAL) >> 7) as usize) };
+                } else {
+                    unsafe { *out_next = (($entry) >> 16) as u8 };
+                    out_next = unsafe { out_next.add(1) };
+                }
+            };
         }
-        self.consume(consumed);
-        Ok(entry)
+
+        refill!();
+        let mut entry = litlen[(bitbuf & LITLEN_MASK) as usize];
+        loop {
+            consume!(entry);
+
+            if entry & LITERAL != 0 {
+                let first = entry;
+                entry = litlen[(bitbuf & LITLEN_MASK) as usize];
+                consume!(entry);
+                write_literal!(first);
+                if entry & LITERAL != 0 {
+                    let second = entry;
+                    entry = litlen[(bitbuf & LITLEN_MASK) as usize];
+                    consume!(entry);
+                    write_literal!(second);
+                    if entry & LITERAL != 0 {
+                        let third = entry;
+                        entry = litlen[(bitbuf & LITLEN_MASK) as usize];
+                        refill!();
+                        write_literal!(third);
+                        if in_next < in_end && out_next < out_end {
+                            continue;
+                        }
+                        exit = FastExit::Margin;
+                        break;
+                    }
+                }
+            }
+
+            if entry & EXCEPTIONAL != 0 {
+                if entry & END_OF_BLOCK != 0 {
+                    exit = FastExit::EndOfBlock;
+                    break;
+                }
+                if entry & SUBTABLE == 0 {
+                    exit = FastExit::Stop;
+                    break;
+                }
+                entry = unsafe { subtable_lookup_unchecked(litlen_entries, entry, bitbuf) };
+                consume!(entry);
+                if entry & LITERAL != 0 {
+                    let literal = entry;
+                    entry = litlen[(bitbuf & LITLEN_MASK) as usize];
+                    refill!();
+                    unsafe { *out_next = (literal >> 16) as u8 };
+                    out_next = unsafe { out_next.add(1) };
+                    if in_next < in_end && out_next < out_end {
+                        continue;
+                    }
+                    exit = FastExit::Margin;
+                    break;
+                }
+                if entry & EXCEPTIONAL != 0 {
+                    exit = if entry & END_OF_BLOCK != 0 { FastExit::EndOfBlock } else { FastExit::Stop };
+                    break;
+                }
+            }
+
+            let length = (entry >> 16) as usize + extra_value(saved, entry);
+
+            entry = dist[(bitbuf & DIST_MASK) as usize];
+            if entry & EXCEPTIONAL != 0 {
+                if entry & SUBTABLE == 0 {
+                    exit = FastExit::Stop;
+                    break;
+                }
+                if bits_left < MAX_CODE_LEN + MAX_EXTRA_DIST_BITS + LITLEN_BITS - 1 {
+                    refill!();
+                }
+                bitbuf >>= total_bits(entry);
+                bits_left -= total_bits(entry);
+                entry = unsafe { subtable_lookup_unchecked(dist_entries, entry, bitbuf) };
+                if entry & EXCEPTIONAL != 0 {
+                    exit = FastExit::Stop;
+                    break;
+                }
+            } else if bits_left < DIST_BITS + MAX_EXTRA_DIST_BITS + LITLEN_BITS - 1 {
+                refill!();
+            }
+            consume!(entry);
+            let distance = (entry >> 16) as usize + extra_value(saved, entry);
+
+            if distance > unsafe { out_next.offset_from(out) } as usize {
+                exit = FastExit::Stop;
+                break;
+            }
+
+            let dst = out_next;
+            let src = unsafe { dst.sub(distance) };
+            out_next = unsafe { out_next.add(length) };
+
+            entry = litlen[(bitbuf & LITLEN_MASK) as usize];
+            refill!();
+
+            unsafe { copy_match(src, dst, out_next, distance, length) };
+
+            if in_next < in_end && out_next < out_end {
+                continue;
+            }
+            exit = FastExit::Margin;
+            break;
+        }
+
+        self.in_pos = unsafe { in_next.offset_from(input) } as usize;
+        self.bitbuf = bitbuf;
+        self.bits_left = bits_left;
+        unsafe { self.out.set_len(out_next.offset_from(out) as usize) };
+        exit
     }
 }
 
-fn decode_block(
-    bits: &mut BitBuffer<'_>,
-    litlen: &HuffTable,
-    dist: &HuffTable,
-    output: &mut Vec<u8>,
-    max_output: usize,
-) -> bool {
-    loop {
-        if output.len() >= max_output {
-            return true;
+#[inline(always)]
+unsafe fn copy_match(mut src: *const u8, mut dst: *mut u8, end: *mut u8, distance: usize, length: usize) {
+    if distance >= 8 {
+        loop {
+            std::ptr::copy_nonoverlapping(src, dst, 8);
+            std::ptr::copy_nonoverlapping(src.add(8), dst.add(8), 8);
+            std::ptr::copy_nonoverlapping(src.add(16), dst.add(16), 8);
+            std::ptr::copy_nonoverlapping(src.add(24), dst.add(24), 8);
+            std::ptr::copy_nonoverlapping(src.add(32), dst.add(32), 8);
+            src = src.add(40);
+            dst = dst.add(40);
+            if dst >= end {
+                break;
+            }
         }
-
-        let entry = match bits.decode_litlen(litlen) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-
-        if entry.is_literal() {
-            if output.len() == output.capacity() {
-                output.reserve(4096);
+    } else if distance == 1 {
+        let word = u64::from(*src) * 0x0101_0101_0101_0101;
+        loop {
+            (dst as *mut u64).write_unaligned(word);
+            (dst.add(8) as *mut u64).write_unaligned(word);
+            (dst.add(16) as *mut u64).write_unaligned(word);
+            (dst.add(24) as *mut u64).write_unaligned(word);
+            dst = dst.add(32);
+            if dst >= end {
+                break;
             }
-            unsafe {
-                let end = output.as_mut_ptr().add(output.len());
-                end.write(entry.lit_a());
-                output.set_len(output.len() + 1);
-            }
-            continue;
         }
-
-        if entry.is_lit_pair() {
-            if output.len() + 2 > output.capacity() {
-                output.reserve(4096);
+    } else if length < 16 {
+        loop {
+            std::ptr::copy(src, dst, 8);
+            src = src.add(distance);
+            dst = dst.add(distance);
+            std::ptr::copy(src, dst, 8);
+            src = src.add(distance);
+            dst = dst.add(distance);
+            if dst >= end {
+                break;
             }
-            unsafe {
-                let len = output.len();
-                let end = output.as_mut_ptr().add(len);
-                end.write(entry.lit_a());
-                end.add(1).write(entry.lit_b());
-                output.set_len(len + 2);
-            }
-            continue;
         }
-
-        if entry.is_eob() {
-            return true;
+    } else {
+        let mut pattern = u128::from(read_pattern(src, distance));
+        let mut covered = distance;
+        while covered < 16 {
+            pattern |= pattern << (8 * covered);
+            covered *= 2;
         }
-
-        if entry.is_length() {
-            let base_val = entry.base_value() as usize;
-            let base_len_bits = entry.base_len();
-            let extra_bits = entry.full_len() - base_len_bits;
-
-            if bits.count < 33 {
-                bits.fill();
+        let stride = 16 - 16 % distance;
+        let pattern = pattern.to_le();
+        loop {
+            (dst as *mut u128).write_unaligned(pattern);
+            dst = dst.add(stride);
+            if dst >= end {
+                break;
             }
-
-            let extra = if extra_bits > 0 {
-                let v = bits.peek(extra_bits);
-                bits.consume(extra_bits);
-                v as usize
-            } else {
-                0
-            };
-            let match_len = base_val + extra;
-
-            let (dist_entry, dist_consumed) = dist.lookup(bits.buf);
-            if dist_entry.is_invalid() || dist_consumed == 0 || !dist_entry.is_dist() {
-                return false;
-            }
-            bits.consume(dist_consumed);
-
-            let dist_base = dist_entry.base_value() as usize;
-            let dist_base_bits = dist_entry.base_len();
-            let dist_extra_bits = dist_entry.full_len() - dist_base_bits;
-            let dist_extra = if dist_extra_bits > 0 {
-                let v = bits.peek(dist_extra_bits);
-                bits.consume(dist_extra_bits);
-                v as usize
-            } else {
-                0
-            };
-            let match_dist = dist_base + dist_extra;
-
-            if bits.overrun() || match_dist == 0 || match_dist > output.len() {
-                return false;
-            }
-
-            let clamped_len = match_len.min(max_output.saturating_sub(output.len()));
-            output.reserve(clamped_len);
-            simd::copy_match(output, match_dist, clamped_len);
-            continue;
         }
+    }
+}
 
-        return false;
+#[inline(always)]
+unsafe fn read_pattern(src: *const u8, distance: usize) -> u64 {
+    if distance >= 4 {
+        let low = u64::from(u32::from_le((src as *const u32).read_unaligned()));
+        let high = u64::from(u32::from_le((src.add(distance - 4) as *const u32).read_unaligned()));
+        low | (high << (8 * (distance - 4)))
+    } else {
+        let low = u64::from(u16::from_le((src as *const u16).read_unaligned()));
+        let high = u64::from(u16::from_le((src.add(distance - 2) as *const u16).read_unaligned()));
+        low | (high << (8 * (distance - 2)))
     }
 }
 
@@ -674,80 +949,18 @@ impl<'a> DeflateDecoder<'a> {
     }
 
     pub fn decode_with_max(&self, max_output: usize) -> Vec<u8> {
-        self.decode_impl(0, max_output)
+        let initial = self.data.len().saturating_mul(4).max(DEFAULT_INITIAL_MIN);
+        Inflater::new(self.data, initial, max_output).inflate()
     }
 
     pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
         let max_output = if capacity_hint > 0 { capacity_hint.saturating_mul(4) } else { 256 * 1024 * 1024 };
-        self.decode_impl(capacity_hint, max_output)
+        let initial = if capacity_hint > 0 { capacity_hint } else { self.data.len().saturating_mul(4) };
+        Inflater::new(self.data, initial, max_output).inflate()
     }
 
-    fn decode_impl(&self, capacity_hint: usize, max_output: usize) -> Vec<u8> {
-        let mut bits = BitBuffer::new(self.data);
-        let reachable = self.data.len().saturating_mul(MAX_DEFLATE_RATIO);
-        let mut output = Vec::with_capacity(if capacity_hint > 0 { capacity_hint.min(reachable) + 32 } else { 0 });
-
-        let mut fixed: Option<(Box<HuffTable>, Box<HuffTable>)> = None;
-        let mut scratch = TableScratch::new();
-
-        loop {
-            bits.fill();
-            let bfinal = match bits.read_bits(1) {
-                Ok(v) => v,
-                Err(_) => break,
-            };
-            let btype = match bits.read_bits(2) {
-                Ok(v) => v,
-                Err(_) => break,
-            };
-
-            let ok = match btype {
-                0 => {
-                    bits.align_to_byte();
-                    let len = match bits.read_u16_le_aligned() {
-                        Ok(v) => v,
-                        Err(_) => break,
-                    };
-                    let nlen = match bits.read_u16_le_aligned() {
-                        Ok(v) => v,
-                        Err(_) => break,
-                    };
-                    if len != !nlen {
-                        break;
-                    }
-                    output.reserve((len as usize).min(max_output.saturating_sub(output.len())));
-                    let mut ok = true;
-                    for _ in 0..len {
-                        if output.len() >= max_output {
-                            break;
-                        }
-                        match bits.read_byte_aligned() {
-                            Ok(b) => output.push(b),
-                            Err(_) => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    ok
-                }
-                1 => {
-                    let (litlen, dist) = fixed.get_or_insert_with(build_fixed_tables);
-                    decode_block(&mut bits, litlen, dist, &mut output, max_output)
-                }
-                2 => match build_dynamic_tables(&mut bits, &mut scratch) {
-                    Ok(()) => decode_block(&mut bits, &scratch.litlen, &scratch.dist, &mut output, max_output),
-                    Err(_) => false,
-                },
-                _ => break,
-            };
-
-            if bfinal == 1 || !ok {
-                break;
-            }
-        }
-
-        output
+    pub fn decode_expected(&self, expected_len: usize) -> Vec<u8> {
+        Inflater::new(self.data, expected_len, expected_len).inflate()
     }
 }
 
@@ -761,19 +974,15 @@ impl<'a> ZlibDecoder<'a> {
     }
 
     pub fn decode_with_max(&self, max_output: usize) -> Vec<u8> {
-        if let Some(inner) = self.inner() {
-            inner.decode_with_max(max_output)
-        } else {
-            Vec::new()
-        }
+        self.inner().map(|inner| inner.decode_with_max(max_output)).unwrap_or_default()
     }
 
     pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
-        if let Some(inner) = self.inner() {
-            inner.decode_with_capacity(capacity_hint)
-        } else {
-            Vec::new()
-        }
+        self.inner().map(|inner| inner.decode_with_capacity(capacity_hint)).unwrap_or_default()
+    }
+
+    pub fn decode_expected(&self, expected_len: usize) -> Vec<u8> {
+        self.inner().map(|inner| inner.decode_expected(expected_len)).unwrap_or_default()
     }
 
     fn inner(&self) -> Option<DeflateDecoder<'a>> {

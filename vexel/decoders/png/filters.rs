@@ -3,6 +3,8 @@ use super::types::{ColorType, FilterType};
 use crate::log_warn;
 use crate::utils::error::VexelResult;
 
+const BATCH_ROWS: usize = 16;
+
 pub struct FilterDecoder {
     bit_depth: u8,
     color_type: ColorType,
@@ -24,101 +26,77 @@ impl FilterDecoder {
     }
 
     pub fn unfilter_scanlines_owned(&self, mut data: Vec<u8>, pass_width: u32) -> VexelResult<Vec<u8>> {
-        let bytes_per_row = self.bytes_per_row(pass_width);
-        if bytes_per_row == 0 {
-            return Ok(Vec::new());
-        }
-
-        let scanline_bytes = 1 + bytes_per_row;
-        let num_rows = data.len() / scanline_bytes;
-
-        for row_idx in 0..num_rows {
-            let src_start = row_idx * scanline_bytes;
-            let filter_byte = data[src_start];
-            let dst_start = row_idx * bytes_per_row;
-
-            data.copy_within(src_start + 1..src_start + scanline_bytes, dst_start);
-            self.unfilter_row_in_place(&mut data, dst_start, bytes_per_row, filter_byte, row_idx > 0);
-        }
-
-        data.truncate(num_rows * bytes_per_row);
+        let len = self.unfilter_in_place(&mut data, pass_width);
+        data.truncate(len);
         Ok(data)
     }
 
-    pub fn unfilter_scanlines(&self, data: &[u8], pass_width: u32) -> VexelResult<Vec<u8>> {
+    pub fn unfilter_in_place(&self, data: &mut [u8], pass_width: u32) -> usize {
+        self.unfilter_rows(data, pass_width, true) * self.bytes_per_row(pass_width)
+    }
+
+    pub fn unfilter_strided(&self, data: &mut [u8], pass_width: u32) -> usize {
+        self.unfilter_rows(data, pass_width, false)
+    }
+
+    fn unfilter_rows(&self, data: &mut [u8], pass_width: u32, compact: bool) -> usize {
         let bytes_per_row = self.bytes_per_row(pass_width);
         if bytes_per_row == 0 {
-            return Ok(Vec::new());
+            return 0;
         }
 
-        let scanline_bytes = 1 + bytes_per_row;
-        let num_rows = data.len() / scanline_bytes;
-        let mut unfiltered = vec![0u8; num_rows * bytes_per_row];
+        let bytes_per_pixel = (self.get_bits_per_pixel() as usize).div_ceil(8).max(1);
+        let stride = bytes_per_row + 1;
+        let num_rows = data.len() / stride;
+        let zero_row = vec![0u8; bytes_per_row];
+        let base = data.as_mut_ptr();
 
-        for (row_idx, scanline) in data.chunks(scanline_bytes).enumerate() {
-            if scanline.len() < scanline_bytes {
-                log_warn!("Invalid scanline length: {}, expected: {}", scanline.len(), scanline_bytes);
-                unfiltered.truncate(row_idx * bytes_per_row);
-                break;
+        let mut filters = [FilterType::None; BATCH_ROWS];
+        let mut rows = [std::ptr::null_mut::<u8>(); BATCH_ROWS];
+        let mut first = 0;
+        while first < num_rows {
+            let count = (num_rows - first).min(BATCH_ROWS);
+            for i in 0..count {
+                let start = (first + i) * stride;
+                filters[i] = parse_filter(unsafe { *base.add(start) });
+                rows[i] = unsafe { base.add(start + 1) };
             }
 
-            let dst_start = row_idx * bytes_per_row;
-            unfiltered[dst_start..dst_start + bytes_per_row].copy_from_slice(&scanline[1..]);
-            self.unfilter_row_in_place(&mut unfiltered, dst_start, bytes_per_row, scanline[0], row_idx > 0);
+            let above = match (first, compact) {
+                (0, _) => zero_row.as_ptr(),
+                (_, true) => unsafe { base.add((first - 1) * bytes_per_row) }.cast_const(),
+                (_, false) => unsafe { base.add((first - 1) * stride + 1) }.cast_const(),
+            };
+            unsafe {
+                filter_simd::unfilter_rows(&filters[..count], &rows[..count], above, bytes_per_row, bytes_per_pixel)
+            };
+
+            if compact {
+                for row in first..first + count {
+                    unsafe { std::ptr::copy(base.add(row * stride + 1), base.add(row * bytes_per_row), bytes_per_row) };
+                }
+            }
+            first += count;
         }
 
-        Ok(unfiltered)
+        num_rows
     }
 
     fn bytes_per_row(&self, pass_width: u32) -> usize {
         (pass_width as usize * self.get_bits_per_pixel() as usize).div_ceil(8)
     }
+}
 
-    fn unfilter_row_in_place(
-        &self,
-        buf: &mut [u8],
-        row_start: usize,
-        bytes_per_row: usize,
-        filter_byte: u8,
-        has_prior: bool,
-    ) {
-        let bytes_per_pixel = (self.get_bits_per_pixel() as usize).div_ceil(8);
-
-        let filter_type = match filter_byte {
-            0 => FilterType::None,
-            1 => FilterType::Sub,
-            2 => FilterType::Up,
-            3 => FilterType::Average,
-            4 => FilterType::Paeth,
-            _ => {
-                log_warn!("Invalid filter type: {}", filter_byte);
-                FilterType::None
-            }
-        };
-
-        if matches!(filter_type, FilterType::None) {
-            return;
-        }
-
-        if !has_prior {
-            let row = &mut buf[row_start..row_start + bytes_per_row];
-            match filter_type {
-                FilterType::Sub => filter_simd::unfilter_sub(row, bytes_per_pixel),
-                FilterType::Average => filter_simd::unfilter_average_no_prior(row, bytes_per_pixel),
-                FilterType::Paeth => filter_simd::unfilter_sub(row, bytes_per_pixel),
-                _ => {}
-            }
-            return;
-        }
-
-        let (prior, row) = buf[row_start - bytes_per_row..row_start + bytes_per_row].split_at_mut(bytes_per_row);
-
-        match filter_type {
-            FilterType::Sub => filter_simd::unfilter_sub(row, bytes_per_pixel),
-            FilterType::Up => filter_simd::unfilter_up(row, prior),
-            FilterType::Average => filter_simd::unfilter_average(row, prior, bytes_per_pixel),
-            FilterType::Paeth => filter_simd::unfilter_paeth(row, prior, bytes_per_pixel),
-            FilterType::None => {}
+fn parse_filter(byte: u8) -> FilterType {
+    match byte {
+        0 => FilterType::None,
+        1 => FilterType::Sub,
+        2 => FilterType::Up,
+        3 => FilterType::Average,
+        4 => FilterType::Paeth,
+        _ => {
+            log_warn!("Invalid filter type: {}", byte);
+            FilterType::None
         }
     }
 }

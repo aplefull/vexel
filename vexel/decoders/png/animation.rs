@@ -90,13 +90,18 @@ impl AnimationDecoder {
         interlace: bool,
         palette: Option<Vec<[u8; 3]>>,
         transparency: Option<TransparencyData>,
+        frame_limit: Option<usize>,
     ) -> VexelResult<Vec<ImageFrame>> {
         if frames.iter().filter(|f| f.fctl_info.width > 0 && f.fctl_info.height > 0 && !f.fdat.is_empty()).count() == 0
         {
             return Err(VexelError::Custom("No valid frames found".into()));
         }
 
-        let decoded_pixels = self.pre_decode_frames(frames, bit_depth, color_type, interlace, &palette, &transparency);
+        let mut decoded_pixels = match frame_limit {
+            Some(_) => Vec::new(),
+            None => self.pre_decode_frames(frames, bit_depth, color_type, interlace, &palette, &transparency),
+        }
+        .into_iter();
 
         let blank = PixelData::RGBA8(vec![0; self.width as usize * self.height as usize * 4]);
         let mut canvas = blank.clone();
@@ -105,8 +110,15 @@ impl AnimationDecoder {
         let mut prev_dispose_op: u8 = 0;
         let mut prev_fctl: Option<&FctlChunk> = None;
 
-        for (frame, pixels) in frames.iter().zip(decoded_pixels) {
+        for frame in frames {
+            if frame_limit.is_some_and(|limit| output_frames.len() >= limit) {
+                break;
+            }
             let fctl = &frame.fctl_info;
+            let pixels = match frame_limit {
+                Some(_) => self.decode_frame(frame, bit_depth, color_type, interlace, &palette, &transparency),
+                None => decoded_pixels.next().flatten(),
+            };
 
             if !self.frame_fits(fctl) {
                 log_warn!(
@@ -178,6 +190,31 @@ impl AnimationDecoder {
         }
 
         Ok(output_frames)
+    }
+
+    fn decode_frame(
+        &self,
+        frame: &PngFrame,
+        bit_depth: u8,
+        color_type: ColorType,
+        interlace: bool,
+        palette: &Option<Vec<[u8; 3]>>,
+        transparency: &Option<TransparencyData>,
+    ) -> Option<PixelData> {
+        let fctl = &frame.fctl_info;
+        if !self.frame_fits(fctl) {
+            return None;
+        }
+        decode_frame_pixels(
+            &frame.fdat,
+            bit_depth,
+            color_type,
+            fctl.width,
+            fctl.height,
+            interlace,
+            palette,
+            transparency,
+        )
     }
 
     fn pre_decode_frames(
@@ -259,7 +296,7 @@ fn decode_frame_pixels(
     };
     let bits_per_pixel = u64::from(bit_depth) * channels;
     let capacity = filtered_data_size(bits_per_pixel, width, height, interlace);
-    let decompressed = ZlibDecoder::from_slice(fdat).decode_with_max(capacity);
+    let decompressed = ZlibDecoder::from_slice(fdat).decode_expected(capacity);
     let frame_pixels = decoder.deinterlace_scan_lines_owned(decompressed, width, height).ok()?;
     let mut pixels = decoder.decode_pixels_by_type(frame_pixels).ok()?;
     pixels.correct_pixels(width, height);

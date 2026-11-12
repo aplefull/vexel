@@ -501,7 +501,7 @@ impl<R: Read + Seek> PngDecoder<R> {
             let capacity = filtered_data_size(u64::from(bits_per_pixel), self.width, self.height, self.interlace);
             let compressed = std::mem::take(&mut self.idat_data);
             let compressed_len = compressed.len();
-            self.idat_data = ZlibDecoder::from_slice(&compressed).decode_with_max(capacity);
+            self.idat_data = ZlibDecoder::from_slice(&compressed).decode_expected(capacity);
             drop(compressed);
             self.limits.free_usize(compressed_len);
         }
@@ -558,7 +558,7 @@ impl<R: Read + Seek> PngDecoder<R> {
         Ok(pixels)
     }
 
-    fn decode_inner(&mut self) -> VexelResult<DecodedPng> {
+    fn decode_inner(&mut self, frame_limit: Option<usize>) -> VexelResult<DecodedPng> {
         self.info = None;
         self.walk_chunks(WalkMode::Decode)?;
         self.finish_info();
@@ -577,6 +577,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                 self.interlace,
                 self.palette.clone(),
                 self.transparency.clone(),
+                frame_limit,
             );
 
             match result {
@@ -591,7 +592,7 @@ impl<R: Read + Seek> PngDecoder<R> {
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        match self.decode_inner()? {
+        match self.decode_inner(Some(1))? {
             DecodedPng::Still(image) => Ok(image),
             DecodedPng::Animation(frames) => {
                 let first = frames
@@ -605,7 +606,7 @@ impl<R: Read + Seek> PngDecoder<R> {
     }
 
     pub(crate) fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
-        match self.decode_inner()? {
+        match self.decode_inner(None)? {
             DecodedPng::Still(image) => {
                 let (width, height) = (image.width(), image.height());
                 Ok(vec![ImageFrame::new(width, height, image.into_pixels(), 0)])
