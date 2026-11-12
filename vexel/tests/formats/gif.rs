@@ -6,49 +6,49 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "GIF gray frames u1",
             path: "gif/gray_frames_u1.gif",
             validation: None,
-            comparison: Comparison::ExactFrames { reference_path: "gif/gray_frames_u1.avif" },
+            comparison: Comparison::ExactFrames { reference_path: "gif/gray_frames_u1.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "GIF totoro",
             path: "gif/totoro.gif",
             validation: None,
-            comparison: Comparison::ExactFrames { reference_path: "gif/totoro.avif" },
+            comparison: Comparison::ExactFrames { reference_path: "gif/totoro.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "GIF totoro interlaced",
             path: "gif/totoro_interlaced.gif",
             validation: None,
-            comparison: Comparison::ExactFrames { reference_path: "gif/totoro_interlaced.avif" },
+            comparison: Comparison::ExactFrames { reference_path: "gif/totoro_interlaced.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "GIF totoro still",
             path: "gif/totoro_still.gif",
             validation: None,
-            comparison: Comparison::ExactFrames { reference_path: "gif/totoro_still.avif" },
+            comparison: Comparison::ExactFrames { reference_path: "gif/totoro_still.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "GIF Australia history",
             path: "gif/Australia_history.gif",
             validation: None,
-            comparison: Comparison::ExactFrames { reference_path: "gif/Australia_history.avif" },
+            comparison: Comparison::ExactFrames { reference_path: "gif/Australia_history.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "GIF 0646caeb9b9161c777f117007921a687",
             path: "gif/0646caeb9b9161c777f117007921a687.gif",
             validation: None,
-            comparison: Comparison::ExactFrames { reference_path: "gif/0646caeb9b9161c777f117007921a687.avif" },
+            comparison: Comparison::ExactFrames { reference_path: "gif/0646caeb9b9161c777f117007921a687.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "GIF jazz-chromecast-ultra",
             path: "gif/jazz-chromecast-ultra.gif",
             validation: None,
-            comparison: Comparison::ExactFrames { reference_path: "gif/jazz-chromecast-ultra.avif" },
+            comparison: Comparison::ExactFrames { reference_path: "gif/jazz-chromecast-ultra.jxl" },
             ..Default::default()
         },
         TestCase {
@@ -56,7 +56,7 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "gif/_corrupted/139770827-18e25c4e-eb0a-4058-ba48-ddc3849090ee.gif",
             validation: None,
             comparison: Comparison::ExactFrames {
-                reference_path: "gif/_corrupted/139770827-18e25c4e-eb0a-4058-ba48-ddc3849090ee.avif",
+                reference_path: "gif/_corrupted/139770827-18e25c4e-eb0a-4058-ba48-ddc3849090ee.jxl",
             },
             ..Default::default()
         },
@@ -65,7 +65,7 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "gif/_corrupted/adaf0da1764aafb7039440dbe098569b.gif",
             validation: None,
             comparison: Comparison::ExactFrames {
-                reference_path: "gif/_corrupted/adaf0da1764aafb7039440dbe098569b.avif",
+                reference_path: "gif/_corrupted/adaf0da1764aafb7039440dbe098569b.jxl",
             },
             ..Default::default()
         },
@@ -145,7 +145,7 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "gif/_corrupted/ee6d1133f9264dc6467990e53d0bf104.gif",
             validation: None,
             comparison: Comparison::ExactFrames {
-                reference_path: "gif/_corrupted/ee6d1133f9264dc6467990e53d0bf104.avif",
+                reference_path: "gif/_corrupted/ee6d1133f9264dc6467990e53d0bf104.jxl",
             },
             ..Default::default()
         },
@@ -180,7 +180,7 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "gif/_corrupted/adf6f850b13dff73ebb22862c6ab028b.gif",
             validation: None,
             comparison: Comparison::FuzzyFrames {
-                reference_path: "gif/_corrupted/adf6f850b13dff73ebb22862c6ab028b.avif",
+                reference_path: "gif/_corrupted/adf6f850b13dff73ebb22862c6ab028b.jxl",
                 // This one is corrupted, so there is a small pixel difference closer to the end of the image.
                 mse_threshold: 17.0,
                 ssim_threshold: 0.997,

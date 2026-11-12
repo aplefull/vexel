@@ -6,161 +6,161 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "NetPBM P1",
             path: "netpbm/P1.pbm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P1.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P1.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P2 8bit",
             path: "netpbm/P2_8bit.pgm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P2_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P2_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P2 16bit",
             path: "netpbm/P2_16bit.pgm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P2_16bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P2_16bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P3 8bit",
             path: "netpbm/P3_8bit.ppm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P3_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P3_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P3 16bit",
             path: "netpbm/P3_16bit.ppm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P3_16bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P3_16bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P4",
             path: "netpbm/P4.pbm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P4.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P4.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P5 8bit",
             path: "netpbm/P5_8bit.pgm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P5_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P5_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P5 16bit",
             path: "netpbm/P5_16bit.pgm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P5_16bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P5_16bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P6 8bit",
             path: "netpbm/P6_8bit.ppm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P6_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P6_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P6 16bit",
             path: "netpbm/P6_16bit.ppm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P6_16bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P6_16bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 monochrome",
             path: "netpbm/P7_monochrome.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_monochrome.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_monochrome.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 monochrome alpha",
             path: "netpbm/P7_monochrome_alpha.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_monochrome_alpha.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_monochrome_alpha.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 grayscale 8bit",
             path: "netpbm/P7_grayscale_8bit.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_grayscale_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_grayscale_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 grayscale 16bit",
             path: "netpbm/P7_grayscale_16bit.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_grayscale_16bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_grayscale_16bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 grayscale alpha 8bit",
             path: "netpbm/P7_grayscale_alpha_8bit.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_grayscale_alpha_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_grayscale_alpha_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 grayscale alpha 16bit",
             path: "netpbm/P7_grayscale_alpha_16bit.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_grayscale_alpha_16bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_grayscale_alpha_16bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 rgb 8bit",
             path: "netpbm/P7_rgb_8bit.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_rgb_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_rgb_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 rgb 16bit",
             path: "netpbm/P7_rgb_16bit.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_rgb_16bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_rgb_16bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 rgb alpha 8bit",
             path: "netpbm/P7_rgb_alpha_8bit.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_rgb_alpha_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_rgb_alpha_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM P7 rgb alpha 16bit",
             path: "netpbm/P7_rgb_alpha_16bit.pam",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/P7_rgb_alpha_16bit.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/P7_rgb_alpha_16bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM 1c-1b",
             path: "netpbm/1c-1b.pbm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/1c-1b.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/1c-1b.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM 1c-8b",
             path: "netpbm/1c-8b.pgm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/1c-8b.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/1c-8b.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "NetPBM 3c-8b",
             path: "netpbm/3c-8b.ppm",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "netpbm/3c-8b.avif" },
+            comparison: Comparison::Exact { reference_path: "netpbm/3c-8b.jxl" },
             ..Default::default()
         },
         TestCase {

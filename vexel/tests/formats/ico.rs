@@ -6,28 +6,28 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "ICO image",
             path: "ico/image.cur",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "ico/image.avif" },
+            comparison: Comparison::Exact { reference_path: "ico/image.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "ICO sample",
             path: "ico/sample.ico",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "ico/sample.avif" },
+            comparison: Comparison::Exact { reference_path: "ico/sample.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "ICO demo",
             path: "ico/demo.ico",
             validation: None,
-            comparison: Comparison::ExactPages { reference_path: "ico/demo.avif" },
+            comparison: Comparison::ExactPages { reference_path: "ico/demo.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "ICO demo BMP",
             path: "ico/demo_bmp.ico",
             validation: None,
-            comparison: Comparison::ExactPages { reference_path: "ico/demo_bmp.avif" },
+            comparison: Comparison::ExactPages { reference_path: "ico/demo_bmp.jxl" },
             ..Default::default()
         },
         TestCase {

@@ -6,147 +6,147 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "BMP bmp0_test_image",
             path: "bmp/bmp0_test_image.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/bmp0_test_image.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/bmp0_test_image.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP lena",
             path: "bmp/lena.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/lena.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/lena.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP OS2_2",
             path: "bmp/OS2_2.BMP",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/OS2_2.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/OS2_2.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP Parrots",
             path: "bmp/Parrots.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/Parrots.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/Parrots.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb32bfdef",
             path: "bmp/rgb32bfdef.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb32bfdef.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb32bfdef.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb32",
             path: "bmp/rgb32.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb32.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb32.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb32-xbgr",
             path: "bmp/rgb32-xbgr.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb32-xbgr.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb32-xbgr.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba32",
             path: "bmp/rgba32.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba32.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba32.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP RLE4_2",
             path: "bmp/RLE4_2.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/RLE4_2.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/RLE4_2.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP second_picture",
             path: "bmp/second_picture.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/second_picture.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/second_picture.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP terrain2",
             path: "bmp/terrain2.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/terrain2.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/terrain2.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP w3c_home",
             path: "bmp/w3c_home.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/w3c_home.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/w3c_home.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP wallpaper-image-cuba-05",
             path: "bmp/wallpaper-image-cuba-05.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/wallpaper-image-cuba-05.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/wallpaper-image-cuba-05.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb16-231",
             path: "bmp/rgb16-231.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb16-231.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb16-231.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb16-3103",
             path: "bmp/rgb16-3103.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb16-3103.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb16-3103.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb16-565",
             path: "bmp/rgb16-565.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb16-565.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb16-565.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb16-565pal",
             path: "bmp/rgb16-565pal.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb16-565pal.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb16-565pal.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb16bfdef",
             path: "bmp/rgb16bfdef.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb16bfdef.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb16bfdef.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb16",
             path: "bmp/rgb16.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb16.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb16.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb16faketrns",
             path: "bmp/rgb16faketrns.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb16faketrns.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb16faketrns.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb24",
             path: "bmp/rgb24.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb24.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb24.jxl" },
             ..Default::default()
         },
         TestCase {
@@ -154,7 +154,7 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "bmp/rgb24jpeg.bmp",
             validation: None,
             comparison: Comparison::Fuzzy {
-                reference_path: "bmp/rgb24jpeg.avif",
+                reference_path: "bmp/rgb24jpeg.jxl",
                 mse_threshold: DEFAULT_MSE_THRESHOLD,
                 ssim_threshold: DEFAULT_SSIM_THRESHOLD,
             },
@@ -164,182 +164,182 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "BMP rgb24largepal",
             path: "bmp/rgb24largepal.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb24largepal.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb24largepal.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb24lprof",
             path: "bmp/rgb24lprof.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb24lprof.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb24lprof.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb24pal",
             path: "bmp/rgb24pal.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb24pal.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb24pal.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb24png",
             path: "bmp/rgb24png.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb24png.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb24png.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb24prof2",
             path: "bmp/rgb24prof2.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb24prof2.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb24prof2.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb24prof",
             path: "bmp/rgb24prof.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb24prof.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb24prof.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb32-111110",
             path: "bmp/rgb32-111110.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb32-111110.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb32-111110.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb32-7187",
             path: "bmp/rgb32-7187.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb32-7187.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb32-7187.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb32bf",
             path: "bmp/rgb32bf.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb32bf.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb32bf.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb32fakealpha",
             path: "bmp/rgb32fakealpha.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb32fakealpha.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb32fakealpha.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgb32h52",
             path: "bmp/rgb32h52.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgb32h52.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgb32h52.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba16-1924",
             path: "bmp/rgba16-1924.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba16-1924.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba16-1924.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba16-4444",
             path: "bmp/rgba16-4444.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba16-4444.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba16-4444.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba16-5551",
             path: "bmp/rgba16-5551.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba16-5551.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba16-5551.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba32-1010102",
             path: "bmp/rgba32-1010102.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba32-1010102.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba32-1010102.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba32-61754",
             path: "bmp/rgba32-61754.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba32-61754.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba32-61754.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba32-81284",
             path: "bmp/rgba32-81284.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba32-81284.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba32-81284.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba32abf",
             path: "bmp/rgba32abf.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba32abf.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba32abf.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP rgba32h56",
             path: "bmp/rgba32h56.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/rgba32h56.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/rgba32h56.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP sample_5184x3456",
             path: "bmp/sample_5184×3456.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/sample_5184×3456.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/sample_5184×3456.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP YES2",
             path: "bmp/YES2.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/YES2.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/YES2.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP 11Bbos20",
             path: "bmp/11Bbos20.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/11Bbos20.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/11Bbos20.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP 11Bgos20",
             path: "bmp/11Bgos20.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/11Bgos20.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/11Bgos20.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP 11Bios13",
             path: "bmp/11Bios13.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/11Bios13.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/11Bios13.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP 11Bos20",
             path: "bmp/11Bos20.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/11Bos20.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/11Bos20.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP 400x300x32_v3_96",
             path: "bmp/400x300x32_v3_96.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/400x300x32_v3_96.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/400x300x32_v3_96.jxl" },
             ..Default::default()
         },
         TestCase {
@@ -353,42 +353,42 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "BMP ba-bm",
             path: "bmp/ba-bm.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/ba-bm.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/ba-bm.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP pal2",
             path: "bmp/pal2.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/pal2.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/pal2.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP pal2color",
             path: "bmp/pal2color.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/pal2color.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/pal2color.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP pal4rletrns",
             path: "bmp/pal4rletrns.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/pal4rletrns.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/pal4rletrns.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP pal8os2v2-16",
             path: "bmp/pal8os2v2-16.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/pal8os2v2-16.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/pal8os2v2-16.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "BMP ang00_000_007",
             path: "bmp/ang00_000_007.bmp",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "bmp/ang00_000_007.avif" },
+            comparison: Comparison::Exact { reference_path: "bmp/ang00_000_007.jxl" },
             ..Default::default()
         },
         TestCase {

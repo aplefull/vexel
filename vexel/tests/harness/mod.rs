@@ -14,7 +14,6 @@ use jpegxl_sys::threads::thread_parallel_runner::{
     JxlThreadParallelRunner, JxlThreadParallelRunnerCreate, JxlThreadParallelRunnerDefaultNumWorkerThreads,
     JxlThreadParallelRunnerDestroy,
 };
-use libavif_sys as avif_sys;
 use vexel::{Image, ImageFrame, PixelData, Vexel};
 
 pub const BASE_PATH: &str = "./tests/images/";
@@ -136,10 +135,6 @@ pub fn image_to_reference_native(image: &Image) -> ReferenceImage {
     ReferenceImage { width, height, pixels }
 }
 
-pub fn image_to_reference_rgba8(image: &Image) -> ReferenceImage {
-    ReferenceImage { width: image.width(), height: image.height(), pixels: ReferencePixels::U8(image.to_rgba8()) }
-}
-
 pub fn frame_to_reference_native(frame: &ImageFrame) -> ReferenceImage {
     let width = frame.width();
     let height = frame.height();
@@ -161,10 +156,6 @@ pub fn frame_to_reference_native(frame: &ImageFrame) -> ReferenceImage {
     };
 
     ReferenceImage { width, height, pixels }
-}
-
-pub fn frame_to_reference_rgba8(frame: &ImageFrame) -> ReferenceImage {
-    ReferenceImage { width: frame.width(), height: frame.height(), pixels: ReferencePixels::U8(frame.to_rgba8()) }
 }
 
 fn pixel_format_for_jxl(info: &JxlBasicInfo) -> (JxlPixelFormat, JxlBitDepth, bool) {
@@ -329,108 +320,6 @@ pub fn read_reference_jxl_all_frames(path: &Path) -> Result<Vec<ReferenceImage>,
     }
 
     Ok(frames)
-}
-
-pub fn read_reference_avif(path: &Path) -> Result<ReferenceImage, Box<dyn std::error::Error>> {
-    let buf = std::fs::read(path)?;
-    let image = libavif::decode_rgb(&buf)
-        .map_err(|e| format!("Failed to decode AVIF reference {}: {:?}", path.display(), e))?;
-
-    let width = image.width();
-    let height = image.height();
-
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for y in 0..height {
-        for x in 0..width {
-            let (r, g, b, a) = image.pixel(x, y);
-            rgba.push(r);
-            rgba.push(g);
-            rgba.push(b);
-            rgba.push(a);
-        }
-    }
-
-    Ok(ReferenceImage { width, height, pixels: ReferencePixels::U8(rgba) })
-}
-
-pub fn read_reference_avif_all_frames(path: &Path) -> Result<Vec<ReferenceImage>, Box<dyn std::error::Error>> {
-    let buf = std::fs::read(path)?;
-    unsafe {
-        let decoder = avif_sys::avifDecoderCreate();
-        if decoder.is_null() {
-            return Err("avifDecoderCreate returned null".into());
-        }
-
-        let set_io = avif_sys::avifDecoderSetIOMemory(decoder, buf.as_ptr(), buf.len());
-        if set_io != avif_sys::AVIF_RESULT_OK {
-            avif_sys::avifDecoderDestroy(decoder);
-            return Err(format!("avifDecoderSetIOMemory failed: {}", set_io).into());
-        }
-
-        let parse = avif_sys::avifDecoderParse(decoder);
-        if parse != avif_sys::AVIF_RESULT_OK {
-            avif_sys::avifDecoderDestroy(decoder);
-            return Err(format!("avifDecoderParse failed: {}", parse).into());
-        }
-
-        let mut frames = Vec::new();
-
-        loop {
-            let result = avif_sys::avifDecoderNextImage(decoder);
-            if result == avif_sys::AVIF_RESULT_NO_IMAGES_REMAINING {
-                break;
-            }
-            if result != avif_sys::AVIF_RESULT_OK {
-                avif_sys::avifDecoderDestroy(decoder);
-                return Err(format!("avifDecoderNextImage failed: {}", result).into());
-            }
-
-            let avif_image = (*decoder).image;
-            let width = (*avif_image).width;
-            let height = (*avif_image).height;
-
-            let mut rgb = avif_sys::avifRGBImage::default();
-            avif_sys::avifRGBImageSetDefaults(&mut rgb, avif_image);
-            rgb.format = avif_sys::AVIF_RGB_FORMAT_RGBA;
-            rgb.depth = 8;
-
-            let alloc = avif_sys::avifRGBImageAllocatePixels(&mut rgb);
-            if alloc != avif_sys::AVIF_RESULT_OK {
-                avif_sys::avifDecoderDestroy(decoder);
-                return Err(format!("avifRGBImageAllocatePixels failed: {}", alloc).into());
-            }
-
-            let convert = avif_sys::avifImageYUVToRGB(avif_image, &mut rgb);
-            if convert != avif_sys::AVIF_RESULT_OK {
-                avif_sys::avifRGBImageFreePixels(&mut rgb);
-                avif_sys::avifDecoderDestroy(decoder);
-                return Err(format!("avifImageYUVToRGB failed: {}", convert).into());
-            }
-
-            let pixel_count = (width * height * 4) as usize;
-            let pixels = std::slice::from_raw_parts(rgb.pixels, pixel_count).to_vec();
-            avif_sys::avifRGBImageFreePixels(&mut rgb);
-
-            frames.push(ReferenceImage { width, height, pixels: ReferencePixels::U8(pixels) });
-        }
-
-        avif_sys::avifDecoderDestroy(decoder);
-        Ok(frames)
-    }
-}
-
-pub fn read_reference(path: &Path) -> Result<ReferenceImage, Box<dyn std::error::Error>> {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("jxl") => read_reference_jxl(path),
-        _ => read_reference_avif(path),
-    }
-}
-
-pub fn read_reference_all_frames(path: &Path) -> Result<Vec<ReferenceImage>, Box<dyn std::error::Error>> {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("jxl") => read_reference_jxl_all_frames(path),
-        _ => read_reference_avif_all_frames(path),
-    }
 }
 
 fn normalize_transparent_pixels_u8(pixels: &[u8]) -> Vec<u8> {
@@ -629,9 +518,8 @@ pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResu
         Comparison::None => Ok(TestResult::Ok { mse: None, ssim: None, psnr: None }),
         Comparison::Exact { reference_path } => {
             let ref_path = get_ref_path(reference_path);
-            let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
-            let reference = read_reference(&ref_path)?;
-            let actual = if is_jxl { image_to_reference_native(image) } else { image_to_reference_rgba8(image) };
+            let reference = read_reference_jxl(&ref_path)?;
+            let actual = image_to_reference_native(image);
             match compare_exact(&actual, &reference) {
                 Ok(()) => Ok(TestResult::Ok { mse: None, ssim: None, psnr: None }),
                 Err(msg) => Ok(TestResult::Fail(msg)),
@@ -639,9 +527,8 @@ pub fn run_comparison(image: &Image, comparison: &Comparison) -> Result<TestResu
         }
         Comparison::Fuzzy { reference_path, mse_threshold, ssim_threshold } => {
             let ref_path = get_ref_path(reference_path);
-            let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
-            let reference = read_reference(&ref_path)?;
-            let actual = if is_jxl { image_to_reference_native(image) } else { image_to_reference_rgba8(image) };
+            let reference = read_reference_jxl(&ref_path)?;
+            let actual = image_to_reference_native(image);
             match compare_fuzzy(&actual, &reference, *mse_threshold, *ssim_threshold) {
                 Ok((mse, ssim, psnr)) => Ok(TestResult::Ok { mse: Some(mse), ssim: Some(ssim), psnr: Some(psnr) }),
                 Err(msg) => Ok(TestResult::Fail(msg)),
@@ -667,8 +554,7 @@ pub fn run_frames_comparison(
     };
 
     let ref_path = get_ref_path(reference_path);
-    let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
-    let ref_frames = read_reference_all_frames(&ref_path)?;
+    let ref_frames = read_reference_jxl_all_frames(&ref_path)?;
 
     if frames.len() != ref_frames.len() {
         return Ok(TestResult::Fail(format!(
@@ -683,7 +569,7 @@ pub fn run_frames_comparison(
     let mut total_psnr = 0.0f64;
 
     for (i, ref_frame) in ref_frames.iter().enumerate() {
-        let actual = if is_jxl { frame_to_reference_native(&frames[i]) } else { frame_to_reference_rgba8(&frames[i]) };
+        let actual = frame_to_reference_native(&frames[i]);
 
         match thresholds {
             None => {
@@ -721,8 +607,7 @@ pub fn run_pages_comparison(
     };
 
     let ref_path = get_ref_path(reference_path);
-    let is_jxl = ref_path.extension().and_then(|e| e.to_str()) == Some("jxl");
-    let ref_frames = read_reference_all_frames(&ref_path)?;
+    let ref_frames = read_reference_jxl_all_frames(&ref_path)?;
 
     if pages.len() != ref_frames.len() {
         return Ok(TestResult::Fail(format!(
@@ -733,7 +618,7 @@ pub fn run_pages_comparison(
     }
 
     for (page_index, page) in pages.iter().enumerate() {
-        let actual = if is_jxl { image_to_reference_native(page) } else { image_to_reference_rgba8(page) };
+        let actual = image_to_reference_native(page);
         if let Err(msg) = compare_exact(&actual, &ref_frames[page_index]) {
             return Ok(TestResult::Fail(format!("page {}: {}", page_index, msg)));
         }

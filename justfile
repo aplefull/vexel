@@ -2,13 +2,9 @@ pgo_profile := justfile_directory() + "/pgo/vexel.profdata"
 
 # --- Build ---
 
-# Build the workspace; pass "release" for the PGO-optimized distribution binary
+# Build the workspace; pass "release" for the PGO-optimized distribution binary or "wasm" for the WASM package with rayon thread pool support
 build profile="dev":
-    {{ if profile == "release" { "RUSTFLAGS='-Cprofile-use=" + pgo_profile + "' cargo build --release" } else { "cargo build" } }}
-
-# Build WASM with rayon thread pool support
-build-wasm:
-    wasm-pack build vexel --target web --release --out-dir ../target/wasm-pkg -- -Z build-std=panic_abort,std
+    {{ if profile == "release" { "RUSTFLAGS='-Cprofile-use=" + pgo_profile + "' cargo build --release" } else if profile == "wasm" { "wasm-pack build vexel --target web --release --out-dir ../target/wasm-pkg -- -Z build-std=panic_abort,std" } else if profile == "dev" { "cargo build" } else { error("unknown profile '" + profile + "', expected dev, release or wasm") } }}
 
 # Regenerate PGO profile data by decoding the whole test image corpus
 pgo-train:
@@ -70,9 +66,3 @@ profile path:
 # Profile memory usage with heaptrack
 heaptrack path:
     heaptrack target/debug/vexel --void "{{path}}"
-
-# --- Tools ---
-
-# Generate a lossless JXL reference
-jxl input output="":
-    cjxl --lossless_jpeg=0 --distance=0 --effort=1 "{{input}}" "{{ if output != "" { output } else { without_extension(input) + ".jxl" } }}"

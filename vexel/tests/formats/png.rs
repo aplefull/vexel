@@ -6,42 +6,42 @@ pub fn test_cases() -> Vec<TestCase> {
             name: "PNG",
             path: "png/0b7d50ac449fd59eb3de00647636d0c9.png",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "png/0b7d50ac449fd59eb3de00647636d0c9.avif" },
+            comparison: Comparison::Exact { reference_path: "png/0b7d50ac449fd59eb3de00647636d0c9.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "PNG",
             path: "png/138331052d7c6e4acebfaa92af314e12.png",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "png/138331052d7c6e4acebfaa92af314e12.avif" },
+            comparison: Comparison::Exact { reference_path: "png/138331052d7c6e4acebfaa92af314e12.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "PNG",
             path: "png/gray_8bit.png",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "png/gray_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "png/gray_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "PNG",
             path: "png/gray_alpha_8bit.png",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "png/gray_alpha_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "png/gray_alpha_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "PNG",
             path: "png/rgb_8bit.png",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "png/rgb_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "png/rgb_8bit.jxl" },
             ..Default::default()
         },
         TestCase {
             name: "PNG",
             path: "png/rgb_alpha_8bit.png",
             validation: None,
-            comparison: Comparison::Exact { reference_path: "png/rgb_alpha_8bit.avif" },
+            comparison: Comparison::Exact { reference_path: "png/rgb_alpha_8bit.jxl" },
             ..Default::default()
         },
         TestCase {

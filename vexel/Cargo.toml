@@ -21,8 +21,6 @@ tsify = { version = "0.5.8", default-features = false, features = ["js"] }
 wasm-bindgen-rayon = { version = "1.2", optional = true }
 
 [dev-dependencies]
-libavif = "0.14.0"
-libavif-sys = "0.17.0"
 jpegxl-sys = { version = "0.13.0", features = ["vendored"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 walkdir = "2"

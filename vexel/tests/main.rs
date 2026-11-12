@@ -340,41 +340,6 @@ fn test_icc() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-#[ignore = "dev only"]
-// This test is used during development for convenience for any new image formats
-pub fn test_image() -> Result<(), Box<dyn std::error::Error>> {
-    let in_path = r"/home/aplefull/Repos/vexel/vexel/tests/images/jpeg";
-    let out_path = Path::new(in_path).with_extension("avif");
-    let save = true;
-
-    let mut decoder = Vexel::open(in_path)?;
-
-    let frames = decoder.decode_frames()?.collect::<Result<Vec<_>, _>>()?;
-
-    if !save {
-        let first = frames.first().ok_or("decoded no frames")?;
-        println!("Decoded image: {}x{}, {} frames", first.width(), first.height(), frames.len());
-        return Ok(());
-    }
-
-    if frames.len() > 1 {
-        for (i, frame) in frames.iter().enumerate() {
-            let frame_out_path =
-                out_path.with_file_name(format!("{}_frame{}.avif", out_path.file_stem().unwrap().to_string_lossy(), i));
-
-            let avif_data = libavif::encode_rgb8(frame.width(), frame.height(), &frame.to_rgba8())?;
-            std::fs::write(frame_out_path, avif_data.as_ref())?;
-        }
-    } else {
-        let frame = frames.first().ok_or("decoded no frames")?;
-        let avif_data = libavif::encode_rgb8(frame.width(), frame.height(), &frame.to_rgba8())?;
-        std::fs::write(out_path, avif_data.as_ref())?;
-    }
-
-    Ok(())
-}
-
-#[test]
 fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
     use std::cell::{Cell, RefCell};
     use std::io::Cursor;
