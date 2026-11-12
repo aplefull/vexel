@@ -260,6 +260,8 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
     }
 }
 
+const FALLBACK_MAX_TEXTURE_SIDE: usize = 2048;
+
 struct Thumbnail {
     image: Arc<egui::ColorImage>,
     size: [usize; 2],
@@ -282,12 +284,11 @@ struct App {
     checkered_bg: bool,
     normalize: bool,
     limits: vexel::Limits,
+    max_texture_side: usize,
 }
 
 impl App {
-    fn frame_to_texture(frame: ImageFrame, normalize: bool) -> Arc<egui::ColorImage> {
-        const MAX_TEXTURE_SIZE: usize = 16384;
-
+    fn frame_to_texture(frame: ImageFrame, normalize: bool, max_side: usize) -> Arc<egui::ColorImage> {
         let src_width = frame.width() as usize;
         let src_height = frame.height() as usize;
         let has_alpha = frame.has_alpha();
@@ -304,18 +305,17 @@ impl App {
         let mut buffer = pixels.into_rgba8_bytes();
         buffer.resize(src_width.saturating_mul(src_height).saturating_mul(4), 0);
 
-        let scale =
-            (MAX_TEXTURE_SIZE as f32 / src_width as f32).min(MAX_TEXTURE_SIZE as f32 / src_height as f32).min(1.0);
+        let scale = (max_side as f64 / src_width as f64).min(max_side as f64 / src_height as f64).min(1.0);
 
         let (dst_width, dst_height, final_buffer) = if scale < 1.0 {
-            let dst_w = ((src_width as f32 * scale) as usize).max(1);
-            let dst_h = ((src_height as f32 * scale) as usize).max(1);
+            let dst_w = ((src_width as f64 * scale) as usize).clamp(1, max_side);
+            let dst_h = ((src_height as f64 * scale) as usize).clamp(1, max_side);
             let mut dst = vec![0u8; dst_w * dst_h * 4];
 
             for dy in 0..dst_h {
                 for dx in 0..dst_w {
-                    let sx = ((dx as f32 + 0.5) / scale) as usize;
-                    let sy = ((dy as f32 + 0.5) / scale) as usize;
+                    let sx = ((dx as f64 + 0.5) / scale) as usize;
+                    let sy = ((dy as f64 + 0.5) / scale) as usize;
                     let sx = sx.min(src_width - 1);
                     let sy = sy.min(src_height - 1);
                     let src_idx = (sy * src_width + sx) * 4;
@@ -342,18 +342,18 @@ impl App {
         if delay <= 10 { 100 } else { delay }.max(17)
     }
 
-    fn image_to_page(image: Image, normalize: bool) -> Page {
+    fn image_to_page(image: Image, normalize: bool, max_side: usize) -> Page {
         let original_size = [image.width() as usize, image.height() as usize];
         let frame = ImageFrame::new_still(image.width(), image.height(), image.into_pixels());
 
         Page {
-            frames: vec![Self::frame_to_texture(frame, normalize)],
+            frames: vec![Self::frame_to_texture(frame, normalize, max_side)],
             delays: vec![Self::frame_delay(0)],
             size: original_size,
         }
     }
 
-    fn frames_to_page(frames: Frames<'_>, normalize: bool) -> Page {
+    fn frames_to_page(frames: Frames, normalize: bool, max_side: usize) -> Page {
         let mut textures = Vec::new();
         let mut delays = Vec::new();
         let mut size = [0usize, 0usize];
@@ -366,14 +366,14 @@ impl App {
             }
 
             delays.push(Self::frame_delay(frame.delay()));
-            textures.push(Self::frame_to_texture(frame, normalize));
+            textures.push(Self::frame_to_texture(frame, normalize, max_side));
         }
 
         Page { frames: textures, delays, size }
     }
 
-    fn thumbnail_from_image(image: Image, normalize: bool) -> Option<Thumbnail> {
-        let page = Self::image_to_page(image, normalize);
+    fn thumbnail_from_image(image: Image, normalize: bool, max_side: usize) -> Option<Thumbnail> {
+        let page = Self::image_to_page(image, normalize, max_side);
         page.frames.into_iter().next().map(|image| Thumbnail { image, size: page.size })
     }
 
@@ -381,7 +381,7 @@ impl App {
         size[0] < 64 || size[1] < 64
     }
 
-    fn new(files: Vec<PathBuf>, start_index: usize, limits: vexel::Limits) -> Self {
+    fn new(files: Vec<PathBuf>, start_index: usize, limits: vexel::Limits, max_texture_side: usize) -> Self {
         let mut app = Self {
             texture: None,
             checker_texture: None,
@@ -399,6 +399,7 @@ impl App {
             checkered_bg: true,
             normalize: false,
             limits,
+            max_texture_side,
         };
 
         let _ = app.load_current_file();
@@ -410,6 +411,7 @@ impl App {
         path: &Path,
         normalize: bool,
         limits: vexel::Limits,
+        max_side: usize,
     ) -> (Result<Vec<Page>, String>, Vec<Thumbnail>) {
         let mut decoder = match Vexel::open(path) {
             Ok(decoder) => decoder,
@@ -421,18 +423,18 @@ impl App {
             .decode_thumbnails()
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|image| Self::thumbnail_from_image(image, normalize))
+            .filter_map(|image| Self::thumbnail_from_image(image, normalize, max_side))
             .collect();
 
         let result = if decoder.supports_pages() {
             decoder.decode_pages().map_err(|e| format!("{}: {}", path.display(), e)).map(|images| {
-                images.into_iter().map(|image| Self::image_to_page(image, normalize)).collect::<Vec<Page>>()
+                images.into_iter().map(|image| Self::image_to_page(image, normalize, max_side)).collect::<Vec<Page>>()
             })
         } else {
             decoder
                 .decode_frames()
                 .map_err(|e| format!("{}: {}", path.display(), e))
-                .map(|frames| vec![Self::frames_to_page(frames, normalize)])
+                .map(|frames| vec![Self::frames_to_page(frames, normalize, max_side)])
         };
 
         let result = result.and_then(|pages| {
@@ -453,8 +455,12 @@ impl App {
             return false;
         }
 
-        let (result, thumbnails) =
-            Self::load_image_from_path(&self.files[self.current_file_index], self.normalize, self.limits.clone());
+        let (result, thumbnails) = Self::load_image_from_path(
+            &self.files[self.current_file_index],
+            self.normalize,
+            self.limits.clone(),
+            self.max_texture_side,
+        );
 
         self.thumbnails = thumbnails;
         self.viewing_thumbnail = None;
@@ -1016,7 +1022,7 @@ pub fn display_image(
     start_index: usize,
     limits: vexel::Limits,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: ViewportBuilder {
             min_inner_size: Some(egui::vec2(300.0, 300.0)),
             icon: load_icon(),
@@ -1024,6 +1030,16 @@ pub fn display_image(
         },
         ..Default::default()
     };
+
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        let base_descriptor = setup.device_descriptor.clone();
+        setup.device_descriptor = Arc::new(move |adapter| {
+            let mut descriptor = base_descriptor(adapter);
+            descriptor.required_limits.max_texture_dimension_2d =
+                descriptor.required_limits.max_texture_dimension_2d.max(adapter.limits().max_texture_dimension_2d);
+            descriptor
+        });
+    }
 
     eframe::run_native(
         "Vexel",
@@ -1037,7 +1053,14 @@ pub fn display_image(
             visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x4a, 0x50, 0x5e);
             visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x52, 0x58, 0x68);
             cc.egui_ctx.set_visuals(visuals);
-            Ok(Box::new(App::new(files, start_index, limits)))
+
+            let max_texture_side = cc
+                .wgpu_render_state
+                .as_ref()
+                .map(|state| state.device.limits().max_texture_dimension_2d as usize)
+                .unwrap_or(FALLBACK_MAX_TEXTURE_SIDE);
+
+            Ok(Box::new(App::new(files, start_index, limits, max_texture_side)))
         }),
     )?;
 

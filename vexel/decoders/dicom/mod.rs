@@ -1,4 +1,5 @@
 pub mod decoder;
+pub mod frames;
 pub mod info;
 pub mod parser;
 pub mod pixels;

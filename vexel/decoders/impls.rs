@@ -24,7 +24,8 @@ use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
 use crate::decoders::traits::ImageDecoder;
 use crate::utils::error::VexelResult;
-use crate::utils::image::{Image, ImageFrame};
+use crate::utils::frames::Frames;
+use crate::utils::image::Image;
 use crate::utils::info::ImageInfo;
 use crate::utils::limits::Limits;
 
@@ -74,7 +75,7 @@ macro_rules! impl_decoder {
                     $frames
                 }
 
-                fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
+                fn decode_frames(&mut self) -> VexelResult<Frames> {
                     $decoder::decode_frames(self)
                 }
             )?
@@ -85,6 +86,7 @@ macro_rules! impl_decoder {
 impl_decoder!(JpegDecoder, Jpeg, thumbnails = true);
 impl_decoder!(JpegLsDecoder, JpegLs, thumbnails = true);
 impl_decoder!(PngDecoder, Png, frames = true);
+impl_decoder!(GifDecoder, Gif, frames = true);
 impl_decoder!(BmpDecoder, Bmp);
 impl_decoder!(NetPbmDecoder, Netpbm, pages = true);
 impl_decoder!(HdrDecoder, Hdr);
@@ -122,26 +124,8 @@ impl<R: Read + Seek + Sync> ImageDecoder<R> for RpgmvpDecoder<R> {
         true
     }
 
-    fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
+    fn decode_frames(&mut self) -> VexelResult<Frames> {
         RpgmvpDecoder::decode_frames(self)
-    }
-}
-
-impl<R: Read + Seek + Sync> ImageDecoder<R> for GifDecoder<R> {
-    fn set_limits(&mut self, limits: Limits) {
-        GifDecoder::set_limits(self, limits);
-    }
-
-    fn decode(&mut self) -> VexelResult<Image> {
-        GifDecoder::decode(self)
-    }
-
-    fn get_info(&mut self) -> ImageInfo {
-        ImageInfo::Gif(GifDecoder::get_info(self))
-    }
-
-    fn supports_frames() -> bool {
-        true
     }
 }
 

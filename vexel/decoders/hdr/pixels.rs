@@ -83,6 +83,7 @@ fn decode_rgbe_row(rgbe_row: &[u8], rgb_row: &mut [f32], width: usize, exp2_tabl
     }
 }
 
+#[cfg_attr(not(feature = "rayon"), allow(unused_variables))]
 fn convert_xyze_to_rgb(xyz_data: &[f32], rgb_data: &mut [f32], width: usize) {
     #[cfg(feature = "rayon")]
     {

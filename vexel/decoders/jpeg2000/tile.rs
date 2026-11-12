@@ -95,6 +95,7 @@ pub enum TilePlane {
 }
 
 impl TilePlane {
+    #[cfg(feature = "rayon")]
     pub fn len(&self) -> usize {
         match self {
             TilePlane::Exact(samples) => samples.len(),
@@ -1112,6 +1113,7 @@ fn decode_block_tasks_serial(tasks: &[BlockTask<'_>], params: &BlockParams) -> V
     tasks.iter().map(|task| decode_block(&mut scratch, task, params)).collect()
 }
 
+#[cfg(feature = "rayon")]
 const PARALLEL_BLOCK_THRESHOLD: usize = 8;
 
 fn band_offset(orient: BandOrient, prev: Option<(i32, i32)>) -> (i32, i32) {
@@ -1257,7 +1259,9 @@ impl<T: Default + Clone> DwtScratch<T> {
     }
 }
 
+#[cfg(feature = "rayon")]
 const PARALLEL_LINE_THRESHOLD: usize = 16;
+#[cfg(feature = "rayon")]
 const PARALLEL_LINE_WORK_THRESHOLD: usize = 1 << 14;
 
 #[cfg(feature = "rayon")]
@@ -1295,14 +1299,18 @@ where
     }
 }
 
+#[cfg(feature = "rayon")]
 struct ColumnView<S> {
     data: *mut S,
     len: usize,
 }
 
+#[cfg(feature = "rayon")]
 unsafe impl<S> Send for ColumnView<S> {}
+#[cfg(feature = "rayon")]
 unsafe impl<S> Sync for ColumnView<S> {}
 
+#[cfg(feature = "rayon")]
 impl<S> ColumnView<S> {
     #[allow(clippy::mut_from_ref)]
     unsafe fn columns_of<'a>(&self) -> &'a mut [S] {

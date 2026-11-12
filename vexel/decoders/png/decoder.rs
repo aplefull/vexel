@@ -1,17 +1,17 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use super::animation::AnimationDecoder;
+use super::animation::{PngData, PngFrames};
 use super::chunks;
 use super::crc_simd::update_crc;
 use super::info::{FdatChunk, IhdrChunk, PngChunk, PngChunkBody, PngInfo, PngSection, PngSignature};
-use super::pixels::{filtered_data_size, PixelDecoder};
+use super::pixels::PngFormat;
 use super::types::*;
 use crate::bitreader::BitReader;
-use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::frames::{FrameExtent, FrameSource, Frames};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, ImageSummary};
-use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData};
+use crate::{log_debug, log_warn, Image, Limits};
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 const STREAM_BLOCK_SIZE: usize = 64 * 1024;
@@ -25,7 +25,7 @@ enum WalkMode {
 enum Payload {
     Collected(Vec<u8>),
     Idat,
-    Fdat { sequence_number: Option<u32>, data: Vec<u8> },
+    Fdat { sequence_number: Option<u32> },
     Streamed { sequence_number: Option<u32> },
 }
 
@@ -90,7 +90,7 @@ impl<R: Read + Seek> PngDecoder<R> {
     pub fn get_info(&mut self) -> PngInfo {
         if self.info.is_none() {
             let saved_limits = self.limits.clone();
-            if let Err(e) = self.walk_chunks(WalkMode::InfoOnly) {
+            if let Err(e) = self.walk_chunks(WalkMode::InfoOnly, FrameExtent::All) {
                 log_warn!("Failed to read PNG structure: {}", e);
             }
             self.limits = saved_limits;
@@ -212,18 +212,31 @@ impl<R: Read + Seek> PngDecoder<R> {
                 let mut idat = std::mem::take(&mut self.idat_data);
                 let (read, crc) = self.stream_payload(length, crc_seed, |bytes| idat.extend_from_slice(bytes))?;
                 if let Some(frame) = self.frames.last_mut() {
-                    frame.fdat.extend_from_slice(&idat[start..]);
+                    frame.append_idat(&idat, start..idat.len());
                 }
                 self.idat_data = idat;
                 (Payload::Idat, read, crc)
             }
             (Some(ChunkKind::FDAT), WalkMode::Decode) => {
                 self.limits.reserve(reservable)?;
-                let mut data = Vec::new();
-                let (read, crc) = self.stream_payload(length, crc_seed, |bytes| data.extend_from_slice(bytes))?;
-                let sequence_number =
-                    (data.len() >= 4).then(|| u32::from_be_bytes([data[0], data[1], data[2], data[3]]));
-                (Payload::Fdat { sequence_number, data }, read, crc)
+                let idat = &self.idat_data;
+                let mut fdat = self.frames.last_mut().map(|frame| frame.take_fdat(idat));
+                let mut prefix = [0u8; 4];
+                let mut prefix_len = 0;
+                let (read, crc) = self.stream_payload(length, crc_seed, |bytes| {
+                    let needed = (prefix.len() - prefix_len).min(bytes.len());
+                    prefix[prefix_len..prefix_len + needed].copy_from_slice(&bytes[..needed]);
+                    prefix_len += needed;
+                    if let Some(fdat) = fdat.as_mut() {
+                        fdat.extend_from_slice(&bytes[needed..]);
+                    }
+                })?;
+                match (self.frames.last_mut(), fdat) {
+                    (Some(frame), Some(fdat)) => frame.fdat = fdat,
+                    _ => self.limits.free(reservable),
+                }
+                let sequence_number = (prefix_len == prefix.len()).then(|| u32::from_be_bytes(prefix));
+                (Payload::Fdat { sequence_number }, read, crc)
             }
             (Some(ChunkKind::IDAT) | Some(ChunkKind::FDAT) | None, _) => {
                 let mut prefix = Vec::with_capacity(4);
@@ -327,10 +340,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                 let fctl = chunks::parse_fctl(data);
                 if complete {
                     let sanitized = chunks::sanitize_fctl(&fctl, self.width, self.height);
-                    if mode == WalkMode::Decode {
-                        self.limits.reserve_buffer(sanitized.width, sanitized.height, self.output_bytes_per_pixel())?;
-                    }
-                    self.frames.push(PngFrame { fctl_info: sanitized, fdat: Vec::new() });
+                    self.frames.push(PngFrame::new(sanitized));
                 }
                 PngChunkBody::Fctl(fctl)
             }
@@ -417,12 +427,9 @@ impl<R: Read + Seek> PngDecoder<R> {
                 result?
             }
             (Payload::Idat, _) => PngChunkBody::Idat,
-            (Payload::Fdat { sequence_number, data }, _) => {
+            (Payload::Fdat { sequence_number }, _) => {
                 if self.frames.is_empty() {
                     log_warn!("fdAT chunk without preceding fcTL chunk");
-                    self.limits.free_usize(data.capacity());
-                } else if let Some(frame) = self.frames.last_mut() {
-                    frame.fdat.extend_from_slice(data.get(4..).unwrap_or(&[]));
                 }
                 PngChunkBody::Fdat(FdatChunk { sequence_number: sequence_number.unwrap_or(0) })
             }
@@ -447,7 +454,11 @@ impl<R: Read + Seek> PngDecoder<R> {
         Ok(())
     }
 
-    fn walk_chunks(&mut self, mode: WalkMode) -> VexelResult<()> {
+    fn first_frame_ready(&self) -> bool {
+        self.actl_info.is_some() && !self.idat_data.is_empty() && self.frames.iter().any(PngFrame::is_drawable)
+    }
+
+    fn walk_chunks(&mut self, mode: WalkMode, extent: FrameExtent) -> VexelResult<bool> {
         self.reset_state();
         self.reader.seek(SeekFrom::Start(0))?;
 
@@ -472,6 +483,13 @@ impl<R: Read + Seek> PngDecoder<R> {
                 break;
             }
 
+            if extent == FrameExtent::First
+                && chunk_kind(&chunk_type) == Some(ChunkKind::FCTL)
+                && self.first_frame_ready()
+            {
+                return Ok(false);
+            }
+
             match self.process_chunk(chunk_type, length, mode) {
                 Err(e @ VexelError::LimitExceeded(_)) => return Err(e),
                 Err(e @ VexelError::InvalidDimensions { .. }) => return Err(e),
@@ -486,137 +504,71 @@ impl<R: Read + Seek> PngDecoder<R> {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
-    fn decode_pixels(&mut self) -> VexelResult<PixelData> {
-        if self.compression_method == CompressionMethod::Deflate {
-            let bits_per_pixel = match self.color_type {
-                ColorType::Grayscale => self.bit_depth as u32,
-                ColorType::RGB => self.bit_depth as u32 * 3,
-                ColorType::Indexed => self.bit_depth as u32,
-                ColorType::GrayscaleAlpha => self.bit_depth as u32 * 2,
-                ColorType::RGBA => self.bit_depth as u32 * 4,
-            };
-            let capacity = filtered_data_size(u64::from(bits_per_pixel), self.width, self.height, self.interlace);
-            let compressed = std::mem::take(&mut self.idat_data);
-            let compressed_len = compressed.len();
-            self.idat_data = ZlibDecoder::from_slice(&compressed).decode_expected(capacity);
-            drop(compressed);
-            self.limits.free_usize(compressed_len);
-        }
-
-        let bits_per_pixel = match self.color_type {
-            ColorType::Grayscale => self.bit_depth as u32,
-            ColorType::RGB => self.bit_depth as u32 * 3,
-            ColorType::Indexed => self.bit_depth as u32,
-            ColorType::GrayscaleAlpha => self.bit_depth as u32 * 2,
-            ColorType::RGBA => self.bit_depth as u32 * 4,
-        };
-        let bytes_per_row = (u64::from(bits_per_pixel) * u64::from(self.width)).div_ceil(8) + 1;
-
-        if !self.interlace && !self.idat_data.is_empty() {
-            let expected = usize::try_from(bytes_per_row.saturating_mul(u64::from(self.height))).unwrap_or(usize::MAX);
-            if self.idat_data.len() < expected {
-                log_warn!(
-                    "Decompressed data covers only {} of {} rows, filling the rest with zeros",
-                    self.idat_data.len() as u64 / bytes_per_row,
-                    self.height
-                );
-                self.idat_data.resize(expected, 0);
-            }
-        }
-
-        if self.idat_data.is_empty() {
-            log_warn!("No decompressed pixel data for {}x{} image, filling with zeros", self.width, self.height);
-            let length = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
-            return Ok(PixelData::RGBA8(vec![0u8; length]));
-        }
-
-        let pixel_decoder = PixelDecoder::new(
-            self.bit_depth,
-            self.color_type,
-            self.width,
-            self.interlace,
-            self.palette.clone(),
-            self.transparency.clone(),
-        );
-
-        let data =
-            pixel_decoder.deinterlace_scan_lines_owned(std::mem::take(&mut self.idat_data), self.width, self.height)?;
-
-        let mut pixels = match self.color_type {
-            ColorType::Indexed => pixel_decoder.decode_indexed(data)?,
-            ColorType::RGB => pixel_decoder.decode_rgb(data)?,
-            ColorType::RGBA => pixel_decoder.decode_rgba(data)?,
-            ColorType::Grayscale => pixel_decoder.decode_grayscale(data)?,
-            ColorType::GrayscaleAlpha => pixel_decoder.decode_grayscale_alpha(data)?,
-        };
-
-        pixels.correct_pixels(self.width, self.height);
-
-        Ok(pixels)
-    }
-
-    fn decode_inner(&mut self, frame_limit: Option<usize>) -> VexelResult<DecodedPng> {
+    fn prepare(&mut self, extent: FrameExtent) -> VexelResult<bool> {
         self.info = None;
-        self.walk_chunks(WalkMode::Decode)?;
-        self.finish_info();
+        let complete = self.walk_chunks(WalkMode::Decode, extent)?;
+        if complete {
+            self.finish_info();
+        } else {
+            self.collected = PngInfo::default();
+        }
 
         if self.width == 0 || self.height == 0 {
             return Err(VexelError::InvalidDimensions { width: self.width, height: self.height });
         }
 
-        if self.actl_info.is_some() {
-            let mut anim_decoder = AnimationDecoder::new(self.width, self.height);
-            let result = anim_decoder.decode_apng_frames(
-                &self.frames,
-                &mut self.limits,
-                self.bit_depth,
-                self.color_type,
-                self.interlace,
-                self.palette.clone(),
-                self.transparency.clone(),
-                frame_limit,
-            );
+        Ok(complete)
+    }
 
-            match result {
-                Ok(image_frames) => return Ok(DecodedPng::Animation(image_frames)),
-                Err(e) => log_warn!("Error decoding APNG frames: {:?}", e),
-            }
-        }
+    fn frame_source(&mut self, lookahead: bool, max_alloc: Option<u64>) -> PngFrames {
+        let data = PngData {
+            format: PngFormat {
+                width: self.width,
+                height: self.height,
+                bit_depth: self.bit_depth,
+                color_type: self.color_type,
+                compression_method: self.compression_method,
+                interlace: self.interlace,
+                palette: self.palette.clone(),
+                transparency: self.transparency.clone(),
+            },
+            frames: std::mem::take(&mut self.frames),
+            idat: std::mem::take(&mut self.idat_data),
+        };
 
-        let pixel_data = self.decode_pixels()?;
-
-        Ok(DecodedPng::Still(Image::from_pixels(self.width, self.height, pixel_data)))
+        PngFrames::new(data, self.actl_info.is_some(), lookahead, &mut self.limits, max_alloc)
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
-        match self.decode_inner(Some(1))? {
-            DecodedPng::Still(image) => Ok(image),
-            DecodedPng::Animation(frames) => {
-                let first = frames
-                    .into_iter()
-                    .next()
-                    .ok_or(VexelError::Custom("PNG: animation contains no frames".to_string()))?;
+        let limits = self.limits.clone();
+        let mut extent = FrameExtent::First;
 
-                Ok(Image::from_frame(first))
+        loop {
+            let complete = self.prepare(extent)?;
+            let mut frames = self.frame_source(false, limits.max_alloc);
+
+            if let Some(frame) = frames.next_animation_frame() {
+                return Ok(Image::from_frame(frame));
             }
+
+            if complete {
+                return frames
+                    .next_frame()?
+                    .map(Image::from_frame)
+                    .ok_or_else(|| VexelError::Custom("PNG: image contains no frames".to_string()));
+            }
+
+            self.limits = limits.clone();
+            extent = FrameExtent::All;
         }
     }
 
-    pub(crate) fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
-        match self.decode_inner(None)? {
-            DecodedPng::Still(image) => {
-                let (width, height) = (image.width(), image.height());
-                Ok(vec![ImageFrame::new(width, height, image.into_pixels(), 0)])
-            }
-            DecodedPng::Animation(frames) => Ok(frames),
-        }
+    pub fn decode_frames(&mut self) -> VexelResult<Frames> {
+        let max_alloc = self.limits.max_alloc;
+        self.prepare(FrameExtent::All)?;
+        Ok(Frames::new(self.frame_source(true, max_alloc)))
     }
-}
-
-enum DecodedPng {
-    Still(Image),
-    Animation(Vec<ImageFrame>),
 }

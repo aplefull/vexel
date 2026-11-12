@@ -1,5 +1,6 @@
 use super::filters::FilterDecoder;
-use super::types::{ColorType, TransparencyData};
+use super::types::{ColorType, CompressionMethod, TransparencyData};
+use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::VexelResult;
 use crate::{log_warn, PixelData};
 
@@ -31,6 +32,91 @@ pub fn filtered_data_size(bits_per_pixel: u64, width: u32, height: u32, interlac
     usize::try_from(total).unwrap_or(usize::MAX)
 }
 
+#[derive(Clone)]
+pub struct PngFormat {
+    pub width: u32,
+    pub height: u32,
+    pub bit_depth: u8,
+    pub color_type: ColorType,
+    pub compression_method: CompressionMethod,
+    pub interlace: bool,
+    pub palette: Option<Vec<[u8; 3]>>,
+    pub transparency: Option<TransparencyData>,
+}
+
+impl PngFormat {
+    pub fn bits_per_pixel(&self) -> u64 {
+        let channels = match self.color_type {
+            ColorType::Grayscale | ColorType::Indexed => 1,
+            ColorType::GrayscaleAlpha => 2,
+            ColorType::RGB => 3,
+            ColorType::RGBA => 4,
+        };
+        u64::from(self.bit_depth) * channels
+    }
+
+    fn pixel_decoder(&self, width: u32) -> PixelDecoder {
+        PixelDecoder::new(
+            self.bit_depth,
+            self.color_type,
+            width,
+            self.interlace,
+            self.palette.clone(),
+            self.transparency.clone(),
+        )
+    }
+
+    pub fn decode_image(&self, compressed: Vec<u8>) -> VexelResult<PixelData> {
+        let (width, height) = (self.width, self.height);
+        let bits_per_pixel = self.bits_per_pixel();
+
+        let mut data = if self.compression_method == CompressionMethod::Deflate {
+            let capacity = filtered_data_size(bits_per_pixel, width, height, self.interlace);
+            let decompressed = ZlibDecoder::from_slice(&compressed).decode_expected(capacity);
+            drop(compressed);
+            decompressed
+        } else {
+            compressed
+        };
+
+        let bytes_per_row = (bits_per_pixel * u64::from(width)).div_ceil(8) + 1;
+        if !self.interlace && !data.is_empty() {
+            let expected = usize::try_from(bytes_per_row.saturating_mul(u64::from(height))).unwrap_or(usize::MAX);
+            if data.len() < expected {
+                log_warn!(
+                    "Decompressed data covers only {} of {} rows, filling the rest with zeros",
+                    data.len() as u64 / bytes_per_row,
+                    height
+                );
+                data.resize(expected, 0);
+            }
+        }
+
+        if data.is_empty() {
+            log_warn!("No decompressed pixel data for {}x{} image, filling with zeros", width, height);
+            let length = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+            return Ok(PixelData::RGBA8(vec![0u8; length]));
+        }
+
+        let decoder = self.pixel_decoder(width);
+        let scanlines = decoder.deinterlace_scan_lines_owned(data, width, height)?;
+        let mut pixels = decoder.decode_pixels_by_type(scanlines)?;
+        pixels.correct_pixels(width, height);
+
+        Ok(pixels)
+    }
+
+    pub fn decode_frame(&self, compressed: &[u8], width: u32, height: u32) -> Option<PixelData> {
+        let decoder = self.pixel_decoder(width);
+        let capacity = filtered_data_size(self.bits_per_pixel(), width, height, self.interlace);
+        let decompressed = ZlibDecoder::from_slice(compressed).decode_expected(capacity);
+        let scanlines = decoder.deinterlace_scan_lines_owned(decompressed, width, height).ok()?;
+        let mut pixels = decoder.decode_pixels_by_type(scanlines).ok()?;
+        pixels.correct_pixels(width, height);
+        Some(pixels)
+    }
+}
+
 pub struct PixelDecoder {
     bit_depth: u8,
     pub(crate) color_type: ColorType,
@@ -59,6 +145,16 @@ impl PixelDecoder {
             ColorType::Indexed => self.bit_depth as u32,
             ColorType::GrayscaleAlpha => self.bit_depth as u32 * 2,
             ColorType::RGBA => self.bit_depth as u32 * 4,
+        }
+    }
+
+    pub fn decode_pixels_by_type(&self, scanlines: Vec<u8>) -> VexelResult<PixelData> {
+        match self.color_type {
+            ColorType::Indexed => self.decode_indexed(scanlines),
+            ColorType::RGB => self.decode_rgb(scanlines),
+            ColorType::RGBA => self.decode_rgba(scanlines),
+            ColorType::Grayscale => self.decode_grayscale(scanlines),
+            ColorType::GrayscaleAlpha => self.decode_grayscale_alpha(scanlines),
         }
     }
 

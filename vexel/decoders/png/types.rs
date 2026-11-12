@@ -122,10 +122,11 @@ pub struct FctlChunk {
     pub blend_op: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug)]
 pub struct PngFrame {
     pub fctl_info: FctlChunk,
     pub fdat: Vec<u8>,
+    pub idat: Option<std::ops::Range<usize>>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]

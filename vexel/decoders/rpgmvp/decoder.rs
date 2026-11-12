@@ -3,7 +3,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use crate::bitreader::BitReader;
 use crate::decoders::png::{PngDecoder, PngInfo};
 use crate::utils::error::VexelResult;
-use crate::utils::image::ImageFrame;
+use crate::utils::frames::Frames;
 use crate::{log_warn, Image, Limits};
 
 pub const MAGIC: &[u8; 8] = b"RPGMV\0\0\0";
@@ -88,7 +88,7 @@ impl<R: Read + Seek> RpgmvpDecoder<R> {
         result
     }
 
-    pub fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
+    pub fn decode_frames(&mut self) -> VexelResult<Frames> {
         let mut decoder = self.png_decoder()?;
         let result = decoder.decode_frames();
         self.capture_info(&mut decoder);

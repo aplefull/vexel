@@ -129,6 +129,7 @@ pub struct ScanData {
     pub arith_dc_tables: Vec<ArithmeticCodingTable>,
     pub arith_ac_tables: Vec<ArithmeticCodingTable>,
     pub data: Vec<u8>,
+    #[cfg_attr(not(feature = "rayon"), allow(dead_code))]
     pub restart_offsets: Vec<usize>,
 }
 

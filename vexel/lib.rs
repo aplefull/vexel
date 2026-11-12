@@ -11,7 +11,6 @@ use tsify::{Ts, Tsify};
 pub(crate) use utils::bitreader;
 pub use utils::error::{VexelError, VexelResult};
 pub use utils::frames::Frames;
-use utils::frames::{BufferedFrames, SingleFrame};
 pub use utils::icc::ICCProfile;
 pub use utils::image::{Image, ImageFormat, ImageFrame, PixelData, PixelFormat};
 pub use utils::info::ImageInfo;
@@ -217,31 +216,13 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     ///
     /// Same as [`decode`](Self::decode). Errors encountered part-way through an
     /// animation end the iteration.
-    pub fn decode_frames(&mut self) -> VexelResult<Frames<'_>> {
-        let decoder = std::mem::replace(&mut self.decoder, Decoders::Unknown);
+    pub fn decode_frames(&mut self) -> VexelResult<Frames> {
+        let decoder = &mut self.decoder;
 
-        match decoder {
-            Decoders::Gif(gif) => catch_decoder_panic(move || gif.into_frame_source()).map(Frames::new),
-            other => {
-                self.decoder = other;
-
-                if !self.decoder.supports_frames() {
-                    return self.decode().map(|image| Frames::new(SingleFrame::new(image)));
-                }
-
-                // TODO: try to remove BufferedFrame, it exists only because of DICOM and PNG now,
-                // because they produce all frames at once.
-                // TODO: a multi-frame DICOM object is a cine loop or a volume of
-                // slices rather than an animation
-                let decoder = &mut self.decoder;
-
-                catch_decoder_panic(move || match decoder.as_dyn() {
-                    Some(decoder) => decoder.decode_frames(),
-                    None => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
-                })
-                .map(|frames| Frames::new(BufferedFrames::new(frames)))
-            }
-        }
+        catch_decoder_panic(move || match decoder.as_dyn() {
+            Some(decoder) => decoder.decode_frames(),
+            None => Err(VexelError::UnsupportedFormat("Unknown format".to_string())),
+        })
     }
 
     /// Decodes every page contained in the file, returning one [`Image`] per page.
@@ -604,7 +585,7 @@ fn pixels_to_js(pixels: PixelData) -> Uint8ClampedArray {
 #[wasm_bindgen(js_name = Decoder)]
 pub struct WasmDecoder {
     decoder: Vexel<Cursor<Vec<u8>>>,
-    pending_frames: Option<std::vec::IntoIter<ImageFrame>>,
+    frames: Option<Frames>,
     timings: JsTimings,
 }
 
@@ -617,7 +598,7 @@ impl WasmDecoder {
     #[wasm_bindgen(constructor)]
     pub fn new(data: Vec<u8>) -> Result<WasmDecoder, String> {
         let decoder = Vexel::new(Cursor::new(data)).map_err(|e| e.to_string())?;
-        Ok(WasmDecoder { decoder, pending_frames: None, timings: JsTimings::default() })
+        Ok(WasmDecoder { decoder, frames: None, timings: JsTimings::default() })
     }
 
     /// Sets resource limits that the decoder will enforce during decoding.
@@ -669,19 +650,14 @@ impl WasmDecoder {
     pub fn next_frame(&mut self) -> Result<Option<Ts<JsImageFrame>>, String> {
         let start = performance_now();
 
-        if self.pending_frames.is_none() {
-            let frames = self
-                .decoder
-                .decode_frames()
-                .map_err(|e| e.to_string())?
-                .collect::<VexelResult<Vec<_>>>()
-                .map_err(|e| e.to_string())?;
-
-            self.pending_frames = Some(frames.into_iter());
+        if self.frames.is_none() {
+            self.frames = Some(self.decoder.decode_frames().map_err(|e| e.to_string())?);
         }
-
+        let frame = match self.frames.as_mut() {
+            Some(frames) => frames.next_frame().map_err(|e| e.to_string())?,
+            None => None,
+        };
         let decoded = performance_now();
-        let frame = self.pending_frames.as_mut().and_then(|frames| frames.next());
 
         let result = frame
             .map(|frame| {

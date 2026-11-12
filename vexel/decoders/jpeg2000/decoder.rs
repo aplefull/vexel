@@ -140,11 +140,13 @@ pub fn decode_codestream_planes(parsed: &Codestream, data: &[u8], limits: &mut L
     let mut decoded_any = false;
     let mut ppm_cursor = 0usize;
 
-    let occupied = tile_data.iter().filter(|bytes| !bytes.is_empty()).count();
-    let sequential_headers = !parsed.ppm_data.is_empty();
-
-    if can_decode_tiles_in_parallel(occupied, sequential_headers) {
-        return decode_tiles_parallel(parsed, &tile_data, planes, limits);
+    #[cfg(feature = "rayon")]
+    {
+        let occupied = tile_data.iter().filter(|bytes| !bytes.is_empty()).count();
+        let sequential_headers = !parsed.ppm_data.is_empty();
+        if can_decode_tiles_in_parallel(occupied, sequential_headers) {
+            return decode_tiles_parallel(parsed, &tile_data, planes, limits);
+        }
     }
 
     for (tile_index, bytes) in tile_data.iter().enumerate() {
@@ -177,11 +179,6 @@ pub fn decode_codestream_planes(parsed: &Codestream, data: &[u8], limits: &mut L
 #[cfg(feature = "rayon")]
 fn can_decode_tiles_in_parallel(occupied_tiles: usize, sequential_headers: bool) -> bool {
     occupied_tiles >= PARALLEL_TILE_THRESHOLD && !sequential_headers
-}
-
-#[cfg(not(feature = "rayon"))]
-fn can_decode_tiles_in_parallel(_occupied_tiles: usize, _sequential_headers: bool) -> bool {
-    false
 }
 
 #[cfg(feature = "rayon")]
@@ -983,8 +980,10 @@ fn pack_pixels(
     }
 }
 
+#[cfg(feature = "rayon")]
 const PARALLEL_PIXEL_THRESHOLD: usize = 1 << 16;
 const MAX_TILE_COMPONENTS: usize = 1 << 20;
+#[cfg(feature = "rayon")]
 const PARALLEL_TILE_THRESHOLD: usize = 4;
 
 fn fill_pixels<T, F>(pixel_count: usize, channels: usize, write: F) -> Vec<T>

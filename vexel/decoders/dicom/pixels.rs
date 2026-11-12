@@ -249,33 +249,65 @@ fn stored_abs_range(params: &PixelParams, transform: &MonoTransform) -> (f64, f6
     }
 }
 
-fn actual_abs_range(frames: &[StoredFrame], mask: &SampleMask, transform: &MonoTransform) -> Option<(f64, f64)> {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
+#[derive(Debug, Clone, Copy)]
+pub struct SampleRange {
+    min: f64,
+    max: f64,
+}
 
-    let mut visit = |container: u32| {
-        let value = apply_modality(mask.apply(container), transform);
-        min = min.min(value);
-        max = max.max(value);
-    };
+impl SampleRange {
+    pub fn empty() -> SampleRange {
+        SampleRange { min: f64::INFINITY, max: f64::NEG_INFINITY }
+    }
 
-    for frame in frames {
+    pub fn merge(self, other: SampleRange) -> SampleRange {
+        SampleRange { min: self.min.min(other.min), max: self.max.max(other.max) }
+    }
+
+    fn include(&mut self, value: f64) {
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+    }
+
+    pub fn of_mono_frame(frame: &StoredFrame, params: &PixelParams, transform: &MonoTransform) -> SampleRange {
+        let mask = SampleMask::new(params);
+        let mut range = SampleRange::empty();
+        let mut visit = |container: u32| range.include(apply_modality(mask.apply(container), transform));
+
         match frame {
             StoredFrame::U8(v) => v.iter().for_each(|&s| visit(s as u32)),
             StoredFrame::U16(v) => v.iter().for_each(|&s| visit(s as u32)),
             StoredFrame::U32(v) => v.iter().for_each(|&s| visit(s)),
             StoredFrame::F32(_) | StoredFrame::F64(_) => {}
         }
+
+        range
     }
 
-    if min.is_finite() && max.is_finite() && max > min {
-        Some((min, max))
-    } else {
-        None
+    pub fn of_float_frame(frame: &StoredFrame) -> SampleRange {
+        let mut range = SampleRange::empty();
+        match frame {
+            StoredFrame::F32(v) => v.iter().filter(|s| s.is_finite()).for_each(|&s| range.include(s as f64)),
+            StoredFrame::F64(v) => v.iter().filter(|s| s.is_finite()).for_each(|&s| range.include(s)),
+            _ => {}
+        }
+        range
+    }
+
+    fn mono_bounds(self) -> Option<(f64, f64)> {
+        (self.min.is_finite() && self.max.is_finite() && self.max > self.min).then_some((self.min, self.max))
+    }
+
+    fn float_bounds(self) -> (f64, f64) {
+        if self.min.is_finite() && self.max.is_finite() {
+            (self.min, self.max)
+        } else {
+            (0.0, 1.0)
+        }
     }
 }
 
-fn uses_data_scale(transform: &MonoTransform) -> bool {
+pub fn uses_data_scale(transform: &MonoTransform) -> bool {
     if transform.voi_lut.as_ref().is_some_and(|l| !l.entries.is_empty()) {
         return false;
     }
@@ -368,102 +400,82 @@ impl DisplayMapper {
     }
 }
 
-pub fn mono_frames_to_pixels(
-    frames: &[StoredFrame],
-    params: &PixelParams,
-    transform: &MonoTransform,
-) -> Vec<PixelData> {
-    let mask = SampleMask::new(params);
-    let deep = params.bits_stored > 8;
-    let out_max = if deep { 65535.0 } else { 255.0 };
-
-    let (abs_min, abs_max) = if uses_data_scale(transform) {
-        actual_abs_range(frames, &mask, transform).unwrap_or_else(|| stored_abs_range(params, transform))
-    } else {
-        stored_abs_range(params, transform)
-    };
-    let mapper = DisplayMapper::new(transform, abs_min, abs_max, out_max);
-    let frac_offset = abs_min - abs_min.trunc();
-
-    let table: Option<Vec<u16>> = if params.bits_allocated <= 16 {
-        let size = 1usize << params.bits_allocated.clamp(1, 16);
-        let mut table = vec![0u16; size];
-        for (container, out) in table.iter_mut().enumerate() {
-            let value = apply_modality(mask.apply(container as u32), transform);
-            *out = mapper.map(value + frac_offset) as u16;
-        }
-        Some(table)
-    } else {
-        None
-    };
-
-    frames
-        .iter()
-        .map(|frame| {
-            let map_value = |container: u32| -> u16 {
-                match &table {
-                    Some(t) => t[(container as usize).min(t.len() - 1)],
-                    None => mapper.map(apply_modality(mask.apply(container), transform) + frac_offset) as u16,
-                }
-            };
-
-            let out16: Vec<u16> = match frame {
-                StoredFrame::U8(v) => v.iter().map(|&s| map_value(s as u32)).collect(),
-                StoredFrame::U16(v) => v.iter().map(|&s| map_value(s as u32)).collect(),
-                StoredFrame::U32(v) => v.iter().map(|&s| map_value(s)).collect(),
-                StoredFrame::F32(_) | StoredFrame::F64(_) => Vec::new(),
-            };
-
-            if deep {
-                PixelData::L16(out16)
-            } else {
-                PixelData::L8(out16.into_iter().map(|v| v as u8).collect())
-            }
-        })
-        .collect()
+pub struct MonoMapper {
+    mask: SampleMask,
+    transform: MonoTransform,
+    deep: bool,
+    mapper: DisplayMapper,
+    frac_offset: f64,
+    table: Option<Vec<u16>>,
 }
 
-pub fn float_frames_to_pixels(frames: &[StoredFrame], transform: &MonoTransform) -> Vec<PixelData> {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
+impl MonoMapper {
+    pub fn new(params: &PixelParams, transform: &MonoTransform, data_range: Option<SampleRange>) -> MonoMapper {
+        let mask = SampleMask::new(params);
+        let deep = params.bits_stored > 8;
+        let out_max = if deep { 65535.0 } else { 255.0 };
 
-    for frame in frames {
-        match frame {
-            StoredFrame::F32(v) => {
-                for &s in v {
-                    if s.is_finite() {
-                        min = min.min(s as f64);
-                        max = max.max(s as f64);
-                    }
-                }
+        let (abs_min, abs_max) =
+            data_range.and_then(SampleRange::mono_bounds).unwrap_or_else(|| stored_abs_range(params, transform));
+        let mapper = DisplayMapper::new(transform, abs_min, abs_max, out_max);
+        let frac_offset = abs_min - abs_min.trunc();
+
+        let table = (params.bits_allocated <= 16).then(|| {
+            let size = 1usize << params.bits_allocated.clamp(1, 16);
+            (0..size)
+                .map(|container| {
+                    let value = apply_modality(mask.apply(container as u32), transform);
+                    mapper.map(value + frac_offset) as u16
+                })
+                .collect()
+        });
+
+        MonoMapper { mask, transform: transform.clone(), deep, mapper, frac_offset, table }
+    }
+
+    fn map_value(&self, container: u32) -> u16 {
+        match &self.table {
+            Some(t) => t[(container as usize).min(t.len() - 1)],
+            None => {
+                let value = apply_modality(self.mask.apply(container), &self.transform);
+                self.mapper.map(value + self.frac_offset) as u16
             }
-            StoredFrame::F64(v) => {
-                for &s in v {
-                    if s.is_finite() {
-                        min = min.min(s);
-                        max = max.max(s);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
-    if !min.is_finite() || !max.is_finite() {
-        min = 0.0;
-        max = 1.0;
+    pub fn map(&self, frame: &StoredFrame) -> PixelData {
+        let out16: Vec<u16> = match frame {
+            StoredFrame::U8(v) => v.iter().map(|&s| self.map_value(s as u32)).collect(),
+            StoredFrame::U16(v) => v.iter().map(|&s| self.map_value(s as u32)).collect(),
+            StoredFrame::U32(v) => v.iter().map(|&s| self.map_value(s)).collect(),
+            StoredFrame::F32(_) | StoredFrame::F64(_) => Vec::new(),
+        };
+
+        if self.deep {
+            PixelData::L16(out16)
+        } else {
+            PixelData::L8(out16.into_iter().map(|v| v as u8).collect())
+        }
+    }
+}
+
+pub struct FloatMapper {
+    mapper: DisplayMapper,
+}
+
+impl FloatMapper {
+    pub fn new(transform: &MonoTransform, data_range: SampleRange) -> FloatMapper {
+        let (min, max) = data_range.float_bounds();
+        FloatMapper { mapper: DisplayMapper::new(transform, min, max, 1.0) }
     }
 
-    let mapper = DisplayMapper::new(transform, min, max, 1.0);
-
-    frames
-        .iter()
-        .map(|frame| match frame {
-            StoredFrame::F32(v) => PixelData::L32F(v.iter().map(|&s| mapper.map(s as f64) as f32).collect()),
-            StoredFrame::F64(v) => PixelData::L64F(v.iter().map(|&s| mapper.map(s)).collect()),
+    pub fn map(&self, frame: &StoredFrame) -> PixelData {
+        match frame {
+            StoredFrame::F32(v) => PixelData::L32F(v.iter().map(|&s| self.mapper.map(s as f64) as f32).collect()),
+            StoredFrame::F64(v) => PixelData::L64F(v.iter().map(|&s| self.mapper.map(s)).collect()),
             _ => PixelData::L32F(Vec::new()),
-        })
-        .collect()
+        }
+    }
 }
 
 fn sample_scale_table(params: &PixelParams, deep: bool) -> Option<Vec<u16>> {

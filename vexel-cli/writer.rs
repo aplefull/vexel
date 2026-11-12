@@ -140,7 +140,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_jxl_animation(output_path: &PathBuf, frames: Frames<'_>) -> Result<(), Error> {
+    fn write_jxl_animation(output_path: &PathBuf, frames: Frames) -> Result<(), Error> {
         let is_animated = frames.frame_count_hint().is_none_or(|count| count > 1);
 
         let mut frames = frames.map(|frame| frame.map_err(Error::other));
@@ -183,7 +183,7 @@ impl Writer {
         Ok(())
     }
 
-    fn write_webp_animation(output_path: &PathBuf, frames: Frames<'_>) -> Result<(), Error> {
+    fn write_webp_animation(output_path: &PathBuf, frames: Frames) -> Result<(), Error> {
         let mut config = WebPConfig::new().unwrap();
         config.lossless = 1i32;
 
@@ -325,7 +325,7 @@ impl Writer {
         }
     }
 
-    pub fn write_animation(output_path: &PathBuf, format: &str, frames: Frames<'_>) -> Result<(), Error> {
+    pub fn write_animation(output_path: &PathBuf, format: &str, frames: Frames) -> Result<(), Error> {
         match format {
             "webp" => Writer::write_webp_animation(output_path, frames),
             "jxl" => Writer::write_jxl_animation(output_path, frames),
@@ -346,7 +346,7 @@ impl Writer {
         }
     }
 
-    pub fn write_frames(output_path: &PathBuf, format: &str, frames: Frames<'_>) -> Result<(), Error> {
+    pub fn write_frames(output_path: &PathBuf, format: &str, frames: Frames) -> Result<(), Error> {
         let ext = match format {
             "pam" => "pam",
             "ppm" => "ppm",

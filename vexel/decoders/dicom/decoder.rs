@@ -1,19 +1,15 @@
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
 
+use crate::decoders::dicom::frames::FramePlan;
 use crate::decoders::dicom::info::{scan, DicomInfo};
-use crate::decoders::dicom::parser::{DataCursor, DataSet, Element, ElementValue, Parser};
-use crate::decoders::dicom::pixels::{
-    color_frame_to_pixels, expand_segmented_lut, extract_native_frame, float_frames_to_pixels, mono_frames_to_pixels,
-    Lut, MonoTransform, PixelParams, StoredFrame,
-};
-use crate::decoders::dicom::rle::decode_rle_frame;
+use crate::decoders::dicom::parser::{DataCursor, DataSet, ElementValue, Parser};
+use crate::decoders::dicom::pixels::{expand_segmented_lut, Lut, MonoTransform, PixelParams};
 use crate::decoders::dicom::types::{tags, Photometric, TransferSyntax, VoiFunction, Vr};
-use crate::decoders::jpeg::decoder::JpegDecoder;
-use crate::decoders::jpeg2000::Jpeg2000Decoder;
-use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::utils::deflate::DeflateDecoder;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::image::{Image, ImageFrame, PixelData};
+use crate::utils::frames::{FrameSource, Frames};
+use crate::utils::image::Image;
 use crate::{log_debug, log_warn, Limits};
 
 pub struct DicomDecoder<R: Read + Seek> {
@@ -25,7 +21,7 @@ pub struct DicomDecoder<R: Read + Seek> {
 
 struct Parsed {
     transfer_syntax: TransferSyntax,
-    dataset: DataSet,
+    dataset: Arc<DataSet>,
 }
 
 pub fn has_dicm_magic(header: &[u8]) -> bool {
@@ -213,501 +209,51 @@ impl<R: Read + Seek> DicomDecoder<R> {
         elements.extend(file.dataset.elements);
         let dataset = DataSet { elements, ..Default::default() };
 
-        self.parsed = Some(Parsed { transfer_syntax: file.transfer_syntax, dataset });
+        self.parsed = Some(Parsed { transfer_syntax: file.transfer_syntax, dataset: Arc::new(dataset) });
         Ok(())
     }
 
-    pub fn decode(&mut self) -> VexelResult<Image> {
-        let mut frames = self.decode_frames()?;
-
-        if frames.is_empty() {
-            return Err(VexelError::Custom("DICOM: no frames could be decoded".to_string()));
-        }
-
-        Ok(Image::from_frame(frames.remove(0)))
+    fn frame_plan(&mut self) -> VexelResult<FramePlan> {
+        self.load()?;
+        let parsed = self.parsed.as_ref().ok_or_else(|| VexelError::Custom("DICOM: no parsed dataset".to_string()))?;
+        FramePlan::new(parsed.dataset.clone(), parsed.transfer_syntax, &mut self.limits)
     }
 
-    pub(crate) fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
-        self.load()?;
-        let parsed = self.parsed.take().ok_or_else(|| VexelError::Custom("DICOM: no parsed dataset".to_string()))?;
+    pub fn decode(&mut self) -> VexelResult<Image> {
+        let mut frames = self.frame_plan()?.into_source(false);
+        frames
+            .next_frame()?
+            .map(Image::from_frame)
+            .ok_or_else(|| VexelError::Custom("DICOM: no frames could be decoded".to_string()))
+    }
 
-        let result = self.decode_dataset(&parsed.dataset, parsed.transfer_syntax);
-        self.parsed = Some(parsed);
-        result
+    // TODO: a multi-frame DICOM object is a cine loop or a volume of
+    // slices rather than an animation
+    pub fn decode_frames(&mut self) -> VexelResult<Frames> {
+        Ok(Frames::new(self.frame_plan()?.into_source(true)))
     }
 
     pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
         self.load()?;
-        let parsed = self.parsed.take().ok_or_else(|| VexelError::Custom("DICOM: no parsed dataset".to_string()))?;
+        let Some(parsed) = self.parsed.as_ref() else {
+            return Err(VexelError::Custom("DICOM: no parsed dataset".to_string()));
+        };
 
         let mut icons = Vec::new();
         find_icon_datasets(&parsed.dataset, 0, &mut icons);
 
         let mut thumbnails = Vec::new();
         for icon in icons {
-            match self.decode_dataset(&icon, TransferSyntax::ImplicitLittleEndian) {
-                Ok(frames) => thumbnails.extend(frames.into_iter().map(Image::from_frame)),
+            let icon = FramePlan::new(Arc::new(icon), TransferSyntax::ImplicitLittleEndian, &mut self.limits)
+                .and_then(|plan| plan.into_source(false).collect_images());
+            match icon {
+                Ok(images) => thumbnails.extend(images),
                 Err(e) => log_warn!("DICOM: failed to decode icon image: {}", e),
             }
         }
 
-        self.parsed = Some(parsed);
         Ok(thumbnails)
     }
-
-    fn decode_dataset(&mut self, dataset: &DataSet, transfer_syntax: TransferSyntax) -> VexelResult<Vec<ImageFrame>> {
-        let pixel_element = dataset
-            .get(tags::PIXEL_DATA)
-            .or_else(|| dataset.get(tags::FLOAT_PIXEL_DATA))
-            .or_else(|| dataset.get(tags::DOUBLE_FLOAT_PIXEL_DATA))
-            .ok_or_else(|| {
-                let sop_class = dataset.string(tags::SOP_CLASS_UID);
-                match sop_class {
-                    Some(uid) => VexelError::Custom(format!(
-                        "DICOM: file contains no pixel data (SOP Class UID: {}) - this is likely a non-image \
-                         object such as a structured report or surface/mesh segmentation, not a decodable image",
-                        uid
-                    )),
-                    None => VexelError::Custom(
-                        "DICOM: file contains no pixel data - this is likely a non-image object, not a decodable \
-                         image"
-                            .to_string(),
-                    ),
-                }
-            })?;
-
-        let params = read_pixel_params(dataset, transfer_syntax)?;
-
-        self.limits.check_dimensions(params.cols, params.rows)?;
-
-        let transform = if params.photometric.is_monochrome() {
-            read_mono_transform(dataset, &params)
-        } else {
-            MonoTransform::identity()
-        };
-
-        let palette = read_palette(dataset, &params);
-
-        let mut num_frames = dataset.int_value(tags::NUMBER_OF_FRAMES).unwrap_or(1).max(1) as usize;
-
-        let frame_pixels = match pixel_element {
-            Element { tag, value: ElementValue::Bytes(bytes), .. } => {
-                if *tag == tags::FLOAT_PIXEL_DATA || *tag == tags::DOUBLE_FLOAT_PIXEL_DATA {
-                    self.decode_float_frames(bytes, *tag, &params, &transform, &mut num_frames)?
-                } else {
-                    self.decode_native_frames(bytes, &params, &transform, palette.as_ref(), &mut num_frames)?
-                }
-            }
-            Element { value: ElementValue::Fragments { offset_table, fragments, .. }, .. } => self
-                .decode_encapsulated(
-                    transfer_syntax,
-                    offset_table,
-                    fragments,
-                    &params,
-                    &transform,
-                    palette.as_ref(),
-                    num_frames,
-                )?,
-            _ => return Err(VexelError::Custom("DICOM: pixel data element has unexpected structure".to_string())),
-        };
-
-        if frame_pixels.is_empty() {
-            return Err(VexelError::Custom("DICOM: no frames could be decoded".to_string()));
-        }
-
-        let delay = frame_delay_ms(dataset, frame_pixels.len());
-
-        let mut frames = Vec::with_capacity(frame_pixels.len());
-        for mut pixels in frame_pixels {
-            pixels.correct_pixels(params.cols, params.rows);
-            frames.push(ImageFrame::new(params.cols, params.rows, pixels, delay));
-        }
-
-        Ok(frames)
-    }
-
-    fn decode_native_frames(
-        &mut self,
-        bytes: &[u8],
-        params: &PixelParams,
-        transform: &MonoTransform,
-        palette: Option<&[Lut; 3]>,
-        num_frames: &mut usize,
-    ) -> VexelResult<Vec<PixelData>> {
-        let frame_size = params.frame_size_bytes();
-        if frame_size == 0 {
-            return Err(VexelError::InvalidDimensions { width: params.cols, height: params.rows });
-        }
-
-        let available_frames = if params.bits_allocated == 1 {
-            (bytes.len() * 8) / params.pixels_per_frame().max(1)
-        } else {
-            bytes.len() / frame_size
-        };
-
-        if available_frames < *num_frames {
-            log_warn!("DICOM: pixel data holds {} frames but {} declared", available_frames, num_frames);
-            *num_frames = available_frames.max(1);
-        }
-
-        self.reserve_output(params, *num_frames)?;
-
-        let mut stored = Vec::with_capacity(*num_frames);
-        for i in 0..*num_frames {
-            if params.bits_allocated == 1 {
-                let pixels = params.pixels_per_frame();
-                let bit_start = i * pixels;
-                let mut frame_bits = Vec::with_capacity(pixels);
-                for b in 0..pixels {
-                    let bit = bit_start + b;
-                    let byte = bytes.get(bit / 8).copied().unwrap_or(0);
-                    frame_bits.push((byte >> (bit % 8)) & 1);
-                }
-                stored.push(StoredFrame::U8(frame_bits));
-            } else {
-                let start = (i * frame_size).min(bytes.len());
-                let end = ((i + 1) * frame_size).min(bytes.len());
-                stored.push(extract_native_frame(&bytes[start..end], params));
-            }
-        }
-
-        self.stored_frames_to_pixels(&stored, params, transform, palette)
-    }
-
-    fn decode_float_frames(
-        &mut self,
-        bytes: &[u8],
-        tag: u32,
-        params: &PixelParams,
-        transform: &MonoTransform,
-        num_frames: &mut usize,
-    ) -> VexelResult<Vec<PixelData>> {
-        let pixels = params.pixels_per_frame();
-        let sample_size = if tag == tags::DOUBLE_FLOAT_PIXEL_DATA { 8 } else { 4 };
-        let frame_size = pixels * sample_size;
-
-        if frame_size == 0 {
-            return Err(VexelError::InvalidDimensions { width: params.cols, height: params.rows });
-        }
-
-        let available = bytes.len() / frame_size;
-        if available < *num_frames {
-            log_warn!("DICOM: float pixel data holds {} frames but {} declared", available, num_frames);
-            *num_frames = available.max(1);
-        }
-
-        self.limits.reserve_usize(pixels * sample_size * *num_frames)?;
-
-        let mut stored = Vec::with_capacity(*num_frames);
-        for i in 0..*num_frames {
-            let start = (i * frame_size).min(bytes.len());
-            let end = ((i + 1) * frame_size).min(bytes.len());
-            let frame = &bytes[start..end];
-
-            if sample_size == 4 {
-                let mut values = vec![0f32; pixels];
-                for (j, v) in values.iter_mut().enumerate() {
-                    let p = j * 4;
-                    if p + 4 <= frame.len() {
-                        *v = f32::from_le_bytes([frame[p], frame[p + 1], frame[p + 2], frame[p + 3]]);
-                    }
-                }
-                stored.push(StoredFrame::F32(values));
-            } else {
-                let mut values = vec![0f64; pixels];
-                for (j, v) in values.iter_mut().enumerate() {
-                    let p = j * 8;
-                    if p + 8 <= frame.len() {
-                        *v = f64::from_le_bytes([
-                            frame[p],
-                            frame[p + 1],
-                            frame[p + 2],
-                            frame[p + 3],
-                            frame[p + 4],
-                            frame[p + 5],
-                            frame[p + 6],
-                            frame[p + 7],
-                        ]);
-                    }
-                }
-                stored.push(StoredFrame::F64(values));
-            }
-        }
-
-        Ok(float_frames_to_pixels(&stored, transform))
-    }
-
-    fn decode_encapsulated(
-        &mut self,
-        transfer_syntax: TransferSyntax,
-        offset_table: &[u32],
-        fragments: &[Vec<u8>],
-        params: &PixelParams,
-        transform: &MonoTransform,
-        palette: Option<&[Lut; 3]>,
-        num_frames: usize,
-    ) -> VexelResult<Vec<PixelData>> {
-        if fragments.is_empty() {
-            return Err(VexelError::Custom("DICOM: encapsulated pixel data has no fragments".to_string()));
-        }
-
-        match transfer_syntax {
-            TransferSyntax::JpegXl => {
-                return Err(VexelError::UnsupportedFormat("DICOM: JPEG XL transfer syntax".to_string()))
-            }
-            TransferSyntax::Video => {
-                return Err(VexelError::UnsupportedFormat("DICOM: video (MPEG/HEVC) transfer syntax".to_string()))
-            }
-            TransferSyntax::Unknown => {
-                log_warn!("DICOM: encapsulated pixel data with unknown transfer syntax, assuming JPEG");
-            }
-            _ => {}
-        }
-
-        let frames_data = group_fragments(offset_table, fragments, num_frames);
-        self.reserve_output(params, frames_data.len())?;
-
-        let mut mono_stored: Vec<StoredFrame> = Vec::new();
-        let mut color_frames: Vec<PixelData> = Vec::new();
-        let mono = params.photometric.is_monochrome() || params.photometric == Photometric::PaletteColor;
-
-        for frame_bytes in &frames_data {
-            match transfer_syntax {
-                TransferSyntax::Rle => {
-                    let bytes_per_sample = (params.bits_allocated as usize).div_ceil(8).max(1);
-                    let decoded = decode_rle_frame(
-                        frame_bytes,
-                        params.pixels_per_frame(),
-                        params.samples_per_pixel.max(1) as usize,
-                        bytes_per_sample,
-                    )?;
-                    let mut rle_params = params.clone();
-                    rle_params.planar = false;
-                    if rle_params.photometric == Photometric::YbrFull422 {
-                        rle_params.photometric = Photometric::YbrFull;
-                    }
-                    let stored = extract_native_frame(&decoded, &rle_params);
-                    if mono {
-                        mono_stored.push(stored);
-                    } else {
-                        color_frames.push(color_frame_to_pixels(&stored, &rle_params, palette)?);
-                    }
-                }
-                TransferSyntax::EncapsulatedUncompressed | TransferSyntax::DeflatedImageFrameCompression => {
-                    let raw;
-                    let data: &[u8] = if transfer_syntax == TransferSyntax::DeflatedImageFrameCompression {
-                        raw = DeflateDecoder::from_slice(frame_bytes).decode_with_max(params.frame_size_bytes());
-                        &raw
-                    } else {
-                        frame_bytes
-                    };
-                    let stored = extract_native_frame(data, params);
-                    if mono {
-                        mono_stored.push(stored);
-                    } else {
-                        color_frames.push(color_frame_to_pixels(&stored, params, palette)?);
-                    }
-                }
-                TransferSyntax::JpegLs => {
-                    let mut decoder = JpegLsDecoder::new(Cursor::new(frame_bytes.clone()));
-                    decoder.set_limits(self.limits.clone());
-                    let image = decoder.decode()?;
-                    self.charge_codec_frame(&image, params)?;
-                    let precision = decoder.precision();
-                    absorb_codec_frame(
-                        image,
-                        params,
-                        palette,
-                        false,
-                        precision,
-                        false,
-                        &mut mono_stored,
-                        &mut color_frames,
-                    )?;
-                }
-                TransferSyntax::Jpeg2000 => {
-                    let mut decoder = Jpeg2000Decoder::new(Cursor::new(frame_bytes.clone()));
-                    decoder.set_limits(self.limits.clone());
-                    let image = decoder.decode()?;
-                    self.charge_codec_frame(&image, params)?;
-                    let precision = decoder.precision();
-                    let signed = decoder.is_signed();
-                    absorb_codec_frame(
-                        image,
-                        params,
-                        palette,
-                        true,
-                        precision,
-                        signed,
-                        &mut mono_stored,
-                        &mut color_frames,
-                    )?;
-                }
-                _ => {
-                    let mut decoder = JpegDecoder::new(Cursor::new(frame_bytes.clone()));
-                    decoder.set_limits(self.limits.clone());
-                    let image = decoder.decode()?;
-                    self.charge_codec_frame(&image, params)?;
-                    let dct = transfer_syntax == TransferSyntax::JpegDct;
-                    let precision = decoder.precision();
-                    absorb_codec_frame(
-                        image,
-                        params,
-                        palette,
-                        dct,
-                        precision,
-                        false,
-                        &mut mono_stored,
-                        &mut color_frames,
-                    )?;
-                }
-            }
-        }
-
-        if mono {
-            if params.photometric == Photometric::PaletteColor {
-                let mut out = Vec::with_capacity(mono_stored.len());
-                for stored in &mono_stored {
-                    out.push(color_frame_to_pixels(stored, params, palette)?);
-                }
-                Ok(out)
-            } else {
-                Ok(mono_frames_to_pixels(&mono_stored, params, transform))
-            }
-        } else {
-            Ok(color_frames)
-        }
-    }
-
-    fn stored_frames_to_pixels(
-        &mut self,
-        stored: &[StoredFrame],
-        params: &PixelParams,
-        transform: &MonoTransform,
-        palette: Option<&[Lut; 3]>,
-    ) -> VexelResult<Vec<PixelData>> {
-        if params.photometric.is_monochrome() && params.samples_per_pixel <= 1 {
-            return Ok(mono_frames_to_pixels(stored, params, transform));
-        }
-
-        let mut out = Vec::with_capacity(stored.len());
-        for frame in stored {
-            out.push(color_frame_to_pixels(frame, params, palette)?);
-        }
-        Ok(out)
-    }
-
-    fn reserve_output(&mut self, params: &PixelParams, num_frames: usize) -> VexelResult<()> {
-        let pixels = params.pixels_per_frame() as u64;
-        let output = pixels.saturating_mul(output_bytes_per_pixel(params)).saturating_mul(num_frames as u64);
-        let total = output.saturating_add(pixels.saturating_mul(working_bytes_per_pixel(params)));
-        self.limits.reserve(total)
-    }
-
-    fn charge_codec_frame(&mut self, image: &Image, params: &PixelParams) -> VexelResult<()> {
-        let expected = (params.pixels_per_frame() as u64).saturating_mul(output_bytes_per_pixel(params));
-        let actual = image.pixels().as_bytes().len() as u64;
-        self.limits.reserve(actual.saturating_sub(expected))
-    }
-}
-
-fn output_bytes_per_pixel(params: &PixelParams) -> u64 {
-    if params.photometric.is_monochrome() && params.samples_per_pixel <= 1 {
-        if params.bits_stored > 8 {
-            2
-        } else {
-            1
-        }
-    } else if params.bits_stored > 8 {
-        6
-    } else {
-        3
-    }
-}
-
-fn working_bytes_per_pixel(params: &PixelParams) -> u64 {
-    let samples = params.samples_per_pixel.max(1) as u64;
-    let container = match params.bits_allocated {
-        0..=8 => 1,
-        9..=16 => 2,
-        _ => 4,
-    };
-    let color = if params.photometric.is_monochrome() && params.samples_per_pixel <= 1 { 0 } else { 4 * samples + 8 };
-    samples * container * 2 + color
-}
-
-fn rebase_signed_samples(samples: Vec<u16>, precision: u16, shift: u32, params: &PixelParams) -> Vec<u16> {
-    let bias = 1i32 << (precision.clamp(1, 16) - 1);
-    let stored_bits = params.bits_stored.clamp(1, 16) as u32;
-    let container_mask = if stored_bits >= 16 { u16::MAX } else { (1u16 << stored_bits) - 1 };
-
-    samples
-        .into_iter()
-        .map(|s| {
-            let value = ((s >> shift) as i32) - bias;
-            (value as u16) & container_mask
-        })
-        .collect()
-}
-
-fn absorb_codec_frame(
-    image: Image,
-    params: &PixelParams,
-    palette: Option<&[Lut; 3]>,
-    dct: bool,
-    codec_precision: u8,
-    codec_signed: bool,
-    mono_stored: &mut Vec<StoredFrame>,
-    color_frames: &mut Vec<PixelData>,
-) -> VexelResult<()> {
-    let mono = params.photometric.is_monochrome() || params.photometric == Photometric::PaletteColor;
-    let pixels = image.into_pixels();
-
-    if mono {
-        let stored = match pixels {
-            PixelData::L8(v) => StoredFrame::U8(v),
-            PixelData::L16(v) => {
-                let precision = if codec_precision > 8 && codec_precision <= 16 {
-                    codec_precision as u16
-                } else {
-                    params.bits_stored
-                };
-                let shift = if precision > 8 && precision < 16 { 16 - precision as u32 } else { 0 };
-
-                if codec_signed {
-                    StoredFrame::U16(rebase_signed_samples(v, precision, shift, params))
-                } else {
-                    StoredFrame::U16(v.into_iter().map(|s| s >> shift).collect())
-                }
-            }
-            PixelData::RGB8(v) => StoredFrame::U8(v.chunks_exact(3).map(|c| c[0]).collect()),
-            PixelData::RGB16(v) => StoredFrame::U16(v.chunks_exact(3).map(|c| c[0]).collect()),
-            other => {
-                log_warn!("DICOM: unexpected codec output {:?} for monochrome frame", other.pixel_format());
-                StoredFrame::U8(other.into_rgb8_bytes().chunks_exact(3).map(|c| c[0]).collect())
-            }
-        };
-        mono_stored.push(stored);
-        return Ok(());
-    }
-
-    let needs_ybr = params.photometric.is_ybr() && !dct;
-    match pixels {
-        PixelData::RGB8(v) if needs_ybr => {
-            let mut ybr_params = params.clone();
-            ybr_params.planar = false;
-            ybr_params.bits_allocated = 8;
-            ybr_params.bits_stored = 8;
-            ybr_params.high_bit = 7;
-            if ybr_params.photometric == Photometric::YbrFull422 {
-                ybr_params.photometric = Photometric::YbrFull;
-            }
-            color_frames.push(color_frame_to_pixels(&StoredFrame::U8(v), &ybr_params, palette)?);
-        }
-        other => color_frames.push(other),
-    }
-
-    Ok(())
 }
 
 pub(super) fn read_pixel_params(dataset: &DataSet, transfer_syntax: TransferSyntax) -> VexelResult<PixelParams> {
@@ -817,7 +363,7 @@ fn functional_group_items(dataset: &DataSet, group_tag: u32) -> Option<&DataSet>
         })
 }
 
-fn read_mono_transform(dataset: &DataSet, params: &PixelParams) -> MonoTransform {
+pub(super) fn read_mono_transform(dataset: &DataSet, params: &PixelParams) -> MonoTransform {
     let pixel_transform = functional_group_items(dataset, tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE);
     let frame_voi = functional_group_items(dataset, tags::FRAME_VOI_LUT_SEQUENCE);
 
@@ -893,7 +439,7 @@ fn read_palette_component(dataset: &DataSet, descriptor_tag: u32, data_tag: u32,
     Some(Lut { first_mapped, bits, entries })
 }
 
-fn read_palette(dataset: &DataSet, params: &PixelParams) -> Option<[Lut; 3]> {
+pub(super) fn read_palette(dataset: &DataSet, params: &PixelParams) -> Option<[Lut; 3]> {
     if !matches!(params.photometric, Photometric::PaletteColor | Photometric::Argb) {
         return None;
     }
@@ -943,66 +489,6 @@ pub(super) fn frame_delay_ms(dataset: &DataSet, num_frames: usize) -> u32 {
     }
 
     0
-}
-
-fn group_fragments(offset_table: &[u32], fragments: &[Vec<u8>], num_frames: usize) -> Vec<Vec<u8>> {
-    if num_frames <= 1 {
-        if fragments.len() == 1 {
-            return vec![fragments[0].clone()];
-        }
-        return vec![fragments.concat()];
-    }
-
-    if fragments.len() == num_frames {
-        return fragments.to_vec();
-    }
-
-    if offset_table.len() == num_frames && offset_table.windows(2).all(|w| w[0] <= w[1]) {
-        let mut frames: Vec<Vec<u8>> = Vec::new();
-        let mut current = None;
-        let mut frame_index = 0;
-        let mut pos = 0u64;
-        for fragment in fragments {
-            while frame_index + 1 < num_frames && pos >= offset_table[frame_index + 1] as u64 {
-                frame_index += 1;
-            }
-            if pos >= offset_table[frame_index] as u64 {
-                if current != Some(frame_index) {
-                    frames.push(Vec::new());
-                    current = Some(frame_index);
-                }
-                if let Some(frame) = frames.last_mut() {
-                    frame.extend_from_slice(fragment);
-                }
-            }
-            pos += 8 + fragment.len() as u64;
-        }
-        if frames.len() != num_frames {
-            log_warn!("DICOM: offset table maps fragments to {} of {} frames", frames.len(), num_frames);
-        }
-        return frames;
-    }
-
-    let mut frames: Vec<Vec<u8>> = Vec::new();
-    for fragment in fragments {
-        let starts_new = fragment.len() >= 2 && fragment[0] == 0xFF && fragment[1] == 0xD8;
-        if starts_new || frames.is_empty() {
-            frames.push(fragment.clone());
-        } else if let Some(last) = frames.last_mut() {
-            last.extend_from_slice(fragment);
-        }
-    }
-
-    if frames.len() != num_frames {
-        log_warn!(
-            "DICOM: could not map {} fragments to {} frames, decoded {}",
-            fragments.len(),
-            num_frames,
-            frames.len()
-        );
-    }
-
-    frames
 }
 
 fn find_icon_datasets(dataset: &DataSet, depth: u8, out: &mut Vec<DataSet>) {

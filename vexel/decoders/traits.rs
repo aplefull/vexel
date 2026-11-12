@@ -1,7 +1,8 @@
 use std::io::{Read, Seek};
 
 use crate::utils::error::VexelResult;
-use crate::utils::image::{Image, ImageFrame};
+use crate::utils::frames::Frames;
+use crate::utils::image::Image;
 use crate::utils::info::ImageInfo;
 use crate::utils::limits::Limits;
 
@@ -41,10 +42,7 @@ pub(crate) trait ImageDecoder<R: Read + Seek + Sync> {
         false
     }
 
-    fn decode_frames(&mut self) -> VexelResult<Vec<ImageFrame>> {
-        self.decode().map(|image| {
-            let (width, height) = (image.width(), image.height());
-            vec![ImageFrame::new(width, height, image.into_pixels(), 0)]
-        })
+    fn decode_frames(&mut self) -> VexelResult<Frames> {
+        self.decode().map(Frames::single)
     }
 }
