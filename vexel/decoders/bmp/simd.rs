@@ -72,6 +72,7 @@ pub fn extract_channels_rgb_row(
     b_bits: u32,
 ) {
     let width = width.min(dst.len() / 3);
+    #[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
     let byte_aligned = r_bits == 8 && g_bits == 8 && b_bits == 8;
 
     #[cfg(target_arch = "x86_64")]
@@ -101,6 +102,7 @@ pub fn extract_channels_rgba_row(
     a_bits: u32,
 ) {
     let width = width.min(dst.len() / 4);
+    #[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
     let byte_aligned = r_bits == 8 && g_bits == 8 && b_bits == 8 && a_bits == 8;
 
     #[cfg(target_arch = "x86_64")]

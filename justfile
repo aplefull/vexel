@@ -57,6 +57,16 @@ fmt:
 clippy:
     cargo clippy --workspace --all-targets
 
+# Check formatting and lint every supported configuration (native, wasm32, aarch64; with and without rayon) with warnings denied
+check-all:
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --package vexel --all-targets --no-default-features -- -D warnings
+    cargo clippy --package vexel --lib --target wasm32-unknown-unknown -Z build-std=panic_abort,std -- -D warnings
+    cargo clippy --package vexel --lib --target wasm32-unknown-unknown -Z build-std=panic_abort,std --no-default-features -- -D warnings
+    cargo clippy --package vexel --lib --target aarch64-unknown-linux-gnu -Z build-std=std -- -D warnings
+    cargo clippy --package vexel --lib --target aarch64-unknown-linux-gnu -Z build-std=std --no-default-features -- -D warnings
+
 # --- Profiling ---
 
 # Profile image decoding with samply

@@ -571,6 +571,7 @@ fn upsample_h2v2_row_wasm(col_sums: &[i32], prev_col_sums: &[i32], dst: &mut [i3
 
 // ─── Shared ───────────────────────────────────────────────────────────
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 fn upsample_h2v1_scalar_range(src: &[i16], dst: &mut [i32], from: usize, to: usize, tw: usize) {
     for sx in from..to {
         let cur3 = src[sx] as i32 * 3;
@@ -584,6 +585,7 @@ fn upsample_h2v1_scalar_range(src: &[i16], dst: &mut [i32], from: usize, to: usi
     }
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 fn upsample_h2v2_scalar_range(col_sums: &[i32], dst: &mut [i32], from: usize, to: usize, tw: usize) {
     for sx in from..to {
         let this = col_sums[sx];

@@ -24,7 +24,7 @@ jobs:
         format: [jpeg, jpeg-ls, png, gif, bmp, tiff, dng, hdr, tga, netpbm, ico, jbig1, jbig2, dicom, exr, jpeg2000, farbfeld, rpgmvp, pgx, jpeg-xs, jpeg-xr, lerc]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - run: rustup toolchain install --profile minimal
       - uses: extractions/setup-just@v4
       - run: cargo install cargo-fuzz
       - run: just fuzz ${{ matrix.format }} ${{ inputs.seconds }}
@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - run: rustup toolchain install --profile minimal
       - uses: extractions/setup-just@v4
       - run: cargo install cargo-fuzz
       - run: just fuzz ${{ inputs.format }} ${{ inputs.seconds }}

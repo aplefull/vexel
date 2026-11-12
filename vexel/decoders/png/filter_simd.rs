@@ -120,6 +120,7 @@ fn unfilter_sub_fixed<const BPP: usize>(row: &mut [u8]) {
     }
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 const fn sub_shift_mask(shift: usize, used: usize) -> [u8; 16] {
     let mut mask = [0x80u8; 16];
     let mut i = 0;
@@ -132,6 +133,7 @@ const fn sub_shift_mask(shift: usize, used: usize) -> [u8; 16] {
     mask
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 const fn sub_carry_mask(bpp: usize, used: usize) -> [u8; 16] {
     let mut mask = [0x80u8; 16];
     let mut i = 0;
@@ -142,8 +144,10 @@ const fn sub_carry_mask(bpp: usize, used: usize) -> [u8; 16] {
     mask
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 struct SubMasks<const BPP: usize>;
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 impl<const BPP: usize> SubMasks<BPP> {
     const USED: usize = 16 - 16 % BPP;
     const SHIFT_1: [u8; 16] = sub_shift_mask(BPP, Self::USED);
@@ -476,6 +480,7 @@ unsafe fn unfilter_diagonal<const VECTORS: usize>(
     }
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 trait Lanes: Copy {
     unsafe fn zero() -> Self;
     unsafe fn from_u32s(lanes: [u32; 4]) -> Self;
@@ -488,6 +493,7 @@ trait Lanes: Copy {
     unsafe fn paeth(left: Self, up: Self, upper_left: Self) -> Self;
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[derive(Clone, Copy)]
 struct DiagonalState<L: Lanes> {
     left_0: L,
@@ -496,6 +502,7 @@ struct DiagonalState<L: Lanes> {
     upper_left_1: L,
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn load_pixel<const BPP: usize>(pixel: *const u8) -> u32 {
     if BPP == 4 {
@@ -505,11 +512,13 @@ unsafe fn load_pixel<const BPP: usize>(pixel: *const u8) -> u32 {
     }
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn load_word(pixel: *const u8) -> u32 {
     u32::from_le((pixel as *const u32).read_unaligned())
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn store_pixel<const BPP: usize>(pixel: *mut u8, value: u32) {
     if BPP == 4 {
@@ -520,6 +529,7 @@ unsafe fn store_pixel<const BPP: usize>(pixel: *mut u8, value: u32) {
     }
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn load_four<L: Lanes, const BPP: usize, const EDGE: bool>(
     rows: &[*mut u8; 8],
@@ -541,6 +551,7 @@ unsafe fn load_four<L: Lanes, const BPP: usize, const EDGE: bool>(
     (L::from_u32s(data), L::from_u32s(inside))
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn store_four<L: Lanes, const BPP: usize, const EDGE: bool>(
     rows: &[*mut u8; 8],
@@ -558,6 +569,7 @@ unsafe fn store_four<L: Lanes, const BPP: usize, const EDGE: bool>(
     }
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn diagonal_predict<L: Lanes, const PAETH: bool>(left: L, up: L, upper_left: L) -> L {
     if PAETH {
@@ -567,6 +579,7 @@ unsafe fn diagonal_predict<L: Lanes, const PAETH: bool>(left: L, up: L, upper_le
     }
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn diagonal_step<L: Lanes, const BPP: usize, const VECTORS: usize, const PAETH: bool, const EDGE: bool>(
     rows: &[*mut u8; 8],
@@ -607,6 +620,7 @@ unsafe fn diagonal_step<L: Lanes, const BPP: usize, const VECTORS: usize, const 
     state.upper_left_0 = up_0;
 }
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 #[inline(always)]
 unsafe fn diagonal<L: Lanes, const BPP: usize, const VECTORS: usize, const PAETH: bool>(
     rows: &[*mut u8; 8],

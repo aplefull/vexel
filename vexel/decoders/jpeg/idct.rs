@@ -584,8 +584,8 @@ fn idct_4blocks_wasm(blocks: &mut [i16], scaled_quant: &[f32; 64], level_shift: 
                         }
                     };
                 }
-                for c in 0..8usize {
-                    *blocks.get_unchecked_mut(b * 64 + row * 8 + c) = extract!(out[c]) as i16;
+                for (c, &lane) in out.iter().enumerate() {
+                    *blocks.get_unchecked_mut(b * 64 + row * 8 + c) = extract!(lane) as i16;
                 }
             }
         }

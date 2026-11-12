@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/pgo/
+            !/vexel/tests/images/
+            !/vexel/tests/references/
+            !/vexel/benches/images/
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+
+      - name: Install toolchain
+        run: rustup toolchain install --profile minimal --component clippy,rustfmt
+
+      - uses: extractions/setup-just@v4
+
+      - name: Check all configurations
+        run: just check-all
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/pgo/
+            !/vexel/benches/images/
+
+      - name: Install toolchain
+        run: rustup toolchain install --profile minimal
+
+      - name: Test
+        run: cargo test --package vexel --no-fail-fast
