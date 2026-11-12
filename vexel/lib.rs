@@ -368,6 +368,12 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             if header.len() >= 12 && header[2] == 0xFF && header[3] == 0xE8 && &header[6..12] == b"SPIFF\0" {
                 return Ok(ImageFormat::JpegLs);
             }
+
+            let is_jpeg_ls = format_detect::jpeg_marker_chain_is_jpeg_ls(reader);
+            reader.seek(SeekFrom::Start(0))?;
+            if is_jpeg_ls {
+                return Ok(ImageFormat::JpegLs);
+            }
         }
 
         // JPEG
@@ -525,13 +531,14 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         let xd = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
         let yd = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
         let l0 = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);
+        let variable_length = header[19] & 0x20 != 0;
         if header[3] == 0
             && (1..=8).contains(&header[2])
             && header[0] <= header[1]
             && xd > 0
             && xd <= 65535
             && yd > 0
-            && yd <= 65535
+            && (yd <= 65535 || variable_length)
             && l0 > 0
             && l0 <= 65535
         {

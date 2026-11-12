@@ -12,11 +12,6 @@ const MAX_STRIPE_SECTIONS: usize = 256;
 const MAX_MARKER_SECTIONS: usize = 1024;
 const UNKNOWN_HEIGHT: u32 = 0xFFFF_FFFF;
 
-const ORDER_HITOLO: u8 = 0x08;
-const ORDER_SEQ: u8 = 0x04;
-const ORDER_ILEAVE: u8 = 0x02;
-const ORDER_SMID: u8 = 0x01;
-
 #[tsify::declare]
 pub type Jbig1Info = FormatInfo<Jbig1Section>;
 
@@ -239,6 +234,7 @@ struct StripeOrder {
     yd: u32,
     iindex: [usize; 3],
     ii: [u32; 3],
+    high_to_low: bool,
 }
 
 impl StripeOrder {
@@ -253,7 +249,7 @@ impl StripeOrder {
         let iindex = iindex_for_order(bih.order);
         let mut ii = [0u32; 3];
         ii[iindex[1]] = dl as u32;
-        StripeOrder { dl, d, planes, l0, yd: bih.yd, iindex, ii }
+        StripeOrder { dl, d, planes, l0, yd: bih.yd, iindex, ii, high_to_low: bih.order & ORDER_HITOLO != 0 }
     }
 
     fn stripes(&self) -> u32 {
@@ -263,7 +259,9 @@ impl StripeOrder {
     }
 
     fn current(&self) -> (u8, u8, u32) {
-        (self.ii[self.iindex[2]] as u8, self.ii[self.iindex[1]] as u8, self.ii[self.iindex[0]])
+        let layer = self.ii[self.iindex[1]] as u8;
+        let layer = if self.high_to_low { self.d - (layer - self.dl) } else { layer };
+        (self.ii[self.iindex[2]] as u8, layer, self.ii[self.iindex[0]])
     }
 
     fn advance(&mut self) {

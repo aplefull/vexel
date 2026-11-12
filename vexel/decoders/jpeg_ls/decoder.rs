@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use super::bitreader::JlsBitReader;
 use super::info::{
-    JpegLsExtension, JpegLsFrame, JpegLsFrameComponent, JpegLsInfo, JpegLsMappingTable, JpegLsPresetParameters,
-    JpegLsScan, JpegLsScanComponent, JpegLsSection,
+    JpegLsExtension, JpegLsFrame, JpegLsFrameComponent, JpegLsInfo, JpegLsMappingTable, JpegLsOversizeDimensions,
+    JpegLsPresetParameters, JpegLsScan, JpegLsScanComponent, JpegLsSection,
 };
 use super::markers::{JpegLsMarker, JPEG_LS_MARKERS};
 use super::types::*;
@@ -14,6 +15,11 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::{ColorModel, ImageSummary};
 use crate::utils::marker::Marker;
 use crate::{log_warn, Image, Limits, PixelData};
+
+enum MappedSamples {
+    Palette { data: Vec<u8>, channels: usize },
+    Values { data: Vec<u16>, wide: bool },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum WalkMode {
@@ -29,6 +35,8 @@ pub struct JpegLsDecoder<R: Read + Seek> {
     scans: Vec<(ScanHeader, Vec<u8>)>,
     color_transform: u8,
     restart_interval: usize,
+    oversize_dimensions: Option<(u32, u32)>,
+    mapping_tables: HashMap<u8, MappingTable>,
     info: Option<JpegLsInfo>,
     walk_mode: WalkMode,
     icc: IccAssembler,
@@ -44,6 +52,8 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             scans: Vec::new(),
             color_transform: 0,
             restart_interval: 0,
+            oversize_dimensions: None,
+            mapping_tables: HashMap::new(),
             info: None,
             walk_mode: WalkMode::Decode,
             icc: IccAssembler::default(),
@@ -86,6 +96,32 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
     fn read_u16(&mut self) -> std::io::Result<u16> {
         Ok(self.reader.read_bits(16)? as u16)
+    }
+
+    fn read_be_uint(&mut self, bytes: usize) -> std::io::Result<u32> {
+        let mut value = 0u32;
+        for _ in 0..bytes {
+            value = (value << 8) | u32::from(self.read_u8()?);
+        }
+        Ok(value)
+    }
+
+    fn skip_bytes(&mut self, count: usize) -> std::io::Result<()> {
+        for _ in 0..count {
+            self.read_u8()?;
+        }
+        Ok(())
+    }
+
+    fn read_sized_value(&mut self, length: u16, what: &str) -> std::io::Result<u32> {
+        let size = usize::from(length.saturating_sub(2));
+        if (2..=4).contains(&size) {
+            return self.read_be_uint(size);
+        }
+        log_warn!("JPEG-LS: {} segment has invalid length {}, reading a 16-bit value", what, length);
+        let value = self.read_be_uint(2)?;
+        self.skip_bytes(size.saturating_sub(2))?;
+        Ok(value)
     }
 
     fn read_segment_payload(&mut self) -> VexelResult<(u16, Vec<u8>)> {
@@ -165,13 +201,14 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             return Err(e.into());
         }
 
-        let (width, height) = (u32::from(raw_width), u32::from(raw_height));
-        if width == 0 || height == 0 {
-            return Err(VexelError::InvalidDimensions { width, height });
-        }
-
-        if self.walk_mode == WalkMode::Decode {
-            self.limits.reserve_buffer(width, height, 4)?;
+        let (mut width, mut height) = (u32::from(raw_width), u32::from(raw_height));
+        if let Some((oversize_height, oversize_width)) = self.oversize_dimensions {
+            if height == 0 {
+                height = oversize_height;
+            }
+            if width == 0 {
+                width = oversize_width;
+            }
         }
 
         self.frame = Some(FrameHeader { precision: effective_precision, height, width, components, alpha });
@@ -205,10 +242,14 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                     JpegLsSection::PresetParameters(JpegLsPresetParameters { maxval, t1, t2, t3, reset }),
                 );
             }
-            2 => {
+            2 | 3 => {
+                let continuation = id_type == 3;
                 let table_id = self.read_u8()?;
-                let entry_width = usize::from(self.read_u8()?);
+                let entry_width = self.read_u8()?;
                 let table_len = usize::from(marker_len).saturating_sub(5);
+                if self.walk_mode == WalkMode::Decode {
+                    self.limits.reserve_usize(table_len)?;
+                }
                 let mut table = Vec::with_capacity(table_len);
                 for _ in 0..table_len {
                     match self.read_u8() {
@@ -216,35 +257,59 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                         Err(_) => break,
                     }
                 }
-                let entries: Vec<u32> = if (1..=3).contains(&entry_width) {
+                let width = usize::from(entry_width);
+                let entries: Vec<u32> = if (1..=4).contains(&width) {
                     table
-                        .chunks_exact(entry_width)
+                        .chunks_exact(width)
                         .map(|entry| entry.iter().fold(0u32, |acc, &byte| (acc << 8) | u32::from(byte)))
                         .collect()
                 } else {
-                    log_warn!("JPEG-LS: invalid mapping table entry width {}", entry_width);
+                    log_warn!("JPEG-LS: mapping table {} has entry width {}, showing no entries", table_id, width);
                     Vec::new()
                 };
                 let entry_count = u16::try_from(entries.len()).unwrap_or(u16::MAX);
                 self.record(
                     marker_start,
                     length,
-                    JpegLsSection::MappingTable(JpegLsMappingTable { table_id, entry_count, entries }),
+                    JpegLsSection::MappingTable(JpegLsMappingTable {
+                        table_id,
+                        entry_width,
+                        continuation,
+                        entry_count,
+                        entries,
+                    }),
                 );
-            }
-            3 => {
-                let remaining = (marker_len as usize).saturating_sub(3);
                 if self.walk_mode == WalkMode::Decode {
-                    self.limits.reserve_usize(remaining)?;
+                    self.store_mapping_table(continuation, table_id, width, table);
                 }
-                for _ in 0..remaining {
-                    self.read_u8()?;
-                }
+            }
+            4 => {
+                let size = self.read_u8()?;
+                let value_size = if (2..=4).contains(&size) {
+                    usize::from(size)
+                } else {
+                    log_warn!("JPEG-LS: invalid oversize dimension size {}, using 4 bytes", size);
+                    4
+                };
+                let height = self.read_be_uint(value_size)?;
+                let width = self.read_be_uint(value_size)?;
+                self.skip_bytes(usize::from(marker_len).saturating_sub(4 + 2 * value_size))?;
+
                 self.record(
                     marker_start,
                     length,
-                    JpegLsSection::Extension(JpegLsExtension { id: id_type, data_length: remaining as u32 }),
+                    JpegLsSection::OversizeDimensions(JpegLsOversizeDimensions { size, height, width }),
                 );
+
+                self.oversize_dimensions = Some((height, width));
+                if let Some(frame) = &mut self.frame {
+                    if frame.height == 0 {
+                        frame.height = height;
+                    }
+                    if frame.width == 0 {
+                        frame.width = width;
+                    }
+                }
             }
             _ => {
                 for _ in 3..marker_len as usize {
@@ -264,15 +329,43 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         Ok(())
     }
 
+    fn store_mapping_table(&mut self, continuation: bool, table_id: u8, entry_width: usize, data: Vec<u8>) {
+        if table_id == 0 {
+            log_warn!("JPEG-LS: mapping table with reserved ID 0, ignoring");
+            return;
+        }
+        if continuation {
+            match self.mapping_tables.get_mut(&table_id) {
+                Some(table) if table.entry_width == entry_width => {
+                    table.data.extend_from_slice(&data);
+                    return;
+                }
+                Some(table) => {
+                    log_warn!(
+                        "JPEG-LS: continuation of mapping table {} has entry width {} instead of {}, ignoring it",
+                        table_id,
+                        entry_width,
+                        table.entry_width
+                    );
+                    return;
+                }
+                None => {
+                    log_warn!("JPEG-LS: continuation of undefined mapping table {}, using it as a new table", table_id);
+                }
+            }
+        }
+        self.mapping_tables.insert(table_id, MappingTable { entry_width, data });
+    }
+
     fn read_dnl(&mut self, marker_start: u64) -> std::io::Result<()> {
         let length = self.read_u16()?;
-        let number_of_lines = self.read_u16()?;
+        let number_of_lines = self.read_sized_value(length, "DNL")?;
 
         self.record(marker_start, Some(2 + u64::from(length)), JpegLsSection::NumberOfLines(number_of_lines));
 
         if let Some(ref mut frame) = self.frame {
             if number_of_lines > 0 {
-                frame.height = number_of_lines as u32;
+                frame.height = number_of_lines;
             } else {
                 log_warn!("DNL specifies 0 lines, ignoring");
             }
@@ -288,11 +381,13 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         let comp_count = self.read_u8()?;
 
         let mut component_ids = Vec::new();
+        let mut mapping_table_ids = Vec::new();
         let mut info_components = Vec::new();
         for _ in 0..comp_count as usize {
             let cid = self.read_u8()?;
             let tm = self.read_u8()?;
             component_ids.push(cid);
+            mapping_table_ids.push(tm);
             info_components.push(JpegLsScanComponent { id: cid, mapping_table: tm });
         }
 
@@ -317,6 +412,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
         let scan = self.pending_scan.get_or_insert_with(ScanHeader::default);
         scan.component_ids = component_ids;
+        scan.mapping_table_ids = mapping_table_ids;
         scan.near = near as i32;
         scan.interleave_mode = interleave_mode;
         scan.point_transform = pt;
@@ -355,7 +451,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 maxval: alpha - 1,
                 thresholds: [t1, t2, t3],
                 reset: scan.reset,
-                restart_interval: self.restart_interval as u16,
+                restart_interval: u32::try_from(self.restart_interval).unwrap_or(u32::MAX),
                 entropy_coded_length: data_end.saturating_sub(data_start),
             }),
         );
@@ -410,6 +506,8 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         self.scans.clear();
         self.color_transform = 0;
         self.restart_interval = 0;
+        self.oversize_dimensions = None;
+        self.mapping_tables.clear();
         self.icc.clear();
     }
 
@@ -448,7 +546,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
                 }
                 JpegLsMarker::DRI => {
                     let len = self.read_u16()?;
-                    let interval = self.read_u16()?;
+                    let interval = self.read_sized_value(len, "DRI")?;
                     self.restart_interval = interval as usize;
                     self.record(marker_start, Some(2 + u64::from(len)), JpegLsSection::RestartInterval(interval));
                 }
@@ -504,6 +602,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             _ => None,
         })?;
 
+        let width = self.frame.as_ref().map(|f| f.width).unwrap_or(u32::from(frame.width));
         let height = self.frame.as_ref().map(|f| f.height).unwrap_or(u32::from(frame.height));
         let components = frame.components.len();
         let color_model = match components {
@@ -513,8 +612,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             _ => ColorModel::Multichannel,
         };
 
-        let mut summary =
-            ImageSummary::new(u32::from(frame.width), height, color_model, components as u16, frame.precision);
+        let mut summary = ImageSummary::new(width, height, color_model, components as u16, frame.precision);
         summary.has_alpha = color_model == ColorModel::Rgba;
 
         let scans: Vec<&JpegLsScan> = info
@@ -546,6 +644,48 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         if self.color_transform != 0 {
             parts.push(format!("HP{} color transform", self.color_transform));
         }
+
+        let table_width = |id: u8| {
+            info.sections.iter().rev().find_map(|section| match &section.data {
+                JpegLsSection::MappingTable(table) if table.table_id == id && !table.continuation => {
+                    Some(table.entry_width)
+                }
+                _ => None,
+            })
+        };
+        let mapped_widths: Vec<u8> = scans
+            .iter()
+            .flat_map(|scan| scan.components.iter())
+            .filter(|component| component.mapping_table != 0)
+            .filter_map(|component| table_width(component.mapping_table))
+            .collect();
+        if !mapped_widths.is_empty() {
+            parts.push("mapping table".to_string());
+            if components == 1 {
+                match mapped_widths[0] {
+                    3 => {
+                        summary.color_model = ColorModel::Rgb;
+                        summary.channels = 3;
+                        summary.bits_per_sample = 8;
+                    }
+                    4 => {
+                        summary.color_model = ColorModel::Rgba;
+                        summary.channels = 4;
+                        summary.bits_per_sample = 8;
+                        summary.has_alpha = true;
+                    }
+                    2 => summary.bits_per_sample = 16,
+                    1 => summary.bits_per_sample = 8,
+                    _ => {}
+                }
+            } else if mapped_widths.iter().all(|&width| width <= 2) {
+                if mapped_widths.contains(&2) {
+                    summary.bits_per_sample = 16;
+                } else if frame.precision <= 8 || mapped_widths.len() >= components {
+                    summary.bits_per_sample = 8;
+                }
+            }
+        }
         summary.compression = Some(parts.join(", "));
 
         let factors: Vec<(u8, u8)> =
@@ -553,6 +693,119 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         summary.subsampling = subsampling_name(&factors);
         summary.icc_profile = self.icc.assemble();
         Some(summary)
+    }
+
+    fn apply_mapping_tables(
+        &self,
+        samples: &[u16],
+        channel_tables: &[(u8, i32)],
+        precision: u8,
+    ) -> Option<MappedSamples> {
+        let channels = channel_tables.len();
+        if channels == 0 || channel_tables.iter().all(|(id, _)| *id == 0) {
+            return None;
+        }
+
+        let tables: Vec<Option<(&MappingTable, i32)>> = channel_tables
+            .iter()
+            .map(|&(id, alpha)| {
+                if id == 0 {
+                    return None;
+                }
+                match self.mapping_tables.get(&id) {
+                    Some(table) if table.entry_count() > 0 => Some((table, (65535 / (alpha - 1).max(1)).max(1))),
+                    Some(_) => {
+                        log_warn!("JPEG-LS: mapping table {} has no usable entries, ignoring it", id);
+                        None
+                    }
+                    None => {
+                        log_warn!("JPEG-LS: mapping table {} is referenced but never defined, ignoring it", id);
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        if tables.iter().all(Option::is_none) {
+            return None;
+        }
+
+        let mut clamped = false;
+        let mut lookup = |table: &MappingTable, scale: i32, sample: u16| -> usize {
+            let index = (i32::from(sample) / scale) as usize;
+            if index >= table.entry_count() {
+                clamped = true;
+            }
+            index
+        };
+
+        let result = if channels == 1 {
+            let (table, scale) = tables[0]?;
+            match table.entry_width {
+                1 => {
+                    let data =
+                        samples.iter().map(|&s| u16::from(table.entry(lookup(table, scale, s))[0]) * 257).collect();
+                    Some(MappedSamples::Values { data, wide: false })
+                }
+                2 => {
+                    let data = samples
+                        .iter()
+                        .map(|&s| {
+                            let entry = table.entry(lookup(table, scale, s));
+                            u16::from_be_bytes([entry[0], entry[1]])
+                        })
+                        .collect();
+                    Some(MappedSamples::Values { data, wide: true })
+                }
+                width @ (3 | 4) => {
+                    let mut data = Vec::with_capacity(samples.len() * width);
+                    for &s in samples {
+                        data.extend_from_slice(table.entry(lookup(table, scale, s)));
+                    }
+                    Some(MappedSamples::Palette { data, channels: width })
+                }
+                width => {
+                    log_warn!(
+                        "JPEG-LS: mapping table entries of {} bytes are not supported, ignoring the table",
+                        width
+                    );
+                    None
+                }
+            }
+        } else {
+            let unsupported = tables.iter().flatten().find(|(table, _)| table.entry_width > 2);
+            if let Some((table, _)) = unsupported {
+                log_warn!(
+                    "JPEG-LS: {}-byte mapping table entries in a {}-component image are not supported, ignoring the tables",
+                    table.entry_width,
+                    channels
+                );
+                return None;
+            }
+            let wide = tables.iter().flatten().any(|(table, _)| table.entry_width == 2)
+                || (precision > 8 && tables.iter().any(Option::is_none));
+            let data = samples
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| match tables[i % channels] {
+                    Some((table, scale)) => {
+                        let entry = table.entry(lookup(table, scale, s));
+                        if table.entry_width == 2 {
+                            u16::from_be_bytes([entry[0], entry[1]])
+                        } else {
+                            u16::from(entry[0]) * 257
+                        }
+                    }
+                    None => s,
+                })
+                .collect();
+            Some(MappedSamples::Values { data, wide })
+        };
+
+        if clamped {
+            log_warn!("JPEG-LS: sample values exceed the mapping table size, using the last entry");
+        }
+        result
     }
 
     pub fn decode(&mut self) -> VexelResult<Image> {
@@ -570,6 +823,11 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             return Err(VexelError::Custom("No SOS marker found".into()));
         }
 
+        if frame.width == 0 || frame.height == 0 {
+            return Err(VexelError::InvalidDimensions { width: frame.width, height: frame.height });
+        }
+
+        self.limits.reserve_buffer(frame.width, frame.height, 4)?;
         self.limits.check_dimensions(frame.width, frame.height)?;
 
         let width = frame.width as usize;
@@ -577,6 +835,17 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         let components = frame.component_count().max(1);
 
         let scans = std::mem::take(&mut self.scans);
+
+        let scan_alpha = |scan: &ScanHeader| if scan.alpha > 1 { scan.alpha } else { frame.alpha };
+        let channel_tables: Vec<(u8, i32)> = if scans.len() > 1 {
+            scans
+                .iter()
+                .map(|(scan, _)| (scan.mapping_table_ids.first().copied().unwrap_or(0), scan_alpha(scan)))
+                .collect()
+        } else {
+            let scan = &scans[0].0;
+            (0..components).map(|i| (scan.mapping_table_ids.get(i).copied().unwrap_or(0), scan_alpha(scan))).collect()
+        };
 
         let max_h = frame.components.iter().map(|c| c.horizontal_sampling as usize).max().unwrap_or(1);
         let max_v = frame.components.iter().map(|c| c.vertical_sampling as usize).max().unwrap_or(1);
@@ -809,14 +1078,29 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             }
         };
 
-        let scan_alpha = scans_alpha.unwrap_or(frame.alpha);
-        let pixel_data = if self.color_transform != 0 && components == 3 {
-            apply_hp_color_transform_inverse(&pixel_data, self.color_transform, scan_alpha)
-        } else {
-            pixel_data
+        let (pixel_data, wide_output) = match self.apply_mapping_tables(&pixel_data, &channel_tables, frame.precision) {
+            Some(MappedSamples::Palette { data, channels }) => {
+                let pixels = if channels == 4 { PixelData::RGBA8(data) } else { PixelData::RGB8(data) };
+                return Ok(Image::from_pixels(frame.width, frame.height, pixels));
+            }
+            Some(MappedSamples::Values { data, wide }) => {
+                if self.color_transform != 0 {
+                    log_warn!("JPEG-LS: mapping tables are in use, ignoring the HP color transform");
+                }
+                (data, wide)
+            }
+            None => {
+                let scan_alpha = scans_alpha.unwrap_or(frame.alpha);
+                let data = if self.color_transform != 0 && components == 3 {
+                    apply_hp_color_transform_inverse(&pixel_data, self.color_transform, scan_alpha)
+                } else {
+                    pixel_data
+                };
+                (data, frame.precision > 8)
+            }
         };
 
-        let image = if frame.precision > 8 {
+        let image = if wide_output {
             if components == 1 {
                 Image::from_pixels(frame.width, frame.height, PixelData::L16(pixel_data))
             } else if components == 4 {

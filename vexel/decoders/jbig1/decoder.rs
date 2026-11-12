@@ -432,6 +432,109 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         Ok(())
     }
 
+    fn stripe_sequence(&self, order: u8) -> impl Iterator<Item = (u32, u8, u8)> {
+        let iindex = Self::iindex_for_order(order);
+        let high_to_low = order & ORDER_HITOLO != 0;
+        let (dl, d) = (self.dl, self.d);
+
+        let mut start = [0u32; 3];
+        let mut end = [0u32; 3];
+        end[iindex[0]] = self.stripes_for_layer(dl).max(1) - 1;
+        start[iindex[1]] = u32::from(dl);
+        end[iindex[1]] = u32::from(d);
+        end[iindex[2]] = u32::from(self.planes.max(1)) - 1;
+
+        let mut ii = start;
+        let mut done = false;
+        std::iter::from_fn(move || {
+            if done {
+                return None;
+            }
+            let layer = ii[iindex[1]] as u8;
+            let layer = if high_to_low { d - (layer - dl) } else { layer };
+            let item = (ii[iindex[0]], layer, ii[iindex[2]] as u8);
+
+            done = true;
+            for i in (0..3).rev() {
+                ii[i] += 1;
+                if ii[i] <= end[i] {
+                    done = false;
+                    break;
+                }
+                ii[i] = start[i];
+            }
+            Some(item)
+        })
+    }
+
+    fn resequence_stripes(&self, data: &[u8]) -> Vec<u8> {
+        let mut chunks: Vec<&[u8]> = Vec::new();
+        let mut start = 0usize;
+        let mut pos = 0usize;
+
+        while pos + 1 < data.len() {
+            if data[pos] != MARKER_ESC {
+                pos += 1;
+                continue;
+            }
+            match data[pos + 1] {
+                MARKER_SDNORM | MARKER_SDRST => {
+                    pos += 2;
+                    chunks.push(&data[start..pos]);
+                    start = pos;
+                }
+                MARKER_ATMOVE => pos += 8,
+                MARKER_NEWLEN => pos += 6,
+                MARKER_COMMENT => {
+                    let Some(length) = data.get(pos + 2..pos + 6) else { break };
+                    let length = u32::from_be_bytes([length[0], length[1], length[2], length[3]]) as usize;
+                    pos = pos.saturating_add(6).saturating_add(length);
+                }
+                MARKER_ABORT => break,
+                _ => pos += 2,
+            }
+        }
+        let tail = &data[start.min(data.len())..];
+
+        let mut by_position = std::collections::HashMap::with_capacity(chunks.len());
+        let mut tail_position = None;
+        for (index, position) in self.stripe_sequence(self.order).take(chunks.len() + 1).enumerate() {
+            if index < chunks.len() {
+                by_position.insert(position, chunks[index]);
+            } else {
+                tail_position = Some(position);
+            }
+        }
+
+        let mut out = Vec::with_capacity(data.len());
+        let mut emitted = 0usize;
+        let mut tail_emitted = tail.is_empty();
+        for position in self.stripe_sequence(ORDER_SMID | ORDER_ILEAVE) {
+            if let Some(chunk) = by_position.get(&position) {
+                out.extend_from_slice(chunk);
+                emitted += 1;
+            } else {
+                if tail_position == Some(position) && !tail_emitted {
+                    out.extend_from_slice(tail);
+                    tail_emitted = true;
+                }
+                break;
+            }
+        }
+
+        if emitted < chunks.len() {
+            log_warn!(
+                "JBIG1: {} of {} stripes could not be placed in decoding order (missing lower layers)",
+                chunks.len() - emitted,
+                chunks.len()
+            );
+        }
+        if !tail_emitted && emitted == chunks.len() {
+            out.extend_from_slice(tail);
+        }
+        out
+    }
+
     fn iindex_for_order(order: u8) -> [usize; 3] {
         match order & 0x07 {
             0 => [2, 1, 0],
@@ -1153,6 +1256,17 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 }
             }
         }
+
+        let data = if self.d > self.dl && self.order & (ORDER_HITOLO | ORDER_SEQ) != 0 {
+            let reordered = self.resequence_stripes(&data);
+            self.order = ORDER_SMID | ORDER_ILEAVE;
+            let iindex = Self::iindex_for_order(self.order);
+            self.ii = [0; 3];
+            self.ii[iindex[1]] = u32::from(self.dl);
+            reordered
+        } else {
+            data
+        };
 
         self.reserve_buffers()?;
         self.allocate_layer_buffers();

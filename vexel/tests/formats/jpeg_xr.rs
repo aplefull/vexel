@@ -3,6 +3,18 @@ use crate::harness::{Comparison, TestCase};
 pub fn test_cases() -> Vec<TestCase> {
     vec![
         TestCase {
+            name: "JPEG XR bilevel, white is one",
+            path: "jpeg-xr/bilevel_bd1white.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/bilevel_bd1white.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR bilevel, black is one",
+            path: "jpeg-xr/bilevel_bd1black.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/bilevel_bd1black.jxl" },
+            ..Default::default()
+        },
+        TestCase {
             name: "JPEG XR Y-only DC subband only",
             path: "jpeg-xr/yonly_sb_dconly.jxr",
             comparison: Comparison::Exact { reference_path: "jpeg-xr/yonly_sb_dconly.jxl" },

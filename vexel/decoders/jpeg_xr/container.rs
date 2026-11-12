@@ -18,54 +18,69 @@ pub struct Container {
 }
 
 pub fn pixel_format_from_guid(guid: &[u8]) -> PixelFormatKind {
-    if guid.len() < 16 {
-        return PixelFormatKind::Unknown;
-    }
+    use PixelFormatKind::*;
+
+    let Some(guid) = guid.get(..16) else {
+        return Unknown;
+    };
 
     if guid[..15] != PIXEL_FORMAT_BASE {
         return match guid {
-            [0x95, 0x6b, 0x8c, 0xd9, ..] => PixelFormatKind::Rgb128Float,
-            [0x8f, 0xd7, 0xfe, 0xe3, ..] => PixelFormatKind::Rgb96Fixed,
-            _ => PixelFormatKind::Unknown,
+            [0x95, 0x6b, 0x8c, 0xd9, 0xfe, 0x3e, 0xd6, 0x47, 0xbb, 0x25, 0xeb, 0x17, 0x48, 0xab, 0x0c, 0xf1] => Rgb32,
+            [0x2d, 0xad, 0xc7, 0xf5, 0x8d, 0x6a, 0xdd, 0x43, 0xa7, 0xa8, 0xa2, 0x99, 0x35, 0x26, 0x1a, 0xe9] => Rgba32,
+            [0x50, 0xa6, 0xc4, 0x3c, 0x27, 0xa5, 0x37, 0x4d, 0xa9, 0x16, 0x31, 0x42, 0xc7, 0xeb, 0xed, 0xba] => Prgba32,
+            [0x8f, 0xd7, 0xfe, 0xe3, 0xdb, 0xe8, 0xcf, 0x4a, 0x84, 0xc1, 0xe9, 0x7f, 0x61, 0x36, 0xb3, 0x27] => {
+                Rgb96Float
+            }
+            _ => Unknown,
         };
     }
 
     match guid[15] {
-        0x05 => PixelFormatKind::BlackWhite1,
-        0x08 => PixelFormatKind::Gray8,
-        0x09 => PixelFormatKind::Bgr555,
-        0x0a => PixelFormatKind::Bgr565,
-        0x0b => PixelFormatKind::Gray16,
-        0x0c => PixelFormatKind::Bgr24,
-        0x0d => PixelFormatKind::Rgb24,
-        0x0e => PixelFormatKind::Bgr32,
-        0x0f | 0x10 => PixelFormatKind::Bgra32,
-        0x11 => PixelFormatKind::Gray32Float,
-        0x12 => PixelFormatKind::Rgb48Fixed,
-        0x13 => PixelFormatKind::Gray16Fixed,
-        0x14 => PixelFormatKind::Bgr101010,
-        0x15 => PixelFormatKind::Rgb48,
-        0x16 | 0x17 => PixelFormatKind::Rgba64,
-        0x18 => PixelFormatKind::Rgb96Fixed,
-        0x19 | 0x1a => PixelFormatKind::Rgba128Float,
-        0x1b => PixelFormatKind::Rgb128Float,
-        0x1c => PixelFormatKind::Cmyk32,
-        0x1d => PixelFormatKind::Rgba64Fixed,
-        0x1e => PixelFormatKind::Rgba128Fixed,
-        0x1f => PixelFormatKind::Cmyk64,
-        0x20..=0x27 => PixelFormatKind::NChannel,
-        0x29 => PixelFormatKind::Cmyka40,
-        0x2a => PixelFormatKind::Cmyka80,
-        0x2b..=0x32 => PixelFormatKind::NChannel,
-        0x3a => PixelFormatKind::Rgba64Half,
-        0x3b => PixelFormatKind::Rgb48Half,
-        0x3d => PixelFormatKind::Rgbe32,
-        0x3e => PixelFormatKind::Gray16Half,
-        0x3f => PixelFormatKind::Gray32Fixed,
-        0x40 => PixelFormatKind::Rgb48Fixed,
-        0x41 => PixelFormatKind::Rgb128Float,
-        0x42 => PixelFormatKind::Rgb48Half,
-        _ => PixelFormatKind::Unknown,
+        0x05 => BlackWhite,
+        0x08 => Gray8,
+        0x09 => Bgr555,
+        0x0a => Bgr565,
+        0x0b => Gray16,
+        0x0c => Bgr24,
+        0x0d => Rgb24,
+        0x0e => Bgr32,
+        0x0f => Bgra32,
+        0x10 => Pbgra32,
+        0x11 => Gray32Float,
+        0x12 => Rgb48Fixed,
+        0x13 => Gray16Fixed,
+        0x14 => Bgr101010,
+        0x15 => Rgb48,
+        0x16 => Rgba64,
+        0x17 => Prgba64,
+        0x18 => Rgb96Fixed,
+        0x19 => Rgba128Float,
+        0x1a => Prgba128Float,
+        0x1b => Rgb128Float,
+        0x1c => Cmyk32,
+        0x1d => Rgba64Fixed,
+        0x1e => Rgba128Fixed,
+        0x1f => Cmyk64,
+        0x20..=0x2b => NChannels,
+        0x2c => Cmyka40,
+        0x2d => Cmyka80,
+        0x2e..=0x39 => NChannelsAlpha,
+        0x3a => Rgba64Half,
+        0x3b => Rgb48Half,
+        0x3d => Rgbe32,
+        0x3e => Gray16Half,
+        0x3f => Gray32Fixed,
+        0x40 => Rgb64Fixed,
+        0x41 => Rgb128Fixed,
+        0x42 => Rgb64Half,
+        0x43 => CmykDirectAlpha80,
+        0x44..=0x4b => Ycc,
+        0x4c..=0x53 => YccAlpha,
+        0x54 => CmykDirect32,
+        0x55 => CmykDirect64,
+        0x56 => CmykDirectAlpha40,
+        _ => Unknown,
     }
 }
 

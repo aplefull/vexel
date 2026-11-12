@@ -8,6 +8,11 @@ pub const OPT_DPON: u8 = 0x04;
 pub const OPT_DPPRIV: u8 = 0x02;
 pub const OPT_DPLAST: u8 = 0x01;
 
+pub const ORDER_HITOLO: u8 = 0x08;
+pub const ORDER_SEQ: u8 = 0x04;
+pub const ORDER_ILEAVE: u8 = 0x02;
+pub const ORDER_SMID: u8 = 0x01;
+
 pub const MARKER_ESC: u8 = 0xFF;
 pub const MARKER_STUFF: u8 = 0x00;
 pub const MARKER_SDNORM: u8 = 0x02;

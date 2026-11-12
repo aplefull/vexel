@@ -3,6 +3,18 @@ use crate::harness::{Comparison, TestCase};
 pub fn test_cases() -> Vec<TestCase> {
     vec![
         TestCase {
+            name: "HDR old-style RLE, bottom-up rows, right to left",
+            path: "hdr/old_rle_flipped_y.hdr",
+            comparison: Comparison::Exact { reference_path: "hdr/old_rle_oriented.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "HDR old-style RLE, column-major scanlines",
+            path: "hdr/old_rle_column_major.hdr",
+            comparison: Comparison::Exact { reference_path: "hdr/old_rle_oriented.jxl" },
+            ..Default::default()
+        },
+        TestCase {
             name: "HDR common",
             path: "hdr/common.hdr",
             validation: None,

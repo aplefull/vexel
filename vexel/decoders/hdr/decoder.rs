@@ -14,6 +14,7 @@ pub struct HdrDecoder<R: Read + Seek> {
     height: u32,
     limits: Limits,
     format: HdrFormat,
+    resolution: Option<HdrResolution>,
     reader: BitReader<R>,
     info: Option<HdrInfo>,
 }
@@ -25,6 +26,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
             height: 0,
             limits: Limits::default(),
             format: HdrFormat::RGBE,
+            resolution: None,
             reader: BitReader::new(reader),
             info: None,
         }
@@ -161,9 +163,12 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 return Err(VexelError::Custom(format!("Invalid header line: {}", line)));
             }
 
-            let (dim1, dim2) = match parts[0].chars().nth(1) {
-                Some('Y') => (parts[3], parts[1]),
-                Some('X') => (parts[1], parts[3]),
+            let axis = |token: &str| match token.chars().last() {
+                Some(letter @ ('X' | 'Y')) => Some((letter, token.starts_with('-'))),
+                _ => None,
+            };
+            let (first, second) = match (axis(parts[0]), axis(parts[2])) {
+                (Some(first), Some(second)) if first.0 != second.0 => (first, second),
                 _ => {
                     return Err(VexelError::Custom(format!(
                         "Invalid header line: {}, cant parse image dimensions",
@@ -172,16 +177,31 @@ impl<R: Read + Seek> HdrDecoder<R> {
                 }
             };
 
-            let width = dim1.parse::<u32>().map_err(|_| "Failed to parse width")?;
-            let height = dim2.parse::<u32>().map_err(|_| "Failed to parse height")?;
+            let first_size = parts[1].parse::<u32>().map_err(|_| "Failed to parse image dimensions")?;
+            let second_size = parts[3].parse::<u32>().map_err(|_| "Failed to parse image dimensions")?;
 
-            return Ok(HdrResolution { line: line.trim().to_string(), width, height });
+            let y_major = first.0 == 'Y';
+            let (width, height, x_decreasing, y_decreasing) = if y_major {
+                (second_size, first_size, second.1, first.1)
+            } else {
+                (first_size, second_size, first.1, second.1)
+            };
+
+            return Ok(HdrResolution {
+                line: line.trim().to_string(),
+                width,
+                height,
+                y_major,
+                x_decreasing,
+                y_decreasing,
+            });
         }
     }
 
     fn scan(&mut self) -> VexelResult<()> {
         self.reader.seek(SeekFrom::Start(0))?;
         self.format = HdrFormat::RGBE;
+        self.resolution = None;
         let mut info = HdrInfo::default();
 
         let mut header = HdrHeader::default();
@@ -201,13 +221,17 @@ impl<R: Read + Seek> HdrDecoder<R> {
         let resolution_end = self.reader.stream_position().unwrap_or(header_end);
         self.width = resolution.width;
         self.height = resolution.height;
+        let scanline_length = resolution.scanline_length();
+        self.resolution = Some(resolution.clone());
         info.push(header_end, Some(resolution_end - header_end), HdrSection::Resolution(resolution));
 
         let available = self.reader.bytes_left().unwrap_or(0);
         let first_scanline = self.reader.peek_bytes(4.min(available as usize)).unwrap_or_default();
         let encoding = match first_scanline.as_slice() {
             [] => None,
-            [2, 2, hi, lo] if u32::from(u16::from_be_bytes([*hi, *lo])) == self.width => Some(HdrScanlineEncoding::Rle),
+            [2, 2, hi, lo] if hi & 0x80 == 0 && u32::from(u16::from_be_bytes([*hi, *lo])) == scanline_length => {
+                Some(HdrScanlineEncoding::Rle)
+            }
             _ => Some(HdrScanlineEncoding::Flat),
         };
         let decoded_length = (u64::from(self.width) * u64::from(self.height)).saturating_mul(4);
@@ -218,7 +242,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
         summary.sample_format = SampleFormat::Float;
         summary.compression = encoding.map(|encoding| match encoding {
             HdrScanlineEncoding::Rle => "Adaptive RLE".to_string(),
-            HdrScanlineEncoding::Flat => "None".to_string(),
+            HdrScanlineEncoding::Flat => "None or old-style RLE".to_string(),
         });
         info.summary = Some(summary);
         self.info = Some(info);
@@ -264,11 +288,8 @@ impl<R: Read + Seek> HdrDecoder<R> {
         }
     }
 
-    fn read_scanlines(&mut self) -> VexelResult<Vec<u8>> {
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let num_pixels = width * height;
-        let mut rgbe_data = vec![0u8; num_pixels * 4];
+    fn read_scanlines(&mut self, scanline_length: usize, scanline_count: usize) -> VexelResult<Vec<u8>> {
+        let mut rgbe_data = vec![0u8; scanline_length * scanline_count * 4];
 
         let compressed = self.reader.read_to_end()?;
         let mut cursor = 0usize;
@@ -283,34 +304,27 @@ impl<R: Read + Seek> HdrDecoder<R> {
             }
         };
 
-        let mut channel_buf = [vec![0u8; width], vec![0u8; width], vec![0u8; width], vec![0u8; width]];
+        let mut channel_buf: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0u8; scanline_length]);
+        let mut warned_length_mismatch = false;
 
-        for y in 0..height {
-            let b0 = match read_byte(&mut cursor) {
-                Some(b) => b,
-                None => break,
-            };
-            let b1 = match read_byte(&mut cursor) {
-                Some(b) => b,
-                None => break,
-            };
-            let b2 = match read_byte(&mut cursor) {
-                Some(b) => b,
-                None => break,
-            };
-            let b3 = match read_byte(&mut cursor) {
-                Some(b) => b,
-                None => break,
+        for y in 0..scanline_count {
+            let Some(&[b0, b1, b2, b3]) = compressed.get(cursor..cursor.saturating_add(4)) else {
+                break;
             };
 
-            let rle_header = (b0 as u16) << 8 | b1 as u16;
-            let rle_width = (b2 as u16) << 8 | b3 as u16;
+            let scanline_start = y * scanline_length * 4;
+            let scanline = &mut rgbe_data[scanline_start..scanline_start + scanline_length * 4];
 
-            if rle_header == 0x0202 && rle_width == self.width as u16 {
+            let new_style = b0 == 2 && b1 == 2 && b2 & 0x80 == 0;
+            let rle_length = usize::from(b2) << 8 | usize::from(b3);
+
+            if new_style && rle_length == scanline_length {
+                cursor += 4;
+
                 for dst in channel_buf.iter_mut() {
                     let mut pos = 0;
 
-                    while pos < width {
+                    while pos < scanline_length {
                         let count = match read_byte(&mut cursor) {
                             Some(b) => b as usize,
                             None => break,
@@ -322,11 +336,11 @@ impl<R: Read + Seek> HdrDecoder<R> {
                                 Some(b) => b,
                                 None => break,
                             };
-                            let end = (pos + run_length).min(width);
+                            let end = (pos + run_length).min(scanline_length);
                             dst[pos..end].fill(value);
                             pos += run_length;
                         } else {
-                            let end = (pos + count).min(width);
+                            let end = (pos + count).min(scanline_length);
                             let src_end = cursor + (end - pos);
                             if src_end <= compressed.len() {
                                 dst[pos..end].copy_from_slice(&compressed[cursor..src_end]);
@@ -341,48 +355,85 @@ impl<R: Read + Seek> HdrDecoder<R> {
                     }
                 }
 
-                let scanline_start = y * width * 4;
-                let scanline = &mut rgbe_data[scanline_start..scanline_start + width * 4];
-
-                for x in 0..width {
+                for x in 0..scanline_length {
                     scanline[x * 4] = channel_buf[0][x];
                     scanline[x * 4 + 1] = channel_buf[1][x];
                     scanline[x * 4 + 2] = channel_buf[2][x];
                     scanline[x * 4 + 3] = channel_buf[3][x];
                 }
             } else {
-                cursor -= 4;
-
-                let scanline_start = y * width * 4;
-                let scanline_bytes = width * 4;
-
-                if scanline_start + scanline_bytes > rgbe_data.len() {
+                if new_style && !warned_length_mismatch {
                     log_warn!(
-                        "Scanline index out of bounds: {} >= {}",
-                        scanline_start + scanline_bytes,
-                        rgbe_data.len()
-                    );
-                    break;
-                }
-
-                let src_end = cursor + scanline_bytes;
-                if src_end > compressed.len() {
-                    log_warn!(
-                        "Compressed data too short for scanline {}: need {} bytes, have {}",
+                        "HDR: scanline {} has RLE length {} but the image needs {}, reading it as old-style data",
                         y,
-                        scanline_bytes,
-                        compressed.len() - cursor
+                        rle_length,
+                        scanline_length
                     );
-                    break;
+                    warned_length_mismatch = true;
                 }
 
-                rgbe_data[scanline_start..scanline_start + scanline_bytes]
-                    .copy_from_slice(&compressed[cursor..src_end]);
-                cursor = src_end;
+                let complete;
+                (cursor, complete) = Self::read_old_style_scanline(&compressed, cursor, scanline);
+                if !complete {
+                    log_warn!("HDR: pixel data ends inside scanline {}", y);
+                    break;
+                }
             }
         }
 
         Ok(rgbe_data)
+    }
+
+    fn read_old_style_scanline(data: &[u8], mut cursor: usize, scanline: &mut [u8]) -> (usize, bool) {
+        let pixels = scanline.len() / 4;
+        let mut pos = 0;
+        let mut shift = 0u32;
+
+        while pos < pixels {
+            let Some(&[r, g, b, e]) = data.get(cursor..cursor.saturating_add(4)) else {
+                return (cursor, false);
+            };
+            cursor += 4;
+
+            if pos > 0 && r == 1 && g == 1 && b == 1 {
+                let count = if shift < 32 { (usize::from(e) << shift).min(pixels - pos) } else { pixels - pos };
+                let mut previous = [0u8; 4];
+                previous.copy_from_slice(&scanline[(pos - 1) * 4..pos * 4]);
+                for pixel in scanline[pos * 4..(pos + count) * 4].chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&previous);
+                }
+                pos += count;
+                shift += 8;
+            } else {
+                scanline[pos * 4..pos * 4 + 4].copy_from_slice(&[r, g, b, e]);
+                pos += 1;
+                shift = 0;
+            }
+        }
+
+        (cursor, true)
+    }
+
+    fn reorient(rgbe_data: Vec<u8>, resolution: &HdrResolution) -> Vec<u8> {
+        if resolution.is_standard() {
+            return rgbe_data;
+        }
+
+        let width = resolution.width as usize;
+        let height = resolution.height as usize;
+        let scanline_length = resolution.scanline_length() as usize;
+        let mut out = vec![0u8; rgbe_data.len()];
+
+        for (index, pixel) in rgbe_data.chunks_exact(4).enumerate() {
+            let (scanline, position) = (index / scanline_length, index % scanline_length);
+            let (x, y) = if resolution.y_major { (position, scanline) } else { (scanline, position) };
+            let column = if resolution.x_decreasing { width - 1 - x } else { x };
+            let row = if resolution.y_decreasing { y } else { height - 1 - y };
+            let target = (row * width + column) * 4;
+            out[target..target + 4].copy_from_slice(pixel);
+        }
+
+        out
     }
 
     pub fn get_info(&mut self) -> HdrInfo {
@@ -398,7 +449,10 @@ impl<R: Read + Seek> HdrDecoder<R> {
     pub fn decode(&mut self) -> VexelResult<Image> {
         self.read_header()?;
 
-        let rgbe_data = self.read_scanlines()?;
+        let resolution = self.resolution.clone().ok_or_else(|| VexelError::Custom("HDR: missing resolution".into()))?;
+        let rgbe_data =
+            self.read_scanlines(resolution.scanline_length() as usize, resolution.scanline_count() as usize)?;
+        let rgbe_data = Self::reorient(rgbe_data, &resolution);
 
         let pixel_decoder = PixelDecoder::new(self.width, self.height, self.format);
         let mut pixel_data = pixel_decoder.decode(&rgbe_data)?;

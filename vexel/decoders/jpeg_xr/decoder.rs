@@ -85,7 +85,6 @@ impl<R: Read + Seek> JpegXrDecoder<R> {
             mantissa_len: plane_header.mantissa_len,
             exp_bias: plane_header.exp_bias,
             rb_swapped: image_header.rb_swapped,
-            black_white: image_header.black_white,
             has_alpha,
             window_top: image_header.extra_top as usize,
             window_left: image_header.extra_left as usize,

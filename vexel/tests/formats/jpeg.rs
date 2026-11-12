@@ -154,6 +154,16 @@ pub fn test_cases() -> Vec<TestCase> {
             ..Default::default()
         },
         TestCase {
+            name: "JPEG stray restart marker between segments",
+            path: "jpeg/arithmetic_stray_rst.jpg",
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/arithmetic.avif",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+            ..Default::default()
+        },
+        TestCase {
             name: "JPEG arithmetic (rainbow)",
             path: "jpeg/arithmetic.jpg",
             validation: None,

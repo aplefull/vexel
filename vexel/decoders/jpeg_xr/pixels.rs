@@ -16,7 +16,6 @@ pub struct OutputParams {
     pub mantissa_len: u8,
     pub exp_bias: i8,
     pub rb_swapped: bool,
-    pub black_white: bool,
     pub has_alpha: bool,
     pub window_top: usize,
     pub window_left: usize,
@@ -466,15 +465,11 @@ pub fn build_image_data(
 fn build_bilevel(sampler: &Sampler, params: &OutputParams) -> PixelData {
     let shift = params.shift();
     let threshold = if shift > 0 { 1 << (shift - 1) } else { 1 };
-    let black_white = i32::from(params.black_white);
-
     let mut out = Vec::with_capacity(params.width * params.height);
 
     for row in 0..params.height {
         for column in 0..params.width {
-            let value = sampler.luma(row, column);
-            let bit = (black_white + i32::from(value >= threshold)) & 1;
-            out.push(if bit != 0 { 1u8 } else { 0u8 });
+            out.push(u8::from(sampler.luma(row, column) >= threshold));
         }
     }
 

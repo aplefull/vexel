@@ -244,17 +244,20 @@ fn bits_and_format(depth: u32) -> (u8, SampleFormat) {
 fn color_model(pixel_format: Option<PixelFormatKind>, headers: &Headers, has_alpha: bool) -> ColorModel {
     use PixelFormatKind::*;
     match pixel_format {
-        Some(BlackWhite1) => ColorModel::Bilevel,
+        Some(BlackWhite) => ColorModel::Bilevel,
         Some(Gray8 | Gray16 | Gray16Fixed | Gray16Half | Gray32Fixed | Gray32Float) => ColorModel::Gray,
-        Some(Bgra32 | Rgba64 | Rgba64Fixed | Rgba64Half | Rgba128Fixed | Rgba128Float) => ColorModel::Rgba,
         Some(
-            Rgb24 | Bgr24 | Bgr32 | Rgb48 | Rgb48Fixed | Rgb48Half | Rgb96Fixed | Rgb128Float | Rgbe32 | Bgr555
-            | Bgr565 | Bgr101010,
+            Bgra32 | Pbgra32 | Rgba32 | Prgba32 | Rgba64 | Prgba64 | Rgba64Fixed | Rgba64Half | Rgba128Fixed
+            | Rgba128Float | Prgba128Float,
+        ) => ColorModel::Rgba,
+        Some(
+            Bgr555 | Bgr565 | Bgr101010 | Bgr24 | Rgb24 | Bgr32 | Rgb32 | Rgb48 | Rgb48Fixed | Rgb48Half | Rgb64Fixed
+            | Rgb64Half | Rgb96Fixed | Rgb96Float | Rgb128Fixed | Rgb128Float | Rgbe32,
         ) => ColorModel::Rgb,
-        Some(Cmyk32 | Cmyk64) => ColorModel::Cmyk,
-        Some(Cmyka40 | Cmyka80) => ColorModel::Cmyka,
-        Some(NChannel) => ColorModel::Multichannel,
-        Some(Unknown) | None => match headers.image.source_color_format {
+        Some(Cmyk32 | Cmyk64 | CmykDirect32 | CmykDirect64) => ColorModel::Cmyk,
+        Some(Cmyka40 | Cmyka80 | CmykDirectAlpha40 | CmykDirectAlpha80) => ColorModel::Cmyka,
+        Some(NChannels | NChannelsAlpha) => ColorModel::Multichannel,
+        Some(Ycc | YccAlpha | Unknown) | None => match headers.image.source_color_format {
             ColorFormat::YOnly => ColorModel::Gray,
             ColorFormat::Cmyk if has_alpha => ColorModel::Cmyka,
             ColorFormat::Cmyk => ColorModel::Cmyk,

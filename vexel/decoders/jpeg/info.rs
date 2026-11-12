@@ -103,6 +103,7 @@ pub enum JpegSection {
     Expand(JpegExpand),
     Scan(JpegScan),
     Unknown(u16),
+    StandaloneMarker(u16),
     EndOfImage,
     TrailingData,
 }
@@ -196,6 +197,10 @@ impl InfoSection for JpegSection {
             JpegSection::Expand(_) => Cow::Borrowed("EXP (Expand Reference Components)"),
             JpegSection::Scan(_) => Cow::Borrowed("SOS (Start of Scan)"),
             JpegSection::Unknown(marker) => Cow::Owned(format!("Unknown Marker 0x{:04X}", marker)),
+            JpegSection::StandaloneMarker(0xFF01) => Cow::Borrowed("TEM (Temporary)"),
+            JpegSection::StandaloneMarker(marker) => {
+                Cow::Owned(format!("RST{} (Restart marker outside a scan)", marker & 0x07))
+            }
             JpegSection::EndOfImage => Cow::Borrowed("EOI (End of Image)"),
             JpegSection::TrailingData => Cow::Borrowed("Trailing Data"),
         }
@@ -299,6 +304,7 @@ impl InfoSection for JpegSection {
             }
             JpegSection::StartOfImage
             | JpegSection::Unknown(_)
+            | JpegSection::StandaloneMarker(_)
             | JpegSection::EndOfImage
             | JpegSection::TrailingData => {}
         }

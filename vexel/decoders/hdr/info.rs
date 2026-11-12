@@ -41,6 +41,31 @@ pub struct HdrResolution {
     pub line: String,
     pub width: u32,
     pub height: u32,
+    pub y_major: bool,
+    pub x_decreasing: bool,
+    pub y_decreasing: bool,
+}
+
+impl HdrResolution {
+    pub fn is_standard(&self) -> bool {
+        self.y_major && self.y_decreasing && !self.x_decreasing
+    }
+
+    pub fn scanline_length(&self) -> u32 {
+        if self.y_major {
+            self.width
+        } else {
+            self.height
+        }
+    }
+
+    pub fn scanline_count(&self) -> u32 {
+        if self.y_major {
+            self.height
+        } else {
+            self.width
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -103,6 +128,14 @@ impl InfoSection for HdrSection {
                 out.text("Line", &resolution.line);
                 out.field("Width", resolution.width);
                 out.field("Height", resolution.height);
+                let horizontal = if resolution.x_decreasing { "right to left" } else { "left to right" };
+                let vertical = if resolution.y_decreasing { "top to bottom" } else { "bottom to top" };
+                let order = if resolution.y_major {
+                    format!("rows {}, pixels {}", vertical, horizontal)
+                } else {
+                    format!("columns {}, pixels {}", horizontal, vertical)
+                };
+                out.field("Scanline order", order);
             }
             HdrSection::PixelData(pixel_data) => {
                 let encoding = match pixel_data.encoding {

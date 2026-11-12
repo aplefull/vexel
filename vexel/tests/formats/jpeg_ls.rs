@@ -220,6 +220,42 @@ pub fn test_cases() -> Vec<TestCase> {
             ..Default::default()
         },
         TestCase {
+            name: "JPEG-LS T.87 H.4.5 palettised image",
+            path: "jpeg-ls/t87_h45_palette.jls",
+            comparison: Comparison::Exact { reference_path: "jpeg-ls/t87_h45_palette.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG-LS mapping tables on two of three components",
+            path: "jpeg-ls/mapping_rgb_partial.jls",
+            comparison: Comparison::Exact { reference_path: "jpeg-ls/mapping_rgb_partial.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG-LS mapping table continuation",
+            path: "jpeg-ls/mapping_continuation.jls",
+            comparison: Comparison::Exact { reference_path: "jpeg-ls/mapping_continuation.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG-LS 32-bit restart interval",
+            path: "jpeg-ls/test8_ilv_sample_rm_7_dri32.jls",
+            comparison: Comparison::Exact { reference_path: "jpeg-ls/test8_ilv_sample_rm_7.avif" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG-LS height from 24-bit DNL",
+            path: "jpeg-ls/dnl_24bit.jls",
+            comparison: Comparison::Exact { reference_path: "jpeg-ls/dnl_24bit.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG-LS oversize image dimensions",
+            path: "jpeg-ls/oversize_width.jls",
+            comparison: Comparison::Exact { reference_path: "jpeg-ls/oversize_width.jxl" },
+            ..Default::default()
+        },
+        TestCase {
             name: "JPEG-LS test8_ilv_sample_rm_300",
             path: "jpeg-ls/test8_ilv_sample_rm_300.jls",
             validation: None,

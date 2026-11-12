@@ -5316,6 +5316,19 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 JpegMarker::DHT => self.read_huffman_table(segment_start),
                 JpegMarker::DAC => self.read_dac(segment_start),
                 JpegMarker::SOS => self.read_start_of_scan(segment_start),
+                JpegMarker::TEM
+                | JpegMarker::RST0
+                | JpegMarker::RST1
+                | JpegMarker::RST2
+                | JpegMarker::RST3
+                | JpegMarker::RST4
+                | JpegMarker::RST5
+                | JpegMarker::RST6
+                | JpegMarker::RST7 => {
+                    log_warn!("Standalone marker {:?} between marker segments, skipping", marker);
+                    self.record(segment_start, Some(2), JpegSection::StandaloneMarker(code));
+                    Ok(())
+                }
                 _ => {
                     log_warn!("Unhandled marker found: {:?}", marker);
                     self.skip_unknown_marker_segment(code, segment_start)

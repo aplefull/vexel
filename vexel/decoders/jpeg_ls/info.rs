@@ -42,7 +42,7 @@ pub struct JpegLsScan {
     pub maxval: i32,
     pub thresholds: [i32; 3],
     pub reset: i32,
-    pub restart_interval: u16,
+    pub restart_interval: u32,
     pub entropy_coded_length: u64,
 }
 
@@ -58,8 +58,17 @@ pub struct JpegLsPresetParameters {
 #[derive(Debug, Clone, Serialize, Tsify)]
 pub struct JpegLsMappingTable {
     pub table_id: u8,
+    pub entry_width: u8,
+    pub continuation: bool,
     pub entry_count: u16,
     pub entries: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+pub struct JpegLsOversizeDimensions {
+    pub size: u8,
+    pub height: u32,
+    pub width: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -75,9 +84,10 @@ pub enum JpegLsSection {
     Scan(JpegLsScan),
     PresetParameters(JpegLsPresetParameters),
     MappingTable(JpegLsMappingTable),
+    OversizeDimensions(JpegLsOversizeDimensions),
     Extension(JpegLsExtension),
-    RestartInterval(u16),
-    NumberOfLines(u16),
+    RestartInterval(u32),
+    NumberOfLines(u32),
     App(AppSection),
     Comment(CommentSegment),
     EndOfImage,
@@ -96,7 +106,6 @@ pub fn interleave_name(mode: u8) -> String {
 fn extension_name(id: u8) -> &'static str {
     match id {
         3 => "Mapping table continuation",
-        4 => "Oversize image dimensions",
         _ => "Unknown",
     }
 }
@@ -108,7 +117,11 @@ impl InfoSection for JpegLsSection {
             JpegLsSection::Frame(_) => Cow::Borrowed("SOF55 (JPEG-LS Frame)"),
             JpegLsSection::Scan(_) => Cow::Borrowed("SOS (Start of Scan)"),
             JpegLsSection::PresetParameters(_) => Cow::Borrowed("LSE (Preset Coding Parameters)"),
+            JpegLsSection::MappingTable(table) if table.continuation => {
+                Cow::Borrowed("LSE (Mapping Table Continuation)")
+            }
             JpegLsSection::MappingTable(_) => Cow::Borrowed("LSE (Mapping Table)"),
+            JpegLsSection::OversizeDimensions(_) => Cow::Borrowed("LSE (Oversize Image Dimensions)"),
             JpegLsSection::Extension(ext) => Cow::Owned(format!("LSE ({})", extension_name(ext.id))),
             JpegLsSection::RestartInterval(_) => Cow::Borrowed("DRI (Restart Interval)"),
             JpegLsSection::NumberOfLines(_) => Cow::Borrowed("DNL (Number of Lines)"),
@@ -178,9 +191,14 @@ impl InfoSection for JpegLsSection {
             }
             JpegLsSection::MappingTable(table) => {
                 out.field("Table ID", table.table_id);
+                out.field("Entry width", format!("{} bytes", table.entry_width));
                 out.field("Entries", table.entries.len());
                 let values = table.entries.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
                 out.text("Values", &values);
+            }
+            JpegLsSection::OversizeDimensions(dimensions) => {
+                out.field("Value size", format!("{} bytes", dimensions.size));
+                out.field("Dimensions", format!("{}x{}", dimensions.width, dimensions.height));
             }
             JpegLsSection::Extension(ext) => {
                 out.field("ID", ext.id);

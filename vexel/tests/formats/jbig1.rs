@@ -3,6 +3,24 @@ use crate::harness::{Comparison, TestCase};
 pub fn test_cases() -> Vec<TestCase> {
     vec![
         TestCase {
+            name: "JBIG1 T.85 height 0xFFFFFFFF with NEWLEN",
+            path: "jbig1/t85_unknown_height.jbg",
+            comparison: Comparison::Exact { reference_path: "jbig1/layers_src.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG1 HITOLO with differential layers",
+            path: "jbig1/hitolo_3layers.jbg",
+            comparison: Comparison::Exact { reference_path: "jbig1/layers_src.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG1 SEQ with differential layers",
+            path: "jbig1/seq_3layers.jbg",
+            comparison: Comparison::Exact { reference_path: "jbig1/layers_src.jxl" },
+            ..Default::default()
+        },
+        TestCase {
             name: "JBIG1 2x2 checkerboard",
             path: "jbig1/2x2.jbg",
             comparison: Comparison::Exact { reference_path: "jbig1/2x2.jxl" },

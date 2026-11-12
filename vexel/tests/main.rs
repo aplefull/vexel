@@ -291,7 +291,7 @@ fn test_icc() -> Result<(), Box<dyn std::error::Error>> {
 
     let spectral = std::fs::read(icc_dir.join("Spec400_10_700-IllumA-Abs_2deg.icc"))?;
     let profile = vexel::parse_icc(&spectral)?;
-    assert!(profile.header.spectral_pcs.is_some());
+    assert_eq!(profile.header.spectral_pcs.as_deref(), Some("Reflectance Spectrum (31 channels)"));
     assert!(profile.header.spectral_range.is_some());
 
     let gbd_path = icc_dir.join("sRGB_D65_MAT.icc");

@@ -157,21 +157,22 @@ fn decode_platform(sig: &str) -> String {
     }
 }
 
-fn decode_spectral_pcs(sig: &str) -> String {
-    let bytes = sig.as_bytes();
-    if bytes.len() == 4 {
-        let channels = u16::from_be_bytes([bytes[2], bytes[3]]);
-        let prefix = &sig[0..2];
-        match prefix {
-            "rs" => return format!("Reflectance Spectrum ({} channels)", channels),
-            "ts" => return format!("Transmission Spectrum ({} channels)", channels),
-            "es" => return format!("Radiant/Emission Spectrum ({} channels)", channels),
-            "bs" => return format!("Bi-Spectral Reflectance ({} channels)", channels),
-            "sm" => return format!("Sparse Matrix Reflectance ({} channels)", channels),
-            _ => {}
+fn decode_spectral_pcs(bytes: &[u8]) -> String {
+    if let [a, b, hi, lo] = *bytes {
+        let channels = u16::from_be_bytes([hi, lo]);
+        let kind = match &[a, b] {
+            b"rs" => Some("Reflectance Spectrum"),
+            b"ts" => Some("Transmission Spectrum"),
+            b"es" => Some("Radiant/Emission Spectrum"),
+            b"bs" => Some("Bi-Spectral Reflectance"),
+            b"sm" => Some("Sparse Matrix Reflectance"),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            return format!("{} ({} channels)", kind, channels);
         }
     }
-    sig.to_string()
+    sig_to_string(bytes)
 }
 
 const HEADER_SIZE: usize = 128;
@@ -261,7 +262,7 @@ impl ICCProfile {
         profile_id.copy_from_slice(&data[84..100]);
 
         let spectral_pcs_raw = read_u32_be(data, 100).unwrap_or(0);
-        let spectral_pcs = if spectral_pcs_raw != 0 { Some(decode_spectral_pcs(&sig_at(data, 100))) } else { None };
+        let spectral_pcs = if spectral_pcs_raw != 0 { Some(decode_spectral_pcs(&data[100..104])) } else { None };
         let spectral_range = read_spectral_range(data, 104).filter(|r| r.steps != 0);
         let bi_spectral_range = read_spectral_range(data, 110).filter(|r| r.steps != 0);
 

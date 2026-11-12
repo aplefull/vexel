@@ -112,6 +112,46 @@ pub(crate) fn tiff_is_camera_raw<R: Read + Seek>(reader: &mut R, first_ifd_offse
         && (model.starts_with("DCS") || model.starts_with("EOSDCS") || model.starts_with("NC2000"))
 }
 
+pub(crate) fn jpeg_marker_chain_is_jpeg_ls<R: Read + Seek>(reader: &mut R) -> bool {
+    const MAX_SEGMENTS: usize = 256;
+
+    let mut byte = [0u8; 1];
+    let mut length = [0u8; 2];
+    if reader.seek(SeekFrom::Start(2)).is_err() {
+        return false;
+    }
+
+    for _ in 0..MAX_SEGMENTS {
+        if reader.read_exact(&mut byte).is_err() || byte[0] != 0xFF {
+            return false;
+        }
+        let mut marker = 0xFF;
+        while marker == 0xFF {
+            if reader.read_exact(&mut byte).is_err() {
+                return false;
+            }
+            marker = byte[0];
+        }
+
+        match marker {
+            0xF7 | 0xF8 => return true,
+            0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF | 0xD9 | 0xDA => return false,
+            0x01 | 0xD0..=0xD7 => continue,
+            _ => {
+                if reader.read_exact(&mut length).is_err() {
+                    return false;
+                }
+                let skip = i64::from(u16::from_be_bytes(length)) - 2;
+                if skip < 0 || reader.seek(SeekFrom::Current(skip)).is_err() {
+                    return false;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 /// Checks whether the first 4 bytes at the current header window look like a headerless DIB
 pub(crate) fn looks_like_headerless_dib(header: &[u8]) -> bool {
     if header.len() < 16 {

@@ -25,7 +25,6 @@ pub struct ImageHeader {
     pub alpha_channel: bool,
     pub source_color_format: ColorFormat,
     pub source_bit_depth: BitDepth,
-    pub black_white: bool,
     pub width: u32,
     pub height: u32,
     pub tile_cols: usize,
@@ -163,16 +162,10 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
     });
 
     let depth_bits = reader.read(4);
-    let mut source_bit_depth = BitDepth::from_bits(depth_bits).unwrap_or_else(|| {
+    let source_bit_depth = BitDepth::from_bits(depth_bits).unwrap_or_else(|| {
         log_warn!("JPEG XR: unknown source bit depth {}, assuming 8", depth_bits);
         BitDepth::Bd8
     });
-
-    let mut black_white = false;
-    if source_bit_depth == BitDepth::Bd1Black {
-        source_bit_depth = BitDepth::Bd1White;
-        black_white = true;
-    }
 
     let size_bits = if short_header { 16 } else { 32 };
     let mut width = reader.read(size_bits).wrapping_add(1);
@@ -266,7 +259,6 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
         alpha_channel,
         source_color_format,
         source_bit_depth,
-        black_white,
         width,
         height,
         tile_cols,
@@ -290,7 +282,11 @@ pub fn parse_plane_header(reader: &mut XrBitReader, image: &ImageHeader) -> Vexe
     }
 
     let scaled_arith = reader.read_bool();
-    let subband = Subband::from_bits(reader.read(4));
+    let subband_bits = reader.read(4);
+    let subband = Subband::from_bits(subband_bits);
+    if subband_bits > 4 {
+        log_warn!("JPEG XR: reserved subband value {}, decoding all subbands", subband_bits);
+    }
 
     let num_channels = match internal_color_format {
         ColorFormat::YOnly => 1,

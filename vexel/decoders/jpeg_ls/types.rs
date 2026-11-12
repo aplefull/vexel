@@ -59,8 +59,26 @@ impl FrameHeader {
 }
 
 #[derive(Debug, Clone)]
+pub struct MappingTable {
+    pub entry_width: usize,
+    pub data: Vec<u8>,
+}
+
+impl MappingTable {
+    pub fn entry_count(&self) -> usize {
+        self.data.len().checked_div(self.entry_width).unwrap_or(0)
+    }
+
+    pub fn entry(&self, index: usize) -> &[u8] {
+        let index = index.min(self.entry_count().saturating_sub(1));
+        &self.data[index * self.entry_width..(index + 1) * self.entry_width]
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ScanHeader {
     pub component_ids: Vec<u8>,
+    pub mapping_table_ids: Vec<u8>,
     pub near: i32,
     pub interleave_mode: InterleaveMode,
     pub point_transform: u8,
@@ -76,6 +94,7 @@ impl Default for ScanHeader {
     fn default() -> Self {
         Self {
             component_ids: Vec::new(),
+            mapping_table_ids: Vec::new(),
             near: 0,
             interleave_mode: InterleaveMode::None,
             point_transform: 0,
