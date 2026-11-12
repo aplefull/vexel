@@ -92,12 +92,8 @@ pub fn decode_refinement_region(
     let mut ltp = false;
 
     for y in 0..height {
-        if arith.exhausted() {
-            log_warn!("JBIG2 refinement region data exhausted at row {} of {}, leaving the rest blank", y, height);
-            break;
-        }
         if params.tpgron {
-            let cx = if params.template != 0 { 0x0040 } else { 0x0100 };
+            let cx = if params.template != 0 { 0x0080 } else { 0x0100 };
             if let Some(slot) = stats.get_mut(cx) {
                 if arith.decode(slot) == 1 {
                     ltp = !ltp;
@@ -106,6 +102,14 @@ pub fn decode_refinement_region(
         }
 
         for x in 0..width {
+            if arith.ran_past_truncated_data() {
+                log_warn!(
+                    "JBIG2 refinement region data is truncated at row {} column {}, leaving the rest blank",
+                    y,
+                    x
+                );
+                return;
+            }
             if ltp {
                 if let Some(value) = typical_prediction(params, x, y) {
                     bitmap.set(x, y, value);

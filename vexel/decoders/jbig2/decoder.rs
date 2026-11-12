@@ -14,11 +14,15 @@ use crate::decoders::jbig2::halftone::{
 use crate::decoders::jbig2::huffman::{self, HuffmanReader, HuffmanTable};
 use crate::decoders::jbig2::info::{scan, Jbig2Info};
 use crate::decoders::jbig2::refinement::{decode_refinement_region, stats_size as refine_stats_size, RefinementParams};
-use crate::decoders::jbig2::segment::{parse_region_info, parse_segment_header, SegmentHeader, SegmentType};
-use crate::decoders::jbig2::symbol_dict::{decode_symbol_dict, SymbolDictHuffman, SymbolDictParams};
+use crate::decoders::jbig2::segment::{
+    parse_region_info, parse_segment_header, RegionInfo, SegmentHeader, SegmentType,
+};
+use crate::decoders::jbig2::symbol_dict::{
+    decode_symbol_dict, SingleInstanceCoding, SymbolDictHuffman, SymbolDictParams,
+};
 use crate::decoders::jbig2::text::{
-    decode_symbol_id_huffman_table, decode_text_region_tracked, Placement, RefCorner, TextArithContexts, TextCoder,
-    TextRegionHuffman, TextRegionParams,
+    decode_symbol_id_huffman_table, decode_text_region_tracked, Placement, RefCorner, SymbolCodes, TextArithContexts,
+    TextCoder, TextRegionHuffman, TextRegionParams,
 };
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, PixelData};
@@ -48,8 +52,6 @@ struct Page {
     default_pixel: bool,
     striped: bool,
     declared_height: u32,
-    combination_operator_overridden: bool,
-    default_op: ComposeOp,
 }
 
 pub struct Jbig2Decoder<R: Read + Seek> {
@@ -130,6 +132,7 @@ pub(super) struct ParsedSegment {
     pub header_offset: usize,
     pub start: usize,
     pub end: usize,
+    pub truncated: bool,
 }
 
 pub(super) fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSegment> {
@@ -167,9 +170,10 @@ pub(super) fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSe
         for (header, header_offset) in headers {
             let length = resolve_length(&header, data, offset);
             let start = offset.min(data.len());
-            let end = start.saturating_add(length).min(data.len());
+            let declared_end = start.saturating_add(length);
+            let end = declared_end.min(data.len());
             offset = end;
-            segments.push(ParsedSegment { header, header_offset, start, end });
+            segments.push(ParsedSegment { header, header_offset, start, end, truncated: declared_end > end });
         }
 
         return segments;
@@ -184,11 +188,12 @@ pub(super) fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSe
 
         let length = resolve_length(&header, data, offset);
         let start = offset.min(data.len());
-        let end = start.saturating_add(length).min(data.len());
+        let declared_end = start.saturating_add(length);
+        let end = declared_end.min(data.len());
         offset = end;
 
         let is_eof = header.segment_type == SegmentType::EndOfFile;
-        segments.push(ParsedSegment { header, header_offset, start, end });
+        segments.push(ParsedSegment { header, header_offset, start, end, truncated: declared_end > end });
         if is_eof {
             break;
         }
@@ -197,12 +202,29 @@ pub(super) fn parse_segments(data: &[u8], has_file_header: bool) -> Vec<ParsedSe
     segments
 }
 
+fn generic_at_pixel_count(flags: u8) -> usize {
+    let template = (flags >> 1) & 3;
+    let ext_template = (flags >> 4) & 1 != 0;
+    if ext_template {
+        12
+    } else if template == 0 {
+        4
+    } else {
+        1
+    }
+}
+
 fn resolve_length(header: &SegmentHeader, data: &[u8], start: usize) -> usize {
     if header.data_length != u32::MAX {
         return header.data_length as usize;
     }
 
-    if header.segment_type != SegmentType::ImmediateGenericRegion {
+    if !matches!(
+        header.segment_type,
+        SegmentType::ImmediateGenericRegion
+            | SegmentType::IntermediateGenericRegion
+            | SegmentType::ImmediateLosslessGenericRegion
+    ) {
         log_warn!("JBIG2 segment {} has unknown length, consuming remaining data", header.number);
         return data.len().saturating_sub(start);
     }
@@ -214,10 +236,11 @@ fn resolve_length(header: &SegmentHeader, data: &[u8], start: usize) -> usize {
         return region.len();
     }
 
-    let mmr = region[17] & 1 != 0;
+    let flags = region[17];
+    let mmr = flags & 1 != 0;
     let marker: [u8; 2] = if mmr { [0x00, 0x00] } else { [0xff, 0xac] };
 
-    let mut position = 18usize;
+    let mut position = if mmr { 18 } else { 18 + generic_at_pixel_count(flags) * 2 };
     while position + 2 <= region.len() {
         if region[position] == marker[0] && region[position + 1] == marker[1] {
             return (position + 2 + 4).min(region.len());
@@ -229,15 +252,22 @@ fn resolve_length(header: &SegmentHeader, data: &[u8], start: usize) -> usize {
     region.len()
 }
 
+struct RetainedContexts {
+    generic: Vec<Cx>,
+    refinement: Vec<Cx>,
+}
+
 struct DecodeContext {
     limits: Limits,
     budget: WorkBudget,
     max_pages: usize,
     results: HashMap<u32, SegmentResult>,
+    retained_contexts: HashMap<u32, RetainedContexts>,
     symbol_order: Vec<u32>,
     pages: Vec<Page>,
     page_index: HashMap<u32, usize>,
     current_page: Option<usize>,
+    segment_truncated: bool,
 }
 
 impl DecodeContext {
@@ -247,10 +277,12 @@ impl DecodeContext {
             budget,
             max_pages,
             results: HashMap::new(),
+            retained_contexts: HashMap::new(),
             symbol_order: Vec::new(),
             pages: Vec::new(),
             page_index: HashMap::new(),
             current_page: None,
+            segment_truncated: false,
         }
     }
 
@@ -260,6 +292,10 @@ impl DecodeContext {
                 break;
             }
             let body = data.get(segment.start..segment.end).unwrap_or(&[]);
+            if segment.truncated {
+                log_warn!("JBIG2 segment {} is truncated", segment.header.number);
+            }
+            self.segment_truncated = segment.truncated;
             self.select_page(&segment.header);
             self.process(&segment.header, body);
         }
@@ -335,7 +371,6 @@ impl DecodeContext {
         let stripe_size = (striping & 0x7fff) as u32;
         let default_pixel = flags & 4 != 0;
         let color_ext = flags & 0x80 != 0;
-        let default_op = ComposeOp::from_bits((flags >> 3) & 3);
 
         let unknown_height = height == u32::MAX;
         let initial_height = if unknown_height {
@@ -374,8 +409,6 @@ impl DecodeContext {
             default_pixel,
             striped: striped || unknown_height,
             declared_height: height,
-            combination_operator_overridden: flags & 0x40 != 0,
-            default_op,
         });
         self.page_index.entry(header.page_association).or_insert(self.pages.len() - 1);
         self.current_page = Some(self.pages.len() - 1);
@@ -424,6 +457,19 @@ impl DecodeContext {
         }
     }
 
+    fn colour_region_on_monochrome_page(&self, header: &SegmentHeader, region: &RegionInfo) -> bool {
+        let colour_extended = region.flags & 8 != 0;
+        let page_allows_colour = self.current_page.is_some_and(|index| self.pages[index].color.is_some());
+        if colour_extended && !page_allows_colour {
+            log_warn!(
+                "JBIG2 region {} is colour-extended but its page does not allow coloured segments, skipping it",
+                header.number
+            );
+            return true;
+        }
+        false
+    }
+
     fn compose_to_page(&mut self, bitmap: &Bitmap, x: u32, y: u32, op: ComposeOp) {
         let Some(index) = self.current_page else {
             log_warn!("JBIG2 region segment appeared before any page information, ignoring");
@@ -431,7 +477,6 @@ impl DecodeContext {
         };
 
         let page = &self.pages[index];
-        let op = if page.combination_operator_overridden { page.default_op } else { op };
 
         if (page.declared_height == u32::MAX || page.striped) && !self.grow_page(index, y.saturating_add(bitmap.height))
         {
@@ -487,10 +532,7 @@ impl DecodeContext {
         let template = ((flags >> 10) & 3) as u8;
         let rtemplate = ((flags >> 12) & 1) as u8;
         let context_used = (flags >> 8) & 1 != 0;
-
-        if context_used {
-            log_warn!("JBIG2 symbol dictionary requests reused arithmetic context, decoding with fresh context");
-        }
+        let context_retained = (flags >> 9) & 1 != 0;
 
         let mut offset = 2usize;
         let mut at = NOMINAL_AT;
@@ -525,12 +567,17 @@ impl DecodeContext {
         let num_new_syms = u32::from_be_bytes([body[offset + 4], body[offset + 5], body[offset + 6], body[offset + 7]]);
         offset += 8;
 
-        if num_new_syms > 100_000 || num_ex_syms > 100_000 {
-            log_warn!("JBIG2 symbol dictionary declares implausible symbol counts, ignoring segment");
-            return;
+        let mut input_symbols = self.collect_symbols(header);
+        if input_symbols.is_empty() && num_ex_syms > num_new_syms && !self.symbol_order.is_empty() {
+            input_symbols = self.collect_all_symbols();
+            log_warn!(
+                "JBIG2 symbol dictionary {} exports {} symbols but defines only {} and refers to no dictionary, using all {} symbols decoded so far",
+                header.number,
+                num_ex_syms,
+                num_new_syms,
+                input_symbols.len()
+            );
         }
-
-        let input_symbols = self.collect_symbols(header);
         if !self.charge_symbol_references(input_symbols.len()) {
             log_warn!("JBIG2 symbol dictionary {} input symbols exceed the decode work budget", header.number);
             return;
@@ -600,12 +647,21 @@ impl DecodeContext {
             None
         };
 
-        let params = SymbolDictParams { huffman, refagg, template, rtemplate, at, rat, num_ex_syms, num_new_syms };
+        let params = SymbolDictParams {
+            huffman,
+            refagg,
+            template,
+            rtemplate,
+            at,
+            rat,
+            num_ex_syms,
+            num_new_syms,
+            single_instance: SingleInstanceCoding::Refinement,
+        };
 
-        let mut gb_stats = vec![Cx::default(); generic_stats_size(template)];
-        let mut gr_stats = vec![Cx::default(); refine_stats_size(rtemplate)];
+        let (mut gb_stats, mut gr_stats) = self.initial_symbol_contexts(header, context_used, template, rtemplate);
 
-        let symbols = decode_symbol_dict(
+        let mut decoded = decode_symbol_dict(
             &body[offset..],
             &params,
             &input_symbols,
@@ -615,6 +671,25 @@ impl DecodeContext {
             &mut self.budget,
         );
 
+        if decoded.first_single_refinement_failed {
+            log_warn!(
+                "JBIG2 symbol dictionary {} cannot decode its first single-instance refinement, retrying with single instances coded as text regions",
+                header.number
+            );
+            let text_region_params = SymbolDictParams { single_instance: SingleInstanceCoding::TextRegion, ..params };
+            (gb_stats, gr_stats) = self.initial_symbol_contexts(header, context_used, template, rtemplate);
+            decoded = decode_symbol_dict(
+                &body[offset..],
+                &text_region_params,
+                &input_symbols,
+                huffman_tables.as_ref(),
+                &mut gb_stats,
+                &mut gr_stats,
+                &mut self.budget,
+            );
+        }
+        let symbols = decoded.symbols;
+
         if !self.charge_symbol_references(symbols.len()) {
             log_warn!("JBIG2 symbol dictionary {} exceeds the decode work budget, dropping it", header.number);
             return;
@@ -622,6 +697,50 @@ impl DecodeContext {
 
         self.symbol_order.push(header.number);
         self.results.insert(header.number, SegmentResult::Symbols(symbols));
+
+        if context_retained {
+            let bytes = (gb_stats.len() + gr_stats.len()) as u64;
+            match self.limits.reserve(bytes) {
+                Ok(()) => {
+                    self.retained_contexts
+                        .insert(header.number, RetainedContexts { generic: gb_stats, refinement: gr_stats });
+                }
+                Err(error) => log_warn!("JBIG2 symbol dictionary cannot retain its arithmetic contexts: {}", error),
+            }
+        }
+    }
+
+    fn initial_symbol_contexts(
+        &self,
+        header: &SegmentHeader,
+        context_used: bool,
+        template: u8,
+        rtemplate: u8,
+    ) -> (Vec<Cx>, Vec<Cx>) {
+        let generic_size = generic_stats_size(template);
+        let refinement_size = refine_stats_size(rtemplate);
+
+        if context_used {
+            let retained = header
+                .referred_to
+                .iter()
+                .rev()
+                .find(|number| matches!(self.results.get(number), Some(SegmentResult::Symbols(_))))
+                .and_then(|number| self.retained_contexts.get(number));
+
+            match retained {
+                Some(contexts)
+                    if contexts.generic.len() == generic_size && contexts.refinement.len() == refinement_size =>
+                {
+                    return (contexts.generic.clone(), contexts.refinement.clone());
+                }
+                _ => log_warn!(
+                    "JBIG2 symbol dictionary reuses arithmetic contexts that were not retained, decoding with fresh contexts"
+                ),
+            }
+        }
+
+        (vec![Cx::default(); generic_size], vec![Cx::default(); refinement_size])
     }
 
     fn handle_pattern_dict(&mut self, header: &SegmentHeader, body: &[u8]) {
@@ -659,6 +778,9 @@ impl DecodeContext {
             log_warn!("JBIG2 generic region segment too short");
             return;
         };
+        if self.colour_region_on_monochrome_page(header, &region) {
+            return;
+        }
 
         if body.len() < 18 {
             log_warn!("JBIG2 generic region segment too short");
@@ -675,13 +797,7 @@ impl DecodeContext {
         let mut offset = 18usize;
         let mut at = NOMINAL_AT;
         if !mmr {
-            let count = if ext_template {
-                12
-            } else if template == 0 {
-                4
-            } else {
-                1
-            };
+            let count = generic_at_pixel_count(flags);
             if body.len() < offset + count * 2 {
                 log_warn!("JBIG2 generic region segment too short for AT pixels");
                 return;
@@ -718,7 +834,7 @@ impl DecodeContext {
         } else {
             let params = GenericParams { template, tpgdon, ext_template, at, skip: None };
             let mut stats = vec![Cx::default(); generic_stats_size(template)];
-            let mut arith = ArithDecoder::new(&body[offset..]);
+            let mut arith = ArithDecoder::with_truncation(&body[offset..], self.segment_truncated);
             decode_generic_region(&mut arith, &mut stats, &mut bitmap, &params);
         }
 
@@ -734,6 +850,9 @@ impl DecodeContext {
             log_warn!("JBIG2 text region segment too short");
             return;
         };
+        if self.colour_region_on_monochrome_page(header, &region) {
+            return;
+        }
 
         let color_ext = region.flags & 8 != 0;
 
@@ -884,7 +1003,7 @@ impl DecodeContext {
                 return;
             };
 
-            let tables = TextRegionHuffman { symcodes, ..tables };
+            let tables = TextRegionHuffman { symcodes: SymbolCodes::Table(symcodes), ..tables };
             let mut coder = TextCoder::Huffman { reader: &mut reader, tables: &tables };
             decode_text_region_tracked(
                 &mut bitmap,
@@ -1002,6 +1121,9 @@ impl DecodeContext {
             log_warn!("JBIG2 halftone region segment too short");
             return;
         };
+        if self.colour_region_on_monochrome_page(header, &region) {
+            return;
+        }
 
         if body.len() < 18 {
             log_warn!("JBIG2 halftone region segment too short");
@@ -1083,6 +1205,9 @@ impl DecodeContext {
             log_warn!("JBIG2 refinement region segment too short");
             return;
         };
+        if self.colour_region_on_monochrome_page(header, &region) {
+            return;
+        }
 
         if body.len() < 18 {
             log_warn!("JBIG2 refinement region segment too short");
@@ -1123,6 +1248,7 @@ impl DecodeContext {
             }
         }
 
+        let page_op = if reference.is_some() { region.op } else { ComposeOp::Replace };
         let (reference, dx, dy) = match reference {
             Some(bitmap) => (bitmap, 0, 0),
             None => {
@@ -1140,14 +1266,14 @@ impl DecodeContext {
         let mut bitmap = Bitmap::new(region.width, region.height);
         let params = RefinementParams { template, reference: &reference, dx, dy, tpgron, at };
         let mut stats = vec![Cx::default(); refine_stats_size(template)];
-        let mut arith = ArithDecoder::new(&body[offset.min(body.len())..]);
+        let mut arith = ArithDecoder::with_truncation(&body[offset.min(body.len())..], self.segment_truncated);
 
         decode_refinement_region(&mut arith, &mut stats, &mut bitmap, &params);
 
         if header.segment_type.is_intermediate() {
             self.results.insert(header.number, SegmentResult::Bitmap(Arc::new(bitmap)));
         } else {
-            self.compose_to_page(&bitmap, region.x, region.y, ComposeOp::Replace);
+            self.compose_to_page(&bitmap, region.x, region.y, page_op);
         }
     }
 }
@@ -1222,7 +1348,7 @@ fn build_text_huffman_tables(flags: u16, custom: &[Arc<HuffmanTable>], index: &m
 
     let rsize = if (flags >> 14) & 1 == 0 { huffman::table_b1() } else { take_table(custom, index)? };
 
-    Some(TextRegionHuffman { fs, ds, dt, rdw, rdh, rdx, rdy, rsize, symcodes: HuffmanTable::new(Vec::new()) })
+    Some(TextRegionHuffman { fs, ds, dt, rdw, rdh, rdx, rdy, rsize, symcodes: SymbolCodes::Fixed(0) })
 }
 
 fn bitmap_to_image(bitmap: &Bitmap, color: Option<&[[u8; 3]]>) -> Image {

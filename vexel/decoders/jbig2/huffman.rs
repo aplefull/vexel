@@ -28,7 +28,8 @@ impl HuffmanLine {
 #[derive(Clone)]
 pub struct HuffmanTable {
     lines: Vec<HuffmanLine>,
-    by_code: std::collections::HashMap<(u32, u32), usize>,
+    count_by_length: Vec<u64>,
+    lines_in_code_order: Vec<usize>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -39,70 +40,49 @@ pub enum HuffmanValue {
 
 impl HuffmanTable {
     pub fn new(lines: Vec<HuffmanLine>) -> HuffmanTable {
-        let codes = assign_codes(&lines);
-        let by_code = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| line.pref_len > 0)
-            .map(|(index, line)| ((line.pref_len, codes[index]), index))
-            .collect();
-        HuffmanTable { lines, by_code }
+        let max_len = lines.iter().map(|line| line.pref_len).max().unwrap_or(0) as usize;
+        let mut count_by_length = vec![0u64; max_len + 1];
+        for line in lines.iter().filter(|line| line.pref_len > 0) {
+            count_by_length[line.pref_len as usize] += 1;
+        }
+
+        let mut lines_in_code_order: Vec<usize> = (0..lines.len()).filter(|&index| lines[index].pref_len > 0).collect();
+        lines_in_code_order.sort_by_key(|&index| lines[index].pref_len);
+
+        HuffmanTable { lines, count_by_length, lines_in_code_order }
     }
 
     pub fn decode(&self, reader: &mut HuffmanReader) -> Option<HuffmanValue> {
-        let mut len = 0u32;
-        let mut code = 0u32;
+        let mut distance_from_first_code = 0u64;
+        let mut lines_before_length = 0usize;
 
-        while len < 32 {
-            code = (code << 1) | reader.read_bit()?;
-            len += 1;
+        for &count in self.count_by_length.iter().skip(1) {
+            distance_from_first_code = (distance_from_first_code << 1) | reader.read_bit()? as u64;
 
-            let Some(&index) = self.by_code.get(&(len, code)) else {
-                continue;
-            };
-            let line = self.lines[index];
-
-            if line.is_oob {
-                return Some(HuffmanValue::Oob);
+            if distance_from_first_code < count {
+                let index = self.lines_in_code_order[lines_before_length + distance_from_first_code as usize];
+                return self.read_value(&self.lines[index], reader);
             }
 
-            let offset = reader.read_bits(line.range_len)? as i32;
-            return Some(HuffmanValue::Value(if line.is_lower {
-                line.range_low.saturating_sub(offset)
-            } else {
-                line.range_low.saturating_add(offset)
-            }));
+            lines_before_length += count as usize;
+            distance_from_first_code -= count;
+            if distance_from_first_code > self.lines_in_code_order.len() as u64 {
+                return None;
+            }
         }
 
         None
     }
-}
 
-fn assign_codes(lines: &[HuffmanLine]) -> Vec<u32> {
-    let max_len = lines.iter().map(|l| l.pref_len).max().unwrap_or(0);
-    let mut len_count = vec![0u32; max_len as usize + 2];
-    for line in lines {
-        if line.pref_len > 0 {
-            len_count[line.pref_len as usize] += 1;
+    fn read_value(&self, line: &HuffmanLine, reader: &mut HuffmanReader) -> Option<HuffmanValue> {
+        if line.is_oob {
+            return Some(HuffmanValue::Oob);
         }
+
+        let offset = reader.read_bits(line.range_len)? as i64;
+        let value = if line.is_lower { line.range_low as i64 - offset } else { line.range_low as i64 + offset };
+        Some(HuffmanValue::Value(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32))
     }
-
-    let mut codes = vec![0u32; lines.len()];
-    let mut first_code = 0u32;
-    len_count[0] = 0;
-
-    for cur_len in 1..=max_len {
-        first_code = first_code.wrapping_add(len_count[cur_len as usize - 1]).wrapping_shl(1);
-        let mut cur_code = first_code;
-        for (index, line) in lines.iter().enumerate() {
-            if line.pref_len == cur_len {
-                codes[index] = cur_code;
-                cur_code = cur_code.wrapping_add(1);
-            }
-        }
-    }
-
-    codes
 }
 
 pub struct HuffmanReader<'a> {
@@ -435,16 +415,16 @@ pub fn parse_custom_table(data: &[u8]) -> Option<HuffmanTable> {
 
     let mut reader = HuffmanReader::new(&data[9..]);
     let mut lines = Vec::new();
-    let mut cur_range_low = htlow;
+    let mut cur_range_low = htlow as i64;
 
-    while cur_range_low < hthigh {
+    while cur_range_low < hthigh as i64 {
         let pref_len = reader.read_bits(htps)?;
         let range_len = reader.read_bits(htrs)?;
-        lines.push(HuffmanLine::normal(pref_len, range_len, cur_range_low));
+        lines.push(HuffmanLine::normal(pref_len, range_len, cur_range_low as i32));
         if range_len >= 32 {
             break;
         }
-        cur_range_low = cur_range_low.saturating_add(1i32.checked_shl(range_len).unwrap_or(i32::MAX));
+        cur_range_low += 1i64 << range_len;
     }
 
     let lower_pref = reader.read_bits(htps)?;

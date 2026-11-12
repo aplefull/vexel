@@ -152,5 +152,161 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::ExactPages { reference_path: "jbig2/codeStreamTest3_TT8.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "JBIG2 bitmap-composite-and-xnor",
+            path: "jbig2/bitmap-composite-and-xnor.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-composite-or-xor-replace-halftone",
+            path: "jbig2/bitmap-composite-or-xor-replace-halftone.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-composite-or-xor-replace-refine",
+            path: "jbig2/bitmap-composite-or-xor-replace-refine.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-composite-or-xor-replace-text",
+            path: "jbig2/bitmap-composite-or-xor-replace-text.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-composite-or-xor-replace",
+            path: "jbig2/bitmap-composite-or-xor-replace.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-refine-page-subrect",
+            path: "jbig2/bitmap-refine-page-subrect.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-refine-template1-tpgron",
+            path: "jbig2/bitmap-refine-template1-tpgron.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-symbol-context-reuse-huffman-refagg",
+            path: "jbig2/bitmap-symbol-context-reuse-huffman-refagg.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-symbol-context-reuse-refagg",
+            path: "jbig2/bitmap-symbol-context-reuse-refagg.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-symbol-context-reuse",
+            path: "jbig2/bitmap-symbol-context-reuse.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-symbol-manysyms",
+            path: "jbig2/bitmap-symbol-manysyms.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-symbol-symhuffrefine-textrefine-export",
+            path: "jbig2/bitmap-symbol-symhuffrefine-textrefine-export.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-symbol-symhuffrefineseveral",
+            path: "jbig2/bitmap-symbol-symhuffrefineseveral.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-trailing-7fff-stripped-harder-refine",
+            path: "jbig2/bitmap-trailing-7fff-stripped-harder-refine.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 bitmap-trailing-7fff-stripped-harder",
+            path: "jbig2/bitmap-trailing-7fff-stripped-harder.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/bitmap.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 power 042_13",
+            path: "jbig2/042_13.jb2",
+            comparison: Comparison::Exact { reference_path: "jbig2/042.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 power 042_14",
+            path: "jbig2/042_14.jb2",
+            comparison: Comparison::Exact { reference_path: "jbig2/042.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 generic_unknown_length_custom_at",
+            path: "jbig2/generic_unknown_length_custom_at.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/truchet.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 huffman_custom_table_htlow_min",
+            path: "jbig2/huffman_custom_table_htlow_min.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/honeycomb.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 huffman_custom_table_long_prefixes",
+            path: "jbig2/huffman_custom_table_long_prefixes.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/honeycomb.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 lenient_colour_region",
+            path: "jbig2/lenient_colour_region.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/honeycomb.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 lenient_failing_region",
+            path: "jbig2/lenient_failing_region.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/honeycomb.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 lenient_symbol_out_of_range",
+            path: "jbig2/lenient_symbol_out_of_range.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/honeycomb.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 lenient_truncated_segment",
+            path: "jbig2/lenient_truncated_segment.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/truchet.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 lenient_unknown_length_intermediate",
+            path: "jbig2/lenient_unknown_length_intermediate.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/truchet.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JBIG2 text_instance_far_left",
+            path: "jbig2/text_instance_far_left.jbig2",
+            comparison: Comparison::Exact { reference_path: "jbig2/honeycomb.jxl" },
+            ..Default::default()
+        },
     ]
 }

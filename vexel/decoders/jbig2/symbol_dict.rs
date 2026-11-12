@@ -6,7 +6,7 @@ use crate::decoders::jbig2::generic::{decode_generic_region, GenericParams};
 use crate::decoders::jbig2::huffman::{HuffmanReader, HuffmanTable, HuffmanValue};
 use crate::decoders::jbig2::refinement::{decode_refinement_region, RefinementParams};
 use crate::decoders::jbig2::text::{
-    decode_text_region, RefCorner, TextArithContexts, TextCoder, TextRegionHuffman, TextRegionParams,
+    decode_text_region, RefCorner, SymbolCodes, TextArithContexts, TextCoder, TextRegionHuffman, TextRegionParams,
 };
 use crate::log_warn;
 use crate::utils::tiff::fax;
@@ -21,6 +21,13 @@ pub struct SymbolDictHuffman {
     pub agginst: HuffmanTable,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SingleInstanceCoding {
+    Refinement,
+    TextRegion,
+}
+
+#[derive(Clone, Copy)]
 pub struct SymbolDictParams {
     pub huffman: bool,
     pub refagg: bool,
@@ -30,6 +37,12 @@ pub struct SymbolDictParams {
     pub rat: [(i8, i8); 2],
     pub num_ex_syms: u32,
     pub num_new_syms: u32,
+    pub single_instance: SingleInstanceCoding,
+}
+
+pub struct DecodedSymbolDict {
+    pub symbols: Vec<Arc<Bitmap>>,
+    pub first_single_refinement_failed: bool,
 }
 
 pub fn decode_symbol_dict(
@@ -40,8 +53,10 @@ pub fn decode_symbol_dict(
     gb_stats: &mut [Cx],
     gr_stats: &mut [Cx],
     budget: &mut WorkBudget,
-) -> Vec<Arc<Bitmap>> {
+) -> DecodedSymbolDict {
     let mut new_symbols: Vec<Arc<Bitmap>> = Vec::new();
+    let mut first_single_refinement_failed = false;
+    let mut clean_single_refinements = 0u32;
     let mut refagg_symbols: Vec<Arc<Bitmap>> = if params.refagg { input_symbols.to_vec() } else { Vec::new() };
     let mut empty_height_classes = 0u32;
 
@@ -73,7 +88,7 @@ pub fn decode_symbol_dict(
             rdx: crate::decoders::jbig2::huffman::table_b15(),
             rdy: crate::decoders::jbig2::huffman::table_b15(),
             rsize: crate::decoders::jbig2::huffman::table_b1(),
-            symcodes: crate::decoders::jbig2::huffman::HuffmanTable::new(Vec::new()),
+            symcodes: SymbolCodes::Fixed(sym_code_len),
         })
     } else {
         None
@@ -175,8 +190,8 @@ pub fn decode_symbol_dict(
                     }
                 };
 
-                if num_instances == 1 {
-                    decode_single_refinement(
+                if num_instances == 1 && params.single_instance == SingleInstanceCoding::Refinement {
+                    let (bitmap, decoded_cleanly) = decode_single_refinement(
                         &mut arith,
                         &mut reader,
                         params,
@@ -187,7 +202,14 @@ pub fn decode_symbol_dict(
                         &mut text_contexts,
                         gr_stats,
                         refagg_huffman.as_ref(),
-                    )
+                    );
+                    if decoded_cleanly {
+                        clean_single_refinements += 1;
+                    } else if clean_single_refinements == 0 {
+                        first_single_refinement_failed = true;
+                        break 'height_classes;
+                    }
+                    bitmap
                 } else {
                     let text_params = TextRegionParams {
                         refine: true,
@@ -267,7 +289,9 @@ pub fn decode_symbol_dict(
         }
     }
 
-    export_symbols(params, input_symbols, &new_symbols, &mut arith, &mut reader, &mut iaex, huffman_tables)
+    let symbols =
+        export_symbols(params, input_symbols, &new_symbols, &mut arith, &mut reader, &mut iaex, huffman_tables);
+    DecodedSymbolDict { symbols, first_single_refinement_failed }
 }
 
 fn decode_single_refinement(
@@ -281,38 +305,52 @@ fn decode_single_refinement(
     contexts: &mut TextArithContexts,
     gr_stats: &mut [Cx],
     huffman: Option<&TextRegionHuffman>,
-) -> Bitmap {
+) -> (Bitmap, bool) {
     let mut target = Bitmap::new(width, height);
+    let mut decoded_cleanly = true;
 
     let (id, rdx, rdy, bmsize) = if params.huffman {
         let Some(tables) = huffman else {
-            return target;
+            return (target, false);
         };
-        let id = reader.read_bits(sym_code_len).unwrap_or(0);
+        let id = reader.read_bits(sym_code_len).unwrap_or_else(|| {
+            decoded_cleanly = false;
+            0
+        });
         let rdx = match tables.rdx.decode(reader) {
             Some(HuffmanValue::Value(value)) => value,
-            _ => 0,
+            _ => {
+                decoded_cleanly = false;
+                0
+            }
         };
         let rdy = match tables.rdy.decode(reader) {
             Some(HuffmanValue::Value(value)) => value,
-            _ => 0,
+            _ => {
+                decoded_cleanly = false;
+                0
+            }
         };
         let bmsize = match tables.rsize.decode(reader) {
-            Some(HuffmanValue::Value(value)) => value,
-            _ => 0,
+            Some(HuffmanValue::Value(value)) if value > 0 => value,
+            _ => {
+                decoded_cleanly = false;
+                0
+            }
         };
         reader.align();
         (id, rdx, rdy, bmsize)
     } else {
         let id = contexts.iaid.decode(arith);
-        let rdx = contexts.iardx.decode(arith).unwrap_or(0);
-        let rdy = contexts.iardy.decode(arith).unwrap_or(0);
-        (id, rdx, rdy, 0)
+        let rdx = contexts.iardx.decode(arith);
+        let rdy = contexts.iardy.decode(arith);
+        decoded_cleanly &= rdx.is_some() && rdy.is_some();
+        (id, rdx.unwrap_or(0), rdy.unwrap_or(0), 0)
     };
 
     let Some(reference) = all_symbols.get(id as usize) else {
         log_warn!("JBIG2 symbol dictionary refinement references unknown symbol {}", id);
-        return target;
+        return (target, false);
     };
 
     let refine_params = RefinementParams {
@@ -334,7 +372,7 @@ fn decode_single_refinement(
         decode_refinement_region(arith, gr_stats, &mut target, &refine_params);
     }
 
-    target
+    (target, decoded_cleanly)
 }
 
 fn decode_collective_bitmap(

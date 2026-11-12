@@ -35,6 +35,11 @@ impl RefCorner {
     }
 }
 
+pub enum SymbolCodes {
+    Table(HuffmanTable),
+    Fixed(u32),
+}
+
 pub struct TextRegionHuffman {
     pub fs: HuffmanTable,
     pub ds: HuffmanTable,
@@ -44,7 +49,7 @@ pub struct TextRegionHuffman {
     pub rdx: HuffmanTable,
     pub rdy: HuffmanTable,
     pub rsize: HuffmanTable,
-    pub symcodes: HuffmanTable,
+    pub symcodes: SymbolCodes,
 }
 
 pub struct TextRegionParams {
@@ -125,11 +130,60 @@ pub fn decode_text_region_tracked(
 ) {
     bitmap.fill(params.def_pixel);
 
+    let mut checkpoint = None;
+    let end = place_instances(
+        bitmap,
+        symbols,
+        params,
+        coder,
+        refine_stats,
+        placements.as_deref_mut(),
+        budget,
+        &mut checkpoint,
+    );
+
+    if end == TextRegionEnd::DataEnded {
+        if let Some(checkpoint) = checkpoint {
+            log_warn!(
+                "JBIG2 text region ran out of data after an out of range symbol ID, discarding the instances placed from instance {} on",
+                checkpoint.instances
+            );
+            *bitmap = checkpoint.bitmap;
+            if let Some(list) = placements {
+                list.truncate(checkpoint.placements);
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum TextRegionEnd {
+    Complete,
+    DataEnded,
+    BudgetExceeded,
+}
+
+struct BeforeFirstInvalidSymbol {
+    bitmap: Bitmap,
+    placements: usize,
+    instances: u32,
+}
+
+fn place_instances(
+    bitmap: &mut Bitmap,
+    symbols: &[Arc<Bitmap>],
+    params: &TextRegionParams,
+    coder: &mut TextCoder,
+    refine_stats: &mut [crate::decoders::jbig2::arith::Cx],
+    mut placements: Option<&mut Vec<Placement>>,
+    budget: &mut WorkBudget,
+    checkpoint: &mut Option<BeforeFirstInvalidSymbol>,
+) -> TextRegionEnd {
     let strips = 1i32 << params.log_strips;
 
     let mut strip_t = match read_dt(coder) {
         Some(value) => value.wrapping_mul(-strips),
-        None => return,
+        None => return TextRegionEnd::DataEnded,
     };
 
     let mut first_s = 0i32;
@@ -137,12 +191,12 @@ pub fn decode_text_region_tracked(
 
     while instances < params.num_instances {
         let Some(dt) = read_dt(coder) else {
-            return;
+            return TextRegionEnd::DataEnded;
         };
         strip_t = strip_t.wrapping_add(dt.wrapping_mul(strips));
 
         let Some(dfs) = read_dfs(coder) else {
-            return;
+            return TextRegionEnd::DataEnded;
         };
         first_s = first_s.wrapping_add(dfs);
         let mut cur_s = first_s;
@@ -155,7 +209,7 @@ pub fn decode_text_region_tracked(
                         cur_s = cur_s.wrapping_add(ids).wrapping_add(params.ds_offset);
                     }
                     Some(None) => break,
-                    None => return,
+                    None => return TextRegionEnd::DataEnded,
                 }
             }
             first_symbol = false;
@@ -167,13 +221,13 @@ pub fn decode_text_region_tracked(
             if let TextCoder::Arith { arith, .. } = coder {
                 if arith.exhausted() {
                     log_warn!("JBIG2 text region data exhausted after {} instances", instances);
-                    return;
+                    return TextRegionEnd::DataEnded;
                 }
             }
 
             if !budget.charge(if placements.is_some() { PLACEMENT_COST } else { 1 }) {
                 log_warn!("JBIG2 text region exceeds the decode work budget after {} instances", instances);
-                return;
+                return TextRegionEnd::BudgetExceeded;
             }
 
             let cur_t = if strips == 1 {
@@ -181,24 +235,31 @@ pub fn decode_text_region_tracked(
             } else {
                 match read_curt(coder, params.log_strips) {
                     Some(value) => value,
-                    None => return,
+                    None => return TextRegionEnd::DataEnded,
                 }
             };
             let t = strip_t.wrapping_add(cur_t);
 
             let Some(id) = read_id(coder) else {
-                return;
+                return TextRegionEnd::DataEnded;
             };
 
             let symbol = symbols.get(id as usize).map(|symbol| symbol.as_ref());
             if symbol.is_none() {
                 log_warn!("JBIG2 text region references out of range symbol ID {}", id);
+                if checkpoint.is_none() {
+                    *checkpoint = Some(BeforeFirstInvalidSymbol {
+                        bitmap: bitmap.clone(),
+                        placements: placements.as_deref().map_or(0, |list| list.len()),
+                        instances,
+                    });
+                }
             }
 
             let refined = if params.refine {
                 match read_ri(coder) {
                     Some(ri) => ri != 0,
-                    None => return,
+                    None => return TextRegionEnd::DataEnded,
                 }
             } else {
                 false
@@ -207,7 +268,7 @@ pub fn decode_text_region_tracked(
             let mut refined_bitmap = None;
             if refined {
                 let Some((rdw, rdh, rdx, rdy, bmsize)) = read_refinement_deltas(coder) else {
-                    return;
+                    return TextRegionEnd::DataEnded;
                 };
 
                 if let Some(reference) = symbol {
@@ -215,7 +276,7 @@ pub fn decode_text_region_tracked(
                     let new_height = (reference.height as i32).saturating_add(rdh);
                     if new_width > 0 && new_height > 0 && !budget.charge_area(new_width as u32, new_height as u32) {
                         log_warn!("JBIG2 text region refinement exceeds the decode work budget");
-                        return;
+                        return TextRegionEnd::BudgetExceeded;
                     }
                     if new_width > 0 && new_height > 0 {
                         let mut target = Bitmap::new(new_width as u32, new_height as u32);
@@ -276,7 +337,7 @@ pub fn decode_text_region_tracked(
                 let area = u64::from(instance.width).saturating_mul(u64::from(instance.height));
                 if !budget.charge(area.saturating_mul(copies)) {
                     log_warn!("JBIG2 text region exceeds the decode work budget after {} instances", instances);
-                    return;
+                    return TextRegionEnd::BudgetExceeded;
                 }
                 if let Some(list) = placements.as_deref_mut() {
                     list.push(Placement {
@@ -299,6 +360,8 @@ pub fn decode_text_region_tracked(
             instances += 1;
         }
     }
+
+    TextRegionEnd::Complete
 }
 
 fn read_dt(coder: &mut TextCoder) -> Option<i32> {
@@ -344,9 +407,12 @@ fn read_curt(coder: &mut TextCoder, log_strips: u32) -> Option<i32> {
 fn read_id(coder: &mut TextCoder) -> Option<u32> {
     match coder {
         TextCoder::Arith { arith, contexts } => Some(contexts.iaid.decode(arith)),
-        TextCoder::Huffman { reader, tables, .. } => match tables.symcodes.decode(reader)? {
-            HuffmanValue::Value(value) => Some(value.max(0) as u32),
-            HuffmanValue::Oob => None,
+        TextCoder::Huffman { reader, tables, .. } => match &tables.symcodes {
+            SymbolCodes::Table(table) => match table.decode(reader)? {
+                HuffmanValue::Value(value) => Some(value.max(0) as u32),
+                HuffmanValue::Oob => None,
+            },
+            SymbolCodes::Fixed(bits) => reader.read_bits(*bits),
         },
     }
 }

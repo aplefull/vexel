@@ -71,6 +71,7 @@ impl Cx {
 }
 
 const MAX_SYNTHETIC_BYTES: u32 = 64;
+const MAX_SYNTHETIC_BYTES_WHEN_TRUNCATED: u32 = 0;
 const MAX_SYMBOL_CODE_LENGTH: u32 = 22;
 
 pub struct ArithDecoder<'a> {
@@ -80,17 +81,26 @@ pub struct ArithDecoder<'a> {
     a: u32,
     ct: i32,
     synthetic: u32,
+    truncated: bool,
 }
 
 impl<'a> ArithDecoder<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        let mut dec = ArithDecoder { data, bp: 0, c: 0, a: 0, ct: 0, synthetic: 0 };
+        Self::with_truncation(data, false)
+    }
+
+    pub fn with_truncation(data: &'a [u8], truncated: bool) -> Self {
+        let mut dec = ArithDecoder { data, bp: 0, c: 0, a: 0, ct: 0, synthetic: 0, truncated };
         dec.init();
         dec
     }
 
     pub fn exhausted(&self) -> bool {
         self.synthetic > MAX_SYNTHETIC_BYTES
+    }
+
+    pub fn ran_past_truncated_data(&self) -> bool {
+        self.truncated && self.synthetic > MAX_SYNTHETIC_BYTES_WHEN_TRUNCATED
     }
 
     fn byte_at(&self, index: usize) -> u8 {
@@ -217,13 +227,14 @@ impl IntCtx {
             v = (v << 1) | d;
         }
 
-        let v = v.saturating_add(offset).min(i32::MAX as u32) as i32;
+        let magnitude = v as i64 + offset as i64;
 
-        if s == 1 && v == 0 {
+        if s == 1 && magnitude == 0 {
             return None;
         }
 
-        Some(if s == 1 { -v } else { v })
+        let value = if s == 1 { -magnitude } else { magnitude };
+        Some(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
     }
 }
 
