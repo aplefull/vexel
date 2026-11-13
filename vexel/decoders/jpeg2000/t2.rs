@@ -467,7 +467,6 @@ pub fn enumerate_packets_with_changes(
     collector.finish()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn enumerate_range(
     order: ProgressionOrder,
     tile: &TileGeometry,

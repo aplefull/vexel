@@ -258,7 +258,6 @@ fn from_half_zigzag(block: &[u16; 64], out: &mut [f32; 64]) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decode_lossy_dct(
     channels: &mut [Channel],
     indices: &[usize],

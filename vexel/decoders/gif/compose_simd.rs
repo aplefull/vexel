@@ -27,7 +27,6 @@ impl Palette {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn compose_frame(
     indices: &[u8],
     palette: &Palette,

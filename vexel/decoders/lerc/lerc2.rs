@@ -374,7 +374,6 @@ fn decode_huffman_int(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_tile(
     reader: &mut ByteReader,
     header: &Lerc2Header,

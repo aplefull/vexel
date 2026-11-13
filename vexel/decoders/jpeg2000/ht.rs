@@ -840,7 +840,6 @@ impl HtDecoder {
         }));
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn decode_cleanup(
         &mut self,
         mel: &mut MelDecoder,
@@ -1088,7 +1087,6 @@ impl HtDecoder {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn decode_quad_pair(
         &mut self,
         magsgn: &mut FrwdReader,

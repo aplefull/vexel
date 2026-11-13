@@ -290,7 +290,6 @@ impl Unpacker {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn unpack_gclis(
         &mut self,
         reader: &mut XsBitReader,

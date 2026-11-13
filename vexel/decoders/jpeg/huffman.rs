@@ -523,3 +523,137 @@ pub(super) fn skim_ac_sequential(reader: &mut JpegBitReader<'_>, ac: &DctHuffman
         }
     }
 }
+
+pub(super) const LOSSLESS_BITS: u32 = 12;
+const LOSSLESS_SIZE: usize = 1 << LOSSLESS_BITS;
+const LOSSLESS_FULL: u32 = 0x80;
+const LOSSLESS_LEN_MASK: u32 = 0x1F;
+
+pub(super) struct LosslessHuffman {
+    lookup: [u32; LOSSLESS_SIZE],
+    maxcode: [u32; 18],
+    valoffset: [i32; 18],
+    values: [u8; 256],
+    ssss16_is_min: bool,
+}
+
+impl LosslessHuffman {
+    pub(super) fn build(table: &HuffmanTable, ssss16_is_min: bool) -> Box<Self> {
+        let mut t = Box::new(LosslessHuffman {
+            lookup: [0; LOSSLESS_SIZE],
+            maxcode: [0; 18],
+            valoffset: [0; 18],
+            values: [0; 256],
+            ssss16_is_min,
+        });
+
+        let count = table.symbols.len().min(256);
+        t.values[..count].copy_from_slice(&table.symbols[..count]);
+
+        let mut code: u32 = 0;
+        let mut k: usize = 0;
+        for len in 1..=16u32 {
+            let start = table.offsets.get(len as usize - 1).copied().unwrap_or(count as u32) as usize;
+            let end = table.offsets.get(len as usize).copied().unwrap_or(count as u32) as usize;
+            let start = start.min(count);
+            let end = end.clamp(start, count);
+            t.valoffset[len as usize] = k as i32 - code as i32;
+            for _ in start..end {
+                if len <= LOSSLESS_BITS {
+                    let shift = LOSSLESS_BITS - len;
+                    let base = (code as usize) << shift;
+                    let ssss = t.values[k] as u32;
+                    for extra in 0..(1usize << shift) {
+                        if let Some(slot) = t.lookup.get_mut(base + extra) {
+                            *slot = Self::entry(len, ssss, extra as u32, shift, ssss16_is_min);
+                        }
+                    }
+                }
+                code += 1;
+                k += 1;
+            }
+            t.maxcode[len as usize] = code << (16 - len);
+            code <<= 1;
+        }
+        t.maxcode[17] = u32::MAX;
+        t
+    }
+
+    fn entry(len: u32, ssss: u32, extra: u32, spare: u32, ssss16_is_min: bool) -> u32 {
+        let full = |diff: u16, total: u32| ((diff as u32) << 16) | LOSSLESS_FULL | total;
+        match ssss {
+            0 => full(0, len),
+            16 if ssss16_is_min => full(32768, len),
+            1..=16 if ssss <= spare => {
+                let bits = extra >> (spare - ssss);
+                full(extend(bits, ssss) as u16, len + ssss)
+            }
+            1..=16 => (ssss << 8) | len,
+            _ => full(0, len),
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn diff(&self, reader: &mut JpegBitReader<'_>) -> u16 {
+        reader.fill_to(32);
+        let entry = self.lookup[reader.peek_unchecked(LOSSLESS_BITS) as usize & (LOSSLESS_SIZE - 1)];
+        if entry & LOSSLESS_FULL != 0 {
+            reader.consume(entry & LOSSLESS_LEN_MASK);
+            return (entry >> 16) as u16;
+        }
+        if entry != 0 {
+            reader.consume(entry & LOSSLESS_LEN_MASK);
+            let ssss = (entry >> 8) & LOSSLESS_LEN_MASK;
+            return extend(reader.read_bits_unchecked(ssss), ssss) as u16;
+        }
+        let (next, diff) = self.diff_slow::<true>(*reader);
+        *reader = next;
+        diff
+    }
+
+    #[cfg(feature = "rayon")]
+    #[inline(always)]
+    pub(super) fn skip(&self, reader: &mut JpegBitReader<'_>) {
+        reader.fill_to(32);
+        let entry = self.lookup[reader.peek_unchecked(LOSSLESS_BITS) as usize & (LOSSLESS_SIZE - 1)];
+        if entry & LOSSLESS_FULL != 0 {
+            reader.consume(entry & LOSSLESS_LEN_MASK);
+        } else if entry != 0 {
+            reader.consume((entry & LOSSLESS_LEN_MASK) + ((entry >> 8) & LOSSLESS_LEN_MASK));
+        } else {
+            *reader = self.diff_slow::<false>(*reader).0;
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn diff_slow<'a, const WARN: bool>(&self, mut reader: JpegBitReader<'a>) -> (JpegBitReader<'a>, u16) {
+        let code = reader.peek_unchecked(16);
+        let mut len = LOSSLESS_BITS as usize + 1;
+        while len < 17 && code >= self.maxcode[len] {
+            len += 1;
+        }
+        if len == 17 {
+            reader.consume(16);
+            if WARN {
+                log_warn!("Invalid Huffman code: {}, replacing with 0", code);
+            }
+            return (reader, 0);
+        }
+        reader.consume(len as u32);
+        let index = ((code >> (16 - len)) as i32).wrapping_add(self.valoffset[len]) as usize & 255;
+        let ssss = self.values[index] as u32;
+        let diff = match ssss {
+            0 => 0,
+            16 if self.ssss16_is_min => 32768,
+            1..=16 => extend(reader.read_bits_unchecked(ssss), ssss) as u16,
+            _ => {
+                if WARN {
+                    log_warn!("Invalid difference: {}", ssss);
+                }
+                0
+            }
+        };
+        (reader, diff)
+    }
+}

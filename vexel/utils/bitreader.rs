@@ -28,6 +28,10 @@ impl<R: Read + Seek> BitReader<R> {
     /// # Parameters
     /// - `byte_order`: The byte order to set
     ///
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.reader
+    }
+
     pub fn set_endianness(&mut self, byte_order: ByteOrder) {
         self.little_endian = byte_order == ByteOrder::LittleEndian;
     }

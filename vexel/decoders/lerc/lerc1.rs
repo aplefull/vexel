@@ -136,7 +136,6 @@ fn read_cnt_tile(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_z_tile(
     reader: &mut ByteReader,
     image: &mut CntZImage,
@@ -222,7 +221,6 @@ fn read_z_tile(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_tiles(
     reader: &mut ByteReader,
     image: &mut CntZImage,

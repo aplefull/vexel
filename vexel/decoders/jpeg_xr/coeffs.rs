@@ -425,7 +425,6 @@ fn split_ac_flex<'a, 'b>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn open_row_streams<'a>(
     stream: &'a [u8],
     base: usize,

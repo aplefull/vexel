@@ -42,11 +42,12 @@ pub fn fancy_h2v1_u8(level: SimdLevel, src: &[u8], dst: &mut [u8]) {
 
 pub fn fancy_h2v2_u8(level: SimdLevel, near: &[u8], far: &[u8], dst: &mut [u8]) {
     let n = near.len().min(far.len());
+    let (near, far) = (&near[..n], &far[..n]);
     let start = match level {
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Avx2 => unsafe { fancy_h2v2_u8_avx2(&near[..n], &far[..n], dst) },
+        SimdLevel::Avx2 => unsafe { fancy_h2v2_u8_avx2(near, far, dst) },
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-        SimdLevel::Simd128 => fancy_h2v2_u8_simd128(&near[..n], &far[..n], dst),
+        SimdLevel::Simd128 => fancy_h2v2_u8_simd128(near, far, dst),
         SimdLevel::Scalar => 0,
     };
     fancy_h2v2(near, far, dst, start);

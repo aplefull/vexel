@@ -504,6 +504,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         let scan_start = self.reader.stream_position()?;
+        let defer = collect && self.defer_entropy;
+        let collect = collect && !defer;
         let scan_data_limit = if collect {
             (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4).max(65536)
         } else {
@@ -522,7 +524,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
         let mut restart_offsets: Vec<usize> = vec![0];
         let mut restart_markers = 0u32;
-        let mut block = vec![0u8; SCAN_BLOCK_SIZE];
+        let mut block = vec![0u8; if defer { 0 } else { SCAN_BLOCK_SIZE }];
         let mut filled = 0usize;
         let mut cursor = 0usize;
         let mut block_origin = 0u64;
@@ -530,6 +532,9 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut end_marker: Option<u64> = None;
 
         loop {
+            if defer {
+                break;
+            }
             if filled - cursor < 2 {
                 block.copy_within(cursor..filled, 0);
                 block_origin += cursor as u64;
@@ -551,20 +556,19 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
 
             let chunk = &block[cursor..filled];
-            let run = chunk.iter().position(|&b| b == 0xFF).unwrap_or(chunk.len());
-            if run > 0 {
-                if collect {
-                    let space = scan_data_limit.saturating_sub(scan_data.len() - base);
-                    if run >= space {
-                        scan_data.extend_from_slice(&chunk[..space]);
-                        cursor += space;
-                        truncated = true;
-                        break;
-                    }
-                    scan_data.extend_from_slice(&chunk[..run]);
+            if collect {
+                let space = scan_data_limit.saturating_sub(scan_data.len() - base);
+                let consumed = destuff_entropy(&chunk[..chunk.len().min(space)], scan_data, is_arithmetic);
+                if consumed > 0 {
+                    cursor += consumed;
+                    continue;
                 }
-                cursor += run;
-                continue;
+            } else {
+                let run = find_ff(chunk);
+                if run > 0 {
+                    cursor += run;
+                    continue;
+                }
             }
 
             if collect && scan_data.len() - base >= scan_data_limit {
@@ -610,7 +614,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
 
         let stop = end_marker.unwrap_or(block_origin + cursor as u64);
-        self.reader.seek(SeekFrom::Start(scan_start + stop))?;
+        if defer {
+            self.deferred_scan_start = Some(scan_start);
+        } else {
+            self.reader.seek(SeekFrom::Start(scan_start + stop))?;
+        }
 
         let lossless = matches!(self.mode, JpegMode::Lossless | JpegMode::DifferentialLossless);
         let header_span = scan_start.saturating_sub(segment_start);
@@ -638,12 +646,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }),
         );
 
-        if !collect {
+        if !collect && !defer {
             return Ok(());
         }
 
-        let actual_scan_size = self.entropy.len() - base;
-        self.limits.free_usize(scan_data_limit.saturating_sub(actual_scan_size));
+        if collect {
+            let actual_scan_size = self.entropy.len() - base;
+            self.limits.free_usize(scan_data_limit.saturating_sub(actual_scan_size));
+        }
 
         if scan_components.len() > MAX_SCAN_COMPONENTS {
             log_warn!("Scan lists {} components, using the first {}", scan_components.len(), MAX_SCAN_COMPONENTS);
@@ -743,4 +753,156 @@ impl<R: Read + Seek> JpegDecoder<R> {
         );
         Ok(())
     }
+}
+
+fn find_ff(data: &[u8]) -> usize {
+    let mut blocks = data.chunks_exact(32);
+    let mut offset = 0;
+    for block in &mut blocks {
+        if block.iter().fold(0u8, |acc, &b| acc | u8::from(b == 0xFF)) != 0 {
+            break;
+        }
+        offset += 32;
+    }
+    offset + data[offset..].iter().position(|&b| b == 0xFF).unwrap_or(data.len() - offset)
+}
+
+fn destuff_entropy(input: &[u8], out: &mut Vec<u8>, keep_zero: bool) -> usize {
+    const LOW: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+
+    let n = input.len();
+    out.reserve(n);
+    let start = out.len();
+    let dst = out.spare_capacity_mut().as_mut_ptr() as *mut u8;
+    let mut i = 0;
+    let mut w = 0;
+    loop {
+        while i + 32 <= n {
+            let words: [u64; 4] =
+                std::array::from_fn(|k| u64::from_le_bytes(input[i + 8 * k..i + 8 * k + 8].try_into().unwrap()));
+            let any_ff = words.iter().fold(0u64, |acc, &word| acc | ((!word).wrapping_sub(LOW) & word & HIGH));
+            if any_ff != 0 {
+                break;
+            }
+            for (k, &word) in words.iter().enumerate() {
+                unsafe { (dst.add(w + 8 * k) as *mut [u8; 8]).write_unaligned(word.to_le_bytes()) };
+            }
+            i += 32;
+            w += 32;
+        }
+        while i + 8 <= n {
+            let word = u64::from_le_bytes(input[i..i + 8].try_into().unwrap());
+            unsafe { (dst.add(w) as *mut [u8; 8]).write_unaligned(word.to_le_bytes()) };
+            let inverted = !word;
+            let ff = inverted.wrapping_sub(LOW) & !inverted & HIGH;
+            if ff == 0 {
+                i += 8;
+                w += 8;
+                continue;
+            }
+            let skip = (ff.trailing_zeros() / 8) as usize;
+            i += skip;
+            w += skip;
+            break;
+        }
+        while i < n && input[i] != 0xFF {
+            unsafe { dst.add(w).write(input[i]) };
+            i += 1;
+            w += 1;
+        }
+        if i + 1 >= n {
+            break;
+        }
+        match input[i + 1] {
+            0x00 => {
+                unsafe { dst.add(w).write(0xFF) };
+                w += 1;
+                if keep_zero {
+                    unsafe { dst.add(w).write(0x00) };
+                    w += 1;
+                }
+                i += 2;
+            }
+            0xFF => i += 1,
+            _ => break,
+        }
+    }
+    unsafe { out.set_len(start + w) };
+    i
+}
+
+pub(super) fn destuff_scan_in_place(data: &mut [u8]) -> (usize, Vec<usize>) {
+    const LOW: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+
+    let n = data.len();
+    let ptr = data.as_mut_ptr();
+    let mut restart_offsets = vec![0];
+    let mut i = 0;
+    let mut w = 0;
+    loop {
+        while i + 32 <= n {
+            let words: [u64; 4] =
+                std::array::from_fn(|k| unsafe { (ptr.add(i + 8 * k) as *const u64).read_unaligned() });
+            let any_ff = words.iter().fold(0u64, |acc, &word| acc | ((!word).wrapping_sub(LOW) & word & HIGH));
+            if any_ff != 0 {
+                break;
+            }
+            if i != w {
+                for (k, &word) in words.iter().enumerate() {
+                    unsafe { (ptr.add(w + 8 * k) as *mut u64).write_unaligned(word) };
+                }
+            }
+            i += 32;
+            w += 32;
+        }
+        while i + 8 <= n {
+            let word = unsafe { (ptr.add(i) as *const u64).read_unaligned() };
+            let inverted = !word;
+            let ff = inverted.wrapping_sub(LOW) & !inverted & HIGH;
+            let skip = if ff == 0 { 8 } else { (ff.trailing_zeros() / 8) as usize };
+            if i - w >= 8 {
+                unsafe { (ptr.add(w) as *mut u64).write_unaligned(word) };
+            } else if i != w {
+                for k in 0..skip {
+                    data[w + k] = data[i + k];
+                }
+            }
+            i += skip;
+            w += skip;
+            if ff != 0 {
+                break;
+            }
+        }
+        while i < n && data[i] != 0xFF {
+            data[w] = data[i];
+            i += 1;
+            w += 1;
+        }
+        if i + 1 >= n {
+            break;
+        }
+        match data[i + 1] {
+            0x00 => {
+                data[w] = 0xFF;
+                w += 1;
+                i += 2;
+            }
+            0xFF => i += 1,
+            b if (0xD0..=0xD7).contains(&b) => {
+                data[w] = 0xFF;
+                data[w + 1] = b;
+                w += 2;
+                i += 2;
+                restart_offsets.push(w);
+            }
+            b if matches!(JpegMarker::from_u16(0xFF00 | b as u16), None | Some(JpegMarker::RES(_))) => {
+                log_warn!("Skipping invalid marker 0xFF{:02X} inside scan data", b);
+                i += 2;
+            }
+            _ => break,
+        }
+    }
+    (w, restart_offsets)
 }

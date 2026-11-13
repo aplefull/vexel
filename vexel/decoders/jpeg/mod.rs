@@ -9,6 +9,7 @@ pub mod huffman;
 pub mod idct;
 pub mod info;
 pub mod lossless;
+pub mod lossless_scan;
 pub mod markers;
 pub mod output;
 pub mod planes;

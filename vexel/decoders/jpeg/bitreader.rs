@@ -64,14 +64,6 @@ impl<'a> JpegBitReader<'a> {
     }
 
     #[inline(always)]
-    pub fn ensure(&mut self, n: u32) -> bool {
-        if self.bits < n {
-            self.refill();
-        }
-        true
-    }
-
-    #[inline(always)]
     pub fn fill_to(&mut self, n: u32) {
         if self.bits < n {
             self.refill();

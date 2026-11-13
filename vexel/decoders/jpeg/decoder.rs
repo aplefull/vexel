@@ -27,9 +27,6 @@ pub(super) const PROGRESSIVE_PASS_BUDGET: u64 = 128;
 pub(super) const LOSSLESS_PASS_BUDGET: u64 = 4;
 pub(super) const HIERARCHICAL_PIXEL_BUDGET: u64 = 4;
 
-#[cfg(feature = "rayon")]
-pub(super) const PARALLEL_LOSSLESS_MIN_SAMPLES: usize = 256 * 256;
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum WalkMode {
     InfoOnly,
@@ -68,6 +65,8 @@ pub struct JpegDecoder<R: Read + Seek> {
     pub(super) collected_scans: usize,
     pub(super) frame_has_scan: bool,
     pub(super) entropy: Vec<u8>,
+    pub(super) defer_entropy: bool,
+    pub(super) deferred_scan_start: Option<u64>,
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
@@ -102,6 +101,8 @@ impl<R: Read + Seek> JpegDecoder<R> {
             lossless_skip_color_transform: false,
             icc: IccAssembler::default(),
             entropy: Vec::new(),
+            defer_entropy: false,
+            deferred_scan_start: None,
             collected_scans: 0,
             frame_has_scan: false,
         }
@@ -155,6 +156,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.hierarchical_frames.clear();
         self.icc.clear();
         self.entropy.clear();
+        self.deferred_scan_start = None;
         self.collected_scans = 0;
         self.frame_has_scan = false;
     }
@@ -421,6 +423,10 @@ impl<R: Read + Seek> JpegDecoder<R> {
                 Err(e) => {
                     log_warn!("Failed to process {:?} marker segment: {}", marker, e);
                 }
+            }
+
+            if self.deferred_scan_start.is_some() {
+                break;
             }
         }
 

@@ -483,7 +483,6 @@ fn step_size_for(params: &ComponentCoding, band_index: usize) -> StepSize {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_precincts(
     bx0: i32,
     by0: i32,
@@ -596,7 +595,6 @@ struct CblkContribution {
     additions: Vec<SegmentAddition>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_packet(
     components: &mut [TileComponent],
     packet: &t2::PacketPosition,

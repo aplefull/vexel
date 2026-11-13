@@ -5,6 +5,7 @@ use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
+use crate::utils::raster::RasterWindow;
 use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, half_to_f32, u16_from_bytes};
 use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, decompress_deflate_with_capacity, decompress_lzw_with_capacity,
@@ -778,22 +779,52 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
     }
 
-    fn decompress_all(
+    fn decode_pieces(
         &mut self,
-        pieces: Vec<(Vec<u8>, usize)>,
-        width: usize,
+        pieces: &[Piece],
+        windows: Vec<RasterWindow<'_, u16>>,
         bps: u16,
         piece_bytes: usize,
-    ) -> VexelResult<Vec<Vec<u16>>> {
-        let ctx = self.strip_context(piece_bytes);
+        context_bytes: usize,
+    ) -> VexelResult<()> {
+        let mut read_budget = self.chunk_read_budget();
+        let batch = batch_len(piece_bytes);
+        let mut windows = windows.into_iter();
+        let mut index = 0;
+        while index < pieces.len() {
+            let batch_end = (index + batch).min(pieces.len());
+            let mut work = Vec::with_capacity(batch_end - index);
+            let mut batch_bytes = 0usize;
+            for piece in &pieces[index..batch_end] {
+                if batch_bytes >= TARGET_BATCH_BYTES {
+                    break;
+                }
+                let data = self.read_chunk(piece.offset, piece.count, &mut read_budget);
+                batch_bytes += data.len();
+                let Some(window) = windows.next() else {
+                    break;
+                };
+                work.push((data, piece.rows, piece.width, window));
+            }
+            if work.is_empty() {
+                break;
+            }
+            index += work.len();
 
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            pieces.into_par_iter().map(|(data, rows)| ctx.decompress_strip(data, rows, width, bps)).collect()
+            let ctx = self.strip_context(context_bytes);
+            let decode = |(data, rows, width, window): (Vec<u8>, usize, usize, RasterWindow<'_, u16>)| {
+                ctx.decode_piece_into(data, rows, width, bps, window)
+            };
+
+            #[cfg(feature = "rayon")]
+            {
+                use rayon::prelude::*;
+                work.into_par_iter().map(decode).collect::<VexelResult<()>>()?;
+            }
+            #[cfg(not(feature = "rayon"))]
+            work.into_iter().try_for_each(decode)?;
         }
-        #[cfg(not(feature = "rayon"))]
-        pieces.into_iter().map(|(data, rows)| ctx.decompress_strip(data, rows, width, bps)).collect()
+        Ok(())
     }
 
     fn read_chunk(&mut self, offset: u32, count: u32, budget: &mut u64) -> Vec<u8> {
@@ -805,7 +836,22 @@ impl<R: Read + Seek> DngDecoder<R> {
         if len < u64::from(count) {
             log_warn!("DNG chunk at offset {} truncated from {} to {} bytes", offset, count, len);
         }
-        let data = self.reader.read_bytes(len as usize).unwrap_or_default();
+        let mut data = vec![0u8; len as usize];
+        prefault(&mut data);
+        let reader = self.reader.get_mut();
+        let mut filled = 0;
+        while filled < data.len() {
+            match reader.read(&mut data[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        self.reader.clear_buffer();
+        if filled < data.len() {
+            data = Vec::new();
+        }
         *budget = budget.saturating_sub(data.len() as u64);
         data
     }
@@ -821,7 +867,6 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let offsets = self.header.strip_offsets.clone();
         let byte_counts = self.header.strip_byte_counts.clone();
-        let mut read_budget = self.chunk_read_budget();
 
         let num_strips = offsets.len().max(1);
         let mut rows_per_strip = (self.header.rows_per_strip as usize).max(1).min(image_height.max(1));
@@ -832,52 +877,20 @@ impl<R: Read + Seek> DngDecoder<R> {
         let used_strips = offsets.len().min(byte_counts.len()).min(image_height.div_ceil(rows_per_strip));
         let piece_bytes = rows_per_strip * image_width * spp * 2;
 
-        if used_strips == 1 {
-            let strip_data = self.read_chunk(offsets[0], byte_counts[0], &mut read_budget);
-
-            let strip_rows = rows_per_strip.min(image_height);
-            let mut decompressed =
-                self.decompress_all(vec![(strip_data, strip_rows)], image_width, bps, piece_bytes)?;
-
-            let mut strip = decompressed.pop().unwrap_or_default();
-            strip.resize(sample_count, 0);
-            return Ok(strip);
-        }
+        let pieces: Vec<Piece> = (0..used_strips)
+            .map(|i| Piece {
+                offset: offsets[i],
+                count: byte_counts[i],
+                rows: rows_per_strip.min(image_height - i * rows_per_strip),
+                width: image_width,
+            })
+            .collect();
 
         let mut raw = vec![0u16; sample_count];
-        let batch = batch_len(piece_bytes);
-        let mut strip_idx = 0;
-        while strip_idx < used_strips {
-            let batch_end = (strip_idx + batch).min(used_strips);
-
-            let mut strips_data: Vec<(Vec<u8>, usize)> = Vec::with_capacity(batch_end - strip_idx);
-            let mut batch_bytes = 0usize;
-            for i in strip_idx..batch_end {
-                if batch_bytes >= TARGET_BATCH_BYTES {
-                    break;
-                }
-                let strip_data = self.read_chunk(offsets[i], byte_counts[i], &mut read_budget);
-                batch_bytes += strip_data.len();
-
-                let strip_rows = rows_per_strip.min(image_height - i * rows_per_strip);
-                strips_data.push((strip_data, strip_rows));
-            }
-            let batch_end = strip_idx + strips_data.len();
-
-            let decompressed = self.decompress_all(strips_data, image_width, bps, piece_bytes)?;
-
-            for (k, strip) in decompressed.iter().enumerate() {
-                let base = (strip_idx + k) * rows_per_strip * image_width * spp;
-                if base >= raw.len() {
-                    break;
-                }
-                let len = strip.len().min(raw.len() - base);
-                raw[base..base + len].copy_from_slice(&strip[..len]);
-            }
-
-            strip_idx = batch_end;
-        }
-
+        let row_samples = image_width * spp;
+        let windows =
+            RasterWindow::new(&mut raw, row_samples, row_samples, image_height).into_row_bands(rows_per_strip);
+        self.decode_pieces(&pieces, windows, bps, piece_bytes, piece_bytes)?;
         Ok(raw)
     }
 
@@ -919,52 +932,26 @@ impl<R: Read + Seek> DngDecoder<R> {
             return Err(tile_limit_error());
         }
 
-        let mut raw = vec![0u16; sample_count];
-
         self.prepare_lossy_curves();
 
-        let mut read_budget = self.chunk_read_budget();
+        let pieces: Vec<Piece> = (0..num_tiles)
+            .map(|i| Piece {
+                offset: offsets[i],
+                count: byte_counts.get(i).copied().unwrap_or(0),
+                rows: tile_rows,
+                width: tile_width,
+            })
+            .collect();
 
-        let batch = batch_len(piece_bytes);
-        let mut tile_idx = 0;
-        while tile_idx < num_tiles {
-            let batch_end = (tile_idx + batch).min(num_tiles);
-
-            let mut tiles_data: Vec<(Vec<u8>, usize)> = Vec::with_capacity(batch_end - tile_idx);
-            let mut batch_bytes = 0usize;
-            for (i, &offset) in offsets.iter().enumerate().take(batch_end).skip(tile_idx) {
-                if batch_bytes >= TARGET_BATCH_BYTES {
-                    break;
-                }
-                let byte_count = byte_counts.get(i).copied().unwrap_or(0);
-                let tile_data = self.read_chunk(offset, byte_count, &mut read_budget);
-                batch_bytes += tile_data.len();
-                tiles_data.push((tile_data, tile_rows));
-            }
-            let batch_end = tile_idx + tiles_data.len();
-
-            let decompressed = self.decompress_all(tiles_data, tile_width, bps, jpeg_piece_bytes)?;
-
-            for (k, tile) in decompressed.iter().enumerate() {
-                let img_x = ((tile_idx + k) % tiles_x) * tile_width;
-                let img_y = ((tile_idx + k) / tiles_x) * tile_height;
-                let cols = tile_width.min(image_width - img_x);
-
-                for row in 0..tile_rows {
-                    let py = img_y + row;
-                    let src = row * tile_width * spp;
-                    if py >= image_height || src >= tile.len() {
-                        break;
-                    }
-                    let dst = (py * image_width + img_x) * spp;
-                    let len = (cols * spp).min(tile.len() - src).min(raw.len() - dst);
-                    raw[dst..dst + len].copy_from_slice(&tile[src..src + len]);
-                }
-            }
-
-            tile_idx = batch_end;
-        }
-
+        let mut raw = vec![0u16; sample_count];
+        let row_samples = image_width * spp;
+        let windows: Vec<RasterWindow<'_, u16>> = RasterWindow::new(&mut raw, row_samples, row_samples, image_height)
+            .into_row_bands(tile_height)
+            .into_iter()
+            .flat_map(|band| band.into_column_tiles(tile_width * spp, tiles_x))
+            .take(num_tiles)
+            .collect();
+        self.decode_pieces(&pieces, windows, bps, piece_bytes, jpeg_piece_bytes)?;
         Ok(raw)
     }
 
@@ -979,18 +966,18 @@ impl<R: Read + Seek> DngDecoder<R> {
         let new_width = (right - left) as usize;
         let new_height = (bottom - top) as usize;
 
-        let mut cropped = Vec::with_capacity(new_width * new_height * spp);
+        let row_samples = new_width * spp;
+        let mut written = 0;
         for y in top as usize..bottom as usize {
             let row_start = (y * full_width + left as usize) * spp;
-            let row_end = row_start + new_width * spp;
-            if row_end > raw.len() {
+            if row_start + row_samples > raw.len() {
                 break;
             }
-            cropped.extend_from_slice(&raw[row_start..row_end]);
+            raw.copy_within(row_start..row_start + row_samples, written);
+            written += row_samples;
         }
-        cropped.resize(new_width * new_height * spp, 0);
-
-        *raw = cropped;
+        raw.truncate(written);
+        raw.resize(row_samples * new_height, 0);
         self.width = new_width as u32;
         self.height = new_height as u32;
         self.cfa_phase = ((self.cfa_phase.0 + top) & 1, (self.cfa_phase.1 + left) & 1);
@@ -1104,72 +1091,217 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
     }
 
-    fn apply_orientation<T: Copy + Default + Send + Sync>(&mut self, data: Vec<T>, channels: usize) -> Vec<T> {
-        let orientation = self.dng.orientation;
-        let w = self.width as usize;
-        let h = self.height as usize;
-        if !(2..=8).contains(&orientation) || data.len() != w * h * channels {
-            return data;
-        }
-
-        let (dw, dh) = if orientation >= 5 { (h, w) } else { (w, h) };
-        let mut out = vec![T::default(); data.len()];
-
-        let fill_row = |(dy, row): (usize, &mut [T])| {
-            for (dx, px) in row.chunks_exact_mut(channels).enumerate() {
-                let (sx, sy) = match orientation {
-                    2 => (w - 1 - dx, dy),
-                    3 => (w - 1 - dx, h - 1 - dy),
-                    4 => (dx, h - 1 - dy),
-                    5 => (dy, dx),
-                    6 => (dy, h - 1 - dx),
-                    7 => (w - 1 - dy, h - 1 - dx),
-                    8 => (w - 1 - dy, dx),
-                    _ => (dx, dy),
-                };
-                let src = (sy * w + sx) * channels;
-                px.copy_from_slice(&data[src..src + channels]);
-            }
-        };
-
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            out.par_chunks_mut(dw * channels).enumerate().for_each(fill_row);
-        }
-        #[cfg(not(feature = "rayon"))]
-        out.chunks_mut(dw * channels).enumerate().for_each(fill_row);
-
-        self.width = dw as u32;
-        self.height = dh as u32;
-        out
-    }
-
-    fn demosaic_bilinear(&self, raw: &[u16]) -> Vec<u16> {
+    fn develop_cfa(
+        &self,
+        raw: &[u16],
+        pre_mul: [f32; 3],
+        rgb_cam: Option<[[f32; 3]; 3]>,
+        orientation: Orientation,
+    ) -> (Vec<u16>, Vec<[u32; HISTOGRAM_SIZE]>) {
         let w = self.width as usize;
         let h = self.height as usize;
         let mut rgb = vec![0u16; w * h * 3];
-
+        let plan = self.scale_plan(raw, pre_mul, true);
         let cfa = CfaView { pattern: self.dng.cfa_pattern.unwrap_or(CfaPattern::Rggb), phase: self.cfa_phase };
+        let band_rows = (DEVELOP_BAND_SAMPLES / w.max(1)).clamp(1, h.max(1));
 
-        let fill_row = |(y, row): (usize, &mut [u16])| {
-            for (x, px) in row.chunks_exact_mut(3).enumerate() {
-                let (r, g, b) = cfa.interpolate_pixel(raw, x, y, w, h);
-                px[0] = r;
-                px[1] = g;
-                px[2] = b;
+        let scale_into = |y: usize, dst: &mut [u16]| {
+            dst.copy_from_slice(&raw[y * w..(y + 1) * w]);
+            if let Some(plan) = &plan {
+                plan.apply_row(y, dst);
             }
+        };
+
+        let develop_band = |mut scratch: DevelopScratch, (bi, mut out): (usize, RasterWindow<'_, u16>)| {
+            scratch.ensure(w);
+            let y0 = bi * band_rows;
+            let y1 = (y0 + band_rows).min(h);
+            let mut scaled_until = y0.saturating_sub(1);
+            for y in y0..y1 {
+                let need = (y + 2).min(h);
+                while scaled_until < need {
+                    scale_into(scaled_until, &mut scratch.ring[scaled_until % 3]);
+                    scaled_until += 1;
+                }
+                let DevelopScratch { ring, planes, hist } = &mut scratch;
+                let cfa_rows = CfaRows {
+                    y,
+                    up: (y > 0).then(|| ring[(y + 2) % 3].as_slice()),
+                    mid: ring[y % 3].as_slice(),
+                    down: (y + 1 < h).then(|| ring[(y + 1) % 3].as_slice()),
+                };
+                let [r, g, b] = planes;
+                cfa.demosaic_row(&cfa_rows, [r.as_mut_slice(), g.as_mut_slice(), b.as_mut_slice()]);
+                if let Some(m) = rgb_cam.as_ref() {
+                    apply_cam_matrix_planes(m, r, g, b);
+                }
+                accumulate_histogram(r, g, b, hist);
+                orientation.write_row(r, g, b, y, y0, y1, &mut out);
+            }
+            scratch
+        };
+
+        if orientation.transposed() {
+            prefault(&mut rgb);
+        }
+        let bands = orientation.band_windows(&mut rgb, band_rows);
+
+        #[cfg(feature = "rayon")]
+        let histogram = {
+            use rayon::prelude::*;
+            bands
+                .into_par_iter()
+                .enumerate()
+                .fold(DevelopScratch::default, develop_band)
+                .map(|scratch| scratch.hist)
+                .reduce(|| vec![[0u32; HISTOGRAM_SIZE]; 3], merge_histograms)
+        };
+        #[cfg(not(feature = "rayon"))]
+        let histogram = bands.into_iter().enumerate().fold(DevelopScratch::default(), develop_band).hist;
+
+        (rgb, histogram)
+    }
+
+    fn develop_rgb(
+        &self,
+        rgb: &mut [u16],
+        pre_mul: [f32; 3],
+        rgb_cam: Option<[[f32; 3]; 3]>,
+    ) -> Vec<[u32; HISTOGRAM_SIZE]> {
+        let w = self.width as usize;
+        let row_samples = w * 3;
+        if row_samples == 0 {
+            return vec![[0u32; HISTOGRAM_SIZE]; 3];
+        }
+        let plan = self.scale_plan(rgb, pre_mul, false);
+        let band_rows = (DEVELOP_BAND_SAMPLES / row_samples).max(1);
+
+        let develop_band = |mut scratch: DevelopScratch, (bi, band): (usize, &mut [u16])| {
+            scratch.ensure(w);
+            for (dy, row) in band.chunks_exact_mut(row_samples).enumerate() {
+                if let Some(plan) = &plan {
+                    plan.apply_row(bi * band_rows + dy, row);
+                }
+                let DevelopScratch { planes, hist, .. } = &mut scratch;
+                let [r, g, b] = planes;
+                for (((px, r), g), b) in row.chunks_exact(3).zip(r.iter_mut()).zip(g.iter_mut()).zip(b.iter_mut()) {
+                    (*r, *g, *b) = (px[0], px[1], px[2]);
+                }
+                if let Some(m) = rgb_cam.as_ref() {
+                    apply_cam_matrix_planes(m, r, g, b);
+                }
+                interleave_with_histogram(r, g, b, row, hist);
+            }
+            scratch
         };
 
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
-            rgb.par_chunks_mut(w * 3).enumerate().for_each(fill_row);
+            rgb.par_chunks_mut(band_rows * row_samples)
+                .enumerate()
+                .fold(DevelopScratch::default, develop_band)
+                .map(|scratch| scratch.hist)
+                .reduce(|| vec![[0u32; HISTOGRAM_SIZE]; 3], merge_histograms)
         }
         #[cfg(not(feature = "rayon"))]
-        rgb.chunks_mut(w * 3).enumerate().for_each(fill_row);
+        rgb.chunks_mut(band_rows * row_samples).enumerate().fold(DevelopScratch::default(), develop_band).hist
+    }
 
-        rgb
+    fn finish_rgb(
+        &mut self,
+        rgb: Vec<u16>,
+        histogram: &[[u32; HISTOGRAM_SIZE]],
+        deep: bool,
+        orientation: u16,
+    ) -> PixelData {
+        let pixel_count = rgb.len() / 3;
+        let t_white = auto_bright_white(histogram, pixel_count, 3);
+        let curve = gamma_curve_bt709(t_white << 3);
+        self.finish_with_curve(rgb, &curve, 3, deep, orientation, PixelData::RGB16, PixelData::RGB8)
+    }
+
+    fn finish_with_curve(
+        &mut self,
+        mut samples: Vec<u16>,
+        curve: &[u16],
+        channels: usize,
+        deep: bool,
+        orientation: u16,
+        wide: impl FnOnce(Vec<u16>) -> PixelData,
+        narrow: impl FnOnce(Vec<u8>) -> PixelData,
+    ) -> PixelData {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let rotate = (2..=8).contains(&orientation) && samples.len() == w * h * channels;
+        if rotate {
+            let (dw, dh) = if orientation >= 5 { (h, w) } else { (w, h) };
+            self.width = dw as u32;
+            self.height = dh as u32;
+        }
+        let curve: &[u16; 0x10000] = curve.try_into().expect("gamma curve has 65536 entries");
+        match (deep, rotate) {
+            (true, false) => {
+                map_through_curve(&mut samples, curve);
+                wide(samples)
+            }
+            (true, true) => wide(remap_oriented(&samples, w, h, channels, orientation, |v| curve[v as usize])),
+            (false, false) => narrow(remap_oriented(&samples, w, h, channels, 1, |v| (curve[v as usize] >> 8) as u8)),
+            (false, true) => {
+                narrow(remap_oriented(&samples, w, h, channels, orientation, |v| (curve[v as usize] >> 8) as u8))
+            }
+        }
+    }
+}
+
+enum ScalePlan<'a> {
+    Lut { combined: Vec<Vec<u16>>, lut_index: Vec<Vec<usize>>, row_pattern: Vec<RowPattern> },
+    Direct { scale_rows: Vec<Vec<f32>>, black_rows: Vec<Vec<f32>>, lin_table: Option<&'a [u16]> },
+}
+
+impl ScalePlan<'_> {
+    fn apply_row(&self, y: usize, raw_row: &mut [u16]) {
+        match self {
+            ScalePlan::Lut { combined, lut_index, row_pattern } => {
+                let y = y % lut_index.len();
+                match row_pattern[y] {
+                    RowPattern::Uniform(li) => {
+                        let lut = &combined[li];
+                        for r in raw_row.iter_mut() {
+                            *r = lut[*r as usize];
+                        }
+                    }
+                    RowPattern::Alternating(l0, l1) => {
+                        let (a, b) = (&combined[l0], &combined[l1]);
+                        let mut it = raw_row.chunks_exact_mut(2);
+                        for px in &mut it {
+                            px[0] = a[px[0] as usize];
+                            px[1] = b[px[1] as usize];
+                        }
+                        if let [last] = it.into_remainder() {
+                            *last = a[*last as usize];
+                        }
+                    }
+                    RowPattern::General => {
+                        let idx_row = &lut_index[y];
+                        for (r, &li) in raw_row.iter_mut().zip(idx_row) {
+                            *r = combined[li][*r as usize];
+                        }
+                    }
+                }
+            }
+            ScalePlan::Direct { scale_rows, black_rows, lin_table } => {
+                let black_row = &black_rows[y % black_rows.len()];
+                let scale_row = &scale_rows[y % scale_rows.len()];
+                for ((r, &b), &s) in raw_row.iter_mut().zip(black_row).zip(scale_row) {
+                    let linear = match lin_table {
+                        Some(table) => (table[(*r as usize).min(table.len() - 1)] as f32 - b).max(0.0),
+                        None => (*r as f32 - b).max(0.0),
+                    };
+                    *r = (linear * s).clamp(0.0, 65535.0) as u16;
+                }
+            }
+        }
     }
 }
 
@@ -1180,27 +1312,171 @@ enum RowPattern {
     General,
 }
 
+impl RowPattern {
+    fn of(idx: &[usize]) -> Self {
+        match idx.first() {
+            None => RowPattern::General,
+            Some(&first) if idx.iter().all(|&li| li == first) => RowPattern::Uniform(first),
+            Some(&first) if idx.len() >= 2 && idx.iter().enumerate().all(|(i, &li)| li == idx[i % 2]) => {
+                RowPattern::Alternating(first, idx[1])
+            }
+            _ => RowPattern::General,
+        }
+    }
+}
+
+fn max_u16(values: &[u16]) -> u16 {
+    let mut acc = [0u16; 32];
+    let mut chunks = values.chunks_exact(32);
+    for chunk in &mut chunks {
+        for (a, &v) in acc.iter_mut().zip(chunk) {
+            *a = (*a).max(v);
+        }
+    }
+    chunks.remainder().iter().chain(&acc).copied().fold(0, u16::max)
+}
+
+fn max_u16_pairs(values: &[u16]) -> (u16, u16) {
+    let mut acc = [0u16; 32];
+    let mut chunks = values.chunks_exact(32);
+    for chunk in &mut chunks {
+        for (a, &v) in acc.iter_mut().zip(chunk) {
+            *a = (*a).max(v);
+        }
+    }
+    let mut even = acc.iter().step_by(2).copied().fold(0, u16::max);
+    let mut odd = acc.iter().skip(1).step_by(2).copied().fold(0, u16::max);
+    let done = values.len() - chunks.remainder().len();
+    for (i, &v) in chunks.remainder().iter().enumerate() {
+        if (done + i).is_multiple_of(2) {
+            even = even.max(v);
+        } else {
+            odd = odd.max(v);
+        }
+    }
+    (even, odd)
+}
+
 #[derive(Clone, Copy)]
 struct CfaView {
     pattern: CfaPattern,
     phase: (u32, u32),
 }
 
+struct CfaRows<'r> {
+    y: usize,
+    up: Option<&'r [u16]>,
+    mid: &'r [u16],
+    down: Option<&'r [u16]>,
+}
+
+impl CfaRows<'_> {
+    fn at(&self, x: i32, dy: i32) -> Option<u16> {
+        let row = match dy {
+            -1 => self.up?,
+            0 => self.mid,
+            _ => self.down?,
+        };
+        if x < 0 {
+            return None;
+        }
+        row.get(x as usize).copied()
+    }
+}
+
+#[derive(Default)]
+struct DevelopScratch {
+    ring: [Vec<u16>; 3],
+    planes: [Vec<u16>; 3],
+    hist: Vec<[u32; HISTOGRAM_SIZE]>,
+}
+
+impl DevelopScratch {
+    fn ensure(&mut self, w: usize) {
+        for row in self.ring.iter_mut().chain(self.planes.iter_mut()) {
+            row.resize(w, 0);
+        }
+        if self.hist.is_empty() {
+            self.hist = vec![[0u32; HISTOGRAM_SIZE]; 3];
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CfaSite {
+    Green { horizontal: usize },
+    Chroma { own: usize },
+}
+
 impl CfaView {
-    fn sample(&self, raw: &[u16], x: i32, y: i32, w: usize, h: usize) -> u16 {
-        let cx = x.clamp(0, w as i32 - 1) as usize;
-        let cy = y.clamp(0, h as i32 - 1) as usize;
-        raw[cy * w + cx]
+    fn color(&self, x: usize, y: usize) -> usize {
+        let row = ((y as u32 & 1) ^ self.phase.0) as usize;
+        let col = ((x as u32 & 1) ^ self.phase.1) as usize;
+        match self.pattern {
+            CfaPattern::Rggb => [[0usize, 1], [1, 2]][row][col],
+            CfaPattern::Bggr => [[2usize, 1], [1, 0]][row][col],
+            CfaPattern::Grbg => [[1usize, 0], [2, 1]][row][col],
+            CfaPattern::Gbrg => [[1usize, 2], [0, 1]][row][col],
+            CfaPattern::Unknown => 1,
+        }
     }
 
-    fn avg_in_bounds(&self, raw: &[u16], x: i32, y: i32, w: usize, h: usize, offsets: &[(i32, i32)]) -> u16 {
+    fn site(&self, x: usize, y: usize) -> CfaSite {
+        match self.color(x, y) {
+            1 => CfaSite::Green { horizontal: self.color(x + 1, y) },
+            own => CfaSite::Chroma { own },
+        }
+    }
+
+    fn demosaic_row(&self, rows: &CfaRows<'_>, planes: [&mut [u16]; 3]) {
+        let w = rows.mid.len();
+        let [r, g, b] = planes;
+        let interior = match (rows.up, rows.down) {
+            (Some(up), Some(down)) if w >= 3 && self.pattern != CfaPattern::Unknown => Some((up, down)),
+            _ => None,
+        };
+        let Some((up, down)) = interior else {
+            for x in 0..w {
+                (r[x], g[x], b[x]) = self.interpolate_pixel(rows, x);
+            }
+            return;
+        };
+
+        for x in [0, w - 1] {
+            (r[x], g[x], b[x]) = self.interpolate_pixel(rows, x);
+        }
+        let mid = &rows.mid[..w];
+        let (up, down) = (&up[..w], &down[..w]);
+        let (r, g, b) = (&mut r[..w], &mut g[..w], &mut b[..w]);
+        for start in [1, 2] {
+            match self.site(start, rows.y) {
+                CfaSite::Green { horizontal } => {
+                    let (hp, vp) = if horizontal == 0 { (&mut *r, &mut *b) } else { (&mut *b, &mut *r) };
+                    for x in (start..w - 1).step_by(2) {
+                        g[x] = mid[x];
+                        hp[x] = ((mid[x - 1] as u32 + mid[x + 1] as u32) / 2) as u16;
+                        vp[x] = ((up[x] as u32 + down[x] as u32) / 2) as u16;
+                    }
+                }
+                CfaSite::Chroma { own } => {
+                    let (op, xp) = if own == 0 { (&mut *r, &mut *b) } else { (&mut *b, &mut *r) };
+                    for x in (start..w - 1).step_by(2) {
+                        op[x] = mid[x];
+                        g[x] = ((mid[x - 1] as u32 + mid[x + 1] as u32 + up[x] as u32 + down[x] as u32) / 4) as u16;
+                        xp[x] = ((up[x - 1] as u32 + up[x + 1] as u32 + down[x - 1] as u32 + down[x + 1] as u32) / 4)
+                            as u16;
+                    }
+                }
+            }
+        }
+    }
+
+    fn avg_in_bounds(&self, rows: &CfaRows<'_>, x: i32, offsets: &[(i32, i32)]) -> u16 {
         let mut sum = 0u32;
         let mut count = 0u32;
         for &(dx, dy) in offsets {
-            let nx = x + dx;
-            let ny = y + dy;
-            if nx >= 0 && ny >= 0 && nx < w as i32 && ny < h as i32 {
-                sum += raw[ny as usize * w + nx as usize] as u32;
+            if let Some(v) = rows.at(x + dx, dy) {
+                sum += v as u32;
                 count += 1;
             }
         }
@@ -1210,13 +1486,13 @@ impl CfaView {
         (sum / count) as u16
     }
 
-    fn interpolate_pixel(&self, raw: &[u16], x: usize, y: usize, w: usize, h: usize) -> (u16, u16, u16) {
+    fn interpolate_pixel(&self, rows: &CfaRows<'_>, x: usize) -> (u16, u16, u16) {
         let xi = x as i32;
-        let yi = y as i32;
-        let s = |dx: i32, dy: i32| self.sample(raw, xi + dx, yi + dy, w, h);
-        let a = |offsets: &[(i32, i32)]| self.avg_in_bounds(raw, xi, yi, w, h, offsets);
+        let center = rows.mid[x];
+        let s = |_: i32, _: i32| center;
+        let a = |offsets: &[(i32, i32)]| self.avg_in_bounds(rows, xi, offsets);
         let pattern = self.pattern;
-        let row_parity = ((y as u32 & 1) ^ self.phase.0) as usize;
+        let row_parity = ((rows.y as u32 & 1) ^ self.phase.0) as usize;
         let col_parity = ((x as u32 & 1) ^ self.phase.1) as usize;
 
         let (r, g, b) = match pattern {
@@ -1301,15 +1577,15 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
     }
 
-    fn scale_colors_direct(
+    fn scale_plan_direct<'a>(
         &self,
-        raw: &mut [u16],
+        raw: &[u16],
         pre_mul: [f32; 3],
         row_samples: usize,
         channel_rows: &[Vec<usize>],
-        black_rows: &[Vec<f32>],
-        lin_table: Option<&[u16]>,
-    ) {
+        black_rows: Vec<Vec<f32>>,
+        lin_table: Option<&'a [u16]>,
+    ) -> ScalePlan<'a> {
         let linearize = |r: u16, b: f32| -> f32 {
             match lin_table {
                 Some(table) => (table[(r as usize).min(table.len() - 1)] as f32 - b).max(0.0),
@@ -1350,29 +1626,41 @@ impl<R: Read + Seek> DngDecoder<R> {
         let scale_rows: Vec<Vec<f32>> =
             channel_rows.iter().map(|row| row.iter().map(|&ch| scale_mul[ch]).collect()).collect();
 
-        let apply_row = |(y, raw_row): (usize, &mut [u16])| {
-            let black_row = &black_rows[y % black_rows.len()];
-            let scale_row = &scale_rows[y % scale_rows.len()];
-            for ((r, &b), &s) in raw_row.iter_mut().zip(black_row).zip(scale_row) {
-                *r = (linearize(*r, b) * s).clamp(0.0, 65535.0) as u16;
+        ScalePlan::Direct { scale_rows, black_rows, lin_table }
+    }
+
+    fn scale_colors(&self, raw: &mut [u16], pre_mul: [f32; 3], is_cfa: bool) {
+        let Some(plan) = self.scale_plan(raw, pre_mul, is_cfa) else {
+            return;
+        };
+        let row_samples = self.scale_row_samples(is_cfa);
+        let band_rows = (PARALLEL_CHUNK / row_samples).max(1);
+        let apply_band = |(bi, band): (usize, &mut [u16])| {
+            for (dy, row) in band.chunks_mut(row_samples).enumerate() {
+                plan.apply_row(bi * band_rows + dy, row);
             }
         };
 
         #[cfg(feature = "rayon")]
         {
             use rayon::prelude::*;
-            raw.par_chunks_mut(row_samples).enumerate().for_each(apply_row);
+            raw.par_chunks_mut(band_rows * row_samples).enumerate().for_each(apply_band);
         }
         #[cfg(not(feature = "rayon"))]
-        raw.chunks_mut(row_samples).enumerate().for_each(apply_row);
+        raw.chunks_mut(band_rows * row_samples).enumerate().for_each(apply_band);
     }
 
-    fn scale_colors(&self, raw: &mut [u16], pre_mul: [f32; 3], is_cfa: bool) {
+    fn scale_row_samples(&self, is_cfa: bool) -> usize {
+        let spp = if is_cfa { 1 } else { (self.header.samples_per_pixel as usize).max(1) };
+        self.width as usize * spp
+    }
+
+    fn scale_plan(&self, raw: &[u16], pre_mul: [f32; 3], is_cfa: bool) -> Option<ScalePlan<'_>> {
         let w = self.width as usize;
         let spp = if is_cfa { 1 } else { (self.header.samples_per_pixel as usize).max(1) };
         let row_samples = w * spp;
         if raw.is_empty() || row_samples == 0 {
-            return;
+            return None;
         }
 
         let channel_rows: Vec<Vec<usize>> = if is_cfa {
@@ -1416,8 +1704,7 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
 
         if distinct_blacks.len() > MAX_BLACK_LUTS || lcm(black_rows.len(), channel_rows.len()) > MAX_LUT_ROWS {
-            self.scale_colors_direct(raw, pre_mul, row_samples, &channel_rows, &black_rows, lin_table);
-            return;
+            return Some(self.scale_plan_direct(raw, pre_mul, row_samples, &channel_rows, black_rows, lin_table));
         }
 
         let black_index: Vec<Vec<usize>> = black_rows
@@ -1430,12 +1717,24 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         type RawMax = [u16; MAX_BLACK_LUTS];
 
+        let black_pattern: Vec<RowPattern> = black_index.iter().map(|idx| RowPattern::of(idx)).collect();
+
         let row_max = |(y, raw_row): (usize, &[u16])| -> RawMax {
-            let idx_row = &black_index[y % black_index.len()];
+            let y = y % black_index.len();
             let mut m: RawMax = [0; MAX_BLACK_LUTS];
-            for (&r, &bi) in raw_row.iter().zip(idx_row) {
-                if r > m[bi] {
-                    m[bi] = r;
+            match black_pattern[y] {
+                RowPattern::Uniform(bi) => m[bi] = max_u16(raw_row),
+                RowPattern::Alternating(b0, b1) => {
+                    let (even, odd) = max_u16_pairs(raw_row);
+                    m[b0] = even;
+                    m[b1] = m[b1].max(odd);
+                }
+                RowPattern::General => {
+                    for (&r, &bi) in raw_row.iter().zip(&black_index[y]) {
+                        if r > m[bi] {
+                            m[bi] = r;
+                        }
+                    }
                 }
             }
             m
@@ -1504,57 +1803,9 @@ impl<R: Read + Seek> DngDecoder<R> {
             })
             .collect();
 
-        let row_pattern: Vec<RowPattern> = lut_index
-            .iter()
-            .map(|idx| match idx.first() {
-                None => RowPattern::General,
-                Some(&first) if idx.iter().all(|&li| li == first) => RowPattern::Uniform(first),
-                Some(&first) if idx.len() >= 2 && idx.iter().enumerate().all(|(i, &li)| li == idx[i % 2]) => {
-                    RowPattern::Alternating(first, idx[1])
-                }
-                _ => RowPattern::General,
-            })
-            .collect();
+        let row_pattern: Vec<RowPattern> = lut_index.iter().map(|idx| RowPattern::of(idx)).collect();
 
-        let apply_band = |(bi, band): (usize, &mut [u16])| {
-            let base = bi * band_rows;
-            for (dy, raw_row) in band.chunks_mut(row_samples).enumerate() {
-                let y = (base + dy) % lut_index.len();
-                match row_pattern[y] {
-                    RowPattern::Uniform(li) => {
-                        let lut = &combined[li];
-                        for r in raw_row.iter_mut() {
-                            *r = lut[*r as usize];
-                        }
-                    }
-                    RowPattern::Alternating(l0, l1) => {
-                        let (a, b) = (&combined[l0], &combined[l1]);
-                        let mut it = raw_row.chunks_exact_mut(2);
-                        for px in &mut it {
-                            px[0] = a[px[0] as usize];
-                            px[1] = b[px[1] as usize];
-                        }
-                        if let [last] = it.into_remainder() {
-                            *last = a[*last as usize];
-                        }
-                    }
-                    RowPattern::General => {
-                        let idx_row = &lut_index[y];
-                        for (r, &li) in raw_row.iter_mut().zip(idx_row) {
-                            *r = combined[li][*r as usize];
-                        }
-                    }
-                }
-            }
-        };
-
-        #[cfg(feature = "rayon")]
-        {
-            use rayon::prelude::*;
-            raw.par_chunks_mut(band_samples).enumerate().for_each(apply_band);
-        }
-        #[cfg(not(feature = "rayon"))]
-        raw.chunks_mut(band_samples).enumerate().for_each(apply_band);
+        Some(ScalePlan::Lut { combined, lut_index, row_pattern })
     }
 
     fn reserve_decode_buffers(&mut self, spp: usize, is_cfa: bool) -> VexelResult<()> {
@@ -1679,50 +1930,39 @@ impl<R: Read + Seek> DngDecoder<R> {
         let deep = self.header.bits_per_sample.first().copied().unwrap_or(16) > 8;
 
         let pixel_data = if is_cfa {
-            self.scale_colors(&mut raw_pixels, transform.pre_mul, true);
-            let mut rgb = self.demosaic_bilinear(&raw_pixels);
+            let orientation = Orientation::new(self.dng.orientation, w, h);
+            let (rgb, histogram) = self.develop_cfa(&raw_pixels, transform.pre_mul, transform.rgb_cam, orientation);
             drop(std::mem::take(&mut raw_pixels));
-            convert_to_rgb16(&mut rgb, w * h, transform.rgb_cam);
-            let rgb = self.apply_orientation(rgb, 3);
-            if deep {
-                PixelData::RGB16(rgb)
-            } else {
-                PixelData::RGB8(downscale_to_u8(&rgb))
-            }
-        } else if spp >= 3 {
+            let (dw, dh) = orientation.dest_dims();
+            self.width = dw as u32;
+            self.height = dh as u32;
+            self.finish_rgb(rgb, &histogram, deep, 1)
+        } else if spp == 3 {
+            let mut rgb = std::mem::take(&mut raw_pixels);
+            rgb.truncate(w * h * 3);
+            let histogram = self.develop_rgb(&mut rgb, transform.pre_mul, transform.rgb_cam);
+            self.finish_rgb(rgb, &histogram, deep, self.dng.orientation)
+        } else if spp > 3 {
             self.scale_colors(&mut raw_pixels, transform.pre_mul, false);
             let pixel_count = w * h;
-            let mut rgb = if spp == 3 {
-                std::mem::take(&mut raw_pixels)
-            } else {
-                let mut rgb = vec![0u16; pixel_count * 3];
-                for i in 0..pixel_count {
-                    let src = i * spp;
-                    for c in 0..3 {
-                        rgb[i * 3 + c] = raw_pixels.get(src + c).copied().unwrap_or(0);
-                    }
-                }
-                drop(std::mem::take(&mut raw_pixels));
-                rgb
-            };
-            rgb.truncate(pixel_count * 3);
-            convert_to_rgb16(&mut rgb, pixel_count, transform.rgb_cam);
-            let rgb = self.apply_orientation(rgb, 3);
-            if deep {
-                PixelData::RGB16(rgb)
-            } else {
-                PixelData::RGB8(downscale_to_u8(&rgb))
+            let mut rgb = vec![0u16; pixel_count * 3];
+            for (dst, src) in rgb.chunks_exact_mut(3).zip(raw_pixels.chunks_exact(spp)) {
+                dst.copy_from_slice(&src[..3]);
             }
+            drop(std::mem::take(&mut raw_pixels));
+            let histogram = apply_cam_matrix_and_histogram(&mut rgb, transform.rgb_cam.as_ref());
+            self.finish_rgb(rgb, &histogram, deep, self.dng.orientation)
         } else {
             self.scale_colors(&mut raw_pixels, [1.0, 1.0, 1.0], false);
-            let mut gray = std::mem::take(&mut raw_pixels);
-            convert_to_gray16(&mut gray);
-            let gray = self.apply_orientation(gray, 1);
-            if deep {
-                PixelData::L16(gray)
-            } else {
-                PixelData::L8(downscale_to_u8(&gray))
+            let gray = std::mem::take(&mut raw_pixels);
+            let mut histogram = vec![[0u32; HISTOGRAM_SIZE]; 1];
+            for &v in gray.iter() {
+                histogram[0][(v >> 3) as usize] += 1;
             }
+            let t_white = auto_bright_white(&histogram, gray.len(), 1);
+            let curve = gamma_curve_bt709(t_white << 3);
+            let orientation = self.dng.orientation;
+            self.finish_with_curve(gray, &curve, 1, deep, orientation, PixelData::L16, PixelData::L8)
         };
 
         Ok(Image::from_pixels(self.width, self.height, pixel_data))
@@ -1739,6 +1979,40 @@ fn batch_len(piece_bytes: usize) -> usize {
 #[cfg(not(feature = "rayon"))]
 fn batch_len(_piece_bytes: usize) -> usize {
     1
+}
+
+fn prefault<T: Copy + Default + Send>(buf: &mut [T]) {
+    #[cfg(feature = "rayon")]
+    if std::mem::size_of_val(buf) >= PREFAULT_MIN_BYTES {
+        use rayon::prelude::*;
+        let page = (4096 / std::mem::size_of::<T>().max(1)).max(1);
+        buf.par_chunks_mut(page * 256).for_each(|chunk| {
+            for slot in chunk.iter_mut().step_by(page) {
+                *slot = T::default();
+            }
+        });
+    }
+    #[cfg(not(feature = "rayon"))]
+    let _ = buf;
+}
+
+struct Piece {
+    offset: u32,
+    count: u32,
+    rows: usize,
+    width: usize,
+}
+
+fn copy_rows(src: &[u16], src_stride: usize, mut window: RasterWindow<'_, u16>) {
+    for y in 0..window.height() {
+        let start = y * src_stride;
+        if start >= src.len() {
+            break;
+        }
+        let row = window.row_mut(y);
+        let n = row.len().min(src.len() - start);
+        row[..n].copy_from_slice(&src[start..start + n]);
+    }
 }
 
 struct StripContext<'a> {
@@ -1802,7 +2076,9 @@ impl StripContext<'_> {
                 d
             }
             Compression::JPEG | Compression::OldJPEG => {
-                return self.decompress_jpeg_lossless(data, rows, width);
+                let mut samples = vec![0u16; count];
+                self.decode_jpeg_lossless_into(data, rows, width, RasterWindow::contiguous(&mut samples, width * spp));
+                return Ok(samples);
             }
             Compression::LossyJPEG => {
                 return self.decompress_jpeg_lossy(data, rows, width);
@@ -1861,7 +2137,25 @@ impl StripContext<'_> {
         out
     }
 
-    fn decompress_jpeg_lossless(&self, strip_data: Vec<u8>, rows: usize, width: usize) -> VexelResult<Vec<u16>> {
+    fn decode_piece_into(
+        &self,
+        data: Vec<u8>,
+        rows: usize,
+        width: usize,
+        bps: u16,
+        window: RasterWindow<'_, u16>,
+    ) -> VexelResult<()> {
+        if matches!(self.header.compression, Compression::JPEG | Compression::OldJPEG) {
+            self.decode_jpeg_lossless_into(data, rows, width, window);
+            return Ok(());
+        }
+        let spp = (self.header.samples_per_pixel as usize).max(1);
+        let samples = self.decompress_strip(data, rows, width, bps)?;
+        copy_rows(&samples, width * spp, window);
+        Ok(())
+    }
+
+    fn decode_jpeg_lossless_into(&self, strip_data: Vec<u8>, rows: usize, width: usize, window: RasterWindow<'_, u16>) {
         let spp = (self.header.samples_per_pixel as usize).max(1);
         let sample_count = rows * width * spp;
 
@@ -1871,16 +2165,33 @@ impl StripContext<'_> {
             strip_data
         };
 
-        let cursor = Cursor::new(jpeg_data);
-        let mut jpeg_decoder = JpegDecoder::new(cursor);
+        let mut jpeg_decoder = JpegDecoder::new(Cursor::new(jpeg_data));
         jpeg_decoder.set_limits(self.jpeg_limits.clone());
         jpeg_decoder.set_lossless_ssss16_is_min(self.dng.dng_version == 0 || self.dng.dng_version >= 0x01010000);
         jpeg_decoder.set_lossless_skip_color_transform(true);
+
+        match jpeg_decoder.read_lossless_frame() {
+            Ok(Some(frame)) if frame.width * frame.components == width * spp => {
+                jpeg_decoder.decode_lossless_into(window);
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log_warn!("DNG JPEG lossless decode failed: {}", e);
+                return;
+            }
+        }
+
+        let samples = Self::lossless_image_samples(&mut jpeg_decoder, sample_count);
+        copy_rows(&samples, width * spp, window);
+    }
+
+    fn lossless_image_samples(jpeg_decoder: &mut JpegDecoder<Cursor<Vec<u8>>>, sample_count: usize) -> Vec<u16> {
         let image = match jpeg_decoder.decode() {
             Ok(img) => img,
             Err(e) => {
                 log_warn!("DNG JPEG lossless decode failed: {}", e);
-                return Ok(vec![0u16; sample_count]);
+                return vec![0u16; sample_count];
             }
         };
 
@@ -1894,7 +2205,7 @@ impl StripContext<'_> {
             crate::utils::image::PixelData::L8(v) => (v.iter().map(|&b| b as u16).collect(), 8),
             crate::utils::image::PixelData::LA8(v) => (v.iter().map(|&b| b as u16).collect(), 8),
             crate::utils::image::PixelData::RGB8(v) => (v.iter().map(|&b| b as u16).collect(), 8),
-            _ => return Ok(vec![0u16; sample_count]),
+            _ => return vec![0u16; sample_count],
         };
 
         let precision_shift = stored_bits.saturating_sub(precision.clamp(1, stored_bits));
@@ -1916,7 +2227,7 @@ impl StripContext<'_> {
             #[cfg(not(feature = "rayon"))]
             shift(&mut out);
         }
-        Ok(out)
+        out
     }
 
     fn decompress_jpeg_lossy(&self, tile_data: Vec<u8>, rows: usize, width: usize) -> VexelResult<Vec<u16>> {
@@ -2041,38 +2352,184 @@ const MAX_BLACK_LUTS: usize = 16;
 const MAX_LUT_ROWS: usize = 64;
 const AUTO_BRIGHT_THRESHOLD: f64 = 0.01;
 const PARALLEL_CHUNK: usize = 0x10000;
+const DEVELOP_BAND_SAMPLES: usize = 0x20000;
+#[cfg(feature = "rayon")]
+const PREFAULT_MIN_BYTES: usize = 8 << 20;
 
-fn convert_to_rgb16(rgb: &mut [u16], pixel_count: usize, rgb_cam: Option<[[f32; 3]; 3]>) {
-    let histogram = apply_cam_matrix_and_histogram(rgb, rgb_cam.as_ref());
-    let t_white = auto_bright_white(&histogram, pixel_count, 3);
-    let curve = gamma_curve_bt709(t_white << 3);
-    map_through_curve(rgb, &curve);
+#[cfg(feature = "rayon")]
+fn merge_histograms(mut a: Vec<[u32; HISTOGRAM_SIZE]>, b: Vec<[u32; HISTOGRAM_SIZE]>) -> Vec<[u32; HISTOGRAM_SIZE]> {
+    for (ha, hb) in a.iter_mut().zip(&b) {
+        for (va, &vb) in ha.iter_mut().zip(hb.iter()) {
+            *va += vb;
+        }
+    }
+    a
 }
 
-fn convert_to_gray16(gray: &mut [u16]) {
-    let mut histogram = vec![[0u32; HISTOGRAM_SIZE]; 1];
-    for &v in gray.iter() {
-        histogram[0][(v >> 3) as usize] += 1;
+fn apply_cam_matrix_planes(m: &[[f32; 3]; 3], r: &mut [u16], g: &mut [u16], b: &mut [u16]) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        return unsafe { apply_cam_matrix_planes_avx2(m, r, g, b) };
     }
-    let t_white = auto_bright_white(&histogram, gray.len(), 1);
-    let curve = gamma_curve_bt709(t_white << 3);
-    map_through_curve(gray, &curve);
+    apply_cam_matrix_planes_scalar(m, r, g, b);
 }
 
-fn downscale_to_u8(values: &[u16]) -> Vec<u8> {
-    let mut out = vec![0u8; values.len()];
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn apply_cam_matrix_planes_avx2(m: &[[f32; 3]; 3], r: &mut [u16], g: &mut [u16], b: &mut [u16]) {
+    apply_cam_matrix_planes_scalar(m, r, g, b);
+}
 
-    #[cfg(feature = "rayon")]
-    {
-        use rayon::prelude::*;
-        out.par_chunks_mut(PARALLEL_CHUNK)
-            .zip(values.par_chunks(PARALLEL_CHUNK))
-            .for_each(|(dst, src)| super::simd::shift_u16_to_u8(src, dst));
+#[allow(clippy::manual_clamp)]
+#[inline(always)]
+fn cam_channel(row: &[f32; 3], r: f32, g: f32, b: f32) -> u16 {
+    let v = (row[0] * r + row[1] * g + row[2] * b).max(0.0).min(65535.0);
+    unsafe { v.to_int_unchecked::<i32>() as u16 }
+}
+
+#[inline(always)]
+fn apply_cam_matrix_planes_scalar(m: &[[f32; 3]; 3], r: &mut [u16], g: &mut [u16], b: &mut [u16]) {
+    let n = r.len().min(g.len()).min(b.len());
+    let (r, g, b) = (&mut r[..n], &mut g[..n], &mut b[..n]);
+    for i in 0..n {
+        let (rf, gf, bf) = (r[i] as f32, g[i] as f32, b[i] as f32);
+        r[i] = cam_channel(&m[0], rf, gf, bf);
+        g[i] = cam_channel(&m[1], rf, gf, bf);
+        b[i] = cam_channel(&m[2], rf, gf, bf);
     }
-    #[cfg(not(feature = "rayon"))]
-    super::simd::shift_u16_to_u8(values, &mut out);
+}
 
-    out
+#[derive(Clone, Copy)]
+struct Orientation {
+    code: u16,
+    w: usize,
+    h: usize,
+}
+
+impl Orientation {
+    fn new(code: u16, w: usize, h: usize) -> Self {
+        Self { code: if (2..=8).contains(&code) { code } else { 1 }, w, h }
+    }
+
+    fn transposed(&self) -> bool {
+        self.code >= 5
+    }
+
+    fn dest_dims(&self) -> (usize, usize) {
+        if self.transposed() {
+            (self.h, self.w)
+        } else {
+            (self.w, self.h)
+        }
+    }
+
+    fn band_range(&self, y0: usize, y1: usize) -> std::ops::Range<usize> {
+        match self.code {
+            3 | 4 | 6 | 7 => self.h - y1..self.h - y0,
+            _ => y0..y1,
+        }
+    }
+
+    fn band_windows<'a>(&self, rgb: &'a mut [u16], band_rows: usize) -> Vec<RasterWindow<'a, u16>> {
+        let (dw, dh) = self.dest_dims();
+        let bands = self.h.div_ceil(band_rows.max(1));
+        let mut order: Vec<(std::ops::Range<usize>, usize)> =
+            (0..bands).map(|b| (self.band_range(b * band_rows, ((b + 1) * band_rows).min(self.h)), b)).collect();
+        order.sort_by_key(|(range, _)| range.start);
+
+        let mut slots: Vec<Option<RasterWindow<'a, u16>>> = (0..bands).map(|_| None).collect();
+        let mut rest = RasterWindow::new(rgb, dw * 3, dw * 3, dh);
+        let mut consumed = 0;
+        for (range, band) in order {
+            let len = range.end - range.start;
+            let window = if self.transposed() {
+                let (head, tail) = rest.split_columns(len * 3);
+                rest = tail;
+                head
+            } else {
+                let (head, tail) = rest.split_rows(len);
+                rest = tail;
+                head
+            };
+            debug_assert_eq!(range.start, consumed);
+            consumed += len;
+            slots[band] = Some(window);
+        }
+        slots.into_iter().map(|w| w.expect("every band has a window")).collect()
+    }
+
+    fn write_row(
+        &self,
+        r: &[u16],
+        g: &[u16],
+        b: &[u16],
+        y: usize,
+        y0: usize,
+        y1: usize,
+        out: &mut RasterWindow<'_, u16>,
+    ) {
+        let w = self.w;
+        let (r, g, b) = (&r[..w], &g[..w], &b[..w]);
+        if !self.transposed() {
+            let row = match self.code {
+                3 | 4 => y1 - 1 - y,
+                _ => y - y0,
+            };
+            let row = &mut out.row_mut(row)[..w * 3];
+            if matches!(self.code, 2 | 3) {
+                for (x, px) in row.chunks_exact_mut(3).rev().enumerate() {
+                    px.copy_from_slice(&[r[x], g[x], b[x]]);
+                }
+            } else {
+                for (x, px) in row.chunks_exact_mut(3).enumerate() {
+                    px.copy_from_slice(&[r[x], g[x], b[x]]);
+                }
+            }
+            return;
+        }
+        let col = match self.code {
+            6 | 7 => y1 - 1 - y,
+            _ => y - y0,
+        };
+        let stride = out.stride();
+        assert!(out.height() >= w && out.width() >= (col + 1) * 3);
+        let base = unsafe { out.as_mut_ptr().add(col * 3) };
+        let flipped = matches!(self.code, 7 | 8);
+        for x in 0..w {
+            let row = if flipped { w - 1 - x } else { x };
+            unsafe {
+                let px = base.add(row * stride);
+                px.write(r[x]);
+                px.add(1).write(g[x]);
+                px.add(2).write(b[x]);
+            }
+        }
+    }
+}
+
+fn accumulate_histogram(r: &[u16], g: &[u16], b: &[u16], hist: &mut [[u32; HISTOGRAM_SIZE]]) {
+    let [hr, hg, hb] = hist else {
+        return;
+    };
+    for ((&r, &g), &b) in r.iter().zip(g).zip(b) {
+        hr[(r >> 3) as usize] += 1;
+        hg[(g >> 3) as usize] += 1;
+        hb[(b >> 3) as usize] += 1;
+    }
+}
+
+fn interleave_with_histogram(r: &[u16], g: &[u16], b: &[u16], out: &mut [u16], hist: &mut [[u32; HISTOGRAM_SIZE]]) {
+    let [hr, hg, hb] = hist else {
+        return;
+    };
+    for (((px, &r), &g), &b) in out.chunks_exact_mut(3).zip(r).zip(g).zip(b) {
+        px[0] = r;
+        px[1] = g;
+        px[2] = b;
+        hr[(r >> 3) as usize] += 1;
+        hg[(g >> 3) as usize] += 1;
+        hb[(b >> 3) as usize] += 1;
+    }
 }
 
 fn apply_cam_matrix_and_histogram(rgb: &mut [u16], m: Option<&[[f32; 3]; 3]>) -> Vec<[u32; HISTOGRAM_SIZE]> {
@@ -2224,4 +2681,58 @@ fn invert_3x3(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
             (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
         ],
     ]
+}
+
+fn remap_oriented<D: Copy + Default + Send>(
+    src: &[u16],
+    w: usize,
+    h: usize,
+    channels: usize,
+    orientation: u16,
+    map: impl Fn(u16) -> D + Sync,
+) -> Vec<D> {
+    const TILE: usize = 64;
+    let (dw, dh) = if orientation >= 5 { (h, w) } else { (w, h) };
+    let mut out = vec![D::default(); dw * dh * channels];
+    if out.is_empty() {
+        return out;
+    }
+
+    let fill_band = |(band, rows): (usize, &mut [D])| {
+        let dy0 = band * TILE;
+        let band_rows = rows.len() / (dw * channels);
+        for dx0 in (0..dw).step_by(TILE) {
+            let dx1 = (dx0 + TILE).min(dw);
+            for r in 0..band_rows {
+                let dy = dy0 + r;
+                let row = &mut rows[r * dw * channels..(r + 1) * dw * channels];
+                for dx in dx0..dx1 {
+                    let (sx, sy) = match orientation {
+                        2 => (w - 1 - dx, dy),
+                        3 => (w - 1 - dx, h - 1 - dy),
+                        4 => (dx, h - 1 - dy),
+                        5 => (dy, dx),
+                        6 => (dy, h - 1 - dx),
+                        7 => (w - 1 - dy, h - 1 - dx),
+                        8 => (w - 1 - dy, dx),
+                        _ => (dx, dy),
+                    };
+                    let s = (sy * w + sx) * channels;
+                    for c in 0..channels {
+                        row[dx * channels + c] = map(src[s + c]);
+                    }
+                }
+            }
+        }
+    };
+
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        out.par_chunks_mut(dw * channels * TILE).enumerate().for_each(fill_band);
+    }
+    #[cfg(not(feature = "rayon"))]
+    out.chunks_mut(dw * channels * TILE).enumerate().for_each(fill_band);
+
+    out
 }

@@ -1,22 +1,63 @@
-use std::io::{Error, ErrorKind, Read, Seek};
+use std::io::{Cursor, Error, ErrorKind, Read, Seek};
 
 use super::arithmetic::ArithmeticDecoder;
-#[cfg(feature = "rayon")]
-use super::decoder::PARALLEL_LOSSLESS_MIN_SAMPLES;
-use super::decoder::{JpegDecoder, LOSSLESS_PASS_BUDGET};
-use super::huffman::get_next_symbol;
+use super::decoder::{JpegDecoder, WalkMode, LOSSLESS_PASS_BUDGET};
+use super::headers::destuff_scan_in_place;
+use super::huffman::{get_next_symbol, LosslessHuffman};
+use super::lossless_scan::LosslessScan;
 use crate::decoders::jpeg::bitreader::JpegBitReader;
-use crate::decoders::jpeg::types::{HuffmanTable, JpegCodingMethod, Predictor, ScanData, HUFF_PEEK_BITS};
+use crate::decoders::jpeg::types::{HuffmanTable, JpegCodingMethod, JpegMode, Predictor, ScanData};
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::raster::RasterWindow;
 use crate::{log_warn, Image, PixelData};
 
-pub(super) struct LosslessComponent<'t> {
-    pub(super) pos: usize,
-    pub(super) stride: usize,
-    pub(super) row_stride: usize,
-    pub(super) table: &'t HuffmanTable,
-    pub(super) ra: i32,
-    pub(super) rb: i32,
+#[derive(Debug, Clone, Copy)]
+pub struct LosslessFrame {
+    pub width: usize,
+    pub components: usize,
+}
+
+impl JpegDecoder<Cursor<Vec<u8>>> {
+    pub fn read_lossless_frame(&mut self) -> VexelResult<Option<LosslessFrame>> {
+        self.defer_entropy = true;
+        let walked = self.walk(WalkMode::Decode);
+        self.defer_entropy = false;
+        walked?;
+        let Some(start) = self.deferred_scan_start else {
+            return Ok(None);
+        };
+        if self.mode != JpegMode::Lossless
+            || self.is_hierarchical
+            || self.coding_method != JpegCodingMethod::Huffman
+            || self.width == 0
+            || self.height == 0
+        {
+            return Ok(None);
+        }
+        let Some(scan) = self.scans.first() else {
+            return Ok(None);
+        };
+        let n = self.components.len();
+        let in_frame_order = scan.components.len() == n
+            && scan.components.iter().zip(&self.components).all(|(sc, c)| sc.component_id == c.id);
+        let full_resolution =
+            self.components.iter().all(|c| c.horizontal_sampling_factor <= 1 && c.vertical_sampling_factor <= 1);
+        if !in_frame_order || !full_resolution || !(1..=4).contains(&n) {
+            return Ok(None);
+        }
+
+        let mut data = std::mem::take(self.reader.get_mut().get_mut());
+        let start = (start as usize).min(data.len());
+        let (len, restart_offsets) = destuff_scan_in_place(&mut data[start..]);
+        let range = start..start + len;
+        self.entropy = data;
+        if let Some(scan) = self.scans.first_mut() {
+            scan.data = range;
+            scan.restart_offsets = restart_offsets;
+        }
+
+        Ok(Some(LosslessFrame { width: self.width as usize, components: n }))
+    }
 }
 
 impl<R: Read + Seek> JpegDecoder<R> {
@@ -377,6 +418,40 @@ impl<R: Read + Seek> JpegDecoder<R> {
         }
     }
 
+    pub fn decode_lossless_into(&mut self, window: RasterWindow<'_, u16>) {
+        let Some(scan) = self.scans.first() else {
+            return;
+        };
+        let predictor = Self::lossless_predictor(scan.start_spectral);
+        let tables = self.lossless_tables(scan, scan.components.len());
+        let lossless = self.lossless_scan(
+            scan,
+            &tables,
+            self.width as usize,
+            self.height as usize,
+            predictor,
+            scan.successive_low,
+        );
+        lossless.decode(window);
+    }
+
+    pub(super) fn lossless_predictor(selection: u8) -> Predictor {
+        match selection {
+            0 => Predictor::NoPrediction,
+            1 => Predictor::Ra,
+            2 => Predictor::Rb,
+            3 => Predictor::Rc,
+            4 => Predictor::RaRbRc1,
+            5 => Predictor::RaRbRc2,
+            6 => Predictor::RaRbRc3,
+            7 => Predictor::RaRb,
+            _ => {
+                log_warn!("Invalid predictor selection: {}", selection);
+                Predictor::NoPrediction
+            }
+        }
+    }
+
     pub(super) fn decode_lossless(&mut self) -> VexelResult<Image> {
         if self.scans.is_empty() {
             return Err(VexelError::from(Error::new(ErrorKind::InvalidData, "No scan data found")));
@@ -525,39 +600,11 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let mut planes: Vec<Vec<u16>> = plane_dims.iter().map(|&(w, h)| vec![0u16; w * h]).collect();
 
         let point_transform = scan.successive_low;
-        let predictor = match scan.start_spectral {
-            0 => Predictor::NoPrediction,
-            1 => Predictor::Ra,
-            2 => Predictor::Rb,
-            3 => Predictor::Rc,
-            4 => Predictor::RaRbRc1,
-            5 => Predictor::RaRbRc2,
-            6 => Predictor::RaRbRc3,
-            7 => Predictor::RaRb,
-            _ => {
-                log_warn!("Invalid predictor selection: {}", scan.start_spectral);
-                Predictor::NoPrediction
-            }
-        };
+        let predictor = Self::lossless_predictor(scan.start_spectral);
 
-        let tables: Vec<HuffmanTable> = (0..sampling.len())
-            .map(|i| {
-                scan.components
-                    .get(i)
-                    .and_then(|sc| scan.dc_tables.iter().find(|t| t.id == sc.dc_table_selector).cloned())
-                    .unwrap_or_else(|| {
-                        log_warn!(
-                            "No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.",
-                            i
-                        );
-                        Self::default_lossless_dc_table()
-                    })
-            })
-            .collect();
+        let tables = self.lossless_tables(scan, sampling.len());
 
-        let default_prediction =
-            if self.precision > point_transform + 1 { 1i32 << (self.precision - point_transform - 1) } else { 0 };
-        let ssss16_is_min = self.lossless_ssss16_is_min;
+        let default_prediction = self.default_lossless_prediction(point_transform) as i32;
         let restart_interval = scan.restart_interval as usize;
 
         let mut reader = JpegBitReader::new(&self.entropy[scan.data.clone()]);
@@ -592,7 +639,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
                         let y = base_y + dy;
                         for dx in 0..sh {
                             let x = base_x + dx;
-                            let diff = Self::decode_lossless_diff(&mut reader, &tables[ci], ssss16_is_min);
+                            let diff = tables[ci].diff(&mut reader) as i32;
 
                             let at_restart_start = y == restart_row_start * sv && x == 0;
                             let on_first_line_of_interval = y == restart_row_start * sv;
@@ -654,25 +701,64 @@ impl<R: Read + Seek> JpegDecoder<R> {
         buf: &mut [u16],
     ) {
         let point_transform = scan.successive_low;
-        let predictor = match scan.start_spectral {
-            0 => Predictor::NoPrediction,
-            1 => Predictor::Ra,
-            2 => Predictor::Rb,
-            3 => Predictor::Rc,
-            4 => Predictor::RaRbRc1,
-            5 => Predictor::RaRbRc2,
-            6 => Predictor::RaRbRc3,
-            7 => Predictor::RaRb,
-            _ => {
-                log_warn!("Invalid predictor selection: {}", scan.start_spectral);
-                Predictor::NoPrediction
-            }
-        };
+        let predictor = Self::lossless_predictor(scan.start_spectral);
 
         if self.coding_method == JpegCodingMethod::Arithmetic {
             self.decode_lossless_scan_arithmetic(scan, sw, sh, views, buf, predictor, point_transform);
         } else {
             self.decode_lossless_scan_huffman(scan, sw, sh, views, buf, predictor, point_transform);
+        }
+    }
+
+    pub(super) fn lossless_tables(&self, scan: &ScanData, count: usize) -> Vec<Box<LosslessHuffman>> {
+        let ssss16_is_min = self.lossless_ssss16_is_min;
+        (0..count)
+            .map(|i| {
+                let table = scan
+                    .components
+                    .get(i)
+                    .and_then(|sc| scan.dc_tables.iter().find(|t| t.id == sc.dc_table_selector))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        log_warn!(
+                            "No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.",
+                            i
+                        );
+                        Self::default_lossless_dc_table()
+                    });
+                LosslessHuffman::build(&table, ssss16_is_min)
+            })
+            .collect()
+    }
+
+    pub(super) fn default_lossless_prediction(&self, point_transform: u8) -> u16 {
+        if self.precision > point_transform + 1 {
+            (1u32 << (self.precision - point_transform - 1)) as u16
+        } else {
+            0
+        }
+    }
+
+    pub(super) fn lossless_scan<'s>(
+        &'s self,
+        scan: &'s ScanData,
+        tables: &'s [Box<LosslessHuffman>],
+        sw: usize,
+        sh: usize,
+        predictor: Predictor,
+        point_transform: u8,
+    ) -> LosslessScan<'s> {
+        LosslessScan {
+            entropy: &self.entropy[scan.data.clone()],
+            restart_offsets: &scan.restart_offsets,
+            tables: tables.iter().map(|t| &**t).collect(),
+            width: sw,
+            height: sh,
+            predictor: predictor as u8,
+            point_transform,
+            initial: self.default_lossless_prediction(point_transform),
+            restart_interval: scan.restart_interval as usize,
+            uniform_tables: scan.components.windows(2).all(|w| w[0].dc_table_selector == w[1].dc_table_selector),
         }
     }
 
@@ -703,381 +789,31 @@ impl<R: Read + Seek> JpegDecoder<R> {
             return;
         }
 
-        let tables: Vec<HuffmanTable> = (0..views.len())
-            .map(|i| {
-                scan.components
-                    .get(i)
-                    .and_then(|sc| scan.dc_tables.iter().find(|t| t.id == sc.dc_table_selector).cloned())
-                    .unwrap_or_else(|| {
-                        log_warn!(
-                            "No DC table found for component {} during lossless decoding. Using default table which will most likely produce incorrect results.",
-                            i
-                        );
-                        Self::default_lossless_dc_table()
-                    })
-            })
-            .collect();
-
-        let mut reader = JpegBitReader::new(&self.entropy[scan.data.clone()]);
-        let restart_interval = scan.restart_interval as usize;
-        let default_prediction =
-            if self.precision > point_transform + 1 { 1i32 << (self.precision - point_transform - 1) } else { 0 };
-
-        let make = |i: usize| LosslessComponent {
-            pos: views[i].0,
-            stride: views[i].1,
-            row_stride: sw * views[i].1,
-            table: &tables[i],
-            ra: 0,
-            rb: 0,
-        };
-
-        let ssss16_is_min = self.lossless_ssss16_is_min;
-
-        #[cfg(feature = "rayon")]
-        if Self::decode_lossless_scan_huffman_parallel(
-            scan,
-            &self.entropy,
-            sw,
-            sh,
-            views,
-            buf,
-            predictor,
-            point_transform,
-            default_prediction,
-            ssss16_is_min,
-            restart_interval,
-            &tables,
-        ) {
+        let ncomp = views.len();
+        let direct = views.iter().enumerate().all(|(i, &(offset, stride))| offset == i && stride == ncomp);
+        let temp_bytes = if direct { 0 } else { total.saturating_mul(ncomp).saturating_mul(2) };
+        if self.limits.reserve_usize(temp_bytes).is_err() {
+            log_warn!("Lossless scan buffer exceeds limits, skipping scan");
             return;
         }
 
-        macro_rules! run {
-            ($components:expr, $predict:expr) => {
-                Self::lossless_huffman_loop(
-                    &mut reader,
-                    sw,
-                    total,
-                    buf,
-                    restart_interval,
-                    point_transform,
-                    default_prediction,
-                    ssss16_is_min,
-                    $components,
-                    $predict,
-                )
-            };
+        let tables = self.lossless_tables(scan, ncomp);
+        let lossless = self.lossless_scan(scan, &tables, sw, sh, predictor, point_transform);
+
+        if direct {
+            lossless.decode(RasterWindow::contiguous(&mut buf[..total * ncomp], sw * ncomp));
+            return;
         }
 
-        macro_rules! dispatch {
-            ($predict:expr) => {
-                match views.len() {
-                    1 => run!([make(0)], $predict),
-                    2 => run!([make(0), make(1)], $predict),
-                    3 => run!([make(0), make(1), make(2)], $predict),
-                    4 => run!([make(0), make(1), make(2), make(3)], $predict),
-                    n => run!((0..n).map(make).collect::<Vec<_>>(), $predict),
-                }
-            };
-        }
-
-        match predictor {
-            Predictor::NoPrediction => dispatch!(|_, _, _| 0),
-            Predictor::Ra => dispatch!(|ra, _, _| ra),
-            Predictor::Rb => dispatch!(|_, rb, _| rb),
-            Predictor::Rc => dispatch!(|_, _, rc| rc),
-            Predictor::RaRbRc1 => dispatch!(|ra, rb, rc| ra + rb - rc),
-            Predictor::RaRbRc2 => dispatch!(|ra, rb, rc| ra + ((rb - rc) >> 1)),
-            Predictor::RaRbRc3 => dispatch!(|ra, rb, rc| rb + ((ra - rc) >> 1)),
-            Predictor::RaRb => dispatch!(|ra, rb, _| (ra + rb) / 2),
-        }
-    }
-
-    #[cfg(feature = "rayon")]
-    pub(super) fn decode_lossless_scan_huffman_parallel(
-        scan: &ScanData,
-        entropy: &[u8],
-        sw: usize,
-        sh: usize,
-        views: &[(usize, usize)],
-        buf: &mut [u16],
-        predictor: Predictor,
-        point_transform: u8,
-        default_prediction: i32,
-        ssss16_is_min: bool,
-        restart_interval: usize,
-        tables: &[HuffmanTable],
-    ) -> bool {
-        use rayon::prelude::*;
-
-        if restart_interval == 0 || sw == 0 || !restart_interval.is_multiple_of(sw) {
-            return false;
-        }
-        if sw.saturating_mul(sh) < PARALLEL_LOSSLESS_MIN_SAMPLES {
-            return false;
-        }
-        let rows_per_segment = restart_interval / sw;
-
-        let ncomp = views.len();
-        if ncomp == 0 || !views.iter().enumerate().all(|(i, &(off, stride))| off == i && stride == ncomp) {
-            return false;
-        }
-        if buf.len() < sw * sh * ncomp {
-            return false;
-        }
-
-        let starts = &scan.restart_offsets;
-        let expected = sh.div_ceil(rows_per_segment);
-        if starts.len() < 2 || starts.len() != expected {
-            return false;
-        }
-
-        let samples_per_segment = rows_per_segment * sw * ncomp;
-        let data = &entropy[scan.data.clone()];
-
-        buf[..sw * sh * ncomp].par_chunks_mut(samples_per_segment).enumerate().for_each(|(seg, out)| {
-            let begin = starts[seg];
-            let end = starts.get(seg + 1).copied().unwrap_or(data.len());
-            let rows = out.len() / (sw * ncomp);
-            if rows == 0 || begin >= end {
-                return;
-            }
-
-            let mut reader = JpegBitReader::new(&data[begin..end]);
-            let make = |i: usize| LosslessComponent {
-                pos: i,
-                stride: ncomp,
-                row_stride: sw * ncomp,
-                table: &tables[i],
-                ra: 0,
-                rb: 0,
-            };
-
-            macro_rules! run {
-                ($components:expr, $predict:expr) => {
-                    Self::lossless_huffman_loop(
-                        &mut reader,
-                        sw,
-                        rows * sw,
-                        out,
-                        0,
-                        point_transform,
-                        default_prediction,
-                        ssss16_is_min,
-                        $components,
-                        $predict,
-                    )
-                };
-            }
-
-            macro_rules! dispatch {
-                ($predict:expr) => {
-                    match ncomp {
-                        1 => run!([make(0)], $predict),
-                        2 => run!([make(0), make(1)], $predict),
-                        3 => run!([make(0), make(1), make(2)], $predict),
-                        4 => run!([make(0), make(1), make(2), make(3)], $predict),
-                        n => run!((0..n).map(make).collect::<Vec<_>>(), $predict),
-                    }
-                };
-            }
-
-            match predictor {
-                Predictor::NoPrediction => dispatch!(|_, _, _| 0),
-                Predictor::Ra => dispatch!(|ra, _, _| ra),
-                Predictor::Rb => dispatch!(|_, rb, _| rb),
-                Predictor::Rc => dispatch!(|_, _, rc| rc),
-                Predictor::RaRbRc1 => dispatch!(|ra, rb, rc| ra + rb - rc),
-                Predictor::RaRbRc2 => dispatch!(|ra, rb, rc| ra + ((rb - rc) >> 1)),
-                Predictor::RaRbRc3 => dispatch!(|ra, rb, rc| rb + ((ra - rc) >> 1)),
-                Predictor::RaRb => dispatch!(|ra, rb, _| (ra + rb) / 2),
-            }
-        });
-
-        true
-    }
-
-    pub(super) fn lossless_huffman_loop<'t, C, F>(
-        reader: &mut JpegBitReader<'_>,
-        sw: usize,
-        total: usize,
-        buf: &mut [u16],
-        restart_interval: usize,
-        point_transform: u8,
-        default_prediction: i32,
-        ssss16_is_min: bool,
-        mut components: C,
-        predict: F,
-    ) where
-        C: AsMut<[LosslessComponent<'t>]>,
-        F: Fn(i32, i32, i32) -> i32,
-    {
-        let components = components.as_mut();
-
-        let interval = if restart_interval > 0 { restart_interval } else { total };
-        let mut mcu = 0usize;
-
-        while mcu < total {
-            if reader.is_exhausted() {
-                log_warn!("Lossless scan data exhausted after {} of {} samples", mcu, total);
-                return;
-            }
-            if mcu > 0 {
-                reader.clear_buffer();
-            }
-            let end = (mcu + interval).min(total);
-
-            for c in components.iter_mut() {
-                let diff = Self::decode_lossless_diff(reader, c.table, ssss16_is_min);
-                let value = (((default_prediction + diff) & 0xFFFF) as u16) << point_transform;
-                unsafe { *buf.get_unchecked_mut(c.pos) = value };
-                c.pos += c.stride;
-                c.ra = value as i32;
-            }
-            mcu += 1;
-
-            let first_row_end = (((mcu - 1) / sw + 1) * sw).min(end);
-            while mcu < first_row_end {
-                for c in components.iter_mut() {
-                    let diff = Self::decode_lossless_diff(reader, c.table, ssss16_is_min);
-                    let value = (((c.ra + diff) & 0xFFFF) as u16) << point_transform;
-                    unsafe { *buf.get_unchecked_mut(c.pos) = value };
-                    c.pos += c.stride;
-                    c.ra = value as i32;
-                }
-                mcu += 1;
-            }
-
-            while mcu < end {
-                if reader.is_exhausted() {
-                    log_warn!("Lossless scan data exhausted after {} of {} samples", mcu, total);
-                    return;
-                }
-                let row_end = (mcu + sw).min(end);
-
-                for c in components.iter_mut() {
-                    let diff = Self::decode_lossless_diff(reader, c.table, ssss16_is_min);
-                    let rb = unsafe { *buf.get_unchecked(c.pos - c.row_stride) } as i32;
-                    let value = (((rb + diff) & 0xFFFF) as u16) << point_transform;
-                    unsafe { *buf.get_unchecked_mut(c.pos) = value };
-                    c.pos += c.stride;
-                    c.ra = value as i32;
-                    c.rb = rb;
-                }
-                mcu += 1;
-
-                while mcu < row_end {
-                    for c in components.iter_mut() {
-                        let diff = Self::decode_lossless_diff(reader, c.table, ssss16_is_min);
-                        let rb = unsafe { *buf.get_unchecked(c.pos - c.row_stride) } as i32;
-                        let value = (((predict(c.ra, rb, c.rb) + diff) & 0xFFFF) as u16) << point_transform;
-                        unsafe { *buf.get_unchecked_mut(c.pos) = value };
-                        c.pos += c.stride;
-                        c.ra = value as i32;
-                        c.rb = rb;
-                    }
-                    mcu += 1;
-                }
+        let mut temp = vec![0u16; total * ncomp];
+        lossless.decode(RasterWindow::contiguous(&mut temp, sw * ncomp));
+        for (p, px) in temp.chunks_exact(ncomp).enumerate() {
+            for (&(offset, stride), &s) in views.iter().zip(px) {
+                buf[offset + p * stride] = s;
             }
         }
-    }
-
-    #[inline(always)]
-    pub(super) fn decode_lossless_diff(
-        reader: &mut JpegBitReader<'_>,
-        table: &HuffmanTable,
-        ssss16_is_min: bool,
-    ) -> i32 {
-        if !reader.ensure(32) {
-            return Self::decode_lossless_diff_tail(reader, table, ssss16_is_min);
-        }
-
-        let window = reader.peek_unchecked(32);
-        let entry = unsafe { *table.fast_lookup.get_unchecked((window >> (32 - HUFF_PEEK_BITS)) as usize) };
-        let ssss = if entry >> 16 != 0 {
-            let len = entry & 0xFF;
-            let ssss = (entry >> 8) & 0xFF;
-            if ssss.wrapping_sub(1) < 15 {
-                reader.consume(len + ssss);
-                let v = ((window >> (32 - len - ssss)) & ((1 << ssss) - 1)) as i32;
-                return v + (((v >> (ssss - 1)) - 1) & ((-1i32 << ssss) + 1));
-            }
-            reader.consume(len);
-            ssss
-        } else {
-            reader.consume(HUFF_PEEK_BITS as u32);
-            let mut code = window >> (32 - HUFF_PEEK_BITS);
-            let mut symbol = u32::MAX;
-            for i in HUFF_PEEK_BITS..16 {
-                code = (code << 1) | reader.read_bits_unchecked(1);
-                let first = unsafe { *table.first_code.get_unchecked(i) };
-                if first != u32::MAX {
-                    let count =
-                        unsafe { table.offsets.get_unchecked(i + 1).wrapping_sub(*table.offsets.get_unchecked(i)) };
-                    if code >= first && code - first < count {
-                        let idx = unsafe { *table.offsets.get_unchecked(i) } as usize + (code - first) as usize;
-                        symbol = unsafe { *table.symbols.get_unchecked(idx) } as u32;
-                        break;
-                    }
-                }
-            }
-            if symbol == u32::MAX {
-                log_warn!("Invalid Huffman code: {}, replacing with 0", code);
-                0
-            } else {
-                symbol
-            }
-        };
-
-        match ssss {
-            0 => 0,
-            1..=15 => {
-                let v = reader.read_bits(ssss) as i32;
-                v + (((v >> (ssss - 1)) - 1) & ((-1i32 << ssss) + 1))
-            }
-            16 if ssss16_is_min => 32768,
-            16 => {
-                let v = reader.read_bits(16) as i32;
-                v + (((v >> 15) - 1) & -65535)
-            }
-            _ => {
-                log_warn!("Invalid difference: {}", ssss);
-                0
-            }
-        }
-    }
-
-    #[cold]
-    pub(super) fn decode_lossless_diff_tail(
-        reader: &mut JpegBitReader<'_>,
-        table: &HuffmanTable,
-        ssss16_is_min: bool,
-    ) -> i32 {
-        let ssss = get_next_symbol(reader, table);
-        match ssss {
-            0 => 0,
-            1..=15 => {
-                let v = reader.read_bits(ssss as u32) as i32;
-                if v < (1 << (ssss - 1)) {
-                    v + (-1i32 << ssss) + 1
-                } else {
-                    v
-                }
-            }
-            16 if ssss16_is_min => 32768,
-            16 => {
-                let v = reader.read_bits(16) as i32;
-                if v < (1 << 15) {
-                    v - 65535
-                } else {
-                    v
-                }
-            }
-            _ => {
-                log_warn!("Invalid difference: {}", ssss);
-                0
-            }
-        }
+        drop(temp);
+        self.limits.free_usize(temp_bytes);
     }
 
     pub(super) fn decode_lossless_scan_arithmetic(

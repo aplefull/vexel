@@ -285,7 +285,6 @@ impl T1Decoder {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn clnpass_step(
         &mut self,
         index: usize,
