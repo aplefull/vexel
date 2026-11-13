@@ -128,9 +128,10 @@ pub struct ScanData {
     pub ac_tables: Vec<HuffmanTable>,
     pub arith_dc_tables: Vec<ArithmeticCodingTable>,
     pub arith_ac_tables: Vec<ArithmeticCodingTable>,
-    pub data: Vec<u8>,
+    pub data: std::ops::Range<usize>,
     #[cfg_attr(not(feature = "rayon"), allow(dead_code))]
     pub restart_offsets: Vec<usize>,
+    pub restart_interval: u16,
 }
 
 #[derive(Debug, Clone)]

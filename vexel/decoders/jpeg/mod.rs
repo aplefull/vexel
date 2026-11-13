@@ -1,9 +1,22 @@
 pub mod app;
+pub mod arithmetic;
 pub mod bitreader;
+pub mod color;
 pub mod decoder;
+pub mod headers;
+pub mod hierarchical;
+pub mod huffman;
 pub mod idct;
 pub mod info;
+pub mod lossless;
 pub mod markers;
+pub mod output;
+pub mod planes;
+pub mod progressive;
+pub mod sample;
+pub mod sequential;
+pub mod streaming;
+pub mod thumbnails;
 pub mod types;
 pub mod upsample;
 

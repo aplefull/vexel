@@ -311,5 +311,25 @@ pub fn test_cases() -> Vec<TestCase> {
             },
             ..Default::default()
         },
+        TestCase {
+            name: "JPEG sequential non-interleaved scans 4:2:0 with restarts",
+            path: "jpeg/multiscan_noninterleaved_420_restart.jpg",
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/multiscan_noninterleaved_420_restart.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG sequential non-interleaved scans 4:2:2 with per-scan restart intervals",
+            path: "jpeg/multiscan_noninterleaved_422_restart.jpg",
+            comparison: Comparison::Fuzzy {
+                reference_path: "jpeg/multiscan_noninterleaved_422_restart.jxl",
+                mse_threshold: DEFAULT_MSE_THRESHOLD,
+                ssim_threshold: DEFAULT_SSIM_THRESHOLD,
+            },
+            ..Default::default()
+        },
     ]
 }

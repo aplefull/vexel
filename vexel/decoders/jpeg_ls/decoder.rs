@@ -81,7 +81,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
     }
 
     pub fn decode_thumbnails(&mut self) -> VexelResult<Vec<Image>> {
-        crate::decoders::jpeg::decoder::scan_jpeg_thumbnails(&mut self.reader, &self.limits)
+        crate::decoders::jpeg::thumbnails::scan_jpeg_thumbnails(&mut self.reader, &self.limits)
     }
 
     fn record(&mut self, offset: u64, length: Option<u64>, section: JpegLsSection) {
