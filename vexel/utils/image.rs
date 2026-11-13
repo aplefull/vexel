@@ -1,90 +1,7 @@
 use serde::Serialize;
 
 use crate::log_warn;
-use crate::utils::channel_simd;
-
-fn drop_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
-    let num_pixels = pixels.len() / 4;
-    let mut out = vec![0u8; num_pixels * 3];
-    channel_simd::rgba_to_rgb(&pixels, &mut out);
-    out
-}
-
-fn add_transparency_channel(pixels: Vec<u8>) -> Vec<u8> {
-    let num_pixels = pixels.len() / 3;
-    let mut out = vec![0u8; num_pixels * 4];
-    channel_simd::rgb_to_rgba(&pixels, &mut out);
-    out
-}
-
-#[inline(always)]
-fn scale_f64(v: f64) -> u8 {
-    (v.clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
-fn scale_f64_slice(src: &[f64]) -> Vec<u8> {
-    src.iter().map(|&v| scale_f64(v)).collect()
-}
-
-fn scale_u16_slice(src: &[u16]) -> Vec<u8> {
-    let mut dst = vec![0u8; src.len()];
-    channel_simd::scale_u16_to_u8(src, &mut dst);
-    dst
-}
-
-fn scale_f32_slice(src: &[f32]) -> Vec<u8> {
-    let mut dst = vec![0u8; src.len()];
-    channel_simd::scale_f32_to_u8(src, &mut dst);
-    dst
-}
-
-fn gray_to_rgb(gray: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; gray.len() * 3];
-    for (chunk, &g) in out.chunks_exact_mut(3).zip(gray) {
-        chunk[0] = g;
-        chunk[1] = g;
-        chunk[2] = g;
-    }
-    out
-}
-
-fn gray_to_rgba(gray: &[u8]) -> Vec<u8> {
-    let mut out = vec![255u8; gray.len() * 4];
-    for (chunk, &g) in out.chunks_exact_mut(4).zip(gray) {
-        chunk[0] = g;
-        chunk[1] = g;
-        chunk[2] = g;
-    }
-    out
-}
-
-fn gray_alpha_to_rgb(la: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; la.len() / 2 * 3];
-    for (chunk, pair) in out.chunks_exact_mut(3).zip(la.chunks_exact(2)) {
-        chunk[0] = pair[0];
-        chunk[1] = pair[0];
-        chunk[2] = pair[0];
-    }
-    out
-}
-
-fn gray_alpha_to_rgba(la: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; la.len() * 2];
-    for (chunk, pair) in out.chunks_exact_mut(4).zip(la.chunks_exact(2)) {
-        chunk[0] = pair[0];
-        chunk[1] = pair[0];
-        chunk[2] = pair[0];
-        chunk[3] = pair[1];
-    }
-    out
-}
-
-fn bits_to_bytes(mut bits: Vec<u8>) -> Vec<u8> {
-    for v in &mut bits {
-        *v = if *v != 0 { 255 } else { 0 };
-    }
-    bits
-}
+use crate::utils::convert::{self, Channels, Target};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ImageFormat {
@@ -241,7 +158,7 @@ impl Image {
     pub fn to_rgb8(&self) -> Vec<u8> {
         match &self.pixels {
             PixelData::RGB8(pixels) => pixels.to_vec(),
-            _ => self.pixels.clone().into_rgb8_bytes(),
+            other => other.to_rgb8_bytes(),
         }
     }
 
@@ -254,7 +171,7 @@ impl Image {
     pub fn to_rgba8(&self) -> Vec<u8> {
         match &self.pixels {
             PixelData::RGBA8(pixels) => pixels.to_vec(),
-            _ => self.pixels.clone().into_rgba8_bytes(),
+            other => other.to_rgba8_bytes(),
         }
     }
 }
@@ -360,7 +277,7 @@ impl ImageFrame {
     pub fn to_rgb8(&self) -> Vec<u8> {
         match &self.pixels {
             PixelData::RGB8(pixels) => pixels.to_vec(),
-            _ => self.pixels.clone().into_rgb8_bytes(),
+            other => other.to_rgb8_bytes(),
         }
     }
 
@@ -382,7 +299,7 @@ impl ImageFrame {
     pub fn to_rgba8(&self) -> Vec<u8> {
         match &self.pixels {
             PixelData::RGBA8(pixels) => pixels.to_vec(),
-            _ => self.pixels.clone().into_rgba8_bytes(),
+            other => other.to_rgba8_bytes(),
         }
     }
 }
@@ -455,22 +372,7 @@ impl PixelData {
     pub fn into_rgb8_bytes(self) -> Vec<u8> {
         match self {
             PixelData::RGB8(p) => p,
-            PixelData::RGBA8(p) => drop_transparency_channel(p),
-            PixelData::RGB16(p) => scale_u16_slice(&p),
-            PixelData::RGBA16(p) => drop_transparency_channel(scale_u16_slice(&p)),
-            PixelData::RGB32F(p) => scale_f32_slice(&p),
-            PixelData::RGBA32F(p) => drop_transparency_channel(scale_f32_slice(&p)),
-            PixelData::RGB64F(p) => scale_f64_slice(&p),
-            PixelData::RGBA64F(p) => drop_transparency_channel(scale_f64_slice(&p)),
-            PixelData::L1(p) => gray_to_rgb(&bits_to_bytes(p)),
-            PixelData::L8(p) => gray_to_rgb(&p),
-            PixelData::L16(p) => gray_to_rgb(&scale_u16_slice(&p)),
-            PixelData::LA8(p) => gray_alpha_to_rgb(&p),
-            PixelData::LA16(p) => gray_alpha_to_rgb(&scale_u16_slice(&p)),
-            PixelData::L32F(p) => gray_to_rgb(&scale_f32_slice(&p)),
-            PixelData::LA32F(p) => gray_alpha_to_rgb(&scale_f32_slice(&p)),
-            PixelData::L64F(p) => gray_to_rgb(&scale_f64_slice(&p)),
-            PixelData::LA64F(p) => gray_alpha_to_rgb(&scale_f64_slice(&p)),
+            other => other.to_rgb8_bytes(),
         }
     }
 
@@ -496,23 +398,88 @@ impl PixelData {
     /// byte vector directly without wrapping it in a [`PixelData`].
     pub fn into_rgba8_bytes(self) -> Vec<u8> {
         match self {
-            PixelData::RGB8(p) => add_transparency_channel(p),
             PixelData::RGBA8(p) => p,
-            PixelData::RGB16(p) => add_transparency_channel(scale_u16_slice(&p)),
-            PixelData::RGBA16(p) => scale_u16_slice(&p),
-            PixelData::RGB32F(p) => add_transparency_channel(scale_f32_slice(&p)),
-            PixelData::RGBA32F(p) => scale_f32_slice(&p),
-            PixelData::RGB64F(p) => add_transparency_channel(scale_f64_slice(&p)),
-            PixelData::RGBA64F(p) => scale_f64_slice(&p),
-            PixelData::L1(p) => gray_to_rgba(&bits_to_bytes(p)),
-            PixelData::L8(p) => gray_to_rgba(&p),
-            PixelData::L16(p) => gray_to_rgba(&scale_u16_slice(&p)),
-            PixelData::LA8(p) => gray_alpha_to_rgba(&p),
-            PixelData::LA16(p) => gray_alpha_to_rgba(&scale_u16_slice(&p)),
-            PixelData::L32F(p) => gray_to_rgba(&scale_f32_slice(&p)),
-            PixelData::LA32F(p) => gray_alpha_to_rgba(&scale_f32_slice(&p)),
-            PixelData::L64F(p) => gray_to_rgba(&scale_f64_slice(&p)),
-            PixelData::LA64F(p) => gray_alpha_to_rgba(&scale_f64_slice(&p)),
+            other => other.to_rgba8_bytes(),
+        }
+    }
+
+    /// Returns this pixel data converted to RGB8 bytes, without consuming it.
+    ///
+    /// Same conversion rules as [`into_rgb8`](Self::into_rgb8). Unlike
+    /// [`into_rgb8_bytes`](Self::into_rgb8_bytes), the source is left intact, so
+    /// `RGB8` input is copied rather than moved.
+    pub fn to_rgb8_bytes(&self) -> Vec<u8> {
+        let mut out = vec![0u8; self.pixel_count() * 3];
+        self.write_rgb8(&mut out);
+        out
+    }
+
+    /// Returns this pixel data converted to RGBA8 bytes, without consuming it.
+    ///
+    /// Same conversion rules as [`into_rgba8`](Self::into_rgba8). Unlike
+    /// [`into_rgba8_bytes`](Self::into_rgba8_bytes), the source is left intact, so
+    /// `RGBA8` input is copied rather than moved.
+    pub fn to_rgba8_bytes(&self) -> Vec<u8> {
+        let mut out = vec![0u8; self.pixel_count() * 4];
+        self.write_rgba8(&mut out);
+        out
+    }
+
+    /// Converts this pixel data to RGB8 and writes it into `dst`.
+    ///
+    /// Same conversion rules as [`into_rgb8`](Self::into_rgb8).
+    ///
+    /// `dst` should be `3 * pixel_count()` bytes long. If it is shorter, only the
+    /// pixels that fit completely are written. If it is longer, the bytes past the
+    /// last pixel are left untouched.
+    pub fn write_rgb8(&self, dst: &mut [u8]) {
+        convert::write_8bit(self, dst, Target { channels: Channels::Rgb, premultiply: false });
+    }
+
+    /// Converts this pixel data to RGBA8 and writes it into `dst`.
+    ///
+    /// Same conversion rules as [`into_rgba8`](Self::into_rgba8).
+    ///
+    /// `dst` should be `4 * pixel_count()` bytes long. If it is shorter, only the
+    /// pixels that fit completely are written; if it is longer, the bytes past the
+    /// last pixel are left untouched.
+    pub fn write_rgba8(&self, dst: &mut [u8]) {
+        convert::write_8bit(self, dst, Target { channels: Channels::Rgba, premultiply: false });
+    }
+
+    /// Converts this pixel data to RGBA8 with premultiplied alpha and writes it into `dst`.
+    ///
+    /// Same as [`write_rgba8`](Self::write_rgba8), except that for formats with an
+    /// alpha channel each color value is multiplied by its alpha.
+    /// Formats without alpha produce the same output as [`write_rgba8`](Self::write_rgba8).
+    ///
+    /// The length rules for `dst` are the same as for [`write_rgba8`](Self::write_rgba8).
+    pub fn write_rgba8_premultiplied(&self, dst: &mut [u8]) {
+        convert::write_8bit(self, dst, Target { channels: Channels::Rgba, premultiply: true });
+    }
+
+    /// Returns the number of whole pixels in this pixel data.
+    pub fn pixel_count(&self) -> usize {
+        self.sample_count() / self.components_per_pixel()
+    }
+
+    fn sample_count(&self) -> usize {
+        match self {
+            PixelData::RGB8(p) | PixelData::RGBA8(p) | PixelData::L1(p) | PixelData::L8(p) | PixelData::LA8(p) => {
+                p.len()
+            }
+            PixelData::RGB16(p) | PixelData::RGBA16(p) | PixelData::L16(p) | PixelData::LA16(p) => p.len(),
+            PixelData::RGB32F(p) | PixelData::RGBA32F(p) | PixelData::L32F(p) | PixelData::LA32F(p) => p.len(),
+            PixelData::RGB64F(p) | PixelData::RGBA64F(p) | PixelData::L64F(p) | PixelData::LA64F(p) => p.len(),
+        }
+    }
+
+    fn components_per_pixel(&self) -> usize {
+        match self {
+            PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) | PixelData::RGB64F(_) => 3,
+            PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::RGBA64F(_) => 4,
+            PixelData::L1(_) | PixelData::L8(_) | PixelData::L16(_) | PixelData::L32F(_) | PixelData::L64F(_) => 1,
+            PixelData::LA8(_) | PixelData::LA16(_) | PixelData::LA32F(_) | PixelData::LA64F(_) => 2,
         }
     }
 
@@ -619,12 +586,7 @@ impl PixelData {
     // Used as a last resort to correct the number of pixels in the image
     // in case something went wrong during decoding
     pub(crate) fn correct_pixels(&mut self, width: u32, height: u32) {
-        let components_per_pixel = match self {
-            PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) | PixelData::RGB64F(_) => 3,
-            PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::RGBA64F(_) => 4,
-            PixelData::L1(_) | PixelData::L8(_) | PixelData::L16(_) | PixelData::L32F(_) | PixelData::L64F(_) => 1,
-            PixelData::LA8(_) | PixelData::LA16(_) | PixelData::LA32F(_) | PixelData::LA64F(_) => 2,
-        };
+        let components_per_pixel = self.components_per_pixel();
 
         let Some(expected_len) = u64::from(width)
             .checked_mul(u64::from(height))

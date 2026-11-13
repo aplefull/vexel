@@ -62,7 +62,29 @@ pub fn rgba_to_rgb(src: &[u8], dst: &mut [u8]) {
     rgba_to_rgb_scalar(src, dst);
 }
 
+pub fn premultiply_rgba(pixels: &mut [u8]) {
+    let len = pixels.len() / 4 * 4;
+    let pixels = &mut pixels[..len];
+
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        return unsafe { premultiply_rgba_avx2(pixels) };
+    }
+
+    premultiply_rgba_scalar(pixels);
+}
+
 // ─── Scalar ───────────────────────────────────────────────────
+
+fn premultiply_rgba_scalar(pixels: &mut [u8]) {
+    for p in pixels.chunks_exact_mut(4) {
+        let alpha = u16::from(p[3]);
+        for c in &mut p[..3] {
+            let t = u16::from(*c) * alpha + 128;
+            *c = ((t + (t >> 8)) >> 8) as u8;
+        }
+    }
+}
 
 fn rgb_to_rgba_scalar(src: &[u8], dst: &mut [u8]) {
     let mut out = 0;
@@ -275,6 +297,35 @@ unsafe fn scale_f32_to_u8_avx2(src: &[f32], dst: &mut [u8]) {
     }
 
     scale_f32_to_u8_scalar(&src[i..], &mut dst[i..]);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn premultiply_rgba_avx2(pixels: &mut [u8]) {
+    use std::arch::x86_64::*;
+
+    let zero = _mm256_setzero_si256();
+    let max = _mm256_set1_epi16(255);
+    let round = _mm256_set1_epi16(128);
+
+    let scale = |c: __m256i| {
+        let alpha = _mm256_shufflehi_epi16(_mm256_shufflelo_epi16(c, 0xff), 0xff);
+        let factor = _mm256_blend_epi16(alpha, max, 0x88);
+        let t = _mm256_add_epi16(_mm256_mullo_epi16(c, factor), round);
+        _mm256_srli_epi16(_mm256_add_epi16(t, _mm256_srli_epi16(t, 8)), 8)
+    };
+
+    let mut i = 0;
+    while i + 32 <= pixels.len() {
+        let ptr = pixels.as_mut_ptr().add(i) as *mut __m256i;
+        let v = _mm256_loadu_si256(ptr);
+        let lo = scale(_mm256_unpacklo_epi8(v, zero));
+        let hi = scale(_mm256_unpackhi_epi8(v, zero));
+        _mm256_storeu_si256(ptr, _mm256_packus_epi16(lo, hi));
+        i += 32;
+    }
+
+    premultiply_rgba_scalar(&mut pixels[i..]);
 }
 
 // ─── WASM SIMD128 ─────────────────────────────────────────────

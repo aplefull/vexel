@@ -1,5 +1,6 @@
 pub mod bitreader;
 pub mod channel_simd;
+pub(crate) mod convert;
 pub mod deflate;
 pub mod error;
 pub mod exif;

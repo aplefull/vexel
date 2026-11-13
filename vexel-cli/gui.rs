@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::ViewportBuilder;
+use rayon::prelude::*;
 use vexel::{Frames, Image, ImageFrame, PixelData, Vexel};
 
 struct Page {
@@ -262,6 +263,12 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
 
 const FALLBACK_MAX_TEXTURE_SIDE: usize = 2048;
 
+#[derive(Clone, Copy, Default)]
+struct DecodeTimes {
+    image: Duration,
+    thumbnails: Duration,
+}
+
 struct Thumbnail {
     image: Arc<egui::ColorImage>,
     size: [usize; 2],
@@ -279,6 +286,7 @@ struct App {
     thumbnails: Vec<Thumbnail>,
     viewing_thumbnail: Option<usize>,
     error_message: Option<String>,
+    decode_times: Option<DecodeTimes>,
     panel_open: bool,
     pixelated: bool,
     checkered_bg: bool,
@@ -291,7 +299,6 @@ impl App {
     fn frame_to_texture(frame: ImageFrame, normalize: bool, max_side: usize) -> Arc<egui::ColorImage> {
         let src_width = frame.width() as usize;
         let src_height = frame.height() as usize;
-        let has_alpha = frame.has_alpha();
 
         let mut pixels = frame.into_pixels();
         if normalize {
@@ -302,40 +309,30 @@ impl App {
             return Arc::new(egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT));
         }
 
-        let mut buffer = pixels.into_rgba8_bytes();
-        buffer.resize(src_width.saturating_mul(src_height).saturating_mul(4), 0);
+        let mut colors: Vec<egui::Color32> = bytemuck::zeroed_vec(src_width * src_height);
+        pixels.write_rgba8_premultiplied(bytemuck::cast_slice_mut(&mut colors));
+        drop(pixels);
 
         let scale = (max_side as f64 / src_width as f64).min(max_side as f64 / src_height as f64).min(1.0);
+        if scale >= 1.0 {
+            return Arc::new(egui::ColorImage::new([src_width, src_height], colors));
+        }
 
-        let (dst_width, dst_height, final_buffer) = if scale < 1.0 {
-            let dst_w = ((src_width as f64 * scale) as usize).clamp(1, max_side);
-            let dst_h = ((src_height as f64 * scale) as usize).clamp(1, max_side);
-            let mut dst = vec![0u8; dst_w * dst_h * 4];
+        let dst_width = ((src_width as f64 * scale) as usize).clamp(1, max_side);
+        let dst_height = ((src_height as f64 * scale) as usize).clamp(1, max_side);
+        let source_index = |d: usize, limit: usize| (((d as f64 + 0.5) / scale) as usize).min(limit - 1);
+        let columns: Vec<usize> = (0..dst_width).map(|dx| source_index(dx, src_width)).collect();
 
-            for dy in 0..dst_h {
-                for dx in 0..dst_w {
-                    let sx = ((dx as f64 + 0.5) / scale) as usize;
-                    let sy = ((dy as f64 + 0.5) / scale) as usize;
-                    let sx = sx.min(src_width - 1);
-                    let sy = sy.min(src_height - 1);
-                    let src_idx = (sy * src_width + sx) * 4;
-                    let dst_idx = (dy * dst_w + dx) * 4;
-                    dst[dst_idx..dst_idx + 4].copy_from_slice(&buffer[src_idx..src_idx + 4]);
-                }
+        let mut scaled: Vec<egui::Color32> = bytemuck::zeroed_vec(dst_width * dst_height);
+        scaled.par_chunks_mut(dst_width).enumerate().for_each(|(dy, row)| {
+            let sy = source_index(dy, src_height);
+            let src_row = &colors[sy * src_width..(sy + 1) * src_width];
+            for (dst, &sx) in row.iter_mut().zip(&columns) {
+                *dst = src_row[sx];
             }
+        });
 
-            (dst_w, dst_h, dst)
-        } else {
-            (src_width, src_height, buffer)
-        };
-
-        let color_image = if has_alpha {
-            egui::ColorImage::from_rgba_unmultiplied([dst_width, dst_height], &final_buffer)
-        } else {
-            egui::ColorImage::from_rgba_premultiplied([dst_width, dst_height], &final_buffer)
-        };
-
-        Arc::new(color_image)
+        Arc::new(egui::ColorImage::new([dst_width, dst_height], scaled))
     }
 
     fn frame_delay(delay: u32) -> u32 {
@@ -353,13 +350,17 @@ impl App {
         }
     }
 
-    fn frames_to_page(frames: Frames, normalize: bool, max_side: usize) -> Page {
+    fn frames_to_page(mut frames: Frames, normalize: bool, max_side: usize, decode_time: &mut Duration) -> Page {
         let mut textures = Vec::new();
         let mut delays = Vec::new();
         let mut size = [0usize, 0usize];
 
-        for frame in frames {
-            let Ok(frame) = frame else { break };
+        loop {
+            let start = Instant::now();
+            let next = frames.next();
+            *decode_time += start.elapsed();
+
+            let Some(Ok(frame)) = next else { break };
 
             if textures.is_empty() {
                 size = [frame.width() as usize, frame.height() as usize];
@@ -394,6 +395,7 @@ impl App {
             thumbnails: Vec::new(),
             viewing_thumbnail: None,
             error_message: None,
+            decode_times: None,
             panel_open: true,
             pixelated: false,
             checkered_bg: true,
@@ -412,29 +414,39 @@ impl App {
         normalize: bool,
         limits: vexel::Limits,
         max_side: usize,
-    ) -> (Result<Vec<Page>, String>, Vec<Thumbnail>) {
+    ) -> (Result<Vec<Page>, String>, Vec<Thumbnail>, DecodeTimes) {
         let mut decoder = match Vexel::open(path) {
             Ok(decoder) => decoder,
-            Err(e) => return (Err(format!("{}: {}", path.display(), e)), Vec::new()),
+            Err(e) => return (Err(format!("{}: {}", path.display(), e)), Vec::new(), DecodeTimes::default()),
         };
         decoder.set_limits(limits);
 
-        let thumbnails = decoder
-            .decode_thumbnails()
-            .unwrap_or_default()
+        let thumbnails_start = Instant::now();
+        let thumbnail_images = decoder.decode_thumbnails().unwrap_or_default();
+        let thumbnail_decode_time = thumbnails_start.elapsed();
+
+        let thumbnails = thumbnail_images
             .into_iter()
             .filter_map(|image| Self::thumbnail_from_image(image, normalize, max_side))
             .collect();
 
+        let start = Instant::now();
+        let mut decode_time = Duration::ZERO;
+
         let result = if decoder.supports_pages() {
-            decoder.decode_pages().map_err(|e| format!("{}: {}", path.display(), e)).map(|images| {
+            let images = decoder.decode_pages();
+            decode_time = start.elapsed();
+
+            images.map_err(|e| format!("{}: {}", path.display(), e)).map(|images| {
                 images.into_iter().map(|image| Self::image_to_page(image, normalize, max_side)).collect::<Vec<Page>>()
             })
         } else {
-            decoder
-                .decode_frames()
+            let frames = decoder.decode_frames();
+            decode_time += start.elapsed();
+
+            frames
                 .map_err(|e| format!("{}: {}", path.display(), e))
-                .map(|frames| vec![Self::frames_to_page(frames, normalize, max_side)])
+                .map(|frames| vec![Self::frames_to_page(frames, normalize, max_side, &mut decode_time)])
         };
 
         let result = result.and_then(|pages| {
@@ -447,7 +459,7 @@ impl App {
             }
         });
 
-        (result, thumbnails)
+        (result, thumbnails, DecodeTimes { image: decode_time, thumbnails: thumbnail_decode_time })
     }
 
     fn load_current_file(&mut self) -> bool {
@@ -455,7 +467,7 @@ impl App {
             return false;
         }
 
-        let (result, thumbnails) = Self::load_image_from_path(
+        let (result, thumbnails, decode_times) = Self::load_image_from_path(
             &self.files[self.current_file_index],
             self.normalize,
             self.limits.clone(),
@@ -464,6 +476,7 @@ impl App {
 
         self.thumbnails = thumbnails;
         self.viewing_thumbnail = None;
+        self.decode_times = Some(decode_times);
 
         match result {
             Ok(pages) => {
@@ -488,6 +501,20 @@ impl App {
                 false
             }
         }
+    }
+
+    fn decode_time_text(&self) -> Option<String> {
+        let times = self.decode_times?;
+
+        let (time, count, unit) = match self.viewing_thumbnail {
+            Some(_) => (times.thumbnails, self.thumbnails.len(), "thumbnails"),
+            None if self.pages.is_empty() => return None,
+            None if self.pages.len() > 1 => (times.image, self.pages.len(), "pages"),
+            None => (times.image, self.page().map_or(0, |page| page.frames.len()), "frames"),
+        };
+
+        let time = format_duration(time);
+        Some(if count > 1 { format!("{time} (all {count} {unit})") } else { time })
     }
 
     fn page(&self) -> Option<&Page> {
@@ -709,6 +736,10 @@ impl eframe::App for App {
                 let frame_count = self.page().map(|page| page.frames.len()).unwrap_or(0);
                 if frame_count > 1 {
                     add_row(ui, "FRAMES", &frame_count.to_string());
+                }
+
+                if let Some(text) = self.decode_time_text() {
+                    add_row(ui, "DECODE TIME", &text);
                 }
 
                 let add_separator = |ui: &mut egui::Ui| {
@@ -958,6 +989,16 @@ impl eframe::App for App {
                 );
             }
         });
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let millis = duration.as_secs_f64() * 1000.0;
+
+    if millis < 1000.0 {
+        format!("{millis:.1} ms")
+    } else {
+        format!("{:.2} s", millis / 1000.0)
     }
 }
 

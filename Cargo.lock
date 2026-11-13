@@ -3849,6 +3849,7 @@ dependencies = [
 name = "vexel-cli"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "clap",
  "eframe",
  "egui",
@@ -3856,6 +3857,7 @@ dependencies = [
  "glob",
  "jpegxl-sys",
  "libc",
+ "rayon",
  "vexel",
  "webp",
  "winres",
