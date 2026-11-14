@@ -59,16 +59,17 @@ pub fn decode_rle_frame(
 
     for seg_index in 0..num_segments.min(expected_segments) {
         let start = read_u32(seg_index + 1) as usize;
-        let end = if seg_index + 1 < num_segments {
-            (read_u32(seg_index + 2) as usize).clamp(start, data.len())
-        } else {
-            data.len()
-        };
 
         if start >= data.len() || start < 64 {
             log_warn!("DICOM RLE: segment {} offset {} out of bounds", seg_index, start);
             continue;
         }
+
+        let end = if seg_index + 1 < num_segments {
+            (read_u32(seg_index + 2) as usize).clamp(start, data.len())
+        } else {
+            data.len()
+        };
 
         segment.clear();
         unpack_segment(&data[start..end], &mut segment, pixels_per_frame);
