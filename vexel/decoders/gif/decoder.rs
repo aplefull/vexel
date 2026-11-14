@@ -1,14 +1,14 @@
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use super::compose_simd::{compose_frame, Palette};
+use super::compose::{compose_first, compose_layer, Layer, Palette, Placement, Update};
 use super::info::{
     GifApplicationExtension, GifApplicationKind, GifColorTable, GifComment, GifGraphicsControl, GifHeader,
     GifImageData, GifImageDescriptor, GifInfo, GifPlainText, GifSection, GifUnknownExtension,
 };
-use super::lzw::{decompress_lzw, LinearSink, WindowSink};
+use super::lzw::{decode_frame_indices, gather_sub_blocks, FrameIndices};
+use super::source::GifSource;
 use super::types::{DisposalMethod, GifDecoder, GifFrameInfo, GraphicsControlExtension};
-use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::frames::{reserve_canvas, FrameExtent, FramePrefetch, FrameSource, Frames, OutputBudget};
 use crate::utils::icc::ICCProfile;
@@ -38,7 +38,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             loop_count: None,
             collect_frame_data: true,
             frame_index: 0,
-            reader: BitReader::new(reader),
+            reader: GifSource::new(reader),
         }
     }
 
@@ -50,11 +50,13 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         if self.info.is_none() {
             let saved_limits = self.limits.clone();
             self.collect_frame_data = false;
+            self.reader.set_retain(false);
             if let Err(e) = self.read_structure(FrameExtent::All) {
                 log_warn!("Failed to read GIF structure: {}", e);
                 self.finish_info();
             }
             self.collect_frame_data = true;
+            self.reader.set_retain(true);
             self.frames.clear();
             self.limits = saved_limits;
         }
@@ -63,7 +65,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     }
 
     fn push_section(&mut self, start: u64, section: GifSection) {
-        let end = self.reader.stream_position().unwrap_or(start);
+        let end = self.reader.stream_position();
         self.collected.push(start, Some(end.saturating_sub(start)), section);
     }
 
@@ -105,7 +107,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
     }
 
     fn read_header(&mut self) -> VexelResult<()> {
-        let start_offset = self.reader.stream_position().unwrap_or(0);
+        let start_offset = self.reader.stream_position();
 
         let mut buf = [0u8; 10];
         let mut n = 0;
@@ -136,8 +138,8 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             String::from_utf8_lossy(buf.get(offset + (sig_len - 3)..offset + sig_len).unwrap_or(b"87a")).to_string();
         self.reader.seek(std::io::SeekFrom::Start((offset + sig_len) as u64))?;
 
-        self.canvas_width = self.reader.read_u16()?.swap_bytes() as u32;
-        self.canvas_height = self.reader.read_u16()?.swap_bytes() as u32;
+        self.canvas_width = self.reader.read_u16()? as u32;
+        self.canvas_height = self.reader.read_u16()? as u32;
 
         let packed_fields = self.reader.read_u8()?;
 
@@ -200,7 +202,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             return;
         }
 
-        let start_offset = self.reader.stream_position().unwrap_or(0);
+        let start_offset = self.reader.stream_position();
         let (table, declared_entries) = match self.read_color_table(self.size_of_global_color_table) {
             Ok(result) => result,
             Err(e) => {
@@ -307,21 +309,15 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         Ok(())
     }
 
-    fn skip_sub_blocks(reader: &mut BitReader<R>) -> VexelResult<()> {
+    fn skip_sub_blocks(reader: &mut GifSource<R>) -> VexelResult<()> {
         loop {
             let block_size = match reader.read_u8() {
                 Ok(size) => size as usize,
                 Err(_) => return Ok(()),
             };
 
-            if block_size == 0 {
+            if block_size == 0 || reader.skip(block_size).is_err() {
                 return Ok(());
-            }
-
-            for _ in 0..block_size {
-                if reader.read_u8().is_err() {
-                    return Ok(());
-                }
             }
         }
     }
@@ -397,7 +393,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let mut current_gce: Option<(u64, GraphicsControlExtension)> = None;
 
         loop {
-            let block_start = self.reader.stream_position().unwrap_or(0);
+            let block_start = self.reader.stream_position();
             let block_type = self.reader.read_u8()?;
 
             match block_type {
@@ -423,7 +419,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                             self.read_application_extension(block_start)?;
                         }
                         0x01 => {
-                            let resume_offset = self.reader.stream_position().unwrap_or(block_start);
+                            let resume_offset = self.reader.stream_position();
                             if let Err(e) = self.read_plain_text_extension(block_start) {
                                 log_warn!("Failed to read plain text extension, skipping: {:?}", e);
                                 self.reader.seek(SeekFrom::Start(resume_offset))?;
@@ -440,7 +436,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                 // End of image (0x3B)
                 0x3B => {
                     self.push_section(block_start, GifSection::Trailer);
-                    let trailing_start = self.reader.stream_position().unwrap_or(0);
+                    let trailing_start = self.reader.stream_position();
                     let trailing = self.reader.bytes_left().unwrap_or(0);
                     if trailing > 0 {
                         self.collected.push(trailing_start, Some(trailing), GifSection::TrailingData);
@@ -458,10 +454,10 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let frame_index = self.frame_index;
         self.frame_index += 1;
 
-        let left = self.reader.read_u16()?.swap_bytes() as u32;
-        let top = self.reader.read_u16()?.swap_bytes() as u32;
-        let width = self.reader.read_u16()?.swap_bytes() as u32;
-        let height = self.reader.read_u16()?.swap_bytes() as u32;
+        let left = self.reader.read_u16()? as u32;
+        let top = self.reader.read_u16()? as u32;
+        let width = self.reader.read_u16()? as u32;
+        let height = self.reader.read_u16()? as u32;
 
         let packed_fields = self.reader.read_u8()?;
         let local_color_table_flag = (packed_fields & 0b10000000) != 0;
@@ -486,7 +482,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
         let mut local_color_table = Vec::new();
         if local_color_table_flag {
-            let lct_offset = self.reader.stream_position().unwrap_or(0);
+            let lct_offset = self.reader.stream_position();
             let (table, declared_entries) = match self.read_color_table(size_of_local_color_table) {
                 Ok(result) => result,
                 Err(e) => {
@@ -502,10 +498,12 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             );
         }
 
-        let image_data_offset = self.reader.stream_position().unwrap_or(0);
+        let image_data_offset = self.reader.stream_position();
         let lzw_minimum_code_size = self.reader.read_u8()?;
 
-        let mut data = Vec::new();
+        let chain_start = self.reader.offset();
+        let mut chain_end = chain_start;
+        let mut payload = 0usize;
         let mut data_length: u64 = 0;
         let mut sub_blocks: u32 = 0;
         loop {
@@ -522,8 +520,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             data_length += block_size as u64;
 
             if !self.collect_frame_data {
-                let mut scratch = [0u8; 255];
-                if self.reader.read_exact(&mut scratch[..block_size]).is_err() {
+                if self.reader.skip(block_size).is_err() {
                     break;
                 }
                 continue;
@@ -531,19 +528,16 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
 
             if let Err(e) = self.limits.reserve_usize(block_size) {
                 log_warn!("Frame image data too large, truncating: {:?}", e);
-                for _ in 0..block_size {
-                    self.reader.read_u8().ok();
-                }
+                self.reader.skip(block_size).ok();
                 break;
             }
 
-            let start = data.len();
-            data.resize(start + block_size, 0);
-            if let Err(e) = self.reader.read_exact(&mut data[start..]) {
+            if let Err(e) = self.reader.skip(block_size) {
                 log_warn!("Error reading image sub-block data: {:?}", e);
-                data.truncate(start);
                 break;
             }
+            chain_end = self.reader.offset();
+            payload += block_size;
         }
 
         self.push_section(
@@ -558,15 +552,13 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             height,
             local_color_table_flag,
             interlace_flag,
-            sort_flag,
-            size_of_local_color_table,
             local_color_table,
             lzw_minimum_code_size,
-            user_input: gce.as_ref().map(|gce| gce.user_input).unwrap_or(false),
             transparent_index: gce.as_ref().filter(|gce| gce.transparency).map(|gce| gce.transparent_color_index),
             disposal_method: gce.as_ref().map(|gce| gce.disposal_method).unwrap_or(DisposalMethod::None),
             delay: gce.map(|gce| gce.delay).unwrap_or(100),
-            data,
+            data: chain_start..chain_end,
+            payload,
         };
 
         if self.frames.is_empty() {
@@ -605,7 +597,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         let user_input = (packed & 0x02) != 0;
         let transparency = (packed & 0x01) != 0;
 
-        let delay_cs = self.reader.read_u16()?.swap_bytes();
+        let delay_cs = self.reader.read_u16()?;
         let delay = u32::from(delay_cs) * 10;
 
         let transparent_color_index = self.reader.read_u8()?;
@@ -626,7 +618,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             }),
         );
 
-        Ok(GraphicsControlExtension { disposal_method, user_input, transparency, delay, transparent_color_index })
+        Ok(GraphicsControlExtension { disposal_method, transparency, delay, transparent_color_index })
     }
 
     fn read_structure(&mut self, extent: FrameExtent) -> VexelResult<()> {
@@ -687,19 +679,29 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.read_structure(FrameExtent::First)?;
         self.resolve_dimensions()?;
 
-        let indices = match self.frames.first() {
-            Some(frame) => decode_frame_indices(frame, self.width, self.height),
-            None => {
-                let canvas_size = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
-                self.limits.reserve_usize(canvas_size)?;
-                return Ok(Image::from_pixels(self.width, self.height, PixelData::RGBA8(vec![0u8; canvas_size])));
-            }
+        let Some(frame) = self.frames.first() else {
+            let canvas_size = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
+            self.limits.reserve_usize(canvas_size)?;
+            return Ok(Image::from_pixels(self.width, self.height, PixelData::RGBA8(vec![0u8; canvas_size])));
         };
 
-        let mut composer = GifComposer::new(self.width, self.height, false, &mut self.limits)?;
-        let frame = composer.compose(&self.frames[0], &indices, &self.global_color_table);
+        let indices = frame_indices(frame, self.reader.data(), self.width, self.height, Vec::new());
+        let palette = Palette::new(color_table(frame, &self.global_color_table), frame.transparent_index);
+        let layer = Layer {
+            placement: placement(frame, self.width, self.height),
+            indices: &indices,
+            palette: &palette,
+            update: Update::Keep,
+        };
 
-        Ok(Image::from_frame(frame))
+        self.limits.check_dimensions(self.width, self.height)?;
+        let size = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
+        self.limits.reserve_usize(size)?;
+
+        let mut pixels = Vec::with_capacity(size);
+        compose_first(&layer, &mut pixels, self.width as usize, self.height as usize);
+
+        Ok(Image::from_pixels(self.width, self.height, PixelData::RGBA8(pixels)))
     }
 
     pub fn decode_frames(&mut self) -> VexelResult<Frames> {
@@ -709,31 +711,17 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.read_structure(FrameExtent::All)?;
         self.resolve_dimensions()?;
 
-        let needs_scratch = self.frames.iter().any(|f| matches!(f.disposal_method, DisposalMethod::Previous));
-        let composer = GifComposer::new(self.width, self.height, needs_scratch, &mut self.limits)?;
-        let frames = std::mem::take(&mut self.frames);
+        let canvas = reserve_canvas(&mut self.limits, self.width, self.height)?;
+        let shared = Shared {
+            frames: std::mem::take(&mut self.frames),
+            source: self.reader.take_data(),
+            width: self.width,
+            height: self.height,
+            buffers: Mutex::new(Vec::new()),
+        };
 
-        Ok(Frames::new(GifFrames::new(frames, self.global_color_table.clone(), composer, max_alloc)))
+        Ok(Frames::new(GifFrames::new(shared, self.global_color_table.clone(), canvas, max_alloc)))
     }
-}
-
-fn decode_frame_indices(frame: &GifFrameInfo, canvas_width: u32, canvas_height: u32) -> Vec<u8> {
-    let (visible_width, visible_height) = visible_size(frame, canvas_width, canvas_height);
-    if visible_width == 0 || visible_height == 0 {
-        return Vec::new();
-    }
-
-    let frame_width = frame.width as usize;
-    if !frame.interlace_flag && frame_width == visible_width {
-        let mut sink = LinearSink::new(visible_width * visible_height);
-        decompress_lzw(frame, &mut sink);
-        return sink.out;
-    }
-
-    let mut sink =
-        WindowSink::new(frame_width, frame.height as usize, visible_width, visible_height, frame.interlace_flag);
-    decompress_lzw(frame, &mut sink);
-    sink.finish()
 }
 
 fn visible_size(frame: &GifFrameInfo, canvas_width: u32, canvas_height: u32) -> (usize, usize) {
@@ -742,124 +730,101 @@ fn visible_size(frame: &GifFrameInfo, canvas_width: u32, canvas_height: u32) -> 
     (width as usize, height as usize)
 }
 
-struct GifComposer {
-    width: u32,
-    height: u32,
-    canvas: Vec<u8>,
-    scratch: Vec<u8>,
-    palette: Palette,
-    palette_source: Vec<u8>,
+fn placement(frame: &GifFrameInfo, canvas_width: u32, canvas_height: u32) -> Placement {
+    let (width, height) = visible_size(frame, canvas_width, canvas_height);
+    if width == 0 || height == 0 {
+        return Placement { left: 0, top: 0, width: 0, height: 0 };
+    }
+    Placement { left: frame.left as usize, top: frame.top as usize, width, height }
 }
 
-impl GifComposer {
-    fn new(width: u32, height: u32, needs_scratch: bool, limits: &mut Limits) -> VexelResult<GifComposer> {
-        let canvas = reserve_canvas(limits, width, height)?;
+fn color_table<'a>(frame: &'a GifFrameInfo, global_color_table: &'a [u8]) -> &'a [u8] {
+    if frame.local_color_table_flag {
+        frame.local_color_table.as_slice()
+    } else {
+        global_color_table
+    }
+}
 
-        let scratch = if needs_scratch { reserve_canvas(limits, width, height)? } else { Vec::new() };
-
-        Ok(GifComposer { width, height, canvas, scratch, palette: Palette::new(&[]), palette_source: Vec::new() })
+fn frame_indices(
+    frame: &GifFrameInfo,
+    source: &[u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    buffer: Vec<u8>,
+) -> FrameIndices {
+    let (visible_width, visible_height) = visible_size(frame, canvas_width, canvas_height);
+    if visible_width == 0 || visible_height == 0 {
+        return FrameIndices::empty();
     }
 
-    fn sync_palette(&mut self, color_table: &[u8]) {
-        if self.palette_source != color_table {
-            self.palette = Palette::new(color_table);
-            self.palette_source.clear();
-            self.palette_source.extend_from_slice(color_table);
-        }
+    let data = gather_sub_blocks(source, frame.data.clone(), frame.payload);
+    decode_frame_indices(
+        frame.lzw_minimum_code_size,
+        data,
+        frame.width as usize,
+        frame.height as usize,
+        visible_width,
+        visible_height,
+        frame.interlace_flag,
+        buffer,
+    )
+}
+
+const POOLED_BUFFERS: usize = 128;
+
+struct Shared {
+    frames: Vec<GifFrameInfo>,
+    source: Vec<u8>,
+    width: u32,
+    height: u32,
+    buffers: Mutex<Vec<Vec<u8>>>,
+}
+
+impl Shared {
+    fn decode(&self, index: usize) -> FrameIndices {
+        let buffer = self.buffers.lock().ok().and_then(|mut buffers| buffers.pop()).unwrap_or_default();
+        frame_indices(&self.frames[index], &self.source, self.width, self.height, buffer)
     }
 
-    fn compose(&mut self, frame: &GifFrameInfo, indices: &[u8], global_color_table: &[u8]) -> ImageFrame {
-        if matches!(frame.disposal_method, DisposalMethod::Previous) && !self.scratch.is_empty() {
-            self.scratch.copy_from_slice(&self.canvas);
-        }
-
-        let color_table =
-            if frame.local_color_table_flag { frame.local_color_table.as_slice() } else { global_color_table };
-        self.sync_palette(color_table);
-
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let (visible_width, visible_height) = visible_size(frame, self.width, self.height);
-
-        compose_frame(
-            indices,
-            &self.palette,
-            frame.transparent_index,
-            frame.left as usize,
-            frame.top as usize,
-            visible_width,
-            visible_height,
-            width,
-            height,
-            &mut self.canvas,
-        );
-
-        let composed = ImageFrame::new(self.width, self.height, PixelData::RGBA8(self.canvas.clone()), frame.delay);
-
-        self.dispose(frame);
-
-        composed
-    }
-
-    fn dispose(&mut self, frame: &GifFrameInfo) {
-        match frame.disposal_method {
-            DisposalMethod::None => {}
-            DisposalMethod::Background => {
-                let clamped_h = frame.height.min(self.height.saturating_sub(frame.top));
-                let clamped_w = frame.width.min(self.width.saturating_sub(frame.left));
-                for y in 0..clamped_h {
-                    let canvas_y = frame.top + y;
-                    let row_base = (canvas_y * self.width + frame.left) as usize * 4;
-                    let row_end = row_base + clamped_w as usize * 4;
-                    if row_end <= self.canvas.len() {
-                        self.canvas[row_base..row_end].fill(0);
-                    }
-                }
-            }
-            DisposalMethod::Previous => {
-                if !self.scratch.is_empty() {
-                    self.canvas.copy_from_slice(&self.scratch);
-                }
+    fn recycle(&self, indices: FrameIndices) {
+        if let Ok(mut buffers) = self.buffers.lock() {
+            if buffers.len() < POOLED_BUFFERS {
+                buffers.push(indices.into_buffer());
             }
         }
     }
 }
 
 pub(crate) struct GifFrames {
-    frames: Arc<Vec<GifFrameInfo>>,
+    shared: Arc<Shared>,
     global_color_table: Vec<u8>,
-    composer: GifComposer,
-    prefetch: FramePrefetch<Vec<u8>>,
+    canvas: Vec<u8>,
+    prefetch: FramePrefetch<FrameIndices>,
     next_index: usize,
     exhausted: bool,
     budget: OutputBudget,
 }
 
 impl GifFrames {
-    fn new(
-        frames: Vec<GifFrameInfo>,
-        global_color_table: Vec<u8>,
-        composer: GifComposer,
-        max_alloc: Option<u64>,
-    ) -> GifFrames {
-        let compressed_bytes = frames.iter().map(|frame| frame.data.len() as u64).fold(0u64, u64::saturating_add);
+    fn new(shared: Shared, global_color_table: Vec<u8>, canvas: Vec<u8>, max_alloc: Option<u64>) -> GifFrames {
+        let compressed_bytes = shared.frames.iter().map(|frame| frame.payload as u64).fold(0u64, u64::saturating_add);
         let budget = OutputBudget::new(max_alloc, compressed_bytes);
 
-        let (width, height) = (composer.width, composer.height);
-        let costs = frames
+        let costs = shared
+            .frames
             .iter()
             .map(|frame| {
-                let (visible_width, visible_height) = visible_size(frame, width, height);
+                let (visible_width, visible_height) = visible_size(frame, shared.width, shared.height);
                 visible_width.saturating_mul(visible_height)
             })
             .collect();
 
-        let frames = Arc::new(frames);
-        let shared = frames.clone();
-        let prefetch =
-            FramePrefetch::new(costs, true, move |index| decode_frame_indices(&shared[index], width, height));
+        let shared = Arc::new(shared);
+        let worker = shared.clone();
+        let prefetch = FramePrefetch::new(costs, true, move |index| worker.decode(index));
 
-        GifFrames { frames, global_color_table, composer, prefetch, next_index: 0, exhausted: false, budget }
+        GifFrames { shared, global_color_table, canvas, prefetch, next_index: 0, exhausted: false, budget }
     }
 }
 
@@ -886,17 +851,34 @@ impl FrameSource for GifFrames {
             }
         };
 
-        let frame = &self.frames[self.next_index];
+        let frame = &self.shared.frames[self.next_index];
 
         let copies = if matches!(frame.disposal_method, DisposalMethod::Previous) { 3 } else { 1 };
-        let cost = (self.composer.canvas.len() as u64).saturating_mul(copies);
+        let cost = (self.canvas.len() as u64).saturating_mul(copies);
         if !self.budget.charge(cost, self.next_index) {
             log_warn!("GIF frames exceed the composition work budget, stopping after {} frames", self.next_index);
             self.exhausted = true;
             return Ok(None);
         }
 
-        let composed = self.composer.compose(frame, &indices, &self.global_color_table);
+        let (width, height) = (self.shared.width, self.shared.height);
+        let palette = Palette::new(color_table(frame, &self.global_color_table), frame.transparent_index);
+        let layer = Layer {
+            placement: placement(frame, width, height),
+            indices: &indices,
+            palette: &palette,
+            update: match frame.disposal_method {
+                DisposalMethod::None => Update::Keep,
+                DisposalMethod::Background => Update::Clear,
+                DisposalMethod::Previous => Update::Leave,
+            },
+        };
+
+        let mut output = Vec::with_capacity(self.canvas.len());
+        compose_layer(&layer, &mut self.canvas, &mut output, width as usize);
+        let composed = ImageFrame::new(width, height, PixelData::RGBA8(output), frame.delay);
+
+        self.shared.recycle(indices);
         self.next_index += 1;
 
         Ok(Some(composed))
@@ -906,6 +888,6 @@ impl FrameSource for GifFrames {
         if self.exhausted {
             return Some(0);
         }
-        Some(self.frames.len().saturating_sub(self.next_index))
+        Some(self.shared.frames.len().saturating_sub(self.next_index))
     }
 }

@@ -467,12 +467,22 @@ impl App {
             return false;
         }
 
-        let (result, thumbnails, decode_times) = Self::load_image_from_path(
-            &self.files[self.current_file_index],
-            self.normalize,
-            self.limits.clone(),
-            self.max_texture_side,
-        );
+        let path = &self.files[self.current_file_index];
+        let normalize = self.normalize;
+        let limits = self.limits.clone();
+        let max_side = self.max_texture_side;
+
+        let (result, thumbnails, decode_times) =
+            std::panic::catch_unwind(|| Self::load_image_from_path(path, normalize, limits, max_side)).unwrap_or_else(
+                |payload| {
+                    let reason = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    (Err(format!("{}: failed to load: {}", path.display(), reason)), Vec::new(), DecodeTimes::default())
+                },
+            );
 
         self.thumbnails = thumbnails;
         self.viewing_thumbnail = None;

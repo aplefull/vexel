@@ -1,3 +1,4 @@
+#[cfg(feature = "rayon")]
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -5,8 +6,10 @@ use crate::utils::error::VexelResult;
 use crate::utils::image::{Image, ImageFrame};
 use crate::utils::limits::Limits;
 
-const LOOKAHEAD_BATCH: usize = 16;
-const LOOKAHEAD_BATCH_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(feature = "rayon")]
+const LOOKAHEAD_FRAMES: usize = 64;
+#[cfg(feature = "rayon")]
+const LOOKAHEAD_BYTES: usize = 64 * 1024 * 1024;
 const OUTPUT_ALLOC_FACTOR: u64 = 8;
 const OUTPUT_PER_INPUT_BYTE: u64 = 1024;
 
@@ -51,13 +54,15 @@ type DecodeFn<T> = Arc<dyn Fn(usize) -> T + Send + Sync>;
 pub(crate) struct FramePrefetch<T: Send + 'static> {
     decode: DecodeFn<T>,
     costs: Vec<usize>,
+    #[cfg(feature = "rayon")]
     lookahead: bool,
     next: usize,
-    batch: VecDeque<T>,
     #[cfg(feature = "rayon")]
-    decoded_upto: usize,
+    spawned: usize,
     #[cfg(feature = "rayon")]
-    pending: Option<std::sync::mpsc::Receiver<VexelResult<Vec<T>>>>,
+    in_flight: VecDeque<(usize, std::sync::mpsc::Receiver<VexelResult<T>>)>,
+    #[cfg(feature = "rayon")]
+    in_flight_bytes: usize,
 }
 
 impl<T: Send + 'static> FramePrefetch<T> {
@@ -66,16 +71,21 @@ impl<T: Send + 'static> FramePrefetch<T> {
         lookahead: bool,
         decode: impl Fn(usize) -> T + Send + Sync + 'static,
     ) -> FramePrefetch<T> {
+        #[cfg(not(feature = "rayon"))]
+        let _ = lookahead;
+
         FramePrefetch {
             decode: Arc::new(decode),
             costs,
+            #[cfg(feature = "rayon")]
             lookahead,
             next: 0,
-            batch: VecDeque::new(),
             #[cfg(feature = "rayon")]
-            decoded_upto: 0,
+            spawned: 0,
             #[cfg(feature = "rayon")]
-            pending: None,
+            in_flight: VecDeque::new(),
+            #[cfg(feature = "rayon")]
+            in_flight_bytes: 0,
         }
     }
 
@@ -84,85 +94,52 @@ impl<T: Send + 'static> FramePrefetch<T> {
             return Ok(None);
         }
 
-        if self.batch.is_empty() {
-            self.fill_batch()?;
-        }
-
-        let item = self.batch.pop_front();
-        if item.is_some() {
-            self.next += 1;
-        }
-        Ok(item)
-    }
-
-    fn batch_end(&self, start: usize) -> usize {
-        let batch = if cfg!(feature = "rayon") && self.lookahead { LOOKAHEAD_BATCH } else { 1 };
-        let limit = (start + batch).min(self.costs.len());
-        let mut bytes = 0usize;
-        let mut end = start;
-        while end < limit {
-            bytes = bytes.saturating_add(self.costs[end]);
-            if end > start && bytes > LOOKAHEAD_BATCH_BYTES {
-                break;
+        #[cfg(feature = "rayon")]
+        if self.lookahead
+            && (!self.in_flight.is_empty()
+                || (rayon::current_thread_index().is_none() && rayon::current_num_threads() > 1))
+        {
+            self.refill();
+            if let Some((cost, rx)) = self.in_flight.pop_front() {
+                self.in_flight_bytes -= cost;
+                self.next += 1;
+                let item = rx
+                    .recv()
+                    .map_err(|_| crate::utils::error::VexelError::Custom("Frame prefetch worker disappeared".into()))?;
+                self.refill();
+                return item.map(Some);
             }
-            end += 1;
         }
-        end
-    }
 
-    fn decode_range(decode: &DecodeFn<T>, start: usize, end: usize) -> Vec<T> {
+        let item = crate::catch_decoder_panic(|| Ok((self.decode)(self.next)))?;
+        self.next += 1;
         #[cfg(feature = "rayon")]
         {
-            use rayon::prelude::*;
-            (start..end).into_par_iter().map(|index| decode(index)).collect()
+            self.spawned = self.spawned.max(self.next);
         }
-
-        #[cfg(not(feature = "rayon"))]
-        (start..end).map(|index| decode(index)).collect()
-    }
-
-    fn fill_batch(&mut self) -> VexelResult<()> {
-        #[cfg(feature = "rayon")]
-        if let Some(rx) = self.pending.take() {
-            let decoded = rx
-                .recv()
-                .map_err(|_| crate::utils::error::VexelError::Custom("Frame prefetch worker disappeared".into()))??;
-            self.batch = decoded.into();
-            self.start_prefetch();
-            return Ok(());
-        }
-
-        let start = self.next;
-        let end = self.batch_end(start);
-        self.batch = Self::decode_range(&self.decode, start, end).into();
-
-        #[cfg(feature = "rayon")]
-        {
-            self.decoded_upto = end;
-            self.start_prefetch();
-        }
-
-        Ok(())
+        Ok(Some(item))
     }
 
     #[cfg(feature = "rayon")]
-    fn start_prefetch(&mut self) {
-        if !self.lookahead || self.pending.is_some() || self.decoded_upto >= self.costs.len() {
-            return;
+    fn refill(&mut self) {
+        let window = (2 * rayon::current_num_threads()).clamp(2, LOOKAHEAD_FRAMES);
+        while self.spawned < self.costs.len() && self.in_flight.len() < window {
+            let cost = self.costs[self.spawned];
+            if !self.in_flight.is_empty() && self.in_flight_bytes.saturating_add(cost) > LOOKAHEAD_BYTES {
+                break;
+            }
+
+            let index = self.spawned;
+            let decode = self.decode.clone();
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            rayon::spawn(move || {
+                let _ = tx.send(crate::catch_decoder_panic(|| Ok(decode(index))));
+            });
+
+            self.in_flight.push_back((cost, rx));
+            self.in_flight_bytes = self.in_flight_bytes.saturating_add(cost);
+            self.spawned += 1;
         }
-
-        let start = self.decoded_upto;
-        let end = self.batch_end(start);
-        self.decoded_upto = end;
-
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        self.pending = Some(rx);
-
-        let decode = self.decode.clone();
-        rayon::spawn(move || {
-            let decoded = crate::catch_decoder_panic(|| Ok(Self::decode_range(&decode, start, end)));
-            let _ = tx.send(decoded);
-        });
     }
 }
 

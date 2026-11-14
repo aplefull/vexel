@@ -1,15 +1,15 @@
 use std::io::{Read, Seek};
+use std::ops::Range;
 
 use serde::Serialize;
 use tsify::Tsify;
 
 use super::info::GifInfo;
-use crate::bitreader::BitReader;
+use super::source::GifSource;
 use crate::utils::icc::ICCProfile;
 use crate::Limits;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone)]
 pub struct GifFrameInfo {
     pub left: u32,
     pub top: u32,
@@ -17,15 +17,13 @@ pub struct GifFrameInfo {
     pub height: u32,
     pub local_color_table_flag: bool,
     pub interlace_flag: bool,
-    pub sort_flag: bool,
-    pub size_of_local_color_table: u8,
     pub local_color_table: Vec<u8>,
     pub lzw_minimum_code_size: u8,
     pub transparent_index: Option<u8>,
     pub disposal_method: DisposalMethod,
     pub delay: u32,
-    pub user_input: bool,
-    pub data: Vec<u8>,
+    pub data: Range<usize>,
+    pub payload: usize,
 }
 
 pub struct GifDecoder<R: Read + Seek> {
@@ -49,13 +47,12 @@ pub struct GifDecoder<R: Read + Seek> {
     pub(super) loop_count: Option<u16>,
     pub(super) collect_frame_data: bool,
     pub(super) frame_index: u32,
-    pub(super) reader: BitReader<R>,
+    pub(super) reader: GifSource<R>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GraphicsControlExtension {
     pub disposal_method: DisposalMethod,
-    pub user_input: bool,
     pub transparency: bool,
     pub delay: u32,
     pub transparent_color_index: u8,

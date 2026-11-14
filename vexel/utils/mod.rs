@@ -12,6 +12,7 @@ pub mod info;
 pub mod limits;
 pub mod logger;
 pub mod lzma;
+pub(crate) mod lzw;
 pub mod marker;
 pub mod raster;
 pub(crate) mod read;

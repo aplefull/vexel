@@ -1,7 +1,8 @@
-pub mod compose_simd;
+mod compose;
 pub mod decoder;
 pub mod info;
-pub mod lzw;
+mod lzw;
+mod source;
 pub mod types;
 
 pub use info::*;
