@@ -306,3 +306,7 @@ pub fn looks_like_jpeg_xr(header: &[u8]) -> bool {
 
     header.len() >= 4 && header[..4] == [0x49, 0x49, 0xbc, 0x01]
 }
+
+pub fn is_netpbm_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}

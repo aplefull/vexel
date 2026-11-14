@@ -7,6 +7,8 @@ edition = "2021"
 name = "vexel"
 path = "lib.rs"
 crate-type = ["cdylib", "rlib"]
+test = false
+doctest = false
 
 [dependencies]
 rayon = { version = "1.10.0", optional = true }
@@ -42,6 +44,7 @@ wasm-opt = [
 [[bench]]
 name = "decode"
 harness = false
+test = false
 
 [features]
 default = ["rayon"]

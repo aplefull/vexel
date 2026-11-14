@@ -1,6 +1,7 @@
 pub mod decoder;
 pub mod info;
-pub mod simd;
+mod input;
+mod raster;
 pub mod types;
 
 pub use decoder::NetPbmDecoder;

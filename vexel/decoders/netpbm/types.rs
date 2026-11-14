@@ -5,13 +5,21 @@ use wasm_bindgen::prelude::wasm_bindgen;
 #[wasm_bindgen]
 #[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
 pub enum NetpbmFormat {
-    P1, // ASCII bitmap
-    P2, // ASCII graymap
-    P3, // ASCII pixmap
-    P4, // Binary bitmap
-    P5, // Binary graymap
-    P6, // Binary pixmap
-    P7, // PAM
+    P1,
+    P2,
+    P3,
+    P4,
+    P5,
+    P6,
+    P7,
+    PfmColor,
+    PfmGray,
+}
+
+impl NetpbmFormat {
+    pub fn is_pfm(&self) -> bool {
+        matches!(self, NetpbmFormat::PfmColor | NetpbmFormat::PfmGray)
+    }
 }
 
 #[wasm_bindgen]

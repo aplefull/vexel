@@ -17,6 +17,7 @@ pub enum ImageFormat {
     NetPbmP5,
     NetPbmP6,
     NetPbmP7,
+    Pfm,
     Hdr,
     Tiff,
     Dng,

@@ -227,6 +227,41 @@ pub fn test_cases() -> Vec<TestCase> {
             ..Default::default()
         },
         TestCase {
+            name: "NetPBM P1 without separators",
+            path: "netpbm/1c-1b_plain.pbm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "netpbm/1c-1b.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "PFM color little-endian",
+            path: "netpbm/PF_le.pfm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "netpbm/PF_le.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "PFM color HDR big-endian",
+            path: "netpbm/PF_hdr_be.pfm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "netpbm/PF_hdr_be.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "PFM grayscale big-endian",
+            path: "netpbm/Pf_be.pfm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "netpbm/Pf_be.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "PFM grayscale little-endian",
+            path: "netpbm/Pf_le.pfm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "netpbm/Pf_le.jxl" },
+            ..Default::default()
+        },
+        TestCase {
             name: "NetPBM corrupted negative width",
             path: "netpbm/corrupted/negative_width.pgm",
             validation: None,
@@ -238,6 +273,13 @@ pub fn test_cases() -> Vec<TestCase> {
             path: "netpbm/corrupted/truncated_data.ppm",
             validation: None,
             comparison: Comparison::Exact { reference_path: "netpbm/corrupted/truncated_data.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "PFM corrupted truncated data",
+            path: "netpbm/corrupted/truncated.pfm",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "netpbm/corrupted/truncated.jxl" },
             ..Default::default()
         },
     ]

@@ -6,6 +6,7 @@ edition = "2021"
 [[bin]]
 name = "vexel"
 path = "main.rs"
+test = false
 
 [dependencies]
 vexel = { path = "../vexel" }

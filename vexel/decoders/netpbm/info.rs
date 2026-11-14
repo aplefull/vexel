@@ -27,6 +27,7 @@ pub struct NetpbmHeader {
     pub depth: Option<u32>,
     pub tuple_type: Option<TupleType>,
     pub tuple_type_raw: Option<String>,
+    pub scale: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -61,6 +62,8 @@ pub fn format_name(format: &NetpbmFormat) -> &'static str {
         NetpbmFormat::P5 => "P5 (PGM, raw)",
         NetpbmFormat::P6 => "P6 (PPM, raw)",
         NetpbmFormat::P7 => "P7 (PAM)",
+        NetpbmFormat::PfmColor => "PF (PFM, color)",
+        NetpbmFormat::PfmGray => "Pf (PFM, grayscale)",
     }
 }
 
@@ -121,6 +124,12 @@ impl InfoSection for NetpbmSection {
                         out.text("Tuple type", &format!("{} (unrecognized)", raw));
                     }
                     (None, None) => {}
+                }
+                if let Some(scale) = header.scale {
+                    out.field("Scale", scale.abs());
+                    let big_endian = scale > 0.0;
+                    out.field("Byte order", if big_endian { "Big-endian" } else { "Little-endian" });
+                    out.field("Row order", "Bottom to top");
                 }
             }
             NetpbmSection::Comment(comment) => {

@@ -127,7 +127,8 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             | ImageFormat::NetPbmP4
             | ImageFormat::NetPbmP5
             | ImageFormat::NetPbmP6
-            | ImageFormat::NetPbmP7 => Decoders::Netpbm(NetPbmDecoder::new(reader)),
+            | ImageFormat::NetPbmP7
+            | ImageFormat::Pfm => Decoders::Netpbm(NetPbmDecoder::new(reader)),
             ImageFormat::Bmp => Decoders::Bmp(BmpDecoder::new(reader)),
             ImageFormat::Png => Decoders::Png(PngDecoder::new(reader)),
             ImageFormat::Hdr => Decoders::Hdr(HdrDecoder::new(reader)),
@@ -382,6 +383,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
                 b'5' => return Ok(ImageFormat::NetPbmP5),
                 b'6' => return Ok(ImageFormat::NetPbmP6),
                 b'7' => return Ok(ImageFormat::NetPbmP7),
+                b'F' | b'f' if format_detect::is_netpbm_space(header[2]) => return Ok(ImageFormat::Pfm),
                 _ => {}
             }
         }

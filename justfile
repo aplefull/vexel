@@ -36,7 +36,7 @@ save path loglevel="":
 
 # Run all tests or a specific test with output captured
 test name="" loglevel="":
-    cargo test --package vexel {{ if name != "" { "\"" + name + "\"" } else { "" } }} -- --nocapture {{ if name != "" { "--exact" } else { "" } }} {{ if loglevel != "" { "--log-level " + loglevel } else { "" } }}
+    cargo test --package vexel --test main {{ if name != "" { "\"" + name + "\"" } else { "" } }} -- --nocapture {{ if name != "" { "--exact" } else { "" } }} {{ if loglevel != "" { "--log-level " + loglevel } else { "" } }}
 
 # Run benchmarks, optionally filtered by name
 bench *args="":
@@ -66,6 +66,14 @@ check-all:
     cargo clippy --package vexel --lib --target wasm32-unknown-unknown -Z build-std=panic_abort,std --no-default-features -- -D warnings
     cargo clippy --package vexel --lib --target aarch64-unknown-linux-gnu -Z build-std=std -- -D warnings
     cargo clippy --package vexel --lib --target aarch64-unknown-linux-gnu -Z build-std=std --no-default-features -- -D warnings
+
+# --- Maintenance ---
+
+# Delete build artifacts and incremental caches not used in the last N days
+sweep days="3":
+    cargo sweep --time {{days}} {{justfile_directory()}}
+    cargo sweep --time {{days}} {{justfile_directory()}}/vexel/fuzz
+    find target vexel/fuzz/target -regextype posix-extended -type d -regex '.*/incremental/[^/]+' -mmin +$(({{days}} * 1440)) -prune -exec rm -rf {} +
 
 # --- Profiling ---
 
