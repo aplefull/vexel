@@ -12,7 +12,7 @@ use crate::utils::tiff::compression::{
     decompress_thunderscan, decompress_zstd_with_capacity, predictor_x_factor, ChunkLayout,
 };
 use crate::utils::tiff::fax::decompress_ccitt;
-use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
+use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard, IfdFormat};
 use crate::utils::tiff::info::{compression_name, walk_structure, IfdKind, TiffImageIfd, TiffInfo};
 use crate::utils::tiff::jpeg::{jpeg_pixel_data, jpeg_rgb_bytes, splice_jpeg_tables};
 use crate::utils::tiff::pixels::PixelReader;
@@ -28,6 +28,7 @@ pub struct TiffDecoder<R: Read + Seek> {
     height: u32,
     limits: Limits,
     byte_order: ByteOrder,
+    ifd_format: IfdFormat,
     header: TiffHeader,
     reader: BitReader<R>,
     info: Option<TiffInfo>,
@@ -220,6 +221,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             height: 0,
             limits: Limits::default(),
             byte_order: ByteOrder::LittleEndian,
+            ifd_format: IfdFormat::classic(ByteOrder::LittleEndian),
             header: TiffHeader::default(),
             reader: BitReader::new(reader),
             info: None,
@@ -349,12 +351,14 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let saved_pos = self.reader.stream_position().unwrap_or(0);
         let saved_header = std::mem::take(&mut self.header);
         let saved_byte_order = self.byte_order;
+        let saved_ifd_format = self.ifd_format;
         let (saved_width, saved_height) = (self.width, self.height);
 
         let result = self.decode_reduced_resolution_ifds();
 
         self.header = saved_header;
         self.byte_order = saved_byte_order;
+        self.ifd_format = saved_ifd_format;
         self.width = saved_width;
         self.height = saved_height;
         let _ = self.reader.seek(SeekFrom::Start(saved_pos));
@@ -366,6 +370,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.reader.seek(SeekFrom::Start(0))?;
         let file_header = ifd::read_file_header(&mut self.reader)?;
         self.byte_order = file_header.byte_order;
+        self.ifd_format = file_header.format;
 
         let mut thumbnails = Vec::new();
         let mut guard = IfdCycleGuard::default();
@@ -376,7 +381,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 continue;
             }
 
-            let ifd = match Ifd::read(&mut self.reader, offset, self.byte_order, &mut self.limits) {
+            let ifd = match Ifd::read(&mut self.reader, offset, self.ifd_format, &mut self.limits) {
                 Ok(ifd) => ifd,
                 Err(_) => continue,
             };
@@ -384,7 +389,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             if ifd.next_ifd_offset != 0 {
                 queue.push(ifd.next_ifd_offset);
             }
-            if let Some(sub_ifds) = ifd.values::<u32, _>(TiffTags::SubIFDs, &mut self.reader, &mut self.limits) {
+            if let Some(sub_ifds) = ifd.values::<u64, _>(TiffTags::SubIFDs, &mut self.reader, &mut self.limits) {
                 let room = MAX_QUEUED_IFDS.saturating_sub(queue.len());
                 queue.extend(sub_ifds.into_iter().filter(|&o| o != 0).take(room));
             }
@@ -413,14 +418,15 @@ impl<R: Read + Seek> TiffDecoder<R> {
         Ok(thumbnails)
     }
 
-    fn read_file_header(&mut self) -> VexelResult<u32> {
+    fn read_file_header(&mut self) -> VexelResult<u64> {
         let file_header = ifd::read_file_header(&mut self.reader)?;
         self.byte_order = file_header.byte_order;
+        self.ifd_format = file_header.format;
         Ok(file_header.first_ifd_offset)
     }
 
-    fn read_ifd(&mut self, ifd_offset: u32) -> VexelResult<u32> {
-        let ifd = Ifd::read(&mut self.reader, ifd_offset, self.byte_order, &mut self.limits)?;
+    fn read_ifd(&mut self, ifd_offset: u64) -> VexelResult<u64> {
+        let ifd = Ifd::read(&mut self.reader, ifd_offset, self.ifd_format, &mut self.limits)?;
         let ifd_end = self.reader.stream_position()?;
 
         self.subfile_type = ifd_subfile_type(&ifd, &mut self.reader);
@@ -513,8 +519,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
         len
     }
 
-    fn read_chunk_bytes(&mut self, offset: u32, byte_count: usize, stream_len: u64) -> VexelResult<Vec<u8>> {
-        let available = stream_len.saturating_sub(offset as u64) as usize;
+    fn read_chunk_bytes(&mut self, offset: u64, byte_count: usize, stream_len: u64) -> VexelResult<Vec<u8>> {
+        let available = usize::try_from(stream_len.saturating_sub(offset)).unwrap_or(usize::MAX);
         let len = byte_count.min(available);
         if len < byte_count {
             log_warn!(
@@ -525,7 +531,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             );
         }
 
-        self.reader.seek(SeekFrom::Start(offset as u64))?;
+        self.reader.seek(SeekFrom::Start(offset))?;
         self.limits.reserve_usize(len)?;
         let mut data = vec![0u8; len];
         let result = self.reader.read_exact(&mut data);
@@ -763,17 +769,17 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         for (chunk_idx, &offset) in offsets.iter().enumerate().take(chunk_count) {
             let byte_count = match byte_counts.get(chunk_idx) {
-                Some(&c) if c > 0 => c as usize,
+                Some(&c) if c > 0 => usize::try_from(c).unwrap_or(usize::MAX),
                 _ => {
                     if self.header.compression == Compression::None {
                         expected_bytes
                     } else {
-                        stream_len.saturating_sub(offset as u64) as usize
+                        usize::try_from(stream_len.saturating_sub(offset)).unwrap_or(usize::MAX)
                     }
                 }
             };
 
-            if (byte_count as u64).min(stream_len.saturating_sub(offset as u64)) > read_budget {
+            if (byte_count as u64).min(stream_len.saturating_sub(offset)) > read_budget {
                 log_warn!("Strips/tiles read far more data than the file holds, stopping at chunk {}", chunk_idx);
                 break;
             }
@@ -846,12 +852,12 @@ impl<R: Read + Seek> TiffDecoder<R> {
         if is_ojpeg && self.header.jpeg_interchange_format != 0 {
             let offset = self.header.jpeg_interchange_format;
             let declared = self.header.jpeg_interchange_format_length as usize;
-            let available = stream_len.saturating_sub(offset as u64) as usize;
+            let available = usize::try_from(stream_len.saturating_sub(offset)).unwrap_or(usize::MAX);
             let len = if declared == 0 { available } else { declared.min(available) };
-            let span_end = offset as u64 + len as u64;
+            let span_end = offset.saturating_add(len as u64);
 
             let first_data_offset = self.header.strip_offsets.first().or(self.header.tile_offsets.first()).copied();
-            let data_inside_span = first_data_offset.is_none_or(|o| o >= offset && (o as u64) < span_end);
+            let data_inside_span = first_data_offset.is_none_or(|o| o >= offset && o < span_end);
 
             if data_inside_span {
                 if let Ok(raw) = self.read_chunk_bytes(offset, len, stream_len) {
@@ -900,8 +906,9 @@ impl<R: Read + Seek> TiffDecoder<R> {
             let mut scan_data = Vec::new();
             let mut read_budget = stream_len.saturating_mul(2);
             for (strip_idx, &offset) in offsets.iter().enumerate().take(height.div_ceil(chunk_h)) {
-                let byte_count = byte_counts.get(strip_idx).copied().unwrap_or(0) as usize;
-                if (byte_count as u64).min(stream_len.saturating_sub(offset as u64)) > read_budget {
+                let byte_count =
+                    usize::try_from(byte_counts.get(strip_idx).copied().unwrap_or(0)).unwrap_or(usize::MAX);
+                if (byte_count as u64).min(stream_len.saturating_sub(offset)) > read_budget {
                     log_warn!("JPEG strips read far more data than the file holds, stopping at strip {}", strip_idx);
                     break;
                 }
@@ -949,10 +956,10 @@ impl<R: Read + Seek> TiffDecoder<R> {
 
         for (chunk_idx, &offset) in offsets.iter().enumerate().take(asm.total_chunks()) {
             let byte_count = match byte_counts.get(chunk_idx) {
-                Some(&c) if c > 0 => c as usize,
-                _ => stream_len.saturating_sub(offset as u64) as usize,
+                Some(&c) if c > 0 => usize::try_from(c).unwrap_or(usize::MAX),
+                _ => usize::try_from(stream_len.saturating_sub(offset)).unwrap_or(usize::MAX),
             };
-            if (byte_count as u64).min(stream_len.saturating_sub(offset as u64)) > read_budget {
+            if (byte_count as u64).min(stream_len.saturating_sub(offset)) > read_budget {
                 log_warn!("JPEG strips/tiles read far more data than the file holds, stopping at chunk {}", chunk_idx);
                 break;
             }
@@ -1273,7 +1280,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         self.limits.free(std::mem::take(&mut self.reserved_output));
     }
 
-    fn chain_has_full_res(&mut self, first_ifd_offset: u32) -> bool {
+    fn chain_has_full_res(&mut self, first_ifd_offset: u64) -> bool {
         let mut guard = IfdCycleGuard::default();
         let mut offset = first_ifd_offset;
 
@@ -1282,7 +1289,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 break;
             }
 
-            let Ok(ifd) = Ifd::read(&mut self.reader, offset, self.byte_order, &mut self.limits) else {
+            let Ok(ifd) = Ifd::read(&mut self.reader, offset, self.ifd_format, &mut self.limits) else {
                 break;
             };
 
@@ -1321,7 +1328,7 @@ fn parse_header<R: Read + Seek>(ifd: &Ifd, reader: &mut BitReader<R>, limits: &m
     }
     let mut photometric_known = false;
     if let Some(v) = ifd.value::<u32, _>(TiffTags::PhotometricInterpretation, reader) {
-        match PhotometricInterpretation::try_from(v) {
+        match PhotometricInterpretation::try_from(u64::from(v)) {
             Ok(p) => {
                 header.photometric_interpretation = p;
                 photometric_known = true;
@@ -1354,7 +1361,7 @@ fn parse_header<R: Read + Seek>(ifd: &Ifd, reader: &mut BitReader<R>, limits: &m
         header.resolution_unit = v;
     }
     if let Some(v) = ifd.value::<u32, _>(TiffTags::Predictor, reader) {
-        match Predictor::try_from(v) {
+        match Predictor::try_from(u64::from(v)) {
             Ok(p) => header.predictor = p,
             Err(_) => log_warn!("Unknown predictor {}, ignoring it", v),
         }
@@ -1392,7 +1399,7 @@ fn parse_header<R: Read + Seek>(ifd: &Ifd, reader: &mut BitReader<R>, limits: &m
         header.sample_format = v
             .into_iter()
             .map(|f| {
-                SampleFormat::try_from(f).unwrap_or_else(|_| {
+                SampleFormat::try_from(u64::from(f)).unwrap_or_else(|_| {
                     log_warn!("Unknown sample format {}, assuming unsigned integers", f);
                     SampleFormat::UnsignedInt
                 })

@@ -1904,5 +1904,29 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "tiff/lerc_lossy.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "TIFF BigTIFF little-endian",
+            path: "tiff/bigtiff_le.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/bigtiff_rgb.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF BigTIFF big-endian",
+            path: "tiff/bigtiff_be.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/bigtiff_rgb.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF BigTIFF with LONG strip tables",
+            path: "tiff/bigtiff_long_offsets.tif",
+            comparison: Comparison::Exact { reference_path: "tiff/bigtiff_rgb.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "TIFF BigTIFF pages with LONG8 tiles and IFD8 SubIFD",
+            path: "tiff/bigtiff_pages_subifd.tif",
+            comparison: Comparison::ExactPages { reference_path: "tiff/bigtiff_pages_subifd.jxl" },
+            ..Default::default()
+        },
     ]
 }

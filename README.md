@@ -60,7 +60,7 @@ Supports all bit depths (1, 4, 8, 16, 24, 32, 64), RLE4/RLE8 (including CMYK var
 ### TIFF
 TIFF is a beast, nothing supports every feature it has. We support most of the common and some rare features for now.
 
-Strips and tiles are supported, including volumetric tiled images. Multi-page files decode each IFD as a separate page via `decode_pages()`. Both chunky and planar configurations are supported.
+Classic TIFF and BigTIFF are both supported. Strips and tiles are supported, including volumetric tiled images. Multi-page files decode each IFD as a separate page via `decode_pages()`. Both chunky and planar configurations are supported.
 
 Supported compression: none, LZW, PackBits, Deflate/AdobeDeflate, JPEG (old and new), JPEG 2000, JPEG XR, PNG, CCITT Group 3/4 fax (RLE, T4, T6), ThunderScan, NeXT, SGILog, LERC, LZMA, ZSTD.
 

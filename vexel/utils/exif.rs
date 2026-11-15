@@ -6,7 +6,7 @@ use tsify::Tsify;
 use crate::bitreader::BitReader;
 use crate::utils::info::InfoWriter;
 use crate::utils::limits::Limits;
-use crate::utils::tiff::ifd::{read_file_header, type_size, Ifd, IfdCycleGuard, IfdEntry};
+use crate::utils::tiff::ifd::{read_file_header, type_size, Ifd, IfdCycleGuard, IfdEntry, IfdFormat};
 use crate::utils::types::ByteOrder;
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -20,6 +20,8 @@ pub enum ExifValue {
     Undefined(Vec<u8>),
     SShort(Vec<i16>),
     SLong(Vec<i32>),
+    Long8(Vec<u64>),
+    SLong8(Vec<i64>),
     SRational(Vec<(i32, i32)>),
     Float(Vec<f32>),
     Double(Vec<f64>),
@@ -71,6 +73,7 @@ impl ExifReader {
         let mut reader = BitReader::new(&mut cursor);
         let header = read_file_header(&mut reader).ok()?;
         let byte_order = header.byte_order;
+        let format = header.format;
 
         let mut limits = Limits {
             max_alloc: Some((tiff_data.len() as u64).saturating_mul(2).saturating_add(4096)),
@@ -78,8 +81,8 @@ impl ExifReader {
         };
         let mut guard = IfdCycleGuard::new(MAX_IFDS);
 
-        let ifd0_raw = read_guarded(&mut reader, header.first_ifd_offset, byte_order, &mut limits, &mut guard)?;
-        let ifd1_raw = read_guarded(&mut reader, ifd0_raw.next_ifd_offset, byte_order, &mut limits, &mut guard);
+        let ifd0_raw = read_guarded(&mut reader, header.first_ifd_offset, format, &mut limits, &mut guard)?;
+        let ifd1_raw = read_guarded(&mut reader, ifd0_raw.next_ifd_offset, format, &mut limits, &mut guard);
 
         let ifd0 = materialize_ifd(&ifd0_raw, IfdType::Ifd0, &mut reader, &mut limits);
         let ifd1 = ifd1_raw.map(|raw| materialize_ifd(&raw, IfdType::Ifd1, &mut reader, &mut limits));
@@ -88,26 +91,12 @@ impl ExifReader {
         let mut gps_ifd = None;
         for ifd in [Some(&ifd0), ifd1.as_ref()].into_iter().flatten() {
             if exif_ifd.is_none() {
-                exif_ifd = load_sub_ifd(
-                    ifd,
-                    EXIF_IFD_POINTER,
-                    IfdType::ExifIfd,
-                    byte_order,
-                    &mut reader,
-                    &mut limits,
-                    &mut guard,
-                );
+                exif_ifd =
+                    load_sub_ifd(ifd, EXIF_IFD_POINTER, IfdType::ExifIfd, format, &mut reader, &mut limits, &mut guard);
             }
             if gps_ifd.is_none() {
-                gps_ifd = load_sub_ifd(
-                    ifd,
-                    GPS_IFD_POINTER,
-                    IfdType::GpsIfd,
-                    byte_order,
-                    &mut reader,
-                    &mut limits,
-                    &mut guard,
-                );
+                gps_ifd =
+                    load_sub_ifd(ifd, GPS_IFD_POINTER, IfdType::GpsIfd, format, &mut reader, &mut limits, &mut guard);
             }
         }
 
@@ -118,7 +107,7 @@ impl ExifReader {
                     ifd,
                     INTEROP_IFD_POINTER,
                     IfdType::InteropIfd,
-                    byte_order,
+                    format,
                     &mut reader,
                     &mut limits,
                     &mut guard,
@@ -153,29 +142,29 @@ pub(crate) fn exif_thumbnail(tiff_data: &[u8]) -> Option<&[u8]> {
 
 fn read_guarded<R: Read + Seek>(
     reader: &mut BitReader<R>,
-    offset: u32,
-    byte_order: ByteOrder,
+    offset: u64,
+    format: IfdFormat,
     limits: &mut Limits,
     guard: &mut IfdCycleGuard,
 ) -> Option<Ifd> {
     if !guard.enter(offset) {
         return None;
     }
-    Ifd::read(reader, offset, byte_order, limits).ok()
+    Ifd::read(reader, offset, format, limits).ok()
 }
 
 fn load_sub_ifd<R: Read + Seek>(
     parent: &ExifIfd,
     pointer_tag: u16,
     ifd_type: IfdType,
-    byte_order: ByteOrder,
+    format: IfdFormat,
     reader: &mut BitReader<R>,
     limits: &mut Limits,
     guard: &mut IfdCycleGuard,
 ) -> Option<ExifIfd> {
     let entry = parent.entries.iter().find(|e| e.tag == pointer_tag)?;
     let offset = ifd_pointer_offset(&entry.value)?;
-    let raw = read_guarded(reader, offset, byte_order, limits, guard)?;
+    let raw = read_guarded(reader, offset, format, limits, guard)?;
     Some(materialize_ifd(&raw, ifd_type, reader, limits))
 }
 
@@ -203,14 +192,14 @@ fn materialize_entry<R: Read + Seek>(
 ) -> Option<ExifEntry> {
     let size = type_size(entry.field_type)?;
     let count = entry.count as usize;
-    let total = (entry.count as u64).saturating_mul(size as u64);
+    let total = entry.count.saturating_mul(size as u64);
 
-    let bytes = if total <= 4 {
+    let bytes = if total <= ifd.format.inline_capacity() as u64 {
         ifd.inline_bytes(entry)[..total as usize].to_vec()
     } else {
         let total = usize::try_from(total).ok()?;
         limits.reserve_usize(total).ok()?;
-        let read = reader.seek(SeekFrom::Start(entry.value_offset as u64)).and_then(|_| reader.read_bytes(total));
+        let read = reader.seek(SeekFrom::Start(entry.value_offset)).and_then(|_| reader.read_bytes(total));
         match read {
             Ok(bytes) => bytes,
             Err(_) => {
@@ -346,14 +335,27 @@ pub(crate) fn parse_value(data_type: u16, count: usize, bytes: &[u8], byte_order
                 })
                 .collect(),
         ),
+        16 | 18 => ExifValue::Long8((0..count).filter_map(|i| read_u64_at(bytes, i, byte_order)).collect()),
+        17 => {
+            ExifValue::SLong8((0..count).filter_map(|i| read_u64_at(bytes, i, byte_order).map(|v| v as i64)).collect())
+        }
         _ => ExifValue::Undefined(bytes.iter().take(count).copied().collect()),
     }
 }
 
-fn ifd_pointer_offset(value: &ExifValue) -> Option<u32> {
+fn read_u64_at(bytes: &[u8], index: usize, byte_order: ByteOrder) -> Option<u64> {
+    let b: [u8; 8] = bytes.get(index * 8..index * 8 + 8)?.try_into().ok()?;
+    Some(match byte_order {
+        ByteOrder::LittleEndian => u64::from_le_bytes(b),
+        ByteOrder::BigEndian => u64::from_be_bytes(b),
+    })
+}
+
+fn ifd_pointer_offset(value: &ExifValue) -> Option<u64> {
     match value {
-        ExifValue::Long(v) => v.first().copied(),
-        ExifValue::Short(v) => v.first().map(|&x| x as u32),
+        ExifValue::Long(v) => v.first().map(|&x| u64::from(x)),
+        ExifValue::Short(v) => v.first().map(|&x| u64::from(x)),
+        ExifValue::Long8(v) => v.first().copied(),
         _ => None,
     }
 }
@@ -572,6 +574,8 @@ impl std::fmt::Display for ExifValue {
             ExifValue::SByte(v) => f.write_str(&join_values(v)),
             ExifValue::SShort(v) => f.write_str(&join_values(v)),
             ExifValue::SLong(v) => f.write_str(&join_values(v)),
+            ExifValue::Long8(v) => f.write_str(&join_values(v)),
+            ExifValue::SLong8(v) => f.write_str(&join_values(v)),
             ExifValue::SRational(v) => f.write_str(&join_rationals(v)),
             ExifValue::Float(v) => f.write_str(&join_values(v)),
             ExifValue::Double(v) => f.write_str(&join_values(v)),

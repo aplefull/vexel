@@ -470,10 +470,10 @@ pub enum SampleFormat {
     Void = 4,
 }
 
-impl TryFrom<u32> for SampleFormat {
+impl TryFrom<u64> for SampleFormat {
     type Error = VexelError;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::UnsignedInt),
             2 => Ok(Self::SignedInt),
@@ -508,10 +508,10 @@ pub enum PhotometricInterpretation {
     LogLuv = 32845,
 }
 
-impl TryFrom<u32> for PhotometricInterpretation {
+impl TryFrom<u64> for PhotometricInterpretation {
     type Error = VexelError;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::WhiteIsZero),
             1 => Ok(Self::BlackIsZero),
@@ -537,10 +537,10 @@ pub enum ResolutionUnit {
     Centimeter = 3,
 }
 
-impl TryFrom<u32> for ResolutionUnit {
+impl TryFrom<u64> for ResolutionUnit {
     type Error = VexelError;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::NoUnit),
             2 => Ok(Self::Inch),
@@ -570,10 +570,10 @@ pub enum PlanarConfiguration {
     Planar = 2, // RRR... GGG... BBB...
 }
 
-impl TryFrom<u32> for PlanarConfiguration {
+impl TryFrom<u64> for PlanarConfiguration {
     type Error = VexelError;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::Chunky),
             2 => Ok(Self::Planar),
@@ -592,10 +592,10 @@ pub enum Predictor {
     FloatingPointX4 = 34895,
 }
 
-impl TryFrom<u32> for Predictor {
+impl TryFrom<u64> for Predictor {
     type Error = VexelError;
 
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::None),
             2 => Ok(Self::HorizontalDifferencing),
@@ -614,10 +614,10 @@ pub struct TiffHeader {
     pub bits_per_sample: Vec<u16>,
     pub compression: Compression,
     pub photometric_interpretation: PhotometricInterpretation,
-    pub strip_offsets: Vec<u32>,
+    pub strip_offsets: Vec<u64>,
     pub samples_per_pixel: u16,
     pub rows_per_strip: u32,
-    pub strip_byte_counts: Vec<u32>,
+    pub strip_byte_counts: Vec<u64>,
     pub x_resolution: f32,
     pub y_resolution: f32,
     pub planar_configuration: PlanarConfiguration,
@@ -630,8 +630,8 @@ pub struct TiffHeader {
     pub reference_black_white: [f32; 6],
     pub tile_width: Option<u32>,
     pub tile_length: Option<u32>,
-    pub tile_offsets: Vec<u32>,
-    pub tile_byte_counts: Vec<u32>,
+    pub tile_offsets: Vec<u64>,
+    pub tile_byte_counts: Vec<u64>,
     pub predictor: Predictor,
     pub jpeg_tables: Vec<u8>,
     pub image_depth: u32,
@@ -639,7 +639,7 @@ pub struct TiffHeader {
     pub jpeg_q_tables: Vec<u32>,
     pub jpeg_dc_tables: Vec<u32>,
     pub jpeg_ac_tables: Vec<u32>,
-    pub jpeg_interchange_format: u32,
+    pub jpeg_interchange_format: u64,
     pub jpeg_interchange_format_length: u32,
     pub jpeg_restart_interval: u16,
     pub fill_order: u16,

@@ -1,110 +1,59 @@
 use std::io::{Read, Seek, SeekFrom};
 
+use crate::bitreader::BitReader;
 use crate::decoders::bmp::headers::HeaderReader;
 use crate::utils::error::VexelResult;
 use crate::utils::image::ImageFormat;
+use crate::utils::limits::Limits;
 use crate::utils::read::read_vec_up_to;
+use crate::utils::tiff::ifd::{read_file_header, Ifd, IfdCycleGuard};
+use crate::utils::tiff::types::TiffTags;
 
 // Walk the IFD tree and try to figure out if a TIFF file is a camera raw
-pub(crate) fn tiff_is_camera_raw<R: Read + Seek>(reader: &mut R, first_ifd_offset: u32, is_le: bool) -> bool {
+pub(crate) fn tiff_is_camera_raw<R: Read + Seek>(reader: &mut R) -> bool {
     const MAX_IFDS: usize = 16;
-    const MAX_ENTRIES: usize = 4096;
+    const MAX_SUB_IFDS: usize = 8;
+    const PHOTOMETRIC_CFA: u32 = 32803;
+    const PHOTOMETRIC_LINEAR_RAW: u32 = 34892;
 
-    let read_u16 = |b: &[u8]| if is_le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) };
-    let read_u32 = |b: &[u8]| {
-        if is_le {
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        } else {
-            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-        }
+    let mut reader = BitReader::new(reader);
+    let Ok(header) = read_file_header(&mut reader) else {
+        return false;
     };
 
-    let mut queue: Vec<u32> = vec![first_ifd_offset];
-    let mut visited: Vec<u32> = Vec::new();
+    let mut limits = Limits { max_alloc: Some(1 << 20), ..Limits::no_limits() };
+    let mut guard = IfdCycleGuard::new(MAX_IFDS);
+    let mut queue = vec![header.first_ifd_offset];
     let mut make = String::new();
     let mut model = String::new();
 
     while let Some(offset) = queue.pop() {
-        if offset < 8 || visited.contains(&offset) || visited.len() >= MAX_IFDS {
+        if offset < header.format.header_length() || !guard.enter(offset) {
             continue;
         }
-        visited.push(offset);
-
-        if reader.seek(SeekFrom::Start(offset as u64)).is_err() {
-            continue;
-        }
-        let mut count_buf = [0u8; 2];
-        if reader.read_exact(&mut count_buf).is_err() {
-            continue;
-        }
-        let num_entries = (read_u16(&count_buf) as usize).min(MAX_ENTRIES);
-
-        let Ok(entries) = read_vec_up_to(reader, num_entries * 12) else {
+        let Ok(ifd) = Ifd::read(&mut reader, offset, header.format, &mut limits) else {
             continue;
         };
-        let mut next_buf = [0u8; 4];
-        if reader.read_exact(&mut next_buf).is_ok() {
-            queue.push(read_u32(&next_buf));
+
+        if ifd.has(TiffTags::DNGVersion) {
+            return true;
+        }
+        if matches!(
+            ifd.value::<u32, _>(TiffTags::PhotometricInterpretation, &mut reader),
+            Some(PHOTOMETRIC_CFA | PHOTOMETRIC_LINEAR_RAW)
+        ) {
+            return true;
+        }
+        if let Some(text) = ifd.string(TiffTags::Make, &mut reader) {
+            make = text.to_uppercase();
+        }
+        if let Some(text) = ifd.string(TiffTags::Model, &mut reader) {
+            model = text.to_uppercase();
         }
 
-        for entry in entries.chunks_exact(12) {
-            let tag = read_u16(&entry[0..2]);
-            let field_type = read_u16(&entry[2..4]);
-            let count = read_u32(&entry[4..8]);
-            let value = &entry[8..12];
-
-            match tag {
-                // DNGVersion
-                50706 => return true,
-                // PhotometricInterpretation: CFA or LinearRaw
-                262 => {
-                    let v = match field_type {
-                        3 => read_u16(&value[..2]) as u32,
-                        4 => read_u32(value),
-                        _ => continue,
-                    };
-                    if v == 32803 || v == 34892 {
-                        return true;
-                    }
-                }
-                // Make / Model
-                271 | 272 => {
-                    let len = (count as usize).min(32);
-                    let bytes = if len <= 4 {
-                        value[..len].to_vec()
-                    } else {
-                        if reader.seek(SeekFrom::Start(read_u32(value) as u64)).is_err() {
-                            continue;
-                        }
-                        match read_vec_up_to(reader, len) {
-                            Ok(buf) => buf,
-                            Err(_) => continue,
-                        }
-                    };
-                    let text = String::from_utf8_lossy(&bytes).trim_end_matches('\0').trim().to_uppercase();
-                    if tag == 271 {
-                        make = text
-                    } else {
-                        model = text
-                    }
-                }
-                // SubIFDs
-                330 => {
-                    if count == 1 {
-                        queue.push(read_u32(value));
-                    } else {
-                        let sub_count = (count as usize).min(8);
-                        if reader.seek(SeekFrom::Start(read_u32(value) as u64)).is_ok() {
-                            if let Ok(buf) = read_vec_up_to(reader, sub_count * 4) {
-                                for chunk in buf.chunks_exact(4) {
-                                    queue.push(read_u32(chunk));
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+        queue.push(ifd.next_ifd_offset);
+        if let Some(sub_ifds) = ifd.values::<u64, _>(TiffTags::SubIFDs, &mut reader, &mut limits) {
+            queue.extend(sub_ifds.into_iter().take(MAX_SUB_IFDS));
         }
     }
 
@@ -327,6 +276,14 @@ pub(crate) fn jp2_family_is_jpeg_xr<R: Read + Seek>(reader: &mut R) -> bool {
     let compatible = ftyp[16..box_len].chunks_exact(4);
 
     brand == b"jxrc" || compatible.into_iter().any(|entry| entry == b"jxrc")
+}
+
+pub fn looks_like_radiance_hdr(header: &[u8]) -> bool {
+    let Some(rest) = header.strip_prefix(b"#?") else {
+        return false;
+    };
+    let name_len = rest.iter().take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-').count();
+    name_len > 0 && matches!(rest.get(name_len), Some(b'\n' | b'\r' | b' ') | None)
 }
 
 pub fn is_netpbm_space(byte: u8) -> bool {

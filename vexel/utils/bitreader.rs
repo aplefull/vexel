@@ -132,6 +132,21 @@ impl<R: Read + Seek> BitReader<R> {
         }
     }
 
+    /// Reads a single 64-bit value from the bitstream.
+    ///
+    /// # Returns
+    /// - The 64-bit value read
+    /// - `std::io::Error` if an I/O error occurs
+    pub fn read_u64(&mut self) -> Result<u64, std::io::Error> {
+        let mut bytes = [0u8; 8];
+        self.reader.read_exact(&mut bytes)?;
+        if self.little_endian {
+            Ok(u64::from_le_bytes(bytes))
+        } else {
+            Ok(u64::from_be_bytes(bytes))
+        }
+    }
+
     /// Reads the exact number of bytes required to fill the buffer.
     ///
     /// # Returns

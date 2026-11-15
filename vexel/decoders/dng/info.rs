@@ -169,7 +169,7 @@ fn read_opcode_list<R: Read + Seek>(reader: &mut BitReader<R>, list: u8, entry: 
     let mut data = vec![0u8; length];
     match entry.value_offset {
         Some(offset) => {
-            reader.seek(SeekFrom::Start(u64::from(offset))).ok()?;
+            reader.seek(SeekFrom::Start(offset)).ok()?;
             reader.read_exact(&mut data).ok()?;
         }
         None => {
@@ -209,7 +209,7 @@ fn parameters<R: Read + Seek>(
     let raw_section = raw.and_then(|image| structure.ifd_section(image.index));
     let lookup = Lookup { primary, raw: raw_section };
 
-    let count = |tag: TiffTags| lookup.raster(tag).map(|entry| entry.count).unwrap_or(0);
+    let count = |tag: TiffTags| lookup.raster(tag).map_or(0, |entry| u32::try_from(entry.count).unwrap_or(u32::MAX));
 
     let mut params = DngParameters {
         raw_ifd: raw.map(|image| image.index),
@@ -332,7 +332,7 @@ pub fn build_info<R: Read + Seek>(structure: TiffStructure, reader: &mut BitRead
     let raw = select_raw(&structure);
     let params = parameters(&structure, raw, reader);
     let summary = raw.and_then(|raw| summary(&structure, raw, &params));
-    let raw_offset = raw.map(|image| u64::from(image.ifd.offset)).unwrap_or(0);
+    let raw_offset = raw.map(|image| image.ifd.offset).unwrap_or(0);
 
     let mut info = DngInfo { summary, sections: Vec::new() };
     for section in structure.sections {

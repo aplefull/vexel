@@ -11,7 +11,7 @@ use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, decompress_deflate_with_capacity, decompress_lzw_with_capacity,
     decompress_packbits_with_capacity, predictor_x_factor,
 };
-use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard};
+use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard, IfdFormat};
 use crate::utils::tiff::info::walk_structure;
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
 use crate::utils::tiff::types::{
@@ -77,15 +77,15 @@ pub struct DngMetadata {
 }
 
 struct IfdQueueFilter {
-    seen: std::collections::HashSet<u32>,
+    seen: std::collections::HashSet<u64>,
 }
 
 impl IfdQueueFilter {
-    fn new(first: u32) -> Self {
+    fn new(first: u64) -> Self {
         Self { seen: std::collections::HashSet::from([first]) }
     }
 
-    fn extend(&mut self, queue: &mut Vec<u32>, offsets: impl IntoIterator<Item = u32>) {
+    fn extend(&mut self, queue: &mut Vec<u64>, offsets: impl IntoIterator<Item = u64>) {
         for offset in offsets {
             if self.seen.len() >= MAX_DNG_IFDS {
                 return;
@@ -103,13 +103,14 @@ struct IfdSummary {
     height: u32,
     is_raw: bool,
     has_data: bool,
-    sub_ifd_offsets: Vec<u32>,
+    sub_ifd_offsets: Vec<u64>,
 }
 
 pub struct DngDecoder<R: Read + Seek> {
     reader: BitReader<R>,
     limits: Limits,
     byte_order: ByteOrder,
+    ifd_format: IfdFormat,
     header: TiffHeader,
     dng: DngMetadata,
     width: u32,
@@ -127,6 +128,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             reader: BitReader::new(reader),
             limits: Limits::default(),
             byte_order: ByteOrder::LittleEndian,
+            ifd_format: IfdFormat::classic(ByteOrder::LittleEndian),
             header: TiffHeader::default(),
             dng: DngMetadata::default(),
             width: 0,
@@ -164,6 +166,7 @@ impl<R: Read + Seek> DngDecoder<R> {
         let saved_header = std::mem::take(&mut self.header);
         let saved_dng = std::mem::take(&mut self.dng);
         let saved_byte_order = self.byte_order;
+        let saved_ifd_format = self.ifd_format;
         let (saved_width, saved_height) = (self.width, self.height);
         let saved_limits = self.limits.clone();
 
@@ -173,6 +176,7 @@ impl<R: Read + Seek> DngDecoder<R> {
         self.header = saved_header;
         self.dng = saved_dng;
         self.byte_order = saved_byte_order;
+        self.ifd_format = saved_ifd_format;
         self.width = saved_width;
         self.height = saved_height;
         let _ = self.reader.seek(SeekFrom::Start(saved_pos));
@@ -184,6 +188,7 @@ impl<R: Read + Seek> DngDecoder<R> {
         self.reader.seek(SeekFrom::Start(0))?;
         let file_header = ifd::read_file_header(&mut self.reader)?;
         self.byte_order = file_header.byte_order;
+        self.ifd_format = file_header.format;
 
         let mut previews = Vec::new();
         let mut guard = IfdCycleGuard::new(MAX_DNG_IFDS);
@@ -195,7 +200,7 @@ impl<R: Read + Seek> DngDecoder<R> {
                 continue;
             }
 
-            let Ok(ifd) = Ifd::read(&mut self.reader, offset, self.byte_order, &mut self.limits) else {
+            let Ok(ifd) = Ifd::read(&mut self.reader, offset, self.ifd_format, &mut self.limits) else {
                 continue;
             };
 
@@ -228,13 +233,13 @@ impl<R: Read + Seek> DngDecoder<R> {
 
         let (offsets, counts) = if ifd.entry(TiffTags::StripOffsets).is_some() {
             (
-                ifd.values::<u32, _>(TiffTags::StripOffsets, &mut self.reader, &mut self.limits).unwrap_or_default(),
-                ifd.values::<u32, _>(TiffTags::StripByteCounts, &mut self.reader, &mut self.limits).unwrap_or_default(),
+                ifd.values::<u64, _>(TiffTags::StripOffsets, &mut self.reader, &mut self.limits).unwrap_or_default(),
+                ifd.values::<u64, _>(TiffTags::StripByteCounts, &mut self.reader, &mut self.limits).unwrap_or_default(),
             )
         } else {
             (
-                ifd.values::<u32, _>(TiffTags::TileOffsets, &mut self.reader, &mut self.limits).unwrap_or_default(),
-                ifd.values::<u32, _>(TiffTags::TileByteCounts, &mut self.reader, &mut self.limits).unwrap_or_default(),
+                ifd.values::<u64, _>(TiffTags::TileOffsets, &mut self.reader, &mut self.limits).unwrap_or_default(),
+                ifd.values::<u64, _>(TiffTags::TileByteCounts, &mut self.reader, &mut self.limits).unwrap_or_default(),
             )
         };
 
@@ -276,7 +281,7 @@ impl<R: Read + Seek> DngDecoder<R> {
                 count = count.min(target_bytes - data.len());
             }
             count = count.min(usize::try_from(read_budget).unwrap_or(usize::MAX));
-            if count == 0 || self.reader.seek(SeekFrom::Start(offset as u64)).is_err() {
+            if count == 0 || self.reader.seek(SeekFrom::Start(offset)).is_err() {
                 continue;
             }
             if self.limits.reserve_usize(count).is_err() {
@@ -336,7 +341,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             || ifd.entry(TiffTags::TileOffsets).is_some_and(|e| e.count > 0);
 
         let sub_ifd_offsets = ifd
-            .values::<u32, _>(TiffTags::SubIFDs, &mut self.reader, &mut self.limits)
+            .values::<u64, _>(TiffTags::SubIFDs, &mut self.reader, &mut self.limits)
             .unwrap_or_default()
             .into_iter()
             .filter(|&o| o > 0)
@@ -368,7 +373,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             self.dng.photometric_raw = v == DNG_PHOTOMETRIC_CFA || v == DNG_PHOTOMETRIC_LINEAR_RAW;
             self.dng.photometric_cfa = v == DNG_PHOTOMETRIC_CFA;
             self.header.photometric_interpretation =
-                PhotometricInterpretation::try_from(v).unwrap_or(PhotometricInterpretation::BlackIsZero);
+                PhotometricInterpretation::try_from(u64::from(v)).unwrap_or(PhotometricInterpretation::BlackIsZero);
         }
         if self.dng.make.is_empty() {
             if let Some(v) = ifd.string(TiffTags::Make, &mut self.reader) {
@@ -413,7 +418,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             self.header.planar_configuration = v;
         }
         if let Some(v) = ifd.value::<u32, _>(TiffTags::Predictor, &mut self.reader) {
-            self.header.predictor = Predictor::try_from(v).unwrap_or(Predictor::None);
+            self.header.predictor = Predictor::try_from(u64::from(v)).unwrap_or(Predictor::None);
         }
         if let Some(v) = ifd.value(TiffTags::TileWidth, &mut self.reader) {
             self.header.tile_width = Some(v);
@@ -481,8 +486,10 @@ impl<R: Read + Seek> DngDecoder<R> {
     fn read_raster_calibration_tags(&mut self, ifd: &Ifd) {
         if let Some(v) = ifd.values::<u32, _>(TiffTags::SampleFormat, &mut self.reader, &mut self.limits) {
             if !v.is_empty() {
-                self.header.sample_format =
-                    v.into_iter().map(|f| SampleFormat::try_from(f).unwrap_or(SampleFormat::UnsignedInt)).collect();
+                self.header.sample_format = v
+                    .into_iter()
+                    .map(|f| SampleFormat::try_from(u64::from(f)).unwrap_or(SampleFormat::UnsignedInt))
+                    .collect();
             }
         }
         if let Some(v) = ifd.values::<u32, _>(TiffTags::CFAPlaneColor, &mut self.reader, &mut self.limits) {
@@ -605,9 +612,9 @@ impl<R: Read + Seek> DngDecoder<R> {
         }
     }
 
-    fn read_opcode_list(&mut self, count: u32, value_offset: u32) {
-        let len = (count as usize).min(1 << 20);
-        if len < 4 || self.reader.seek(SeekFrom::Start(value_offset as u64)).is_err() {
+    fn read_opcode_list(&mut self, count: u64, value_offset: u64) {
+        let len = count.min(1 << 20) as usize;
+        if len < 4 || self.reader.seek(SeekFrom::Start(value_offset)).is_err() {
             return;
         }
         let mut data = vec![0u8; len];
@@ -827,13 +834,13 @@ impl<R: Read + Seek> DngDecoder<R> {
         Ok(())
     }
 
-    fn read_chunk(&mut self, offset: u32, count: u32, budget: &mut u64) -> Vec<u8> {
-        if *budget == 0 || count == 0 || self.reader.seek(SeekFrom::Start(offset as u64)).is_err() {
+    fn read_chunk(&mut self, offset: u64, count: u64, budget: &mut u64) -> Vec<u8> {
+        if *budget == 0 || count == 0 || self.reader.seek(SeekFrom::Start(offset)).is_err() {
             return Vec::new();
         }
         let available = self.reader.bytes_left().unwrap_or(0);
-        let len = u64::from(count).min(available).min(*budget);
-        if len < u64::from(count) {
+        let len = count.min(available).min(*budget);
+        if len < count {
             log_warn!("DNG chunk at offset {} truncated from {} to {} bytes", offset, count, len);
         }
         let mut data = vec![0u8; len as usize];
@@ -1836,9 +1843,10 @@ impl<R: Read + Seek> DngDecoder<R> {
     pub fn decode(&mut self) -> VexelResult<Image> {
         let file_header = ifd::read_file_header(&mut self.reader)?;
         self.byte_order = file_header.byte_order;
+        self.ifd_format = file_header.format;
         let first_ifd_offset = file_header.first_ifd_offset;
 
-        let mut queue: Vec<u32> = vec![first_ifd_offset];
+        let mut queue: Vec<u64> = vec![first_ifd_offset];
         let mut guard = IfdCycleGuard::new(MAX_DNG_IFDS);
         let mut queued = IfdQueueFilter::new(first_ifd_offset);
         let mut all_ifds: Vec<IfdSummary> = Vec::new();
@@ -1849,7 +1857,7 @@ impl<R: Read + Seek> DngDecoder<R> {
                 continue;
             }
 
-            let Ok(parsed) = Ifd::read(&mut self.reader, ifd_offset, self.byte_order, &mut self.limits) else {
+            let Ok(parsed) = Ifd::read(&mut self.reader, ifd_offset, self.ifd_format, &mut self.limits) else {
                 continue;
             };
 
@@ -1882,7 +1890,7 @@ impl<R: Read + Seek> DngDecoder<R> {
         let best_ifd = match all_ifds.iter().find(|s| s.ifd.offset == best_offset) {
             Some(summary) => &summary.ifd,
             None => {
-                parsed_best = Ifd::read(&mut self.reader, best_offset, self.byte_order, &mut self.limits)?;
+                parsed_best = Ifd::read(&mut self.reader, best_offset, self.ifd_format, &mut self.limits)?;
                 &parsed_best
             }
         };
@@ -1997,8 +2005,8 @@ fn prefault<T: Copy + Default + Send>(buf: &mut [T]) {
 }
 
 struct Piece {
-    offset: u32,
-    count: u32,
+    offset: u64,
+    count: u64,
     rows: usize,
     width: usize,
 }

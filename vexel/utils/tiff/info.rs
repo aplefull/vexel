@@ -10,7 +10,7 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::{parse_value, tag_name as exif_tag_name, ExifValue, IfdType};
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter, Section};
 use crate::utils::limits::Limits;
-use crate::utils::tiff::ifd::{type_size, Ifd, IfdCycleGuard, IfdEntry};
+use crate::utils::tiff::ifd::{type_size, Ifd, IfdCycleGuard, IfdEntry, IfdFormat, BIGTIFF_MAGIC, TIFF_MAGIC};
 use crate::utils::tiff::types::TiffTags;
 use crate::utils::types::ByteOrder;
 
@@ -23,7 +23,6 @@ const SMALL_VALUE_RESERVE: usize = 4 << 20;
 const ASCII_STRING_COST: usize = 64;
 const MAX_CHUNK_TABLE_VALUES: u64 = 1 << 24;
 
-const TIFF_MAGIC: u16 = 42;
 const JPEG_XR_MAGIC: u16 = 0x01BC;
 const JPEG_XR_PIXEL_FORMAT: u16 = 48129;
 const JPEG_XR_IMAGE_OFFSET: u16 = 48320;
@@ -39,7 +38,7 @@ pub type TiffInfo = FormatInfo<TiffSection>;
 pub struct TiffFileHeaderSection {
     pub byte_order: ByteOrder,
     pub magic: u16,
-    pub first_ifd_offset: u32,
+    pub first_ifd_offset: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
@@ -56,8 +55,8 @@ pub enum IfdKind {
 pub struct TiffEntry {
     pub tag: u16,
     pub field_type: u16,
-    pub count: u32,
-    pub value_offset: Option<u32>,
+    pub count: u64,
+    pub value_offset: Option<u64>,
     pub value: Option<ExifValue>,
     pub truncated: bool,
 }
@@ -68,8 +67,8 @@ pub struct TiffIfdSection {
     pub kind: IfdKind,
     pub index: u32,
     pub parent: Option<u32>,
-    pub declared_entries: u16,
-    pub next_ifd_offset: u32,
+    pub declared_entries: u64,
+    pub next_ifd_offset: u64,
     pub entries: Vec<TiffEntry>,
 }
 
@@ -125,6 +124,8 @@ impl TiffEntry {
             Some(ExifValue::SByte(v)) => v.iter().map(|&x| f64::from(x)).collect(),
             Some(ExifValue::SShort(v)) => v.iter().map(|&x| f64::from(x)).collect(),
             Some(ExifValue::SLong(v)) => v.iter().map(|&x| f64::from(x)).collect(),
+            Some(ExifValue::Long8(v)) => v.iter().map(|&x| x as f64).collect(),
+            Some(ExifValue::SLong8(v)) => v.iter().map(|&x| x as f64).collect(),
             Some(ExifValue::Float(v)) => v.iter().map(|&x| f64::from(x)).collect(),
             Some(ExifValue::Double(v)) => v.clone(),
             Some(ExifValue::Rational(v)) => {
@@ -158,7 +159,7 @@ impl TiffEntry {
 struct Walker<'a, R: Read + Seek> {
     reader: &'a mut BitReader<R>,
     limits: &'a mut Limits,
-    byte_order: ByteOrder,
+    format: IfdFormat,
     stream_len: u64,
     guard: IfdCycleGuard,
     next_index: u32,
@@ -170,8 +171,8 @@ struct Walker<'a, R: Read + Seek> {
 }
 
 enum WalkTask {
-    Visit { offset: u32, kind: IfdKind, parent: Option<u32> },
-    SubIfds { pending: Vec<u32>, parent: u32 },
+    Visit { offset: u64, kind: IfdKind, parent: Option<u32> },
+    SubIfds { pending: Vec<u64>, parent: u32 },
     Finish(Box<TiffImageIfd>),
 }
 
@@ -186,13 +187,25 @@ pub fn walk_structure<R: Read + Seek>(reader: &mut BitReader<R>, limits: &mut Li
     };
     reader.set_endianness(byte_order);
     let magic = reader.read_u16()?;
-    let first_ifd_offset = reader.read_u32().unwrap_or(0);
+    let format = IfdFormat { byte_order, big: magic == BIGTIFF_MAGIC };
+    if format.big {
+        let offset_size = reader.read_u16().unwrap_or(0);
+        if offset_size != 8 {
+            log_warn!("BigTIFF offset size is {} instead of 8, reading 8-byte offsets", offset_size);
+        }
+        let reserved = reader.read_u16().unwrap_or(0);
+        if reserved != 0 {
+            log_warn!("BigTIFF reserved header field is {} instead of 0", reserved);
+        }
+    }
+    let first_ifd_offset =
+        if format.big { reader.read_u64().unwrap_or(0) } else { u64::from(reader.read_u32().unwrap_or(0)) };
     let stream_len = reader.seek(SeekFrom::End(0))?;
 
     let mut walker = Walker {
         reader,
         limits,
-        byte_order,
+        format,
         stream_len,
         guard: IfdCycleGuard::default(),
         next_index: 0,
@@ -205,12 +218,12 @@ pub fn walk_structure<R: Read + Seek>(reader: &mut BitReader<R>, limits: &mut Li
 
     walker.structure.sections.push(Section::new(
         0,
-        Some(8),
+        Some(format.header_length()),
         TiffSection::FileHeader(TiffFileHeaderSection { byte_order, magic, first_ifd_offset }),
     ));
 
-    if magic != TIFF_MAGIC && magic != JPEG_XR_MAGIC {
-        log_warn!("TIFF magic is {} instead of 42, not walking IFDs", magic);
+    if magic != TIFF_MAGIC && magic != BIGTIFF_MAGIC && magic != JPEG_XR_MAGIC {
+        log_warn!("TIFF magic is {} instead of 42 or 43, not walking IFDs", magic);
     } else {
         walker.walk(first_ifd_offset);
     }
@@ -221,7 +234,7 @@ pub fn walk_structure<R: Read + Seek>(reader: &mut BitReader<R>, limits: &mut Li
 }
 
 impl<R: Read + Seek> Walker<'_, R> {
-    fn walk(&mut self, first: u32) {
+    fn walk(&mut self, first: u64) {
         let mut tasks = vec![WalkTask::Visit { offset: first, kind: IfdKind::Page, parent: None }];
         while let Some(task) = tasks.pop() {
             match task {
@@ -239,7 +252,7 @@ impl<R: Read + Seek> Walker<'_, R> {
         }
     }
 
-    fn visit_ifd(&mut self, offset: u32, kind: IfdKind, parent: Option<u32>, tasks: &mut Vec<WalkTask>) {
+    fn visit_ifd(&mut self, offset: u64, kind: IfdKind, parent: Option<u32>, tasks: &mut Vec<WalkTask>) {
         if offset == 0 {
             return;
         }
@@ -251,7 +264,7 @@ impl<R: Read + Seek> Walker<'_, R> {
             return;
         }
 
-        let ifd = match Ifd::read(self.reader, offset, self.byte_order, self.limits) {
+        let ifd = match Ifd::read(self.reader, offset, self.format, self.limits) {
             Ok(ifd) => ifd,
             Err(e) => {
                 log_warn!("Failed to read TIFF IFD at 0x{:08X}: {}", offset, e);
@@ -264,9 +277,9 @@ impl<R: Read + Seek> Walker<'_, R> {
         self.next_index += 1;
 
         let entries = ifd.entries.iter().map(|entry| self.read_entry(&ifd, entry, true)).collect();
-        let length = 2 + 12 * ifd.entries.len() as u64 + 4;
+        let length = self.format.ifd_length(ifd.entries.len());
         self.structure.sections.push(Section::new(
-            u64::from(offset),
+            offset,
             Some(length),
             TiffSection::Ifd(TiffIfdSection {
                 kind,
@@ -329,8 +342,8 @@ impl<R: Read + Seek> Walker<'_, R> {
             return result;
         };
 
-        let total = u64::from(entry.count).saturating_mul(size as u64);
-        if total <= 4 {
+        let total = entry.count.saturating_mul(size as u64);
+        if total <= ifd.format.inline_capacity() as u64 {
             let bytes = &ifd.inline_bytes(entry)[..total as usize];
             result.value = Some(parse_value(entry.field_type, bytes.len() / size, bytes, ifd.byte_order));
             return result;
@@ -350,10 +363,8 @@ impl<R: Read + Seek> Walker<'_, R> {
         }
 
         let mut buffer = vec![0u8; wanted];
-        let read = self
-            .reader
-            .seek(SeekFrom::Start(u64::from(entry.value_offset)))
-            .and_then(|_| self.reader.read_exact(&mut buffer));
+        let read =
+            self.reader.seek(SeekFrom::Start(entry.value_offset)).and_then(|_| self.reader.read_exact(&mut buffer));
         if read.is_err() {
             result.truncated = false;
             return result;
@@ -386,23 +397,26 @@ impl<R: Read + Seek> Walker<'_, R> {
         result
     }
 
-    fn pointer(&mut self, ifd: &Ifd, tag: u16) -> Option<u32> {
+    fn pointer(&mut self, ifd: &Ifd, tag: u16) -> Option<u64> {
         self.pointers(ifd, tag).into_iter().next()
     }
 
-    fn pointers(&mut self, ifd: &Ifd, tag: u16) -> Vec<u32> {
+    fn pointers(&mut self, ifd: &Ifd, tag: u16) -> Vec<u64> {
         let Some(entry) = ifd.entries.iter().find(|e| e.tag == tag) else {
             return Vec::new();
         };
         let entry = self.read_entry(ifd, entry, false);
-        let values: Vec<u32> = match entry.value {
-            Some(ExifValue::Long(v)) => v,
-            Some(ExifValue::Short(v)) => v.into_iter().map(u32::from).collect(),
+        let values: Vec<u64> = match entry.value {
+            Some(ExifValue::Long(v)) => v.into_iter().map(u64::from).collect(),
+            Some(ExifValue::Short(v)) => v.into_iter().map(u64::from).collect(),
+            Some(ExifValue::Long8(v)) => v,
             Some(ExifValue::Undefined(v)) | Some(ExifValue::Byte(v)) if v.len() >= 4 => v
                 .chunks_exact(4)
-                .map(|b| match ifd.byte_order {
-                    ByteOrder::LittleEndian => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-                    ByteOrder::BigEndian => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                .map(|b| {
+                    u64::from(match ifd.byte_order {
+                        ByteOrder::LittleEndian => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                        ByteOrder::BigEndian => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+                    })
                 })
                 .collect(),
             _ => Vec::new(),
@@ -410,7 +424,7 @@ impl<R: Read + Seek> Walker<'_, R> {
         values.into_iter().filter(|&o| o != 0).collect()
     }
 
-    fn chunk_arrays(&mut self, ifd: &Ifd) -> Option<(bool, Vec<u32>, Vec<u32>)> {
+    fn chunk_arrays(&mut self, ifd: &Ifd) -> Option<(bool, Vec<u64>, Vec<u64>)> {
         let tiled = ifd.has(TiffTags::TileOffsets);
         let (offsets_tag, counts_tag) = if tiled {
             (TiffTags::TileOffsets, TiffTags::TileByteCounts)
@@ -421,8 +435,7 @@ impl<R: Read + Seek> Walker<'_, R> {
         };
         let stream_len = self.stream_len;
         let table_values = |tag: TiffTags| {
-            ifd.entry(tag)
-                .map_or(0, |e| u64::from(e.count).min(stream_len / type_size(e.field_type).unwrap_or(4) as u64))
+            ifd.entry(tag).map_or(0, |e| e.count.min(stream_len / type_size(e.field_type).unwrap_or(4) as u64))
         };
         let wanted = table_values(offsets_tag) + table_values(counts_tag);
         if wanted > self.chunk_table_budget {
@@ -433,21 +446,21 @@ impl<R: Read + Seek> Walker<'_, R> {
             return None;
         }
         self.chunk_table_budget -= wanted;
-        let offsets = ifd.values::<u32, _>(offsets_tag, self.reader, self.limits)?;
-        let counts = ifd.values::<u32, _>(counts_tag, self.reader, self.limits).unwrap_or_default();
+        let offsets = ifd.values::<u64, _>(offsets_tag, self.reader, self.limits)?;
+        let counts = ifd.values::<u64, _>(counts_tag, self.reader, self.limits).unwrap_or_default();
         Some((tiled, offsets, counts))
     }
 
     fn image_data(&mut self, ifd: &Ifd, index: u32) -> Option<(TiffImageData, u64)> {
         let (tiled, offsets, counts) = self.chunk_arrays(ifd)?;
-        let start = offsets.iter().filter(|&&o| o != 0).min().map(|&o| u64::from(o)).unwrap_or(0);
+        let start = offsets.iter().filter(|&&o| o != 0).min().copied().unwrap_or(0);
         let mut declared_bytes = 0u64;
         let mut available_bytes = 0u64;
         for (i, &offset) in offsets.iter().enumerate() {
-            let count = u64::from(counts.get(i).copied().unwrap_or(0));
-            declared_bytes += count;
-            let end = (u64::from(offset) + count).min(self.stream_len);
-            available_bytes += end.saturating_sub(u64::from(offset));
+            let count = counts.get(i).copied().unwrap_or(0);
+            declared_bytes = declared_bytes.saturating_add(count);
+            let end = offset.saturating_add(count).min(self.stream_len);
+            available_bytes += end.saturating_sub(offset);
         }
         Some((
             TiffImageData { ifd: index, tiled, chunk_count: offsets.len() as u32, declared_bytes, available_bytes },
@@ -745,8 +758,8 @@ impl InfoSection for TiffSection {
                 out.field("Byte order", order);
                 match header.magic {
                     TIFF_MAGIC => out.field("Magic", "42 (TIFF)"),
+                    BIGTIFF_MAGIC => out.field("Magic", "43 (BigTIFF)"),
                     JPEG_XR_MAGIC => out.field("Magic", "0x01BC (JPEG XR)"),
-                    43 => out.field("Magic", "43 (BigTIFF, unsupported)"),
                     other => out.field("Magic", format!("{} (invalid)", other)),
                 };
                 out.field("First IFD offset", format!("0x{:08X}", header.first_ifd_offset));

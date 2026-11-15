@@ -413,7 +413,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         }
 
         // HDR
-        if header.starts_with(b"#?RADIANCE") {
+        if format_detect::looks_like_radiance_hdr(&header) {
             return Ok(ImageFormat::Hdr);
         }
 
@@ -459,16 +459,12 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         }
 
         // TIFF / DNG
-        if (header.starts_with(b"II") || header.starts_with(b"MM"))
-            && ((header[2] == 42 && header[3] == 0) || (header[2] == 0 && header[3] == 42))
+        if header.starts_with(b"II\x2a\x00")
+            || header.starts_with(b"MM\x00\x2a")
+            || header.starts_with(b"II\x2b\x00")
+            || header.starts_with(b"MM\x00\x2b")
         {
-            let is_le = header.starts_with(b"II");
-            let first_ifd_offset = if is_le {
-                u32::from_le_bytes([header[4], header[5], header[6], header[7]])
-            } else {
-                u32::from_be_bytes([header[4], header[5], header[6], header[7]])
-            };
-            let is_raw = format_detect::tiff_is_camera_raw(reader, first_ifd_offset, is_le);
+            let is_raw = format_detect::tiff_is_camera_raw(reader);
             reader.seek(SeekFrom::Start(0))?;
             return if is_raw { Ok(ImageFormat::Dng) } else { Ok(ImageFormat::Tiff) };
         }
