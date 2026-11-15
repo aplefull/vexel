@@ -273,10 +273,14 @@ pub fn convert_row_wide(kind: JpegColorspace, rows: &[&[u16]; 4], out: &mut [u16
     let center = 1i32 << (precision - 1);
     let sample = |c: usize, x: usize| -> i32 { rows[c].get(x).map(|&v| v as i32).unwrap_or(center) };
     let ycc = |x: usize| -> (i32, i32, i32) {
-        let y = sample(0, x) << 16;
-        let cb = sample(1, x) - center;
-        let cr = sample(2, x) - center;
-        ((y + 91881 * cr + 32768) >> 16, (y - 22554 * cb - 46802 * cr + 32768) >> 16, (y + 116130 * cb + 32768) >> 16)
+        let y = (sample(0, x) as i64) << 16;
+        let cb = (sample(1, x) - center) as i64;
+        let cr = (sample(2, x) - center) as i64;
+        (
+            ((y + 91881 * cr + 32768) >> 16) as i32,
+            ((y - 22554 * cb - 46802 * cr + 32768) >> 16) as i32,
+            ((y + 116130 * cb + 32768) >> 16) as i32,
+        )
     };
     match kind {
         JpegColorspace::Grayscale => {

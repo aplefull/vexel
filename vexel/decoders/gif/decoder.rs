@@ -679,10 +679,12 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.read_structure(FrameExtent::First)?;
         self.resolve_dimensions()?;
 
+        self.limits.check_dimensions(self.width, self.height)?;
+        let size = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
+        self.limits.reserve_usize(size)?;
+
         let Some(frame) = self.frames.first() else {
-            let canvas_size = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
-            self.limits.reserve_usize(canvas_size)?;
-            return Ok(Image::from_pixels(self.width, self.height, PixelData::RGBA8(vec![0u8; canvas_size])));
+            return Ok(Image::from_pixels(self.width, self.height, PixelData::RGBA8(vec![0u8; size])));
         };
 
         let indices = frame_indices(frame, self.reader.data(), self.width, self.height, Vec::new());
@@ -693,10 +695,6 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             palette: &palette,
             update: Update::Keep,
         };
-
-        self.limits.check_dimensions(self.width, self.height)?;
-        let size = (self.width as usize).saturating_mul(self.height as usize).saturating_mul(4);
-        self.limits.reserve_usize(size)?;
 
         let mut pixels = Vec::with_capacity(size);
         compose_first(&layer, &mut pixels, self.width as usize, self.height as usize);

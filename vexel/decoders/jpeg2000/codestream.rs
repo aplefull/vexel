@@ -1082,9 +1082,12 @@ fn parse_palette(body: &[u8]) -> Option<Palette> {
             }
             pos += bytes;
 
+            if depth < 32 {
+                value &= (1u32 << depth) - 1;
+            }
             let mut sample = value as i32;
             if signed && depth < 32 && value & (1 << (depth - 1)) != 0 {
-                sample = value as i32 - (1i32 << depth);
+                sample = (i64::from(value) - (1i64 << depth)) as i32;
             }
             row.push(sample);
         }

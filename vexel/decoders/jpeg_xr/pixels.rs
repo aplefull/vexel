@@ -217,6 +217,10 @@ fn half_to_f32(bits: u16) -> f32 {
     f32::from_bits(sign | (biased << 23) | (mantissa << 13))
 }
 
+fn midpoint(a: i32, b: i32) -> i32 {
+    ((i64::from(a) + i64::from(b) + 1) >> 1) as i32
+}
+
 struct Chroma {
     u: Vec<i32>,
     v: Vec<i32>,
@@ -264,8 +268,8 @@ fn interpolate_uv(
                     let left = column - 2;
                     let center = column - 1;
 
-                    let mid_u = (load(&out_u, row, left) + load(&out_u, row, column) + 1) >> 1;
-                    let mid_v = (load(&out_v, row, left) + load(&out_v, row, column) + 1) >> 1;
+                    let mid_u = midpoint(load(&out_u, row, left), load(&out_u, row, column));
+                    let mid_v = midpoint(load(&out_v, row, left), load(&out_v, row, column));
                     store(&mut out_u, row, center, mid_u);
                     store(&mut out_v, row, center, mid_v);
                 }
@@ -292,8 +296,8 @@ fn interpolate_uv(
                     let top = row - 2;
                     let center = row - 1;
 
-                    let mid_u = (load(&out_u, top, column) + load(&out_u, row, column) + 1) >> 1;
-                    let mid_v = (load(&out_v, top, column) + load(&out_v, row, column) + 1) >> 1;
+                    let mid_u = midpoint(load(&out_u, top, column), load(&out_u, row, column));
+                    let mid_v = midpoint(load(&out_v, top, column), load(&out_v, row, column));
                     store(&mut out_u, center, column, mid_u);
                     store(&mut out_v, center, column, mid_v);
                 }
@@ -316,11 +320,11 @@ fn interpolate_uv(
             while column + 1 < width {
                 let left = load(&out_u, row, column - 1);
                 let right = load(&out_u, row, column + 1);
-                store(&mut out_u, row, column, (left + right + 1) >> 1);
+                store(&mut out_u, row, column, midpoint(left, right));
 
                 let left = load(&out_v, row, column - 1);
                 let right = load(&out_v, row, column + 1);
-                store(&mut out_v, row, column, (left + right + 1) >> 1);
+                store(&mut out_v, row, column, midpoint(left, right));
 
                 column += 2;
             }
