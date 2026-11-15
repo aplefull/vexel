@@ -438,9 +438,13 @@ impl<R: Read + Seek + Sync> Vexel<R> {
         }
 
         // JPEG 2000
-        if header.starts_with(&[0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A])
-            || header.starts_with(&[0xFF, 0x4F, 0xFF, 0x51])
-        {
+        if header.starts_with(&[0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A]) {
+            let is_jpeg_xr = format_detect::jp2_family_is_jpeg_xr(reader);
+            reader.seek(SeekFrom::Start(0))?;
+            return Ok(if is_jpeg_xr { ImageFormat::JpegXr } else { ImageFormat::Jpeg2000 });
+        }
+
+        if header.starts_with(&[0xFF, 0x4F, 0xFF, 0x51]) {
             return Ok(ImageFormat::Jpeg2000);
         }
 

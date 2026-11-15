@@ -69,10 +69,7 @@ impl<R: Read + Seek> JpegXrDecoder<R> {
         let image_header = &primary.image;
         let plane_header = &primary.plane;
 
-        let has_alpha = alpha.is_some() || primary.alpha_planes.is_some();
-
-        let orientation =
-            container.as_ref().and_then(|c| c.transformation).map(Orientation::from_bits).unwrap_or(Orientation::None);
+        let orientation = container::effective_orientation(container.as_ref(), image_header.spatial_transform);
 
         let params = OutputParams {
             width: image_header.width as usize,
@@ -84,8 +81,7 @@ impl<R: Read + Seek> JpegXrDecoder<R> {
             scaled_arith: plane_header.scaled_arith,
             mantissa_len: plane_header.mantissa_len,
             exp_bias: plane_header.exp_bias,
-            rb_swapped: image_header.rb_swapped,
-            has_alpha,
+            red_blue_not_swapped: image_header.red_blue_not_swapped,
             window_top: image_header.extra_top as usize,
             window_left: image_header.extra_left as usize,
         };
@@ -367,12 +363,13 @@ fn output_bytes_per_pixel(params: &OutputParams) -> u64 {
         || (params.source_color_format == ColorFormat::NComponent && params.channels < 3);
     let sample_bytes = match params.bit_depth {
         BitDepth::Bd1White | BitDepth::Bd1Black => return 1,
+        BitDepth::Bd8 if params.source_color_format == ColorFormat::Rgbe => return 12,
         BitDepth::Bd8 | BitDepth::Bd5 | BitDepth::Bd565 => 1,
-        BitDepth::Bd16 | BitDepth::Bd16S | BitDepth::Bd10 => 2,
-        BitDepth::Bd16F | BitDepth::Bd32 | BitDepth::Bd32S | BitDepth::Bd32F => 4,
+        BitDepth::Bd16 | BitDepth::Bd10 => 2,
+        BitDepth::Bd16S | BitDepth::Bd16F | BitDepth::Bd32 | BitDepth::Bd32S | BitDepth::Bd32F => 4,
     };
     if gray {
-        sample_bytes
+        sample_bytes * 2
     } else {
         sample_bytes * 4
     }

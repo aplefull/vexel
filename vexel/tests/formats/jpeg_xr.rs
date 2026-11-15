@@ -206,5 +206,71 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "jpeg-xr/level128_rows_freq.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "JPEG XR JPX container gray",
+            path: "jpeg-xr/jpx_gray8.jpx",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/jpx_gray8.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR JPX container separate alpha codestream",
+            path: "jpeg-xr/jpx_bgra_separate_alpha.jpx",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/jpx_bgra_separate_alpha.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR JPX container interleaved alpha",
+            path: "jpeg-xr/jpx_bgra_interleaved_alpha.jpx",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/jpx_bgra_interleaved_alpha.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR bare codestream applies its orientation",
+            path: "jpeg-xr/bare_codestream_rcw.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/bare_codestream_rcw.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR 16-bit fixed point gray",
+            path: "jpeg-xr/fixed_point_gray16.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/fixed_point_gray16.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR 16-bit fixed point RGB",
+            path: "jpeg-xr/fixed_point_rgb48.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/fixed_point_rgb48.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR 32-bit fixed point RGBA",
+            path: "jpeg-xr/fixed_point_rgba128.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/fixed_point_rgba128.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR RGBE",
+            path: "jpeg-xr/rgbe.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/rgbe.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR CMYK direct",
+            path: "jpeg-xr/cmyk_direct32.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/cmyk_direct32.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR BGR565 red and blue not swapped",
+            path: "jpeg-xr/bgr565_red_blue_not_swapped.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/bgr565_red_blue_not_swapped.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "JPEG XR YCC 4:2:2 10-bit with alpha",
+            path: "jpeg-xr/ycc422_10bit_alpha.jxr",
+            comparison: Comparison::Exact { reference_path: "jpeg-xr/ycc422_10bit_alpha.jxl" },
+            ..Default::default()
+        },
     ]
 }

@@ -307,6 +307,28 @@ pub fn looks_like_jpeg_xr(header: &[u8]) -> bool {
     header.len() >= 4 && header[..4] == [0x49, 0x49, 0xbc, 0x01]
 }
 
+pub(crate) fn jp2_family_is_jpeg_xr<R: Read + Seek>(reader: &mut R) -> bool {
+    const SIGNATURE_BOX_LEN: u64 = 12;
+    const MAX_FTYP_LEN: usize = 1024;
+
+    if reader.seek(SeekFrom::Start(SIGNATURE_BOX_LEN)).is_err() {
+        return false;
+    }
+    let Ok(ftyp) = read_vec_up_to(reader, MAX_FTYP_LEN) else {
+        return false;
+    };
+    let _ = reader.seek(SeekFrom::Start(0));
+
+    if ftyp.len() < 16 || &ftyp[4..8] != b"ftyp" {
+        return false;
+    }
+    let box_len = (u32::from_be_bytes([ftyp[0], ftyp[1], ftyp[2], ftyp[3]]) as usize).clamp(16, ftyp.len());
+    let brand = &ftyp[8..12];
+    let compatible = ftyp[16..box_len].chunks_exact(4);
+
+    brand == b"jxrc" || compatible.into_iter().any(|entry| entry == b"jxrc")
+}
+
 pub fn is_netpbm_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }

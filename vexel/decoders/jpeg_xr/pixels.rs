@@ -1,5 +1,6 @@
 use crate::decoders::jpeg_xr::tables::{IDX_CC, IDX_CC_420};
 use crate::decoders::jpeg_xr::types::*;
+use crate::log_warn;
 use crate::utils::image::PixelData;
 
 pub const SHIFT_SCALED: i32 = SHIFTZERO + QPFRACBITS;
@@ -15,8 +16,7 @@ pub struct OutputParams {
     pub scaled_arith: bool,
     pub mantissa_len: u8,
     pub exp_bias: i8,
-    pub rb_swapped: bool,
-    pub has_alpha: bool,
+    pub red_blue_not_swapped: bool,
     pub window_top: usize,
     pub window_left: usize,
 }
@@ -449,6 +449,10 @@ pub fn build_image_data(
     mb_width: usize,
     mb_height: usize,
 ) -> PixelData {
+    if params.source_color_format == ColorFormat::NComponent && params.channels > 3 {
+        log_warn!("JPEG XR: {} components, keeping the first three", params.channels);
+    }
+
     let sampler = build_sampler(planes, params, mb_width, mb_height);
     let alpha_sampler = alpha.map(|planes| build_sampler(&planes[..planes.len().min(1)], params, mb_width, mb_height));
 
@@ -456,13 +460,13 @@ pub fn build_image_data(
         BitDepth::Bd1White | BitDepth::Bd1Black => build_bilevel(&sampler, params),
         BitDepth::Bd8 => build_8bit(&sampler, alpha_sampler.as_ref(), params),
         BitDepth::Bd16 => build_16bit(&sampler, alpha_sampler.as_ref(), params),
-        BitDepth::Bd16S => build_16bit_signed(&sampler, alpha_sampler.as_ref(), params),
+        BitDepth::Bd16S => build_16bit_fixed(&sampler, alpha_sampler.as_ref(), params),
         BitDepth::Bd16F => build_half(&sampler, alpha_sampler.as_ref(), params),
         BitDepth::Bd32 | BitDepth::Bd32S => build_32bit(&sampler, alpha_sampler.as_ref(), params),
         BitDepth::Bd32F => build_float(&sampler, alpha_sampler.as_ref(), params),
         BitDepth::Bd5 => build_packed555(&sampler, params),
         BitDepth::Bd565 => build_packed565(&sampler, params),
-        BitDepth::Bd10 => build_packed101010(&sampler, params),
+        BitDepth::Bd10 => build_10bit(&sampler, alpha_sampler.as_ref(), params),
     }
 }
 
@@ -480,132 +484,116 @@ fn build_bilevel(sampler: &Sampler, params: &OutputParams) -> PixelData {
     PixelData::L1(out)
 }
 
+fn is_gray(params: &OutputParams) -> bool {
+    params.source_color_format == ColorFormat::YOnly
+        || (params.source_color_format == ColorFormat::NComponent && params.channels < 3)
+}
+
+fn color_components(sampler: &Sampler, params: &OutputParams, row: usize, column: usize, bias: i32) -> (i32, i32, i32) {
+    if params.source_color_format == ColorFormat::NComponent {
+        let channel = |index: usize| sampler.channel(index, row, column).wrapping_add(bias);
+        return (channel(0), channel(1), channel(2));
+    }
+    rgb_triplet(sampler, row, column, bias)
+}
+
+fn gray_output<T: Copy>(
+    sampler: &Sampler,
+    alpha: Option<&Sampler>,
+    params: &OutputParams,
+    sample: impl Fn(i32) -> T,
+    alpha_sample: impl Fn(i32) -> T,
+    bias: i32,
+    alpha_bias: i32,
+) -> (Vec<T>, bool) {
+    let channels = if alpha.is_some() { 2 } else { 1 };
+    let mut out = Vec::with_capacity(params.width * params.height * channels);
+    for row in 0..params.height {
+        for column in 0..params.width {
+            out.push(sample(sampler.channel(0, row, column).wrapping_add(bias)));
+            if let Some(alpha) = alpha {
+                out.push(alpha_sample(alpha.luma(row, column).wrapping_add(alpha_bias)));
+            }
+        }
+    }
+    (out, alpha.is_some())
+}
+
+fn color_output<T: Copy>(
+    sampler: &Sampler,
+    alpha: Option<&Sampler>,
+    params: &OutputParams,
+    sample: impl Fn(i32) -> T,
+    alpha_sample: impl Fn(i32) -> T,
+    bias: i32,
+    alpha_bias: i32,
+) -> (Vec<T>, bool) {
+    let channels = if alpha.is_some() { 4 } else { 3 };
+    let mut out = Vec::with_capacity(params.width * params.height * channels);
+    for row in 0..params.height {
+        for column in 0..params.width {
+            let (r, g, b) = color_components(sampler, params, row, column, bias);
+            out.push(sample(r));
+            out.push(sample(g));
+            out.push(sample(b));
+            if let Some(alpha) = alpha {
+                out.push(alpha_sample(alpha.luma(row, column).wrapping_add(alpha_bias)));
+            }
+        }
+    }
+    (out, alpha.is_some())
+}
+
+fn build_rgbe(sampler: &Sampler, params: &OutputParams) -> PixelData {
+    let shift = params.shift();
+    let bias = params.scaled_bias();
+    let mut out = Vec::with_capacity(params.width * params.height * 3);
+
+    for row in 0..params.height {
+        for column in 0..params.width {
+            let (r, g, b) = rgb_triplet(sampler, row, column, bias);
+            let [r, g, b, e] = inverse_convert_rgbe(r >> shift, g >> shift, b >> shift);
+            let scale = if e == 0 { 0.0 } else { 2f32.powi(i32::from(e) - 136) };
+            out.extend_from_slice(&[f32::from(r) * scale, f32::from(g) * scale, f32::from(b) * scale]);
+        }
+    }
+
+    PixelData::RGB32F(out)
+}
+
 fn build_8bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
     let shift = params.shift();
     let bias1 = 128 << shift;
     let bias2 = params.scaled_bias();
     let bias = bias1 + bias2;
+    let sample = |value: i32| clip8(value >> shift);
 
     match params.source_color_format {
-        ColorFormat::Rgbe => {
-            let mut out = Vec::with_capacity(params.width * params.height * 4);
-            for row in 0..params.height {
-                for column in 0..params.width {
-                    let mut g = sampler.luma(row, column).wrapping_add(bias2);
-                    let mut r = sampler.chroma_u(row, column).wrapping_neg();
-                    let mut b = sampler.chroma_v(row, column);
-                    inverse_color(&mut r, &mut g, &mut b);
+        ColorFormat::Rgbe => build_rgbe(sampler, params),
 
-                    let rgbe = inverse_convert_rgbe(r >> shift, g >> shift, b >> shift);
-                    out.extend_from_slice(&rgbe);
-                }
-            }
-            PixelData::RGBA8(out)
-        }
-
-        ColorFormat::Cmyk => {
+        ColorFormat::Cmyk | ColorFormat::CmykDirect => {
             let mut out = Vec::with_capacity(params.width * params.height * 4);
             for row in 0..params.height {
                 for column in 0..params.width {
                     let (c, m, y, k) = cmyk_quad(sampler, row, column, bias1, bias2);
                     let (r, g, b) = cmyk_to_rgb(c >> shift, m >> shift, y >> shift, k >> shift, 255);
-
-                    let a = alpha.map(|s| (s.luma(row, column).wrapping_add(bias)) >> shift).unwrap_or(255);
-
-                    out.push(clip8(r));
-                    out.push(clip8(g));
-                    out.push(clip8(b));
-                    out.push(clip8(a));
+                    let a = alpha.map_or(255, |s| sample(s.luma(row, column).wrapping_add(bias)));
+                    out.extend_from_slice(&[clip8(r), clip8(g), clip8(b), a]);
                 }
             }
             PixelData::RGBA8(out)
         }
 
-        ColorFormat::YOnly => {
-            let mut out = Vec::with_capacity(params.width * params.height);
-            for row in 0..params.height {
-                for column in 0..params.width {
-                    let value = (sampler.luma(row, column).wrapping_add(bias)) >> shift;
-                    out.push(clip8(value));
-                }
-            }
-            PixelData::L8(out)
-        }
+        _ if is_gray(params) => match gray_output(sampler, alpha, params, sample, sample, bias, bias) {
+            (out, true) => PixelData::LA8(out),
+            (out, false) => PixelData::L8(out),
+        },
 
-        ColorFormat::NComponent => build_ncomponent_8(sampler, alpha, params, bias, shift),
-
-        _ => {
-            let with_alpha = params.has_alpha || alpha.is_some();
-            let channels = if with_alpha { 4 } else { 3 };
-            let mut out = Vec::with_capacity(params.width * params.height * channels);
-
-            for row in 0..params.height {
-                for column in 0..params.width {
-                    let (r, g, b) = rgb_triplet(sampler, row, column, bias);
-                    let (mut r, g, mut b) = (r >> shift, g >> shift, b >> shift);
-
-                    if params.rb_swapped {
-                        std::mem::swap(&mut r, &mut b);
-                    }
-
-                    out.push(clip8(r));
-                    out.push(clip8(g));
-                    out.push(clip8(b));
-
-                    if with_alpha {
-                        let a = alpha.map(|s| (s.luma(row, column).wrapping_add(bias)) >> shift).unwrap_or(255);
-                        out.push(clip8(a));
-                    }
-                }
-            }
-
-            if with_alpha {
-                PixelData::RGBA8(out)
-            } else {
-                PixelData::RGB8(out)
-            }
-        }
+        _ => match color_output(sampler, alpha, params, sample, sample, bias, bias) {
+            (out, true) => PixelData::RGBA8(out),
+            (out, false) => PixelData::RGB8(out),
+        },
     }
-}
-
-fn build_ncomponent_8(
-    sampler: &Sampler,
-    alpha: Option<&Sampler>,
-    params: &OutputParams,
-    bias: i32,
-    shift: i32,
-) -> PixelData {
-    let channels = params.channels;
-
-    if channels >= 3 {
-        let with_alpha = channels >= 4 || alpha.is_some();
-        let mut out = Vec::with_capacity(params.width * params.height * if with_alpha { 4 } else { 3 });
-        for row in 0..params.height {
-            for column in 0..params.width {
-                for channel in 0..3usize {
-                    let value = (sampler.channel(channel, row, column).wrapping_add(bias)) >> shift;
-                    out.push(clip8(value));
-                }
-                if with_alpha {
-                    let value = match alpha {
-                        Some(s) => (s.luma(row, column).wrapping_add(bias)) >> shift,
-                        None => (sampler.channel(3, row, column).wrapping_add(bias)) >> shift,
-                    };
-                    out.push(clip8(value));
-                }
-            }
-        }
-        return if with_alpha { PixelData::RGBA8(out) } else { PixelData::RGB8(out) };
-    }
-
-    let mut out = Vec::with_capacity(params.width * params.height);
-    for row in 0..params.height {
-        for column in 0..params.width {
-            let value = (sampler.channel(0, row, column).wrapping_add(bias)) >> shift;
-            out.push(clip8(value));
-        }
-    }
-    PixelData::L8(out)
 }
 
 fn build_16bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
@@ -613,20 +601,10 @@ fn build_16bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams
     let len = u32::from(params.mantissa_len).min(31);
     let bias = (((1i32 << 15) >> len) << shift) + params.round_bias();
     let alpha_bias = (1 << (shift + 15)) + params.round_bias();
+    let sample = |value: i32| clip_u16((value >> shift) << len);
 
     match params.source_color_format {
-        ColorFormat::YOnly => {
-            let mut out = Vec::with_capacity(params.width * params.height);
-            for row in 0..params.height {
-                for column in 0..params.width {
-                    let value = ((sampler.luma(row, column).wrapping_add(bias)) >> shift) << len;
-                    out.push(clip_u16(value));
-                }
-            }
-            PixelData::L16(out)
-        }
-
-        ColorFormat::Cmyk => {
+        ColorFormat::Cmyk | ColorFormat::CmykDirect => {
             let bias1 = (32768 >> len) << shift;
             let bias2 = bias - bias1;
             let mut out = Vec::with_capacity(params.width * params.height * 4);
@@ -636,190 +614,66 @@ fn build_16bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams
                     let (c, m, y, k) =
                         ((c >> shift) << len, (m >> shift) << len, (y >> shift) << len, (k >> shift) << len);
                     let (r, g, b) = cmyk_to_rgb(c, m, y, k, 65535);
-
-                    let a = alpha
-                        .map(|s| ((s.luma(row, column).wrapping_add(alpha_bias)) >> shift) << len)
-                        .unwrap_or(65535);
-
-                    out.push(clip_u16(r));
-                    out.push(clip_u16(g));
-                    out.push(clip_u16(b));
-                    out.push(clip_u16(a));
+                    let a = alpha.map_or(65535, |s| sample(s.luma(row, column).wrapping_add(alpha_bias)));
+                    out.extend_from_slice(&[clip_u16(r), clip_u16(g), clip_u16(b), a]);
                 }
             }
             PixelData::RGBA16(out)
         }
 
-        ColorFormat::NComponent if params.channels < 3 => {
-            let mut out = Vec::with_capacity(params.width * params.height);
-            for row in 0..params.height {
-                for column in 0..params.width {
-                    let value = ((sampler.channel(0, row, column).wrapping_add(bias)) >> shift) << len;
-                    out.push(clip_u16(value));
-                }
-            }
-            PixelData::L16(out)
-        }
+        _ if is_gray(params) => match gray_output(sampler, alpha, params, sample, sample, bias, alpha_bias) {
+            (out, true) => PixelData::LA16(out),
+            (out, false) => PixelData::L16(out),
+        },
 
-        ColorFormat::NComponent => {
-            let with_alpha = params.channels >= 4 || alpha.is_some();
-            let mut out = Vec::with_capacity(params.width * params.height * if with_alpha { 4 } else { 3 });
-            for row in 0..params.height {
-                for column in 0..params.width {
-                    for channel in 0..3usize {
-                        let value = ((sampler.channel(channel, row, column).wrapping_add(bias)) >> shift) << len;
-                        out.push(clip_u16(value));
-                    }
-                    if with_alpha {
-                        let value = match alpha {
-                            Some(s) => ((s.luma(row, column).wrapping_add(alpha_bias)) >> shift) << len,
-                            None => ((sampler.channel(3, row, column).wrapping_add(bias)) >> shift) << len,
-                        };
-                        out.push(clip_u16(value));
-                    }
-                }
-            }
-            if with_alpha {
-                PixelData::RGBA16(out)
-            } else {
-                PixelData::RGB16(out)
-            }
-        }
-
-        _ => {
-            let with_alpha = params.has_alpha || alpha.is_some();
-            let mut out = Vec::with_capacity(params.width * params.height * 4);
-
-            for row in 0..params.height {
-                for column in 0..params.width {
-                    let (r, g, b) = rgb_triplet(sampler, row, column, bias);
-                    let (mut r, g, mut b) = ((r >> shift) << len, (g >> shift) << len, (b >> shift) << len);
-
-                    if params.rb_swapped {
-                        std::mem::swap(&mut r, &mut b);
-                    }
-
-                    out.push(clip_u16(r));
-                    out.push(clip_u16(g));
-                    out.push(clip_u16(b));
-
-                    if with_alpha {
-                        let a = alpha
-                            .map(|s| ((s.luma(row, column).wrapping_add(alpha_bias)) >> shift) << len)
-                            .unwrap_or(65535);
-                        out.push(clip_u16(a));
-                    }
-                }
-            }
-
-            if with_alpha {
-                PixelData::RGBA16(out)
-            } else {
-                PixelData::RGB16(out)
-            }
-        }
+        _ => match color_output(sampler, alpha, params, sample, sample, bias, alpha_bias) {
+            (out, true) => PixelData::RGBA16(out),
+            (out, false) => PixelData::RGB16(out),
+        },
     }
 }
 
-fn build_16bit_signed(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
+fn float_pixels(params: &OutputParams, output: (Vec<f32>, bool)) -> PixelData {
+    match (is_gray(params), output) {
+        (true, (out, true)) => PixelData::LA32F(out),
+        (true, (out, false)) => PixelData::L32F(out),
+        (false, (out, true)) => PixelData::RGBA32F(out),
+        (false, (out, false)) => PixelData::RGB32F(out),
+    }
+}
+
+fn float_output(
+    sampler: &Sampler,
+    alpha: Option<&Sampler>,
+    params: &OutputParams,
+    sample: impl Fn(i32) -> f32,
+    alpha_sample: impl Fn(i32) -> f32,
+    bias: i32,
+    alpha_bias: i32,
+) -> PixelData {
+    let output = if is_gray(params) {
+        gray_output(sampler, alpha, params, sample, alpha_sample, bias, alpha_bias)
+    } else {
+        color_output(sampler, alpha, params, sample, alpha_sample, bias, alpha_bias)
+    };
+    float_pixels(params, output)
+}
+
+const FIXED16_ONE: f32 = (1 << 13) as f32;
+const FIXED32_ONE: f64 = (1 << 24) as f64;
+
+fn build_16bit_fixed(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
     let shift = params.shift();
     let len = u32::from(params.mantissa_len).min(31);
     let bias = params.round_bias();
-
-    let normalize = |value: i16| -> u16 { ((i32::from(value) - i32::from(i16::MIN)) as u32).min(65535) as u16 };
-
-    let with_alpha = params.has_alpha || alpha.is_some();
-
-    if params.source_color_format == ColorFormat::YOnly
-        || (params.source_color_format == ColorFormat::NComponent && params.channels < 3)
-    {
-        let mut out = Vec::with_capacity(params.width * params.height);
-        for row in 0..params.height {
-            for column in 0..params.width {
-                let value = ((sampler.channel(0, row, column).wrapping_add(bias)) >> shift) << len;
-                out.push(normalize(clip_i16(value)));
-            }
-        }
-        return PixelData::L16(out);
-    }
-
-    let mut out = Vec::with_capacity(params.width * params.height * 4);
-
-    for row in 0..params.height {
-        for column in 0..params.width {
-            let (r, g, b) = rgb_triplet(sampler, row, column, bias);
-            let (mut r, g, mut b) = ((r >> shift) << len, (g >> shift) << len, (b >> shift) << len);
-
-            if params.rb_swapped {
-                std::mem::swap(&mut r, &mut b);
-            }
-
-            out.push(normalize(clip_i16(r)));
-            out.push(normalize(clip_i16(g)));
-            out.push(normalize(clip_i16(b)));
-
-            if with_alpha {
-                let a = alpha
-                    .map(|s| ((s.luma(row, column).wrapping_add(bias)) >> shift) << len)
-                    .unwrap_or(i32::from(i16::MAX));
-                out.push(normalize(clip_i16(a)));
-            }
-        }
-    }
-
-    if with_alpha {
-        PixelData::RGBA16(out)
-    } else {
-        PixelData::RGB16(out)
-    }
+    let sample = |value: i32| f32::from(clip_i16((value >> shift) << len)) / FIXED16_ONE;
+    float_output(sampler, alpha, params, sample, sample, bias, bias)
 }
 
 fn build_half(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
     let shift = params.shift();
-    let bias = params.scaled_bias();
-    let alpha_bias = params.round_bias();
-    let with_alpha = params.has_alpha || alpha.is_some();
-
-    if params.source_color_format == ColorFormat::YOnly
-        || (params.source_color_format == ColorFormat::NComponent && params.channels < 3)
-    {
-        let mut out = Vec::with_capacity(params.width * params.height);
-        for row in 0..params.height {
-            for column in 0..params.width {
-                let value = (sampler.channel(0, row, column).wrapping_add(bias)) >> shift;
-                out.push(half_to_f32(backward_half(value)));
-            }
-        }
-        return PixelData::L32F(out);
-    }
-
-    let mut out = Vec::with_capacity(params.width * params.height * 4);
-
-    for row in 0..params.height {
-        for column in 0..params.width {
-            let (r, g, b) = rgb_triplet(sampler, row, column, bias);
-            let (mut r, g, mut b) = (r >> shift, g >> shift, b >> shift);
-
-            if params.rb_swapped {
-                std::mem::swap(&mut r, &mut b);
-            }
-
-            out.push(half_to_f32(backward_half(r)));
-            out.push(half_to_f32(backward_half(g)));
-            out.push(half_to_f32(backward_half(b)));
-
-            if with_alpha {
-                let a = alpha.map(|s| (s.luma(row, column).wrapping_add(alpha_bias)) >> shift).unwrap_or(0x3c00);
-                out.push(half_to_f32(backward_half(a)));
-            }
-        }
-    }
-
-    if with_alpha {
-        PixelData::RGBA32F(out)
-    } else {
-        PixelData::RGB32F(out)
-    }
+    let sample = |value: i32| half_to_f32(backward_half(value >> shift));
+    float_output(sampler, alpha, params, sample, sample, params.scaled_bias(), params.round_bias())
 }
 
 fn build_32bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
@@ -833,107 +687,28 @@ fn build_32bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams
         (((1i64 << 31) >> len) as i32).wrapping_shl(shift as u32).wrapping_add(params.round_bias())
     };
 
-    let scale = |value: i32| -> f32 {
+    let sample = |value: i32| -> f32 {
         let shifted = (value >> shift).wrapping_shl(len);
         if signed {
-            (shifted as f64 / i32::MAX as f64) as f32
+            (f64::from(shifted) / FIXED32_ONE) as f32
         } else {
-            ((shifted as u32) as f64 / u32::MAX as f64) as f32
+            (f64::from(shifted as u32) / f64::from(u32::MAX)) as f32
         }
     };
 
-    let with_alpha = params.has_alpha || alpha.is_some();
-
-    if params.source_color_format == ColorFormat::YOnly
-        || (params.source_color_format == ColorFormat::NComponent && params.channels < 3)
-    {
-        let mut out = Vec::with_capacity(params.width * params.height);
-        for row in 0..params.height {
-            for column in 0..params.width {
-                let value = sampler.channel(0, row, column).wrapping_add(bias);
-                out.push(scale(value));
-            }
-        }
-        return PixelData::L32F(out);
-    }
-
-    let mut out = Vec::with_capacity(params.width * params.height * 4);
-
-    for row in 0..params.height {
-        for column in 0..params.width {
-            let (r, g, b) = rgb_triplet(sampler, row, column, bias);
-            let (mut r, g, mut b) = (r, g, b);
-
-            if params.rb_swapped {
-                std::mem::swap(&mut r, &mut b);
-            }
-
-            out.push(scale(r));
-            out.push(scale(g));
-            out.push(scale(b));
-
-            if with_alpha {
-                let a = alpha.map(|s| s.luma(row, column).wrapping_add(bias)).unwrap_or(i32::MAX);
-                out.push(scale(a));
-            }
-        }
-    }
-
-    if with_alpha {
-        PixelData::RGBA32F(out)
-    } else {
-        PixelData::RGB32F(out)
-    }
+    float_output(sampler, alpha, params, sample, sample, bias, bias)
 }
 
 fn build_float(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
     let shift = params.shift();
-    let bias = params.scaled_bias();
-    let alpha_bias = params.round_bias();
     let exp_bias = params.exp_bias;
     let len = params.mantissa_len;
-    let with_alpha = params.has_alpha || alpha.is_some();
+    let sample = |value: i32| pixel_to_float(value >> shift, exp_bias, len);
+    float_output(sampler, alpha, params, sample, sample, params.scaled_bias(), params.round_bias())
+}
 
-    if params.source_color_format == ColorFormat::YOnly
-        || (params.source_color_format == ColorFormat::NComponent && params.channels < 3)
-    {
-        let mut out = Vec::with_capacity(params.width * params.height);
-        for row in 0..params.height {
-            for column in 0..params.width {
-                let value = (sampler.channel(0, row, column).wrapping_add(bias)) >> shift;
-                out.push(pixel_to_float(value, exp_bias, len));
-            }
-        }
-        return PixelData::L32F(out);
-    }
-
-    let mut out = Vec::with_capacity(params.width * params.height * 4);
-
-    for row in 0..params.height {
-        for column in 0..params.width {
-            let (r, g, b) = rgb_triplet(sampler, row, column, bias);
-            let (mut r, g, mut b) = (r >> shift, g >> shift, b >> shift);
-
-            if params.rb_swapped {
-                std::mem::swap(&mut r, &mut b);
-            }
-
-            out.push(pixel_to_float(r, exp_bias, len));
-            out.push(pixel_to_float(g, exp_bias, len));
-            out.push(pixel_to_float(b, exp_bias, len));
-
-            if with_alpha {
-                let a = alpha.map(|s| (s.luma(row, column).wrapping_add(alpha_bias)) >> shift).unwrap_or(0);
-                out.push(if alpha.is_some() { pixel_to_float(a, exp_bias, len) } else { 1.0 });
-            }
-        }
-    }
-
-    if with_alpha {
-        PixelData::RGBA32F(out)
-    } else {
-        PixelData::RGB32F(out)
-    }
+fn swap_red_blue(params: &OutputParams) -> bool {
+    params.source_color_format == ColorFormat::Rgb && !params.red_blue_not_swapped
 }
 
 fn build_packed555(sampler: &Sampler, params: &OutputParams) -> PixelData {
@@ -946,7 +721,7 @@ fn build_packed555(sampler: &Sampler, params: &OutputParams) -> PixelData {
             let (r, g, b) = rgb_triplet(sampler, row, column, bias);
             let (mut r, g, mut b) = (r >> shift, g >> shift, b >> shift);
 
-            if params.rb_swapped {
+            if swap_red_blue(params) {
                 std::mem::swap(&mut r, &mut b);
             }
 
@@ -970,7 +745,7 @@ fn build_packed565(sampler: &Sampler, params: &OutputParams) -> PixelData {
             let g = g >> shift;
             let (mut r, mut b) = (r >> (shift + 1), b >> (shift + 1));
 
-            if params.rb_swapped {
+            if swap_red_blue(params) {
                 std::mem::swap(&mut r, &mut b);
             }
 
@@ -983,27 +758,30 @@ fn build_packed565(sampler: &Sampler, params: &OutputParams) -> PixelData {
     PixelData::RGB8(out)
 }
 
-fn build_packed101010(sampler: &Sampler, params: &OutputParams) -> PixelData {
+fn build_10bit(sampler: &Sampler, alpha: Option<&Sampler>, params: &OutputParams) -> PixelData {
     let shift = params.shift();
     let bias = (512 << shift) + params.scaled_bias();
-    let mut out = Vec::with_capacity(params.width * params.height * 3);
+    let sample = |value: i32| expand10((value >> shift).clamp(0, 1023));
 
-    for row in 0..params.height {
-        for column in 0..params.width {
-            let (r, g, b) = rgb_triplet(sampler, row, column, bias);
-            let (mut r, g, mut b) = (r >> shift, g >> shift, b >> shift);
+    if is_gray(params) {
+        return match gray_output(sampler, alpha, params, sample, sample, bias, bias) {
+            (out, true) => PixelData::LA16(out),
+            (out, false) => PixelData::L16(out),
+        };
+    }
 
-            if params.rb_swapped {
-                std::mem::swap(&mut r, &mut b);
-            }
-
-            out.push(expand10(r.clamp(0, 1023)));
-            out.push(expand10(g.clamp(0, 1023)));
-            out.push(expand10(b.clamp(0, 1023)));
+    let (mut out, with_alpha) = color_output(sampler, alpha, params, sample, sample, bias, bias);
+    if swap_red_blue(params) {
+        for pixel in out.chunks_exact_mut(if with_alpha { 4 } else { 3 }) {
+            pixel.swap(0, 2);
         }
     }
 
-    PixelData::RGB16(out)
+    if with_alpha {
+        PixelData::RGBA16(out)
+    } else {
+        PixelData::RGB16(out)
+    }
 }
 
 #[inline]

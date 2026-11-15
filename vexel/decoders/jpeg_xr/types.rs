@@ -39,6 +39,7 @@ pub enum ColorFormat {
     Yuv422,
     Yuv444,
     Cmyk,
+    CmykDirect,
     NComponent,
     Rgb,
     Rgbe,
@@ -52,6 +53,7 @@ impl ColorFormat {
             2 => Some(ColorFormat::Yuv422),
             3 => Some(ColorFormat::Yuv444),
             4 => Some(ColorFormat::Cmyk),
+            5 => Some(ColorFormat::CmykDirect),
             6 => Some(ColorFormat::NComponent),
             7 => Some(ColorFormat::Rgb),
             8 => Some(ColorFormat::Rgbe),
@@ -163,7 +165,7 @@ pub enum Orientation {
 
 impl Orientation {
     pub fn from_bits(value: u32) -> Self {
-        match value & 7 {
+        match value {
             1 => Orientation::FlipV,
             2 => Orientation::FlipH,
             3 => Orientation::FlipVH,

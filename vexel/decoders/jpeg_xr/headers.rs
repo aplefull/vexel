@@ -21,7 +21,7 @@ pub struct ImageHeader {
     pub index_table_present: bool,
     pub overlap: Overlap,
     pub trim_flexbits_flag: bool,
-    pub rb_swapped: bool,
+    pub red_blue_not_swapped: bool,
     pub alpha_channel: bool,
     pub source_color_format: ColorFormat,
     pub source_bit_depth: BitDepth,
@@ -133,7 +133,7 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
         log_warn!("JPEG XR: unexpected codec subversion {}", subversion);
     }
 
-    let hard_tile_boundaries = subversion == CODEC_SUBVERSION_NEWSCALING_HARD_TILES;
+    let hard_tile_boundaries = subversion & 0x8 != 0;
 
     let tiling_present = reader.read_bool();
     let bitstream_format = if reader.read_bool() { BitstreamFormat::Frequency } else { BitstreamFormat::Spatial };
@@ -151,7 +151,7 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
     let windowing = reader.read_bool();
     let trim_flexbits_flag = reader.read_bool();
     let tile_stretch = reader.read_bool();
-    let rb_swapped = reader.read_bool();
+    let red_blue_not_swapped = reader.read_bool();
     let premultiplied_alpha = reader.read_bool();
     let alpha_channel = reader.read_bool();
 
@@ -255,7 +255,7 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
         index_table_present,
         overlap,
         trim_flexbits_flag,
-        rb_swapped,
+        red_blue_not_swapped,
         alpha_channel,
         source_color_format,
         source_bit_depth,
@@ -277,7 +277,7 @@ pub fn parse_plane_header(reader: &mut XrBitReader, image: &ImageHeader) -> Vexe
     let internal_color_format = ColorFormat::from_bits(color_bits)
         .ok_or_else(|| VexelError::Custom(format!("JPEG XR: unsupported internal color format {}", color_bits)))?;
 
-    if matches!(internal_color_format, ColorFormat::Rgb | ColorFormat::Rgbe) {
+    if matches!(internal_color_format, ColorFormat::Rgb | ColorFormat::Rgbe | ColorFormat::CmykDirect) {
         return Err(VexelError::Custom("JPEG XR: internal color format out of range".to_string()));
     }
 

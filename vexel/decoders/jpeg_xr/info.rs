@@ -34,7 +34,7 @@ pub struct JxrImageHeader {
     pub windowing: bool,
     pub trim_flexbits: bool,
     pub tile_stretch: bool,
-    pub red_blue_swapped: bool,
+    pub red_blue_not_swapped: bool,
     pub premultiplied_alpha: bool,
     pub alpha_plane: bool,
     pub source_color_format: u32,
@@ -75,6 +75,7 @@ fn color_format_code(format: ColorFormat) -> u32 {
         ColorFormat::Yuv422 => 2,
         ColorFormat::Yuv444 => 3,
         ColorFormat::Cmyk => 4,
+        ColorFormat::CmykDirect => 5,
         ColorFormat::NComponent => 6,
         ColorFormat::Rgb => 7,
         ColorFormat::Rgbe => 8,
@@ -145,7 +146,7 @@ fn image_header_info(header: &ImageHeader, alpha_stream: bool) -> JxrImageHeader
         windowing: header.windowing,
         trim_flexbits: header.trim_flexbits_flag,
         tile_stretch: header.tile_stretch,
-        red_blue_swapped: header.rb_swapped,
+        red_blue_not_swapped: header.red_blue_not_swapped,
         premultiplied_alpha: header.premultiplied_alpha,
         alpha_plane: header.alpha_channel,
         source_color_format: header.source_color_bits,
@@ -259,8 +260,8 @@ fn color_model(pixel_format: Option<PixelFormatKind>, headers: &Headers, has_alp
         Some(NChannels | NChannelsAlpha) => ColorModel::Multichannel,
         Some(Ycc | YccAlpha | Unknown) | None => match headers.image.source_color_format {
             ColorFormat::YOnly => ColorModel::Gray,
-            ColorFormat::Cmyk if has_alpha => ColorModel::Cmyka,
-            ColorFormat::Cmyk => ColorModel::Cmyk,
+            ColorFormat::Cmyk | ColorFormat::CmykDirect if has_alpha => ColorModel::Cmyka,
+            ColorFormat::Cmyk | ColorFormat::CmykDirect => ColorModel::Cmyk,
             ColorFormat::NComponent => ColorModel::Multichannel,
             _ if has_alpha => ColorModel::Rgba,
             _ => ColorModel::Rgb,
@@ -271,7 +272,7 @@ fn color_model(pixel_format: Option<PixelFormatKind>, headers: &Headers, has_alp
 fn build_summary(container: Option<&Container>, headers: &Headers, alpha_stream: bool) -> ImageSummary {
     let image = &headers.image;
     let has_alpha = image.alpha_channel || alpha_stream;
-    let orientation = container.and_then(|c| c.transformation).map(Orientation::from_bits).unwrap_or(Orientation::None);
+    let orientation = container::effective_orientation(container, image.spatial_transform);
     let (width, height) = if orientation.rotates() { (image.height, image.width) } else { (image.width, image.height) };
 
     let (bits, sample_format) = bits_and_format(image.source_depth_bits);
@@ -385,7 +386,7 @@ impl InfoSection for JpegXrSection {
                 out.field("Short header", yes_no(header.short_header));
                 out.field("Long word", yes_no(header.long_word));
                 out.field("Trim flexbits", yes_no(header.trim_flexbits));
-                out.field("Red/blue swapped", yes_no(header.red_blue_swapped));
+                out.field("Red/blue not swapped", yes_no(header.red_blue_not_swapped));
                 out.field("Premultiplied alpha", yes_no(header.premultiplied_alpha));
                 out.field("Alpha plane", yes_no(header.alpha_plane));
                 out.field("Source color format", color_format_name(header.source_color_format));

@@ -4,8 +4,16 @@ use crate::log_warn;
 const PIXEL_FORMAT_BASE: [u8; 15] =
     [0x24, 0xc3, 0xdd, 0x6f, 0x03, 0x4e, 0xfe, 0x4b, 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9];
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ContainerKind {
+    #[default]
+    Tiff,
+    Jpx,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Container {
+    pub kind: ContainerKind,
     pub image_offset: usize,
     pub image_byte_count: usize,
     pub alpha_offset: usize,
@@ -15,6 +23,15 @@ pub struct Container {
     pub height: Option<u32>,
     pub transformation: Option<u32>,
     pub icc_profile: Option<Vec<u8>>,
+}
+
+pub fn effective_orientation(container: Option<&Container>, spatial_transform: u32) -> Orientation {
+    match container {
+        Some(container) if container.kind == ContainerKind::Tiff => {
+            container.transformation.map(Orientation::from_bits).unwrap_or(Orientation::None)
+        }
+        _ => Orientation::from_bits(spatial_transform),
+    }
 }
 
 pub fn pixel_format_from_guid(guid: &[u8]) -> PixelFormatKind {
@@ -192,51 +209,90 @@ pub fn find_codestream(data: &[u8]) -> Option<usize> {
 
 const MAX_BOX_DEPTH: usize = 16;
 
-pub fn parse_jpx_boxes(data: &[u8]) -> Option<Container> {
-    parse_jpx_boxes_at_depth(data, 0)
+struct JpxBox<'a> {
+    kind: &'a [u8],
+    payload_start: usize,
+    payload: &'a [u8],
 }
 
-fn parse_jpx_boxes_at_depth(data: &[u8], depth: usize) -> Option<Container> {
+fn jpx_boxes(data: &[u8]) -> Vec<JpxBox<'_>> {
+    let mut boxes = Vec::new();
     let mut pos = 0usize;
-    let mut best: Option<Container> = None;
 
     while pos + 8 <= data.len() {
-        let len = u32::from_be_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
-        let kind = data.get(pos + 4..pos + 8)?;
+        let Some(len) = data.get(pos..pos + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize) else {
+            break;
+        };
+        let kind = &data[pos + 4..pos + 8];
 
-        let (payload_start, payload_len) = if len == 1 {
-            let ext = u64::from_be_bytes(data.get(pos + 8..pos.checked_add(16)?)?.try_into().ok()?);
-            (pos + 16, usize::try_from(ext).unwrap_or(usize::MAX).checked_sub(16)?)
-        } else if len == 0 {
-            (pos + 8, data.len() - (pos + 8))
-        } else {
-            (pos + 8, len.checked_sub(8)?)
+        let (payload_start, payload_end) = match len {
+            0 => (pos + 8, data.len()),
+            1 => {
+                let Some(ext) = data.get(pos + 8..pos + 16) else { break };
+                let ext = u64::from_be_bytes(ext.try_into().unwrap_or([0; 8]));
+                let end = usize::try_from(ext).ok().and_then(|ext| pos.checked_add(ext)).unwrap_or(usize::MAX);
+                (pos + 16, end.max(pos + 16).min(data.len()))
+            }
+            2..=7 => {
+                log_warn!("JPEG XR: JPX box at {} has invalid length {}", pos, len);
+                break;
+            }
+            _ => (pos + 8, pos.saturating_add(len).min(data.len())),
         };
 
-        let payload_end = payload_start.checked_add(payload_len)?.min(data.len());
-        let payload = data.get(payload_start..payload_end)?;
+        boxes.push(JpxBox { kind, payload_start, payload: &data[payload_start..payload_end] });
+        pos = payload_end;
+    }
 
-        match kind {
-            b"jp2c" | b"jxrc" => {
-                if let Some(rel) = find_codestream(payload) {
-                    return Some(Container {
-                        image_offset: payload_start + rel,
-                        image_byte_count: payload_end - (payload_start + rel),
-                        ..Default::default()
-                    });
+    boxes
+}
+
+fn collect_jpx_codestreams(data: &[u8], base: usize, depth: usize, out: &mut Vec<(usize, usize)>, opacity: &mut bool) {
+    for item in jpx_boxes(data) {
+        match item.kind {
+            b"jp2c" | b"jxrc" => match find_codestream(item.payload) {
+                Some(rel) => out.push((base + item.payload_start + rel, item.payload.len() - rel)),
+                None => {
+                    log_warn!("JPEG XR: JPX codestream box at {} has no WMPHOTO signature", base + item.payload_start)
                 }
+            },
+            b"cdef" => {
+                let count = item.payload.get(..2).map_or(0, |b| u16::from_be_bytes([b[0], b[1]]) as usize);
+                *opacity |= item
+                    .payload
+                    .get(2..)
+                    .unwrap_or_default()
+                    .chunks_exact(6)
+                    .take(count)
+                    .any(|entry| matches!(u16::from_be_bytes([entry[2], entry[3]]), 1 | 2));
             }
-            b"jp2h" | b"jpch" | b"jplh" if depth < MAX_BOX_DEPTH => {
-                if let Some(inner) = parse_jpx_boxes_at_depth(payload, depth + 1) {
-                    best = Some(inner);
-                }
+            b"jp2h" | b"jpch" | b"jplh" | b"res " | b"asoc" if depth < MAX_BOX_DEPTH => {
+                collect_jpx_codestreams(item.payload, base + item.payload_start, depth + 1, out, opacity);
             }
             _ => {}
         }
+    }
+}
 
-        let advance = if len == 0 { data.len() - pos } else { (payload_end - pos).max(8) };
-        pos = pos.checked_add(advance)?;
+pub fn parse_jpx_boxes(data: &[u8]) -> Option<Container> {
+    let mut codestreams = Vec::new();
+    let mut opacity = false;
+    collect_jpx_codestreams(data, 0, 0, &mut codestreams, &mut opacity);
+
+    let &(image_offset, image_byte_count) = codestreams.first()?;
+    let mut container = Container { kind: ContainerKind::Jpx, image_offset, image_byte_count, ..Default::default() };
+
+    if let Some(&(alpha_offset, alpha_byte_count)) = codestreams.get(1) {
+        if opacity {
+            container.alpha_offset = alpha_offset;
+            container.alpha_byte_count = alpha_byte_count;
+        } else {
+            log_warn!(
+                "JPEG XR: JPX file has {} codestreams but no opacity channel, using the first",
+                codestreams.len()
+            );
+        }
     }
 
-    best
+    Some(container)
 }
