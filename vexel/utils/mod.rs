@@ -14,6 +14,7 @@ pub mod logger;
 pub mod lzma;
 pub(crate) mod lzw;
 pub mod marker;
+pub mod metadata;
 pub mod raster;
 pub(crate) mod read;
 pub mod tiff;

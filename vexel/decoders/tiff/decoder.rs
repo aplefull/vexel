@@ -5,6 +5,7 @@ use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::ImageFrame;
 use crate::utils::info::{ColorModel, DataExtent, ImageSummary, SampleFormat as SummarySampleFormat};
+use crate::utils::metadata::MetadataCollector;
 use crate::utils::tiff::compression::{
     apply_predictor_float, apply_predictor_horizontal, decompress_deflate_with_capacity, decompress_jpeg2000,
     decompress_jpeg_xr, decompress_lerc, decompress_lzma_with_capacity, decompress_lzw_with_capacity, decompress_next,
@@ -13,8 +14,9 @@ use crate::utils::tiff::compression::{
 };
 use crate::utils::tiff::fax::decompress_ccitt;
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard, IfdFormat};
-use crate::utils::tiff::info::{compression_name, walk_structure, IfdKind, TiffImageIfd, TiffInfo};
+use crate::utils::tiff::info::{compression_name, walk_structure, IfdKind, TiffImageIfd, TiffInfo, TiffStructure};
 use crate::utils::tiff::jpeg::{jpeg_pixel_data, jpeg_rgb_bytes, splice_jpeg_tables};
+use crate::utils::tiff::metadata::collect_metadata;
 use crate::utils::tiff::pixels::PixelReader;
 use crate::utils::tiff::types::{
     Compression, LercAdditionalCompression, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat,
@@ -250,11 +252,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let structure = walk_structure(&mut self.reader, &mut self.limits)?;
         let pages: Vec<&TiffImageIfd> =
             structure.image_ifds.iter().filter(|image| image.kind == IfdKind::Page).collect();
-        let summary = self.build_summary(&pages);
+        let summary = self.build_summary(&structure, &pages);
         Ok(TiffInfo { summary, sections: structure.sections })
     }
 
-    fn build_summary(&mut self, pages: &[&TiffImageIfd]) -> Option<ImageSummary> {
+    fn build_summary(&mut self, structure: &TiffStructure, pages: &[&TiffImageIfd]) -> Option<ImageSummary> {
         let page = *pages
             .iter()
             .find(|page| ifd_subfile_type(&page.ifd, &mut self.reader) & 1 == 0)
@@ -339,6 +341,16 @@ impl<R: Read + Seek> TiffDecoder<R> {
             .image_data
             .as_ref()
             .map(|data| DataExtent { expected: data.declared_bytes, actual: data.available_bytes });
+
+        let mut metadata = MetadataCollector::default();
+        if let Some(orientation) = page.ifd.value::<u32, _>(TiffTags::Orientation, &mut self.reader) {
+            metadata.set_orientation(orientation, false);
+        }
+        let first = pages.first().copied().filter(|first| first.index != page.index);
+        for source in [Some(page), first].into_iter().flatten() {
+            collect_metadata(structure, source.index, &source.ifd, &mut self.reader, &mut self.limits, &mut metadata);
+        }
+        metadata.apply(&mut summary);
 
         Some(summary)
     }

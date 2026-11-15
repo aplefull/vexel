@@ -13,6 +13,7 @@ use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::frames::{reserve_canvas, FrameExtent, FramePrefetch, FrameSource, Frames, OutputBudget};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, ImageSummary};
+use crate::utils::metadata::MetadataCollector;
 use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData};
 
 impl<R: Read + Seek + Sync> GifDecoder<R> {
@@ -35,6 +36,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             collected: GifInfo::default(),
             info: None,
             icc_profile: None,
+            metadata: MetadataCollector::default(),
             loop_count: None,
             collect_frame_data: true,
             frame_index: 0,
@@ -95,6 +97,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             summary.has_alpha = has_transparency;
             summary.compression = Some("LZW".to_string());
             summary.icc_profile = self.icc_profile.clone();
+            self.metadata.apply(&mut summary);
             if frame_count > 1 {
                 summary.frames = Some(frame_count as u32);
                 summary.loop_count = self.loop_count.map(u32::from);
@@ -251,6 +254,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         };
 
         let mut icc_data = Vec::new();
+        let mut xmp_data = Vec::new();
         let mut truncated = false;
         loop {
             let sub_block_size = match self.reader.read_u8() {
@@ -285,6 +289,14 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
                     Ok(()) => icc_data.extend_from_slice(&payload),
                     Err(e) => log_warn!("ICC application extension too large, ignoring: {:?}", e),
                 }
+            } else if kind == GifApplicationKind::Xmp {
+                match self.limits.reserve_usize(payload.len() + 1) {
+                    Ok(()) => {
+                        xmp_data.push(sub_block_size);
+                        xmp_data.extend_from_slice(&payload);
+                    }
+                    Err(e) => log_warn!("XMP application extension too large, ignoring: {:?}", e),
+                }
             }
         }
 
@@ -298,6 +310,11 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
             if profile.is_some() {
                 self.icc_profile = profile;
             }
+        }
+
+        if kind == GifApplicationKind::Xmp {
+            self.metadata.add_xmp(&xmp_data);
+            self.limits.free_usize(xmp_data.len());
         }
 
         if looping && self.loop_count.is_none() {
@@ -628,6 +645,7 @@ impl<R: Read + Seek + Sync> GifDecoder<R> {
         self.frames.clear();
         self.global_color_table.clear();
         self.icc_profile = None;
+        self.metadata = MetadataCollector::default();
         self.loop_count = None;
         self.frame_index = 0;
 

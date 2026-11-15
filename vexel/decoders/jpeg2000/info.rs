@@ -7,8 +7,11 @@ use super::codestream::{self, Jp2Container};
 use super::decoder::resolve_colorspace;
 use super::types::{Colorspace, JP2_SIGNATURE};
 use crate::log_warn;
+use crate::utils::exif::{ExifData, ExifReader};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat, Section};
+use crate::utils::metadata::jp2::{self, UuidKind};
+use crate::utils::metadata::{strip_exif_header, Cicp, MetadataCollector};
 
 const MAX_TILE_PART_SECTIONS: usize = 256;
 const MAX_SECTIONS: usize = 4096;
@@ -51,6 +54,15 @@ pub struct J2kColorSpecification {
     pub approximation: u8,
     pub enumerated: Option<u32>,
     pub icc_length: Option<u32>,
+    pub cicp: Option<Cicp>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
+pub struct J2kUuid {
+    pub uuid: String,
+    pub name: Option<String>,
+    pub exif: Option<ExifData>,
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
@@ -226,7 +238,7 @@ pub enum Jpeg2000Section {
     BitsPerComponent(Vec<u8>),
     Resolution(J2kResolution),
     Xml(String),
-    Uuid(String),
+    Uuid(J2kUuid),
     Marker(J2kMarkerBody),
     TilePart(J2kTilePart),
     MoreTileParts(J2kTilePartRemainder),
@@ -256,6 +268,7 @@ fn four_cc(bytes: &[u8]) -> String {
 struct Scanner {
     sections: Vec<Section<Jpeg2000Section>>,
     icc_profile: Option<ICCProfile>,
+    metadata: MetadataCollector,
     detailed_tile_parts: usize,
     remainder: Option<(u64, J2kTilePartRemainder)>,
     more_sections: Option<(u64, J2kSectionRemainder)>,
@@ -349,6 +362,10 @@ impl Scanner {
                     let b = Bytes(body);
                     let method = b.u8(0);
                     let icc = body.get(3..).filter(|_| method == 2 || method == 3);
+                    let cicp = if method == 5 { jp2::parse_cicp(body.get(3..).unwrap_or_default()) } else { None };
+                    if let Some(cicp) = cicp {
+                        self.metadata.set_cicp(cicp);
+                    }
                     if let Some(icc) = icc {
                         if self.icc_profile.is_none() {
                             match ICCProfile::new(icc) {
@@ -366,6 +383,7 @@ impl Scanner {
                             approximation: b.u8(2),
                             enumerated: (method == 1).then(|| b.u32(3)),
                             icc_length: icc.map(|icc| icc.len() as u32),
+                            cicp,
                         }),
                     );
                 }
@@ -424,13 +442,31 @@ impl Scanner {
                     );
                 }
                 b"xml " => {
+                    jp2::collect_box(type_bytes, body, &mut self.metadata);
                     let text = String::from_utf8_lossy(&body[..body.len().min(MAX_TEXT_BYTES)]).into_owned();
                     self.push(offset, span, Jpeg2000Section::Xml(text));
                 }
                 b"uuid" => {
+                    let kind = jp2::uuid_kind(body);
+                    let exif = match kind {
+                        Some(UuidKind::Exif) => {
+                            let exif = ExifReader::parse(strip_exif_header(&body[16..]));
+                            match &exif {
+                                Some(exif) => self.metadata.add_exif_data(exif),
+                                None => log_warn!("JPEG 2000: failed to parse Exif uuid box"),
+                            }
+                            exif
+                        }
+                        Some(UuidKind::GeoJp2) => ExifReader::parse(&body[16..]),
+                        _ => {
+                            jp2::collect_box(type_bytes, body, &mut self.metadata);
+                            None
+                        }
+                    };
                     let uuid =
                         body.get(..16).map(|id| id.iter().map(|b| format!("{:02X}", b)).collect()).unwrap_or_default();
-                    self.push(offset, span, Jpeg2000Section::Uuid(uuid));
+                    let name = kind.map(|kind| kind.name().to_string());
+                    self.push(offset, span, Jpeg2000Section::Uuid(J2kUuid { uuid, name, exif }));
                 }
                 b"jp2c" => {
                     self.push(
@@ -793,6 +829,7 @@ pub fn scan(data: &[u8]) -> Jpeg2000Info {
     let mut scanner = Scanner {
         sections: Vec::new(),
         icc_profile: None,
+        metadata: MetadataCollector::default(),
         detailed_tile_parts: 0,
         remainder: None,
         more_sections: None,
@@ -822,6 +859,7 @@ pub fn scan(data: &[u8]) -> Jpeg2000Info {
     let mut summary = build_summary(&codestream_data, container.as_ref());
     if let Some(summary) = &mut summary {
         summary.icc_profile = scanner.icc_profile.take();
+        scanner.metadata.apply(summary);
     }
 
     let mut sections = scanner.sections;
@@ -1180,6 +1218,7 @@ impl InfoSection for Jpeg2000Section {
                     2 => "Restricted ICC (2)".to_string(),
                     3 => "Any ICC (3)".to_string(),
                     4 => "Vendor (4)".to_string(),
+                    5 => "Parameterized (5)".to_string(),
                     other => format!("Unknown ({})", other),
                 };
                 out.field("Method", method);
@@ -1187,6 +1226,7 @@ impl InfoSection for Jpeg2000Section {
                 out.field("Approximation", colr.approximation);
                 out.opt_field("Colorspace", colr.enumerated.map(enumerated_colorspace_name));
                 out.opt_field("ICC profile", colr.icc_length.map(|n| format!("{} bytes", n)));
+                out.opt_field("CICP", colr.cicp);
             }
             Jpeg2000Section::Palette(palette) => {
                 out.field("Entries", palette.entries);
@@ -1245,7 +1285,11 @@ impl InfoSection for Jpeg2000Section {
                 out.text("Content", text);
             }
             Jpeg2000Section::Uuid(uuid) => {
-                out.field("UUID", uuid);
+                out.field("UUID", &uuid.uuid);
+                out.opt_field("Content", uuid.name.as_deref());
+                if let Some(exif) = &uuid.exif {
+                    exif.describe(out);
+                }
             }
             Jpeg2000Section::Marker(marker) => describe_marker(marker, out),
             Jpeg2000Section::TilePart(part) => {

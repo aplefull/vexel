@@ -7,7 +7,9 @@ use super::types::{
     ActlChunk, BackgroundData, Chromaticities, ColorType, FctlChunk, ImageTime, SignificantBits, SuggestedPalette,
     TransparencyData,
 };
+use crate::utils::exif::ExifData;
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::metadata::{Cicp, ContentLightLevel, MasteringDisplay};
 
 #[tsify::declare]
 pub type PngInfo = FormatInfo<PngSection>;
@@ -116,6 +118,12 @@ pub struct InternationalTextChunk {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
+#[tsify(missing_as_null)]
+pub struct ExifChunk {
+    pub exif: Option<ExifData>,
+}
+
+#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct FdatChunk {
     pub sequence_number: u32,
 }
@@ -144,6 +152,10 @@ pub enum PngChunkBody {
     Actl(ActlChunk),
     Fctl(FctlChunk),
     Fdat(FdatChunk),
+    Exif(ExifChunk),
+    Cicp(Cicp),
+    Mdcv(MasteringDisplay),
+    Clli(ContentLightLevel),
     Unknown,
 }
 
@@ -344,6 +356,29 @@ fn describe_body(body: &PngChunkBody, out: &mut InfoWriter) {
         PngChunkBody::Fctl(fctl) => describe_fctl(fctl, out),
         PngChunkBody::Fdat(fdat) => {
             out.field("Sequence", fdat.sequence_number);
+        }
+        PngChunkBody::Exif(chunk) => match &chunk.exif {
+            Some(exif) => exif.describe(out),
+            None => {
+                out.field("Parsed", "no");
+            }
+        },
+        PngChunkBody::Cicp(cicp) => {
+            out.field("Color primaries", format!("{} ({})", cicp.primaries_name(), cicp.color_primaries));
+            out.field(
+                "Transfer characteristics",
+                format!("{} ({})", cicp.transfer_name(), cicp.transfer_characteristics),
+            );
+            out.field("Matrix coefficients", format!("{} ({})", cicp.matrix_name(), cicp.matrix_coefficients));
+            out.field("Range", cicp.range_name());
+        }
+        PngChunkBody::Mdcv(display) => {
+            out.field("Primaries", display.primaries_text());
+            out.field("Luminance", display.luminance_text());
+        }
+        PngChunkBody::Clli(level) => {
+            out.field("MaxCLL", format!("{} cd/m²", level.max_content_light_level));
+            out.field("MaxFALL", format!("{} cd/m²", level.max_frame_average_light_level));
         }
     }
 }

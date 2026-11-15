@@ -5,5 +5,6 @@ pub mod ifd;
 pub mod info;
 pub mod jpeg;
 pub mod logluv;
+pub mod metadata;
 pub mod pixels;
 pub mod types;

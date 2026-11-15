@@ -6,10 +6,13 @@ use tsify::Tsify;
 
 use crate::bitreader::BitReader;
 use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat};
+use crate::utils::limits::Limits;
+use crate::utils::metadata::MetadataCollector;
 use crate::utils::tiff::info::{
     compression_name, first_u32, photometric_name, IfdKind, TiffEntry, TiffIfdSection, TiffImageIfd, TiffSection,
     TiffStructure,
 };
+use crate::utils::tiff::metadata::collect_metadata;
 use crate::utils::tiff::types::TiffTags;
 
 const MAX_OPCODE_LIST_BYTES: usize = 1 << 20;
@@ -278,6 +281,12 @@ fn parameters<R: Read + Seek>(
     params
 }
 
+fn orientation(structure: &TiffStructure, raw: &TiffIfdSection) -> Option<u32> {
+    [primary_ifd(structure), Some(raw)].into_iter().flatten().find_map(|section| {
+        section.entry(TiffTags::Orientation as u16).and_then(first_u32).filter(|o| (1..=8).contains(o))
+    })
+}
+
 fn summary(structure: &TiffStructure, raw: &TiffImageIfd, params: &DngParameters) -> Option<ImageSummary> {
     let ifd = structure.ifd_section(raw.index)?;
     let mut width = dimension(ifd, TiffTags::ImageWidth);
@@ -292,11 +301,7 @@ fn summary(structure: &TiffStructure, raw: &TiffImageIfd, params: &DngParameters
         }
     }
 
-    let primary = primary_ifd(structure);
-    let orientation = [primary, Some(ifd)].into_iter().flatten().find_map(|section| {
-        section.entry(TiffTags::Orientation as u16).and_then(first_u32).filter(|o| (1..=8).contains(o))
-    });
-    if orientation.is_some_and(|o| o >= 5) {
+    if orientation(structure, ifd).is_some_and(|o| o >= 5) {
         std::mem::swap(&mut width, &mut height);
     }
 
@@ -328,10 +333,32 @@ fn summary(structure: &TiffStructure, raw: &TiffImageIfd, params: &DngParameters
     Some(summary)
 }
 
-pub fn build_info<R: Read + Seek>(structure: TiffStructure, reader: &mut BitReader<R>) -> DngInfo {
+fn apply_metadata<R: Read + Seek>(
+    structure: &TiffStructure,
+    raw: &TiffImageIfd,
+    summary: &mut ImageSummary,
+    reader: &mut BitReader<R>,
+    limits: &mut Limits,
+) {
+    let mut metadata = MetadataCollector::default();
+    if let Some(value) = structure.ifd_section(raw.index).and_then(|ifd| orientation(structure, ifd)) {
+        metadata.set_orientation(value, true);
+    }
+    let primary =
+        structure.image_ifds.iter().filter(|image| image.kind == IfdKind::Page).min_by_key(|image| image.index);
+    for source in [primary, Some(raw)].into_iter().flatten() {
+        collect_metadata(structure, source.index, &source.ifd, reader, limits, &mut metadata);
+    }
+    metadata.apply(summary);
+}
+
+pub fn build_info<R: Read + Seek>(structure: TiffStructure, reader: &mut BitReader<R>, limits: &mut Limits) -> DngInfo {
     let raw = select_raw(&structure);
     let params = parameters(&structure, raw, reader);
-    let summary = raw.and_then(|raw| summary(&structure, raw, &params));
+    let mut summary = raw.and_then(|raw| summary(&structure, raw, &params));
+    if let (Some(raw), Some(summary)) = (raw, summary.as_mut()) {
+        apply_metadata(&structure, raw, summary, reader, limits);
+    }
     let raw_offset = raw.map(|image| image.ifd.offset).unwrap_or(0);
 
     let mut info = DngInfo { summary, sections: Vec::new() };

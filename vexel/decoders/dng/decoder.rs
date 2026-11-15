@@ -151,7 +151,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             let saved_pos = self.reader.stream_position().unwrap_or(0);
             let structure = walk_structure(&mut self.reader, &mut self.limits);
             match structure {
-                Ok(structure) => self.info = Some(build_info(structure, &mut self.reader)),
+                Ok(structure) => self.info = Some(build_info(structure, &mut self.reader, &mut self.limits)),
                 Err(e) => log_warn!("Failed to read DNG structure: {}", e),
             }
             self.limits = saved_limits;

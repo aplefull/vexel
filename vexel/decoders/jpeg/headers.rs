@@ -53,7 +53,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
 
     pub(super) fn read_app(&mut self, index: u8, segment_start: u64) -> VexelResult<()> {
         let (length, payload) = self.read_segment_payload()?;
-        let segment = parse_app(index, &payload, segment_start + 4, &mut self.icc);
+        let segment = parse_app(index, &payload, segment_start + 4, &mut self.app_metadata);
 
         match &segment {
             AppSegment::Jfif(_) => self.has_jfif = true,

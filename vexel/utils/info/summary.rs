@@ -4,7 +4,9 @@ use serde::Serialize;
 use tsify::Tsify;
 
 use super::writer::InfoWriter;
+use crate::utils::exif::ExifData;
 use crate::utils::icc::ICCProfile;
+use crate::utils::metadata::{Cicp, ContentLightLevel, IptcData, MasteringDisplay, Orientation, XmpData};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
 pub enum ColorModel {
@@ -95,6 +97,13 @@ pub struct ImageSummary {
     pub duration_ms: Option<u64>,
     pub pages: Option<u32>,
     pub icc_profile: Option<ICCProfile>,
+    pub cicp: Option<Cicp>,
+    pub mastering_display: Option<MasteringDisplay>,
+    pub content_light_level: Option<ContentLightLevel>,
+    pub orientation: Option<Orientation>,
+    pub exif: Option<ExifData>,
+    pub xmp: Option<XmpData>,
+    pub iptc: Option<IptcData>,
     pub data: Option<DataExtent>,
 }
 
@@ -115,6 +124,13 @@ impl ImageSummary {
             duration_ms: None,
             pages: None,
             icc_profile: None,
+            cicp: None,
+            mastering_display: None,
+            content_light_level: None,
+            orientation: None,
+            exif: None,
+            xmp: None,
+            iptc: None,
             data: None,
         }
     }
@@ -146,6 +162,37 @@ impl ImageSummary {
             if let Some(description) = profile.description() {
                 out.text("ICC description", &description);
             }
+        }
+        out.opt_field("CICP", self.cicp);
+        if let Some(display) = &self.mastering_display {
+            out.field("Mastering primaries", display.primaries_text());
+            out.field("Mastering luminance", display.luminance_text());
+        }
+        out.opt_field("Content light level", self.content_light_level);
+        out.opt_field("Orientation", self.orientation);
+        if let Some(exif) = &self.exif {
+            let ifds: Vec<&str> = exif.ifds().map(|(name, _)| name).collect();
+            out.field("Exif", format!("{} entries ({})", exif.entry_count(), ifds.join(", ")));
+            for (label, value) in exif.highlights() {
+                out.text(label, &value);
+            }
+        }
+        if let Some(xmp) = &self.xmp {
+            let mut size = format!("{} bytes", xmp.packet.len());
+            if let Some(extended) = &xmp.extended {
+                size = format!("{} + {} bytes extended", size, extended.len());
+            }
+            out.field("XMP", size);
+            if !xmp.properties.is_empty() {
+                out.group(format!("XMP ({} properties)", xmp.properties.len()), |out| xmp.describe_properties(out));
+            }
+        }
+        if let Some(iptc) = &self.iptc {
+            out.group(format!("IPTC ({} datasets)", iptc.datasets.len()), |out| {
+                for dataset in &iptc.datasets {
+                    out.text(&dataset.label(), &dataset.value.to_string());
+                }
+            });
         }
         if let Some(data) = &self.data {
             let suffix = if data.is_truncated() { " (truncated)" } else { "" };

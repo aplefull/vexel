@@ -614,3 +614,174 @@ impl ExifData {
         }
     }
 }
+
+fn rational_value((numerator, denominator): (f64, f64)) -> Option<f64> {
+    (denominator != 0.0).then(|| numerator / denominator)
+}
+
+fn trim_number(value: f64) -> String {
+    let text = format!("{:.2}", value);
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+impl ExifValue {
+    pub fn first_number(&self) -> Option<u32> {
+        match self {
+            ExifValue::Byte(v) | ExifValue::Undefined(v) => v.first().map(|&x| u32::from(x)),
+            ExifValue::Short(v) => v.first().map(|&x| u32::from(x)),
+            ExifValue::Long(v) => v.first().copied(),
+            ExifValue::Long8(v) => v.first().and_then(|&x| u32::try_from(x).ok()),
+            _ => None,
+        }
+    }
+
+    pub fn reals(&self) -> Vec<f64> {
+        match self {
+            ExifValue::Rational(v) => {
+                v.iter().filter_map(|&(n, d)| rational_value((f64::from(n), f64::from(d)))).collect()
+            }
+            ExifValue::SRational(v) => {
+                v.iter().filter_map(|&(n, d)| rational_value((f64::from(n), f64::from(d)))).collect()
+            }
+            ExifValue::Short(v) => v.iter().map(|&x| f64::from(x)).collect(),
+            ExifValue::Long(v) => v.iter().map(|&x| f64::from(x)).collect(),
+            ExifValue::Float(v) => v.iter().map(|&x| f64::from(x)).collect(),
+            ExifValue::Double(v) => v.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn text(&self) -> Option<String> {
+        let text = match self {
+            ExifValue::Ascii(strings) => strings.join(" / "),
+            ExifValue::Byte(bytes) | ExifValue::Undefined(bytes) => {
+                let text = std::str::from_utf8(bytes).ok()?.trim_end_matches('\0');
+                if text.chars().any(char::is_control) {
+                    return None;
+                }
+                text.to_string()
+            }
+            _ => return None,
+        };
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+}
+
+impl ExifIfd {
+    pub fn get(&self, tag: u16) -> Option<&ExifValue> {
+        self.entries.iter().find(|entry| entry.tag == tag).map(|entry| &entry.value)
+    }
+
+    pub fn number(&self, tag: u16) -> Option<u32> {
+        self.get(tag)?.first_number()
+    }
+
+    pub fn text(&self, tag: u16) -> Option<String> {
+        self.get(tag)?.text()
+    }
+
+    pub fn reals(&self, tag: u16) -> Vec<f64> {
+        self.get(tag).map(ExifValue::reals).unwrap_or_default()
+    }
+}
+
+fn joined_name(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) if second.to_lowercase().starts_with(&first.to_lowercase()) => Some(second),
+        (Some(first), Some(second)) => Some(format!("{} {}", first, second)),
+        (first, second) => first.or(second),
+    }
+}
+
+fn gps_coordinate(gps: &ExifIfd, value_tag: u16, ref_tag: u16) -> Option<String> {
+    let parts = gps.reals(value_tag);
+    let degrees = match parts[..] {
+        [d, m, s, ..] => d + m / 60.0 + s / 3600.0,
+        [d, m] => d + m / 60.0,
+        [d] => d,
+        [] => return None,
+    };
+    let reference = gps.text(ref_tag).unwrap_or_default();
+    Some(format!("{:.6}° {}", degrees, reference).trim_end().to_string())
+}
+
+impl ExifData {
+    pub fn ifds(&self) -> impl Iterator<Item = (&'static str, &ExifIfd)> {
+        [
+            ("IFD0", Some(&self.ifd0)),
+            ("Exif", self.exif_ifd.as_ref()),
+            ("GPS", self.gps_ifd.as_ref()),
+            ("Interop", self.interop_ifd.as_ref()),
+            ("IFD1", self.ifd1.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, ifd)| ifd.map(|ifd| (name, ifd)))
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.ifds().map(|(_, ifd)| ifd.entries.len()).sum()
+    }
+
+    pub fn highlights(&self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        let exif = self.exif_ifd.as_ref();
+        let exif_text = |tag: u16| exif.and_then(|ifd| ifd.text(tag));
+        let exif_reals = |tag: u16| exif.map(|ifd| ifd.reals(tag)).unwrap_or_default();
+
+        if let Some(camera) = joined_name(self.ifd0.text(0x010F), self.ifd0.text(0x0110)) {
+            out.push(("Camera", camera));
+        }
+        if let Some(lens) = joined_name(exif_text(0xA433), exif_text(0xA434)) {
+            out.push(("Lens", lens));
+        }
+        match exif_text(0x9003) {
+            Some(date) => out.push(("Date taken", date)),
+            None => {
+                if let Some(date) = self.ifd0.text(0x0132) {
+                    out.push(("Date", date));
+                }
+            }
+        }
+
+        let mut exposure = Vec::new();
+        if let Some(&time) = exif_reals(0x829A).first() {
+            if time > 0.0 && time < 1.0 {
+                exposure.push(format!("1/{} s", trim_number(1.0 / time)));
+            } else {
+                exposure.push(format!("{} s", trim_number(time)));
+            }
+        }
+        if let Some(&f_number) = exif_reals(0x829D).first() {
+            exposure.push(format!("f/{}", trim_number(f_number)));
+        }
+        if let Some(iso) = exif.and_then(|ifd| ifd.number(0x8827)) {
+            exposure.push(format!("ISO {}", iso));
+        }
+        if let Some(&focal) = exif_reals(0x920A).first() {
+            exposure.push(format!("{} mm", trim_number(focal)));
+        }
+        if !exposure.is_empty() {
+            out.push(("Exposure", exposure.join(", ")));
+        }
+
+        if let Some(gps) = &self.gps_ifd {
+            let latitude = gps_coordinate(gps, 0x0002, 0x0001);
+            let longitude = gps_coordinate(gps, 0x0004, 0x0003);
+            if let (Some(latitude), Some(longitude)) = (latitude, longitude) {
+                let mut position = format!("{}, {}", latitude, longitude);
+                if let Some(&altitude) = gps.reals(0x0006).first() {
+                    let below = gps.number(0x0005) == Some(1);
+                    position = format!("{}, {} m", position, trim_number(if below { -altitude } else { altitude }));
+                }
+                out.push(("GPS position", position));
+            }
+        }
+
+        if let Some(software) = self.ifd0.text(0x0131) {
+            out.push(("Software", software));
+        }
+
+        out
+    }
+}

@@ -6,7 +6,9 @@ use tsify::Tsify;
 use crate::log_warn;
 use crate::utils::exif::{ExifData, ExifReader};
 use crate::utils::icc::ICCProfile;
-use crate::utils::info::InfoWriter;
+use crate::utils::info::{ImageSummary, InfoWriter};
+use crate::utils::metadata::photoshop::{self, PhotoshopResource};
+use crate::utils::metadata::MetadataCollector;
 use crate::utils::types::ByteOrder;
 
 const XMP_IDENTIFIER: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
@@ -89,14 +91,6 @@ pub struct AdobeSegment {
 }
 
 #[derive(Debug, Clone, Serialize, Tsify)]
-pub struct PhotoshopResource {
-    pub signature: String,
-    pub id: u16,
-    pub name: String,
-    pub size: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Tsify)]
 pub struct PhotoshopSegment {
     pub resources: Vec<PhotoshopResource>,
 }
@@ -166,21 +160,23 @@ pub struct CommentSegment {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct IccAssembler {
-    chunks: Vec<(u8, Vec<u8>)>,
+pub struct AppMetadata {
+    icc_chunks: Vec<(u8, Vec<u8>)>,
+    photoshop: Vec<u8>,
+    collector: MetadataCollector,
 }
 
-impl IccAssembler {
+impl AppMetadata {
     pub fn clear(&mut self) {
-        self.chunks.clear();
+        *self = AppMetadata::default();
     }
 
-    pub fn assemble(&self) -> Option<ICCProfile> {
-        if self.chunks.is_empty() {
+    pub fn icc_profile(&self) -> Option<ICCProfile> {
+        if self.icc_chunks.is_empty() {
             return None;
         }
 
-        let mut chunks: Vec<&(u8, Vec<u8>)> = self.chunks.iter().collect();
+        let mut chunks: Vec<&(u8, Vec<u8>)> = self.icc_chunks.iter().collect();
         chunks.sort_by_key(|(sequence, _)| *sequence);
 
         let profile_data: Vec<u8> = chunks.iter().flat_map(|(_, data)| data.iter().copied()).collect();
@@ -192,6 +188,15 @@ impl IccAssembler {
                 None
             }
         }
+    }
+
+    pub fn apply(&self, summary: &mut ImageSummary) {
+        summary.icc_profile = self.icc_profile();
+        let mut collector = self.collector.clone();
+        if !self.photoshop.is_empty() {
+            collector.add_photoshop_resources(&self.photoshop);
+        }
+        collector.apply(summary);
     }
 }
 
@@ -253,7 +258,7 @@ pub fn parse_comment(payload: &[u8]) -> CommentSegment {
     CommentSegment { text: String::from_utf8_lossy(payload).trim_end_matches('\0').to_string() }
 }
 
-pub fn parse_app(index: u8, payload: &[u8], payload_offset: u64, icc: &mut IccAssembler) -> AppSegment {
+pub fn parse_app(index: u8, payload: &[u8], payload_offset: u64, metadata: &mut AppMetadata) -> AppSegment {
     match index {
         0 if payload.starts_with(b"JFIF\0") => AppSegment::Jfif(parse_jfif(&payload[5..])),
         0 if payload.starts_with(b"JFXX\0") => AppSegment::Jfxx(JfxxSegment {
@@ -262,27 +267,52 @@ pub fn parse_app(index: u8, payload: &[u8], payload_offset: u64, icc: &mut IccAs
         }),
         1 if payload.starts_with(b"Exif\0") && payload.len() >= 6 => {
             let tiff = &payload[6..];
-            AppSegment::Exif(ExifSegment { tiff_length: tiff.len() as u32, exif: ExifReader::parse(tiff) })
+            let exif = ExifReader::parse(tiff);
+            match &exif {
+                Some(exif) => metadata.collector.add_exif_data(exif),
+                None => log_warn!("Failed to parse APP1 Exif data"),
+            }
+            AppSegment::Exif(ExifSegment { tiff_length: tiff.len() as u32, exif })
         }
-        1 if payload.starts_with(XMP_IDENTIFIER) => AppSegment::Xmp(XmpSegment {
-            packet: String::from_utf8_lossy(&payload[XMP_IDENTIFIER.len()..]).trim_end_matches('\0').to_string(),
-        }),
+        1 if payload.starts_with(XMP_IDENTIFIER) => {
+            let packet = &payload[XMP_IDENTIFIER.len()..];
+            metadata.collector.add_xmp(packet);
+            AppSegment::Xmp(XmpSegment { packet: String::from_utf8_lossy(packet).trim_end_matches('\0').to_string() })
+        }
         1 if payload.starts_with(EXTENDED_XMP_IDENTIFIER) => {
             let rest = &payload[EXTENDED_XMP_IDENTIFIER.len()..];
             let bytes = Bytes(rest);
-            AppSegment::ExtendedXmp(ExtendedXmpSegment {
+            let segment = ExtendedXmpSegment {
                 guid: printable_ascii(&rest[..rest.len().min(32)]),
                 full_length: bytes.u32_be(32),
                 chunk_offset: bytes.u32_be(36),
                 chunk_length: rest.len().saturating_sub(40) as u32,
-            })
+            };
+            if rest.len() >= 40 {
+                metadata.collector.add_extended_xmp(
+                    segment.guid.clone(),
+                    segment.full_length,
+                    segment.chunk_offset,
+                    &rest[40..],
+                );
+            } else {
+                log_warn!("Truncated extended XMP segment header");
+            }
+            AppSegment::ExtendedXmp(segment)
+        }
+        1 if recovered_xmp_start(payload).is_some() => {
+            let start = recovered_xmp_start(payload).unwrap_or(0);
+            log_warn!("APP1 segment has a damaged XMP identifier, reading the packet at byte {}", start);
+            let packet = &payload[start..];
+            metadata.collector.add_xmp(packet);
+            AppSegment::Xmp(XmpSegment { packet: String::from_utf8_lossy(packet).trim_end_matches('\0').to_string() })
         }
         2 if payload.starts_with(ICC_IDENTIFIER) && payload.len() >= ICC_IDENTIFIER.len() + 2 => {
             let header = ICC_IDENTIFIER.len();
             let sequence = payload[header];
             let total = payload[header + 1];
             let data = &payload[header + 2..];
-            icc.chunks.push((sequence, data.to_vec()));
+            metadata.icc_chunks.push((sequence, data.to_vec()));
             AppSegment::Icc(IccChunk { sequence, total, data_length: data.len() as u32 })
         }
         2 if payload.starts_with(b"MPF\0") => AppSegment::Mpf(parse_mpf(&payload[4..], payload_offset + 4)),
@@ -300,7 +330,11 @@ pub fn parse_app(index: u8, payload: &[u8], payload_offset: u64, icc: &mut IccAs
             })
         }
         13 if payload.starts_with(PHOTOSHOP_IDENTIFIER) => {
-            AppSegment::Photoshop(parse_photoshop(&payload[PHOTOSHOP_IDENTIFIER.len()..]))
+            let body = &payload[PHOTOSHOP_IDENTIFIER.len()..];
+            metadata.photoshop.extend_from_slice(body);
+            AppSegment::Photoshop(PhotoshopSegment {
+                resources: photoshop::parse_resources(body).into_iter().map(|block| block.resource).collect(),
+            })
         }
         14 if payload.starts_with(b"Adobe") && payload.len() >= 10 => {
             let bytes = Bytes(payload);
@@ -314,6 +348,14 @@ pub fn parse_app(index: u8, payload: &[u8], payload_offset: u64, icc: &mut IccAs
         }
         _ => AppSegment::Generic(GenericAppSegment { identifier: generic_identifier(payload) }),
     }
+}
+
+fn recovered_xmp_start(payload: &[u8]) -> Option<usize> {
+    let window = &payload[..payload.len().min(XMP_IDENTIFIER.len() + 16)];
+    [b"<?xpacket".as_slice(), b"<x:xmpmeta".as_slice()]
+        .iter()
+        .filter_map(|marker| window.windows(marker.len()).position(|w| w == *marker))
+        .min()
 }
 
 fn parse_jfif(body: &[u8]) -> JfifSegment {
@@ -356,33 +398,6 @@ fn parse_spiff(body: &[u8]) -> SpiffSegment {
         horizontal_resolution: bytes.u32_be(20),
         truncated: body.len() < 24,
     }
-}
-
-fn parse_photoshop(body: &[u8]) -> PhotoshopSegment {
-    let bytes = Bytes(body);
-    let mut resources = Vec::new();
-    let mut pos = 0usize;
-
-    while body.len().saturating_sub(pos) >= 4 {
-        let signature = &body[pos..pos + 4];
-        if !matches!(signature, b"8BIM" | b"PHUT" | b"AgHg" | b"DCSR" | b"MeSa") {
-            break;
-        }
-        let id = bytes.u16_be(pos + 4);
-        let name_length = usize::from(bytes.u8(pos + 6));
-        let name_start = (pos + 7).min(body.len());
-        let name_end = (name_start + name_length).min(body.len());
-        let name = String::from_utf8_lossy(&body[name_start..name_end]).into_owned();
-        let size_at = pos + 6 + ((1 + name_length + 1) & !1);
-        let size = bytes.u32_be(size_at);
-        resources.push(PhotoshopResource { signature: printable_ascii(signature), id, name, size });
-
-        let data_start = size_at + 4;
-        let padded = (size as usize).saturating_add(size as usize & 1);
-        pos = data_start.saturating_add(padded);
-    }
-
-    PhotoshopSegment { resources }
 }
 
 fn parse_mpf(tiff: &[u8], tiff_offset: u64) -> MpfSegment {
@@ -488,41 +503,6 @@ fn mpf_type_name(attribute: u32) -> String {
         _ => "Unknown",
     };
     format!("{} (0x{:06X})", name, code)
-}
-
-fn photoshop_resource_name(id: u16) -> Option<&'static str> {
-    Some(match id {
-        0x03E9 => "Print info",
-        0x03ED => "Resolution info",
-        0x03F3 => "Print flags",
-        0x03F5 => "Color halftoning",
-        0x03F8 => "Color transfer functions",
-        0x0400 => "Layer state",
-        0x0402 => "Layer groups",
-        0x0404 => "IPTC-NAA record",
-        0x0406 => "JPEG quality",
-        0x0408 => "Grid and guides",
-        0x0409 | 0x040C => "Thumbnail",
-        0x040A => "Copyright flag",
-        0x040B => "URL",
-        0x040D => "Global angle",
-        0x040F => "ICC profile",
-        0x0411 => "ICC untagged",
-        0x0414 => "Document IDs seed",
-        0x0419 => "Global altitude",
-        0x041A => "Slices",
-        0x041E => "URL list",
-        0x0421 => "Version info",
-        0x0422 => "Exif data",
-        0x0423 => "Exif data 3",
-        0x0424 => "XMP metadata",
-        0x0425 => "IPTC digest",
-        0x0426 => "Print scale",
-        0x0428 => "Pixel aspect ratio",
-        0x0429 => "Layer comps",
-        0x2710 => "Print flags info",
-        _ => return None,
-    })
 }
 
 fn spiff_profile_name(profile: u8) -> String {
@@ -709,7 +689,7 @@ impl AppSegment {
             AppSegment::Photoshop(photoshop) => {
                 out.field("Resources", photoshop.resources.len());
                 for resource in &photoshop.resources {
-                    let name = match photoshop_resource_name(resource.id) {
+                    let name = match photoshop::resource_name(resource.id) {
                         Some(name) => format!("{} (0x{:04X})", name, resource.id),
                         None => format!("0x{:04X}", resource.id),
                     };

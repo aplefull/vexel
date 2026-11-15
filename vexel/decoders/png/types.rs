@@ -24,6 +24,10 @@ pub enum ChunkKind {
     ACTL,
     FCTL,
     FDAT,
+    EXIF,
+    CICP,
+    MDCV,
+    CLLI,
 }
 
 pub fn chunk_kind(chunk_type: &[u8; 4]) -> Option<ChunkKind> {
@@ -49,6 +53,10 @@ pub fn chunk_kind(chunk_type: &[u8; 4]) -> Option<ChunkKind> {
         b"acTL" => Some(ChunkKind::ACTL),
         b"fcTL" => Some(ChunkKind::FCTL),
         b"fdAT" => Some(ChunkKind::FDAT),
+        b"eXIf" => Some(ChunkKind::EXIF),
+        b"cICP" => Some(ChunkKind::CICP),
+        b"mDCV" | b"mDCv" => Some(ChunkKind::MDCV),
+        b"cLLI" | b"cLLi" => Some(ChunkKind::CLLI),
         _ => None,
     }
 }

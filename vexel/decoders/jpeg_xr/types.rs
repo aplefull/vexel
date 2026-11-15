@@ -181,6 +181,19 @@ impl Orientation {
         matches!(self, Orientation::Rcw | Orientation::RcwFlipV | Orientation::RcwFlipH | Orientation::RcwFlipVH)
     }
 
+    pub fn exif_value(self) -> u32 {
+        match self {
+            Orientation::None => 1,
+            Orientation::FlipH => 2,
+            Orientation::FlipVH => 3,
+            Orientation::FlipV => 4,
+            Orientation::RcwFlipH => 5,
+            Orientation::Rcw => 6,
+            Orientation::RcwFlipV => 7,
+            Orientation::RcwFlipVH => 8,
+        }
+    }
+
     pub fn flips_h(self) -> bool {
         matches!(self, Orientation::FlipH | Orientation::FlipVH | Orientation::RcwFlipH | Orientation::RcwFlipVH)
     }

@@ -9,7 +9,7 @@ use super::info::{
 use super::markers::{JpegLsMarker, JPEG_LS_MARKERS};
 use super::types::*;
 use crate::bitreader::BitReader;
-use crate::decoders::jpeg::app::{parse_app, parse_comment, AppSection, AppSegment, IccAssembler};
+use crate::decoders::jpeg::app::{parse_app, parse_comment, AppMetadata, AppSection, AppSegment};
 use crate::decoders::jpeg::info::subsampling_name;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::{ColorModel, ImageSummary};
@@ -39,7 +39,7 @@ pub struct JpegLsDecoder<R: Read + Seek> {
     mapping_tables: HashMap<u8, MappingTable>,
     info: Option<JpegLsInfo>,
     walk_mode: WalkMode,
-    icc: IccAssembler,
+    app_metadata: AppMetadata,
 }
 
 impl<R: Read + Seek> JpegLsDecoder<R> {
@@ -56,7 +56,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
             mapping_tables: HashMap::new(),
             info: None,
             walk_mode: WalkMode::Decode,
-            icc: IccAssembler::default(),
+            app_metadata: AppMetadata::default(),
         }
     }
 
@@ -465,7 +465,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
     fn read_app(&mut self, index: u8, marker_start: u64) -> VexelResult<()> {
         let (length, payload) = self.read_segment_payload()?;
-        let segment = parse_app(index, &payload, marker_start + 4, &mut self.icc);
+        let segment = parse_app(index, &payload, marker_start + 4, &mut self.app_metadata);
         if let AppSegment::HpTransform(hp) = &segment {
             self.color_transform = hp.transform;
         }
@@ -508,7 +508,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         self.restart_interval = 0;
         self.oversize_dimensions = None;
         self.mapping_tables.clear();
-        self.icc.clear();
+        self.app_metadata.clear();
     }
 
     fn walk(&mut self, mode: WalkMode) -> VexelResult<()> {
@@ -691,7 +691,7 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
         let factors: Vec<(u8, u8)> =
             frame.components.iter().map(|c| (c.horizontal_sampling, c.vertical_sampling)).collect();
         summary.subsampling = subsampling_name(&factors);
-        summary.icc_profile = self.icc.assemble();
+        self.app_metadata.apply(&mut summary);
         Some(summary)
     }
 

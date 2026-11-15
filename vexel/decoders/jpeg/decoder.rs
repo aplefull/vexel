@@ -5,7 +5,7 @@ use super::color::JpegColorspace;
 use super::hierarchical::HierarchicalFrame;
 use super::thumbnails::scan_jpeg_thumbnails;
 use crate::bitreader::BitReader;
-use crate::decoders::jpeg::app::IccAssembler;
+use crate::decoders::jpeg::app::AppMetadata;
 use crate::decoders::jpeg::info::{coding_name, process_name, subsampling_name, JpegInfo, JpegSection};
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
 use crate::decoders::jpeg::types::{
@@ -61,7 +61,7 @@ pub struct JpegDecoder<R: Read + Seek> {
     pub(super) hierarchical_frames: Vec<HierarchicalFrame>,
     pub(super) lossless_ssss16_is_min: bool,
     pub(super) lossless_skip_color_transform: bool,
-    pub(super) icc: IccAssembler,
+    pub(super) app_metadata: AppMetadata,
     pub(super) collected_scans: usize,
     pub(super) frame_has_scan: bool,
     pub(super) entropy: Vec<u8>,
@@ -99,7 +99,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             hierarchical_frames: Vec::new(),
             lossless_ssss16_is_min: true,
             lossless_skip_color_transform: false,
-            icc: IccAssembler::default(),
+            app_metadata: AppMetadata::default(),
             entropy: Vec::new(),
             defer_entropy: false,
             deferred_scan_start: None,
@@ -154,7 +154,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         self.pending_expand_h = false;
         self.pending_expand_v = false;
         self.hierarchical_frames.clear();
-        self.icc.clear();
+        self.app_metadata.clear();
         self.entropy.clear();
         self.deferred_scan_start = None;
         self.collected_scans = 0;
@@ -475,7 +475,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
         let factors: Vec<(u8, u8)> =
             self.components.iter().map(|c| (c.horizontal_sampling_factor, c.vertical_sampling_factor)).collect();
         summary.subsampling = subsampling_name(&factors);
-        summary.icc_profile = self.icc.assemble();
+        self.app_metadata.apply(&mut summary);
         Some(summary)
     }
 

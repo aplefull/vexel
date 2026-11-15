@@ -7,6 +7,7 @@ use tsify::Tsify;
 use super::info::GifInfo;
 use super::source::GifSource;
 use crate::utils::icc::ICCProfile;
+use crate::utils::metadata::MetadataCollector;
 use crate::Limits;
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,7 @@ pub struct GifDecoder<R: Read + Seek> {
     pub(super) collected: GifInfo,
     pub(super) info: Option<GifInfo>,
     pub(super) icc_profile: Option<ICCProfile>,
+    pub(super) metadata: MetadataCollector,
     pub(super) loop_count: Option<u16>,
     pub(super) collect_frame_data: bool,
     pub(super) frame_index: u32,

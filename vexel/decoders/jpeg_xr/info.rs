@@ -5,7 +5,7 @@ use serde::Serialize;
 use tsify::Tsify;
 
 use super::bitreader::XrBitReader;
-use super::container::{self, Container};
+use super::container::{self, Container, ContainerKind};
 use super::decoder::locate_codestream;
 use super::headers::{parse_image_header, parse_plane_header, ImageHeader, PlaneHeader};
 use super::types::*;
@@ -14,7 +14,9 @@ use crate::log_warn;
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat, Section};
 use crate::utils::limits::Limits;
-use crate::utils::tiff::info::{walk_structure, TiffSection};
+use crate::utils::metadata::MetadataCollector;
+use crate::utils::tiff::info::{walk_structure, IfdKind, TiffSection};
+use crate::utils::tiff::metadata::collect_metadata;
 
 #[tsify::declare]
 pub type JpegXrInfo = FormatInfo<JpegXrSection>;
@@ -269,7 +271,12 @@ fn color_model(pixel_format: Option<PixelFormatKind>, headers: &Headers, has_alp
     }
 }
 
-fn build_summary(container: Option<&Container>, headers: &Headers, alpha_stream: bool) -> ImageSummary {
+fn build_summary(
+    container: Option<&Container>,
+    headers: &Headers,
+    alpha_stream: bool,
+    mut metadata: MetadataCollector,
+) -> ImageSummary {
     let image = &headers.image;
     let has_alpha = image.alpha_channel || alpha_stream;
     let orientation = container::effective_orientation(container, image.spatial_transform);
@@ -311,17 +318,31 @@ fn build_summary(container: Option<&Container>, headers: &Headers, alpha_stream:
         }
     }
 
+    if orientation != Orientation::None {
+        metadata.set_orientation(orientation.exif_value(), true);
+    }
+    metadata.apply(&mut summary);
+
     summary
 }
 
 pub fn scan(data: &[u8]) -> JpegXrInfo {
     let mut sections = Vec::new();
+    let mut metadata = MetadataCollector::default();
 
     if container::looks_like_container(data) {
         let mut reader = BitReader::new(Cursor::new(data));
         let mut limits = Limits::default();
         match walk_structure(&mut reader, &mut limits) {
             Ok(structure) => {
+                if let Some(image) = structure
+                    .image_ifds
+                    .iter()
+                    .filter(|image| image.kind == IfdKind::Page)
+                    .min_by_key(|image| image.index)
+                {
+                    collect_metadata(&structure, image.index, &image.ifd, &mut reader, &mut limits, &mut metadata);
+                }
                 for section in structure.sections {
                     sections.push(Section::new(section.offset, section.length, JpegXrSection::Tiff(section.data)));
                 }
@@ -338,12 +359,16 @@ pub fn scan(data: &[u8]) -> JpegXrInfo {
         }
     };
 
+    if container.as_ref().is_some_and(|container| container.kind == ContainerKind::Jpx) {
+        container::collect_jpx_metadata(data, 0, &mut metadata);
+    }
+
     let primary = read_headers(data, offset, false, &mut sections);
     let alpha_offset =
         container.as_ref().filter(|c| c.alpha_offset != 0 && c.alpha_byte_count != 0).map(|c| c.alpha_offset);
     let alpha = alpha_offset.and_then(|at| read_headers(data, at, true, &mut sections));
 
-    let summary = primary.as_ref().map(|headers| build_summary(container.as_ref(), headers, alpha.is_some()));
+    let summary = primary.as_ref().map(|headers| build_summary(container.as_ref(), headers, alpha.is_some(), metadata));
     sections.sort_by_key(|section| section.offset);
     JpegXrInfo { summary, sections }
 }

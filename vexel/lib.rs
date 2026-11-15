@@ -17,7 +17,7 @@ pub use utils::info::ImageInfo;
 pub use utils::limits::Limits;
 pub(crate) use utils::logger::{log_debug, log_error, log_warn};
 pub use utils::logger::{set_log_level, LogLevel};
-pub use utils::{icc, info};
+pub use utils::{exif, icc, info, metadata};
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast, JsValue};
 #[cfg(all(target_arch = "wasm32", feature = "rayon"))]

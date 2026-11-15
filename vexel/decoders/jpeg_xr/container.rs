@@ -1,5 +1,6 @@
 use crate::decoders::jpeg_xr::types::*;
 use crate::log_warn;
+use crate::utils::metadata::{jp2, MetadataCollector};
 
 const PIXEL_FORMAT_BASE: [u8; 15] =
     [0x24, 0xc3, 0xdd, 0x6f, 0x03, 0x4e, 0xfe, 0x4b, 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9];
@@ -270,6 +271,26 @@ fn collect_jpx_codestreams(data: &[u8], base: usize, depth: usize, out: &mut Vec
                 collect_jpx_codestreams(item.payload, base + item.payload_start, depth + 1, out, opacity);
             }
             _ => {}
+        }
+    }
+}
+
+pub fn collect_jpx_metadata(data: &[u8], depth: usize, metadata: &mut MetadataCollector) {
+    for item in jpx_boxes(data) {
+        match item.kind {
+            b"jp2h" | b"jpch" | b"jplh" | b"res " | b"asoc" if depth < MAX_BOX_DEPTH => {
+                collect_jpx_metadata(item.payload, depth + 1, metadata);
+            }
+            b"colr" => match item.payload.first() {
+                Some(2 | 3) => metadata.add_icc(item.payload.get(3..).unwrap_or_default()),
+                Some(5) => {
+                    if let Some(cicp) = jp2::parse_cicp(item.payload.get(3..).unwrap_or_default()) {
+                        metadata.set_cicp(cicp);
+                    }
+                }
+                _ => {}
+            },
+            kind => jp2::collect_box(kind, item.payload, metadata),
         }
     }
 }

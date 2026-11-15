@@ -3,14 +3,16 @@ use std::io::{Read, Seek, SeekFrom};
 use super::animation::{PngData, PngFrames};
 use super::chunks;
 use super::crc_simd::update_crc;
-use super::info::{FdatChunk, IhdrChunk, PngChunk, PngChunkBody, PngInfo, PngSection, PngSignature};
+use super::info::{ExifChunk, FdatChunk, IhdrChunk, PngChunk, PngChunkBody, PngInfo, PngSection, PngSignature};
 use super::pixels::PngFormat;
 use super::types::*;
 use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::exif::ExifReader;
 use crate::utils::frames::{FrameExtent, FrameSource, Frames};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, ImageSummary};
+use crate::utils::metadata::{strip_exif_header, MetadataCollector};
 use crate::{log_debug, log_warn, Image, Limits};
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -56,6 +58,7 @@ pub struct PngDecoder<R: Read + Seek> {
     frames: Vec<PngFrame>,
     actl_info: Option<ActlChunk>,
     icc_profile: Option<ICCProfile>,
+    metadata: MetadataCollector,
     collected: PngInfo,
     info: Option<PngInfo>,
     reader: BitReader<R>,
@@ -77,6 +80,7 @@ impl<R: Read + Seek> PngDecoder<R> {
             frames: Vec::new(),
             actl_info: None,
             icc_profile: None,
+            metadata: MetadataCollector::default(),
             collected: PngInfo::default(),
             info: None,
             reader: BitReader::new(reader),
@@ -113,6 +117,7 @@ impl<R: Read + Seek> PngDecoder<R> {
         self.frames.clear();
         self.actl_info = None;
         self.icc_profile = None;
+        self.metadata = MetadataCollector::default();
         self.collected = PngInfo::default();
     }
 
@@ -162,6 +167,7 @@ impl<R: Read + Seek> PngDecoder<R> {
                 summary.duration_ms = Some(total_ms.round() as u64);
             }
             summary.icc_profile = self.icc_profile.clone();
+            self.metadata.apply(&mut summary);
             info.summary = Some(summary);
         }
 
@@ -322,9 +328,50 @@ impl<R: Read + Seek> PngDecoder<R> {
             }
             ChunkKind::SBIT => PngChunkBody::Sbit(chunks::parse_sbit(data, self.color_type)),
             ChunkKind::SRGB => PngChunkBody::Srgb(chunks::parse_srgb(data)),
-            ChunkKind::TEXT => PngChunkBody::Text(chunks::parse_text(data)),
-            ChunkKind::ZTXT => PngChunkBody::Ztxt(chunks::parse_ztxt(data, &mut self.limits)?),
-            ChunkKind::ITXT => PngChunkBody::Itxt(chunks::parse_itxt(data, &mut self.limits)?),
+            ChunkKind::TEXT => {
+                let text = chunks::parse_text(data);
+                chunks::collect_text_metadata(&text.keyword, &text.text, &mut self.metadata);
+                PngChunkBody::Text(text)
+            }
+            ChunkKind::ZTXT => {
+                let text = chunks::parse_ztxt(data, &mut self.limits)?;
+                chunks::collect_text_metadata(&text.keyword, &text.text, &mut self.metadata);
+                PngChunkBody::Ztxt(text)
+            }
+            ChunkKind::ITXT => {
+                let text = chunks::parse_itxt(data, &mut self.limits)?;
+                chunks::collect_text_metadata(&text.keyword, &text.text, &mut self.metadata);
+                PngChunkBody::Itxt(text)
+            }
+            ChunkKind::EXIF => {
+                let exif = ExifReader::parse(strip_exif_header(data));
+                match &exif {
+                    Some(exif) => self.metadata.add_exif_data(exif),
+                    None => log_warn!("Failed to parse eXIf chunk"),
+                }
+                PngChunkBody::Exif(ExifChunk { exif })
+            }
+            ChunkKind::CICP => match chunks::parse_cicp(data) {
+                Some(cicp) => {
+                    self.metadata.set_cicp(cicp);
+                    PngChunkBody::Cicp(cicp)
+                }
+                None => PngChunkBody::Unknown,
+            },
+            ChunkKind::MDCV => match chunks::parse_mdcv(data) {
+                Some(display) => {
+                    self.metadata.set_mastering_display(display);
+                    PngChunkBody::Mdcv(display)
+                }
+                None => PngChunkBody::Unknown,
+            },
+            ChunkKind::CLLI => match chunks::parse_clli(data) {
+                Some(level) => {
+                    self.metadata.set_content_light_level(level);
+                    PngChunkBody::Clli(level)
+                }
+                None => PngChunkBody::Unknown,
+            },
             ChunkKind::PHYS => PngChunkBody::Phys(chunks::parse_phys(data)),
             ChunkKind::TIME => PngChunkBody::Time(chunks::parse_time(data)),
             ChunkKind::SPLT => PngChunkBody::Splt(chunks::parse_splt(data)),

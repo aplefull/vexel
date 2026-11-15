@@ -2,11 +2,12 @@ use super::info::{
     CompressedTextChunk, GamaChunk, IccpChunk, IhdrChunk, InternationalTextChunk, PhysChunk, SrgbChunk, TextChunk,
 };
 use super::types::*;
-use crate::log_warn;
 use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::VexelResult;
 use crate::utils::icc::ICCProfile;
 use crate::utils::limits::Limits;
+use crate::utils::metadata::{xmp, Cicp, ContentLightLevel, MasteringDisplay, MetadataCollector};
+use crate::{log_debug, log_warn};
 
 const MAX_DECOMPRESSED_ICC: usize = 64 * 1024 * 1024;
 const MAX_DECOMPRESSED_TEXT: usize = 16 * 1024 * 1024;
@@ -435,4 +436,111 @@ pub fn sanitize_fctl(fctl: &FctlChunk, width: u32, height: u32) -> FctlChunk {
     }
 
     sanitized
+}
+
+pub fn parse_cicp(data: &[u8]) -> Option<Cicp> {
+    if data.len() < 4 {
+        log_warn!("cICP chunk is {} bytes instead of 4, ignoring", data.len());
+        return None;
+    }
+    let cicp = Cicp {
+        color_primaries: u16::from(data[0]),
+        transfer_characteristics: u16::from(data[1]),
+        matrix_coefficients: u16::from(data[2]),
+        full_range: data[3] != 0,
+    };
+    if cicp.matrix_coefficients != 0 {
+        log_warn!("cICP matrix coefficients are {}, PNG only allows 0 (RGB)", cicp.matrix_coefficients);
+    }
+    if data[3] > 1 {
+        log_warn!("cICP full range flag is {}, treating as full range", data[3]);
+    }
+    Some(cicp)
+}
+
+pub fn parse_mdcv(data: &[u8]) -> Option<MasteringDisplay> {
+    if data.len() < 24 {
+        log_warn!("mDCV chunk is {} bytes instead of 24, ignoring", data.len());
+        return None;
+    }
+    let mut cursor = ByteCursor::new(data);
+    let mut chromaticity = || [f64::from(cursor.u16()) / 50000.0, f64::from(cursor.u16()) / 50000.0];
+    let red = chromaticity();
+    let green = chromaticity();
+    let blue = chromaticity();
+    let white_point = chromaticity();
+    let max_luminance = f64::from(cursor.u32()) / 10000.0;
+    let min_luminance = f64::from(cursor.u32()) / 10000.0;
+    Some(MasteringDisplay { red, green, blue, white_point, max_luminance, min_luminance })
+}
+
+pub fn parse_clli(data: &[u8]) -> Option<ContentLightLevel> {
+    if data.len() < 8 {
+        log_warn!("cLLI chunk is {} bytes instead of 8, ignoring", data.len());
+        return None;
+    }
+    let mut cursor = ByteCursor::new(data);
+    let max_content_light_level = f64::from(cursor.u32()) / 10000.0;
+    let max_frame_average_light_level = f64::from(cursor.u32()) / 10000.0;
+    Some(ContentLightLevel { max_content_light_level, max_frame_average_light_level })
+}
+
+const XMP_KEYWORD: &str = "XML:com.adobe.xmp";
+const RAW_PROFILE_PREFIX: &str = "Raw profile type ";
+
+fn decode_raw_profile(text: &str) -> Option<Vec<u8>> {
+    let (_name, body) = text.trim_start_matches(['\n', '\r']).split_once('\n')?;
+    let mut tokens = body.split_ascii_whitespace();
+    let declared: usize = tokens.next()?.parse().ok()?;
+    let mut data = Vec::with_capacity(declared.min(text.len() / 2));
+    let mut high = None;
+
+    'tokens: for token in tokens {
+        for c in token.chars() {
+            let Some(nibble) = c.to_digit(16) else {
+                log_warn!("Invalid character {:?} in raw profile hex data, stopping", c);
+                break 'tokens;
+            };
+            match high.take() {
+                None => high = Some(nibble as u8),
+                Some(value) => {
+                    data.push((value << 4) | nibble as u8);
+                    if data.len() == declared {
+                        break 'tokens;
+                    }
+                }
+            }
+        }
+    }
+
+    if data.len() < declared {
+        log_warn!("Raw profile declares {} bytes but contains {}", declared, data.len());
+    }
+    (!data.is_empty()).then_some(data)
+}
+
+pub fn collect_text_metadata(keyword: &str, text: &str, metadata: &mut MetadataCollector) {
+    if keyword == XMP_KEYWORD {
+        metadata.add_xmp(text.as_bytes());
+        return;
+    }
+
+    let Some(kind) = keyword.strip_prefix(RAW_PROFILE_PREFIX) else {
+        return;
+    };
+    let Some(data) = decode_raw_profile(text) else {
+        log_warn!("Failed to decode \"{}\" text chunk", keyword);
+        return;
+    };
+
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "exif" => metadata.add_exif(&data),
+        "app1" if xmp::looks_like_xmp(&data) => metadata.add_xmp(&data),
+        "app1" => metadata.add_exif(&data),
+        "xmp" => metadata.add_xmp(&data),
+        "iptc" => metadata.add_iptc(&data),
+        "8bim" => metadata.add_photoshop_resources(&data),
+        "icc" | "icm" => metadata.add_icc(&data),
+        other => log_debug!("Ignoring raw profile type {}", other),
+    }
 }
