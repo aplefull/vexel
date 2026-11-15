@@ -117,6 +117,10 @@ impl<R: Read + Seek + Sync> Vexel<R> {
 
         log_debug!("Detected image format: {:?}", format);
 
+        Ok(Vexel::with_format(reader, format))
+    }
+
+    pub fn with_format(reader: R, format: ImageFormat) -> Vexel<R> {
         let decoder = match format {
             ImageFormat::Jpeg => Decoders::Jpeg(JpegDecoder::new(reader)),
             ImageFormat::JpegLs => Decoders::JpegLs(JpegLsDecoder::new(reader)),
@@ -150,7 +154,7 @@ impl<R: Read + Seek + Sync> Vexel<R> {
             ImageFormat::Unknown => Decoders::Unknown,
         };
 
-        Ok(Vexel { decoder, format, limits: Limits::default() })
+        Vexel { decoder, format, limits: Limits::default() }
     }
 
     /// Sets resource limits that the decoder will enforce during decoding.

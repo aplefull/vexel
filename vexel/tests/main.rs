@@ -4,7 +4,7 @@ mod harness;
 use std::path::Path;
 
 use harness::*;
-use vexel::{Vexel, VexelError};
+use vexel::{ImageFormat, Vexel, VexelError};
 
 fn run_test_cases(test_cases: Vec<TestCase>) -> Result<(), Box<dyn std::error::Error>> {
     let name_width = test_cases.iter().map(|t| t.name.len()).max().unwrap_or(0);
@@ -359,11 +359,47 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
         }));
     });
 
-    type ArtifactStage = (&'static str, fn(&[u8]) -> bool);
+    type Decoder<'a> = Vexel<Cursor<&'a [u8]>>;
+    type ArtifactStage = (&'static str, fn(&[u8], Option<ImageFormat>) -> bool);
+
+    fn open(data: &[u8], format: Option<ImageFormat>) -> Result<Decoder<'_>, VexelError> {
+        match format {
+            Some(format) => Ok(Vexel::with_format(Cursor::new(data), format)),
+            None => Vexel::new(Cursor::new(data)),
+        }
+    }
+
+    fn target_format(target: &str) -> Option<ImageFormat> {
+        Some(match target.strip_prefix("decode_")? {
+            "bmp" => ImageFormat::Bmp,
+            "dicom" => ImageFormat::Dicom,
+            "dng" => ImageFormat::Dng,
+            "exr" => ImageFormat::Exr,
+            "farbfeld" => ImageFormat::Farbfeld,
+            "gif" => ImageFormat::Gif,
+            "hdr" => ImageFormat::Hdr,
+            "ico" => ImageFormat::Ico,
+            "jbig1" => ImageFormat::Jbig1,
+            "jbig2" => ImageFormat::Jbig2,
+            "jpeg" => ImageFormat::Jpeg,
+            "jpeg_ls" => ImageFormat::JpegLs,
+            "jpeg2000" => ImageFormat::Jpeg2000,
+            "jpeg_xr" => ImageFormat::JpegXr,
+            "jpeg_xs" => ImageFormat::JpegXs,
+            "lerc" => ImageFormat::Lerc,
+            "netpbm" => ImageFormat::NetPbmP6,
+            "pgx" => ImageFormat::Pgx,
+            "png" => ImageFormat::Png,
+            "rpgmvp" => ImageFormat::Rpgmvp,
+            "tga" => ImageFormat::Tga,
+            "tiff" => ImageFormat::Tiff,
+            _ => return None,
+        })
+    }
 
     let stages: [ArtifactStage; 5] = [
-        ("get_info", |data| {
-            if let Ok(mut decoder) = Vexel::new(Cursor::new(data)) {
+        ("get_info", |data, format| {
+            if let Ok(mut decoder) = open(data, format) {
                 let info = decoder.get_info();
                 let _ = info.summary();
                 let _ = info.to_tree();
@@ -371,20 +407,20 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
             }
             false
         }),
-        ("decode", |data| match Vexel::new(Cursor::new(data)) {
+        ("decode", |data, format| match open(data, format) {
             Ok(mut decoder) => matches!(decoder.decode(), Err(VexelError::Panic(_))),
             Err(error) => matches!(error, VexelError::Panic(_)),
         }),
-        ("decode_pages", |data| match Vexel::new(Cursor::new(data)) {
+        ("decode_pages", |data, format| match open(data, format) {
             Ok(mut decoder) => matches!(decoder.decode_pages(), Err(VexelError::Panic(_))),
             Err(error) => matches!(error, VexelError::Panic(_)),
         }),
-        ("decode_thumbnails", |data| match Vexel::new(Cursor::new(data)) {
+        ("decode_thumbnails", |data, format| match open(data, format) {
             Ok(mut decoder) => matches!(decoder.decode_thumbnails(), Err(VexelError::Panic(_))),
             Err(error) => matches!(error, VexelError::Panic(_)),
         }),
-        ("decode_frames", |data| {
-            let Ok(mut decoder) = Vexel::new(Cursor::new(data)) else {
+        ("decode_frames", |data, format| {
+            let Ok(mut decoder) = open(data, format) else {
                 return false;
             };
             let mut frames = match decoder.decode_frames() {
@@ -417,7 +453,9 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
 
         let path = entry.path();
         let data = std::fs::read(path)?;
-        let name = path.strip_prefix(&artifacts_dir).unwrap_or(path).display().to_string();
+        let relative = path.strip_prefix(&artifacts_dir).unwrap_or(path);
+        let name = relative.display().to_string();
+        let format = relative.components().next().and_then(|c| c.as_os_str().to_str()).and_then(target_format);
 
         checked += 1;
 
@@ -426,7 +464,7 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
 
         for (stage, run) in &stages {
             let panics_before = PANIC_COUNT.with(Cell::get);
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&data)));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&data, format.clone())));
 
             if !matches!(outcome, Ok(false)) || PANIC_COUNT.with(Cell::get) != panics_before {
                 let message = LAST_PANIC.with(|last| last.borrow().clone());

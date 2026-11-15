@@ -11,6 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+rayon = "1.12"
 
 [dependencies.vexel]
 path = ".."
@@ -19,6 +20,13 @@ default-features = true
 [[bin]]
 name = "decode_any"
 path = "fuzz_targets/decode_any.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_parallel"
+path = "fuzz_targets/decode_parallel.rs"
 test = false
 doc = false
 bench = false

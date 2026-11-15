@@ -43,9 +43,33 @@ bench *args="":
     cargo bench --package vexel --bench decode {{ if args != "" { "-- " + args } else { "" } }}
 
 # Fuzz a specific format
-fuzz format seconds="":
-    mkdir -p vexel/fuzz/corpus/decode_{{replace(format, "-", "_")}}
-    cd vexel && cargo fuzz run decode_{{replace(format, "-", "_")}} fuzz/corpus/decode_{{replace(format, "-", "_")}} tests/images/{{format}}/ {{ if seconds != "" { "-- -max_total_time=" + seconds } else { "" } }}
+fuzz format seconds="" jobs="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target=decode_{{replace(format, "-", "_")}}
+    seeds=$PWD/target/fuzz-seeds/$target
+    source=vexel/tests/images/{{format}}
+    max_len=65536
+    case "{{format}}" in
+        any) source=vexel/tests/images ;;
+        parallel) source=vexel/tests/images; max_len=524288 ;;
+    esac
+    rm -rf "$seeds" "$seeds.dict"
+    mkdir -p "$seeds"
+    find "$source" -type f -size -$((max_len + 1))c -print0 | while IFS= read -r -d '' file; do
+        name=${file#vexel/tests/images/}
+        ln -f "$file" "$seeds/${name//\//_}" 2>/dev/null || cp "$file" "$seeds/${name//\//_}"
+    done
+    case "{{format}}" in
+        any|parallel) sort -u vexel/fuzz/dicts/*.dict > "$seeds.dict" ;;
+        *) if [ -f vexel/fuzz/dicts/{{format}}.dict ]; then cp vexel/fuzz/dicts/{{format}}.dict "$seeds.dict"; fi ;;
+    esac
+    args=(-max_len=$max_len -timeout=30 -report_slow_units=30 -rss_limit_mb=2048)
+    if [ -f "$seeds.dict" ]; then args+=(-dict="$seeds.dict"); fi
+    if [ -n "{{seconds}}" ]; then args+=(-max_total_time={{seconds}}); fi
+    if [ -n "{{jobs}}" ]; then args+=(-fork={{jobs}} -ignore_crashes=1); fi
+    mkdir -p vexel/fuzz/corpus/$target
+    cd vexel && cargo fuzz run "$target" "fuzz/corpus/$target" "$seeds" -- "${args[@]}"
 
 # --- Code quality ---
 

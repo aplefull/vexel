@@ -8,43 +8,41 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, jpeg, jpeg-ls, png, gif, bmp, tiff, dng, hdr, tga, netpbm, ico, jbig1, jbig2, dicom, exr, jpeg2000, farbfeld, rpgmvp, pgx, jpeg-xs, jpeg-xr, lerc]
+        options: [all, any, parallel, jpeg, jpeg-ls, png, gif, bmp, tiff, dng, hdr, tga, netpbm, ico, jbig1, jbig2, dicom, exr, jpeg2000, farbfeld, rpgmvp, pgx, jpeg-xs, jpeg-xr, lerc]
       seconds:
         description: 'Time limit per target (seconds)'
         required: true
         default: '300'
 
 jobs:
-  fuzz-all:
-    if: inputs.format == 'all'
+  fuzz:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        format: [jpeg, jpeg-ls, png, gif, bmp, tiff, dng, hdr, tga, netpbm, ico, jbig1, jbig2, dicom, exr, jpeg2000, farbfeld, rpgmvp, pgx, jpeg-xs, jpeg-xr, lerc]
+        format: ${{ fromJSON(inputs.format == 'all' && '["any", "parallel", "jpeg", "jpeg-ls", "png", "gif", "bmp", "tiff", "dng", "hdr", "tga", "netpbm", "ico", "jbig1", "jbig2", "dicom", "exr", "jpeg2000", "farbfeld", "rpgmvp", "pgx", "jpeg-xs", "jpeg-xr", "lerc"]' || format('["{0}"]', inputs.format)) }}
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install --profile minimal
       - uses: extractions/setup-just@v4
       - run: cargo install cargo-fuzz
-      - run: just fuzz ${{ matrix.format }} ${{ inputs.seconds }}
+      - run: just fuzz ${{ matrix.format }} ${{ inputs.seconds }} 4
+      - id: findings
+        if: always()
+        run: |
+          mkdir -p findings
+          git ls-files --others --exclude-standard vexel/fuzz/artifacts | while read -r file; do
+            relative=${file#vexel/fuzz/artifacts/}
+            mkdir -p "findings/$(dirname "$relative")"
+            cp "$file" "findings/$relative"
+          done
+          echo "count=$(find findings -type f | wc -l)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
-        if: failure()
+        if: always() && steps.findings.outputs.count != '0'
         with:
           name: artifacts-${{ matrix.format }}
-          path: vexel/fuzz/artifacts/
-
-  fuzz-one:
-    if: inputs.format != 'all'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup toolchain install --profile minimal
-      - uses: extractions/setup-just@v4
-      - run: cargo install cargo-fuzz
-      - run: just fuzz ${{ inputs.format }} ${{ inputs.seconds }}
-      - uses: actions/upload-artifact@v7
-        if: failure()
-        with:
-          name: artifacts-${{ inputs.format }}
-          path: vexel/fuzz/artifacts/
+          path: findings/
+      - if: always() && steps.findings.outputs.count != '0'
+        run: |
+          echo "::error::${{ steps.findings.outputs.count }} new fuzz artifact(s) for ${{ matrix.format }}"
+          exit 1

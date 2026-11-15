@@ -37,5 +37,26 @@ pub fn test_cases() -> Vec<TestCase> {
             comparison: Comparison::Exact { reference_path: "dng/iphone12pro-linearraw.jxl" },
             ..Default::default()
         },
+        TestCase {
+            name: "DNG small_cfa_uncompressed",
+            path: "dng/small_cfa_uncompressed.dng",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dng/small_cfa_uncompressed.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "DNG small_cfa_lossless_jpeg",
+            path: "dng/small_cfa_lossless_jpeg.dng",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dng/small_cfa_lossless_jpeg.jxl" },
+            ..Default::default()
+        },
+        TestCase {
+            name: "DNG small_linear_raw",
+            path: "dng/small_linear_raw.dng",
+            validation: None,
+            comparison: Comparison::Exact { reference_path: "dng/small_linear_raw.jxl" },
+            ..Default::default()
+        },
     ]
 }

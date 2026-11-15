@@ -339,6 +339,7 @@ name = "vexel-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "rayon",
  "vexel",
 ]
 
