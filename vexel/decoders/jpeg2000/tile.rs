@@ -1,9 +1,10 @@
+use crate::decoders::jpeg2000::bits::StuffedBitReader;
 use crate::decoders::jpeg2000::codestream::Codestream;
 use crate::decoders::jpeg2000::dwt::{self, Line};
 use crate::decoders::jpeg2000::ht::{HtCodeBlock, HtDecoder};
 use crate::decoders::jpeg2000::simd;
 use crate::decoders::jpeg2000::t1::{CodeBlock, Segment, T1Decoder};
-use crate::decoders::jpeg2000::t2::{self, HeaderReader, TagTree};
+use crate::decoders::jpeg2000::t2::{self, TagTree};
 use crate::decoders::jpeg2000::types::*;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::limits::Limits;
@@ -644,11 +645,11 @@ fn read_packet(
         }
     }
 
-    let mut reader = HeaderReader::new(&header_bytes[header_offset..]);
+    let mut reader = StuffedBitReader::new(&header_bytes[header_offset..], 0);
 
     if reader.read(1) == 0 {
-        reader.inalign();
-        let mut consumed = reader.num_bytes();
+        reader.align();
+        let mut consumed = reader.bytes_consumed();
 
         if expect_eph {
             let eph_at = header_offset + consumed;
@@ -776,8 +777,8 @@ fn read_packet(
         }
     }
 
-    reader.inalign();
-    let mut consumed = reader.num_bytes();
+    reader.align();
+    let mut consumed = reader.bytes_consumed();
 
     if expect_eph {
         let eph_at = header_offset + consumed;

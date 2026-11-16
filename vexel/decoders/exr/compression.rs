@@ -1,66 +1,69 @@
-use crate::decoders::exr::types::{ChunkChannel, ExrPixelType};
+use crate::decoders::exr::types::{ChunkChannel, ExrCompression, ExrPixelType};
 use crate::log_warn;
+use crate::utils::codecs::deflate::ZlibDecoder;
+use crate::utils::codecs::pad_to;
+use crate::utils::codecs::rle::{self, Packet};
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::tiff::color::half_to_f32;
+use crate::utils::float::{f32_to_half, half_to_f32};
+
+pub fn unpredict(data: &mut [u8]) {
+    for i in 1..data.len() {
+        data[i] = data[i - 1].wrapping_add(data[i]).wrapping_sub(128);
+    }
+}
 
 pub fn unpredict_and_reorder(mut data: Vec<u8>) -> Vec<u8> {
-    for i in 1..data.len() {
-        let d = data[i - 1] as i32 + data[i] as i32 - 128;
-        data[i] = d as u8;
-    }
+    unpredict(&mut data);
 
-    let half = data.len().div_ceil(2);
-    let (first, second) = data.split_at(half);
+    let (first, second) = data.split_at(data.len().div_ceil(2));
     let mut out = Vec::with_capacity(data.len());
-
-    let mut it1 = first.iter();
-    let mut it2 = second.iter();
-    while out.len() < data.len() {
-        if let Some(&b) = it1.next() {
-            out.push(b);
-        }
-        if out.len() >= data.len() {
-            break;
-        }
-        if let Some(&b) = it2.next() {
-            out.push(b);
+    for (index, &byte) in first.iter().enumerate() {
+        out.push(byte);
+        if let Some(&byte) = second.get(index) {
+            out.push(byte);
         }
     }
-
     out
 }
 
-pub fn rle_decompress(src: &[u8], expected: usize) -> VexelResult<Vec<u8>> {
+pub fn rle_decompress(src: &[u8], expected: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(expected);
-    let mut pos = 0usize;
-
-    while pos < src.len() && out.len() < expected {
-        let control = src[pos] as i8;
-        pos += 1;
-
-        if control < 0 {
-            let count = (-(control as i32)) as usize;
-            let count = count.min(src.len() - pos).min(expected - out.len());
-            out.extend_from_slice(&src[pos..pos + count]);
-            pos += count;
+    rle::decode(src, &mut out, expected, 1, |input| {
+        let control = rle::take_byte(input)? as i8;
+        Some(if control < 0 {
+            Packet::Literal(control.unsigned_abs() as usize)
         } else {
-            if pos >= src.len() {
-                break;
-            }
-            let count = control as usize + 1;
-            let count = count.min(expected - out.len());
-            let value = src[pos];
-            pos += 1;
-            out.resize(out.len() + count, value);
-        }
-    }
+            Packet::Run(control as usize + 1)
+        })
+    });
+    pad_to(out, expected, "EXR RLE data")
+}
 
-    if out.len() < expected {
-        log_warn!("EXR: RLE data produced {} of {} expected bytes, padding with zeros", out.len(), expected);
-        out.resize(expected, 0);
-    }
+pub fn inflate(data: &[u8], expected: usize, what: &str) -> Vec<u8> {
+    pad_to(ZlibDecoder::from_slice(data).decode_with_max(expected), expected, what)
+}
 
-    Ok(out)
+pub fn decompress_stored(data: &[u8], unpacked: usize) -> Option<Vec<u8>> {
+    if data.len() < unpacked {
+        return None;
+    }
+    if data.len() > unpacked {
+        log_warn!(
+            "EXR: chunk data is larger than its uncompressed size ({} > {}), treating as uncompressed",
+            data.len(),
+            unpacked
+        );
+    }
+    Some(data[..unpacked].to_vec())
+}
+
+pub fn decompress_bytes(compression: ExrCompression, data: &[u8], unpacked: usize) -> Option<Vec<u8>> {
+    Some(match compression {
+        ExrCompression::None => pad_to(data.to_vec(), unpacked, "EXR uncompressed chunk"),
+        ExrCompression::Rle => unpredict_and_reorder(rle_decompress(data, unpacked)),
+        ExrCompression::Zips | ExrCompression::Zip => unpredict_and_reorder(inflate(data, unpacked, "EXR zip chunk")),
+        _ => return None,
+    })
 }
 
 pub fn pxr24_reconstruct(
@@ -146,53 +149,6 @@ fn b44_to_linear(bits: u16) -> u16 {
 
     let f = half_to_f32(bits);
     f32_to_half(8.0 * f.ln())
-}
-
-pub fn f32_to_half(value: f32) -> u16 {
-    let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xFF) as i32;
-    let mantissa = bits & 0x007F_FFFF;
-
-    if exp == 0xFF {
-        if mantissa != 0 {
-            return sign | 0x7C00 | ((mantissa >> 13) as u16).max(1);
-        }
-        return sign | 0x7C00;
-    }
-
-    let unbiased = exp - 127;
-    if unbiased > 15 {
-        return sign | 0x7C00;
-    }
-
-    if unbiased >= -14 {
-        let half_exp = (unbiased + 15) as u32;
-        let mut half_mant = mantissa >> 13;
-        let round_bits = mantissa & 0x1FFF;
-        if round_bits > 0x1000 || (round_bits == 0x1000 && half_mant & 1 == 1) {
-            half_mant += 1;
-        }
-        let combined = (half_exp << 10) + half_mant;
-        if combined >= 0x7C00 {
-            return sign | 0x7C00;
-        }
-        return sign | combined as u16;
-    }
-
-    if unbiased < -25 {
-        return sign;
-    }
-
-    let full_mant = mantissa | 0x0080_0000;
-    let shift = (-14 - unbiased + 13) as u32;
-    let mut half_mant = full_mant >> shift;
-    let rem = full_mant & ((1u32 << shift) - 1);
-    let halfway = 1u32 << (shift - 1);
-    if rem > halfway || (rem == halfway && half_mant & 1 == 1) {
-        half_mant += 1;
-    }
-    sign | half_mant as u16
 }
 
 fn unpack14(b: &[u8]) -> [u16; 16] {

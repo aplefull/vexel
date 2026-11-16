@@ -4,17 +4,17 @@ use std::io::Cursor;
 use serde::Serialize;
 use tsify::Tsify;
 
-use super::bitreader::XrBitReader;
 use super::container::{self, Container, ContainerKind};
 use super::decoder::locate_codestream;
 use super::headers::{parse_image_header, parse_plane_header, ImageHeader, PlaneHeader};
 use super::types::*;
-use crate::bitreader::BitReader;
+use crate::decoders::jpeg_xr::bitreader::xr_bit_reader;
 use crate::log_warn;
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat, Section};
 use crate::utils::limits::Limits;
 use crate::utils::metadata::MetadataCollector;
+use crate::utils::stream::StreamReader;
 use crate::utils::tiff::info::{walk_structure, IfdKind, TiffSection};
 use crate::utils::tiff::metadata::collect_metadata;
 
@@ -190,7 +190,7 @@ fn read_headers(
     sections: &mut Vec<Section<JpegXrSection>>,
 ) -> Option<Headers> {
     let stream = data.get(offset..)?;
-    let mut reader = XrBitReader::new(stream);
+    let mut reader = xr_bit_reader(stream);
     let image = match parse_image_header(&mut reader) {
         Ok(image) => image,
         Err(e) => {
@@ -331,7 +331,7 @@ pub fn scan(data: &[u8]) -> JpegXrInfo {
     let mut metadata = MetadataCollector::default();
 
     if container::looks_like_container(data) {
-        let mut reader = BitReader::new(Cursor::new(data));
+        let mut reader = StreamReader::new(Cursor::new(data));
         let mut limits = Limits::default();
         match walk_structure(&mut reader, &mut limits) {
             Ok(structure) => {

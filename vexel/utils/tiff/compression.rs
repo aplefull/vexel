@@ -5,19 +5,21 @@ use crate::decoders::jpeg_xr::JpegXrDecoder;
 use crate::decoders::lerc::decode_blob_with_limits;
 use crate::decoders::png::PngDecoder;
 use crate::log_warn;
-use crate::utils::deflate::ZlibDecoder;
+use crate::utils::codecs::ccitt::FaxMode;
+use crate::utils::codecs::deflate::ZlibDecoder;
+use crate::utils::codecs::lzma::XzDecoder;
+use crate::utils::codecs::lzw::{self, LzwOptions};
+use crate::utils::codecs::zstd::ZstdDecoder;
+use crate::utils::codecs::{output_cap, rle};
 use crate::utils::error::VexelResult;
 use crate::utils::image::{Image, PixelData};
 use crate::utils::limits::Limits;
-use crate::utils::lzma::XzDecoder;
-use crate::utils::lzw::{self, LzwOptions};
 use crate::utils::tiff::logluv::{decode_sgilog16, decode_sgilog24, decode_sgilog32, words_to_bytes};
 use crate::utils::tiff::pixels::{read_msb_bits64, write_msb_bits};
-use crate::utils::tiff::types::{Predictor, SampleFormat};
+use crate::utils::tiff::types::{Compression, Predictor, SampleFormat};
 use crate::utils::types::ByteOrder;
-use crate::utils::zstd::ZstdDecoder;
 
-pub fn predictor_x_factor(predictor: Predictor) -> u32 {
+fn predictor_x_factor(predictor: Predictor) -> u32 {
     match predictor {
         Predictor::FloatingPointX2 => 2,
         Predictor::FloatingPointX4 => 4,
@@ -25,63 +27,47 @@ pub fn predictor_x_factor(predictor: Predictor) -> u32 {
     }
 }
 
-const DEFAULT_MAX_OUTPUT: usize = 256 * 1024 * 1024;
-
-fn max_output_for(capacity_hint: usize) -> usize {
-    if capacity_hint > 0 {
-        capacity_hint.saturating_mul(4)
-    } else {
-        DEFAULT_MAX_OUTPUT
-    }
+pub fn decompress_generic(compression: Compression, data: &[u8], expected_bytes: usize) -> Option<Vec<u8>> {
+    Some(match compression {
+        Compression::LZW => decompress_lzw(data, expected_bytes),
+        Compression::PackBits => rle::packbits(data, output_cap(expected_bytes)),
+        Compression::AdobeDeflate | Compression::Deflate => {
+            ZlibDecoder::from_slice(data).decode_with_capacity(expected_bytes)
+        }
+        Compression::LZMA => XzDecoder::from_slice(data).decode_with_capacity(expected_bytes),
+        Compression::ZSTD => ZstdDecoder::from_slice(data).decode_with_capacity(expected_bytes),
+        _ => return None,
+    })
 }
 
-pub fn decompress_lzw_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
+fn decompress_lzw(data: &[u8], expected_bytes: usize) -> Vec<u8> {
     if data.is_empty() {
         return Vec::new();
     }
     let is_old_style = data.len() >= 2 && data[0] == 0 && (data[1] & 0x1) != 0;
     let options = if is_old_style { LzwOptions::tiff_old_style() } else { LzwOptions::tiff() };
-    lzw::decompress(data, options, max_output_for(capacity_hint))
+    lzw::decompress(data, options, output_cap(expected_bytes))
 }
 
-pub fn decompress_packbits_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
-    let max_output = max_output_for(capacity_hint);
-    let mut output = Vec::new();
-    let mut i = 0;
+pub fn fax_mode(compression: Compression, t4_options: u32) -> Option<FaxMode> {
+    match compression {
+        Compression::CCITTRLE => Some(FaxMode::ModifiedHuffman { word_aligned: false }),
+        Compression::CCITTRLEWord => Some(FaxMode::ModifiedHuffman { word_aligned: true }),
+        Compression::CCITTFax3 => Some(FaxMode::Group3 { two_dimensional: t4_options & 1 != 0 }),
+        Compression::CCITTFax4 => Some(FaxMode::Group4),
+        _ => None,
+    }
+}
 
-    while i < data.len() && output.len() < max_output {
-        let header = data[i] as i8;
-        i += 1;
-
-        if header >= 0 {
-            let count = (header as usize) + 1;
-            let end = (i + count).min(data.len());
-            output.extend_from_slice(&data[i..end]);
-            i += count;
-        } else if header != -128 {
-            let count = (-header as usize) + 1;
-            if i < data.len() {
-                let byte = data[i];
-                i += 1;
-                output.resize(output.len() + count, byte);
-            }
+pub fn apply_predictor(predictor: Predictor, data: &mut [u8], width: u32, spp: u16, bps: u16, big_endian: bool) {
+    match predictor {
+        Predictor::None => {}
+        Predictor::HorizontalDifferencing => apply_predictor_horizontal(data, width, spp, bps, big_endian),
+        Predictor::FloatingPoint | Predictor::FloatingPointX2 | Predictor::FloatingPointX4 => {
+            let x = predictor_x_factor(predictor);
+            apply_predictor_float(data, (width / x).max(1), spp.saturating_mul(x as u16), bps, big_endian);
         }
     }
-
-    output.truncate(max_output);
-    output
-}
-
-pub fn decompress_deflate_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
-    ZlibDecoder::from_slice(data).decode_with_capacity(capacity_hint)
-}
-
-pub fn decompress_lzma_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
-    XzDecoder::from_slice(data).decode_with_capacity(capacity_hint)
-}
-
-pub fn decompress_zstd_with_capacity(data: &[u8], capacity_hint: usize) -> Vec<u8> {
-    ZstdDecoder::from_slice(data).decode_with_capacity(capacity_hint)
 }
 
 pub fn decompress_lerc(
@@ -409,7 +395,7 @@ fn write_uint(bytes: &mut [u8], value: u64, big_endian: bool) {
     }
 }
 
-pub fn apply_predictor_horizontal(
+fn apply_predictor_horizontal(
     data: &mut [u8],
     width: u32,
     samples_per_pixel: u16,
@@ -603,13 +589,7 @@ pub fn decompress_next(data: &[u8], width: usize, rows: usize) -> Vec<u8> {
     out
 }
 
-pub fn apply_predictor_float(
-    data: &mut [u8],
-    width: u32,
-    samples_per_pixel: u16,
-    bits_per_sample: u16,
-    big_endian: bool,
-) {
+fn apply_predictor_float(data: &mut [u8], width: u32, samples_per_pixel: u16, bits_per_sample: u16, big_endian: bool) {
     let bps = (bits_per_sample as usize) / 8;
     let spp = samples_per_pixel as usize;
     let Some(row_stride) = (width as usize).checked_mul(spp).and_then(|n| n.checked_mul(bps)) else {

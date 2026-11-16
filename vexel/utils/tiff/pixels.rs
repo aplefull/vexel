@@ -17,14 +17,15 @@
 //! is read at its own width, and the widest channel decides the output type.
 
 use super::color::{
-    cmyk_to_rgb_f32, float24_to_f32, float_bits_to_f64, half_to_f32, lab_to_xyz, u16_from_bytes, xyz_to_srgb_f32,
-    ycbcr_to_rgb_f32, YCbCrTables, D50_WHITE, D65_WHITE,
+    cmyk_to_rgb_f32, float24_to_f32, float_bits_to_f64, lab_to_xyz, u16_from_bytes, xyz_to_srgb_f32, ycbcr_to_rgb_f32,
+    YCbCrTables, D50_WHITE, D65_WHITE,
 };
 use super::logluv::{logl16_to_y, logluv24_to_xyz, logluv32_to_xyz, luv_to_xyz, xyz_to_rgb};
 use super::types::{
     Compression, ExtraSampleType, PhotometricInterpretation, PlanarConfiguration, SampleFormat, TiffHeader,
 };
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::float::half_to_f32;
 use crate::utils::types::ByteOrder;
 use crate::{log_warn, PixelData};
 

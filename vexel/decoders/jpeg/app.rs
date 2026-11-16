@@ -4,6 +4,7 @@ use serde::Serialize;
 use tsify::Tsify;
 
 use crate::log_warn;
+use crate::utils::bytes::Bytes;
 use crate::utils::exif::{ExifData, ExifReader};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ImageSummary, InfoWriter};
@@ -200,46 +201,6 @@ impl AppMetadata {
     }
 }
 
-struct Bytes<'a>(&'a [u8]);
-
-impl Bytes<'_> {
-    fn u8(&self, at: usize) -> u8 {
-        self.0.get(at).copied().unwrap_or(0)
-    }
-
-    fn u16_be(&self, at: usize) -> u16 {
-        u16::from_be_bytes([self.u8(at), self.u8(at.saturating_add(1))])
-    }
-
-    fn u32_be(&self, at: usize) -> u32 {
-        u32::from_be_bytes([
-            self.u8(at),
-            self.u8(at.saturating_add(1)),
-            self.u8(at.saturating_add(2)),
-            self.u8(at.saturating_add(3)),
-        ])
-    }
-
-    fn u16(&self, at: usize, order: ByteOrder) -> u16 {
-        match order {
-            ByteOrder::BigEndian => self.u16_be(at),
-            ByteOrder::LittleEndian => u16::from_le_bytes([self.u8(at), self.u8(at.saturating_add(1))]),
-        }
-    }
-
-    fn u32(&self, at: usize, order: ByteOrder) -> u32 {
-        match order {
-            ByteOrder::BigEndian => self.u32_be(at),
-            ByteOrder::LittleEndian => u32::from_le_bytes([
-                self.u8(at),
-                self.u8(at.saturating_add(1)),
-                self.u8(at.saturating_add(2)),
-                self.u8(at.saturating_add(3)),
-            ]),
-        }
-    }
-}
-
 fn printable_ascii(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect()
 }
@@ -284,8 +245,8 @@ pub fn parse_app(index: u8, payload: &[u8], payload_offset: u64, metadata: &mut 
             let bytes = Bytes(rest);
             let segment = ExtendedXmpSegment {
                 guid: printable_ascii(&rest[..rest.len().min(32)]),
-                full_length: bytes.u32_be(32),
-                chunk_offset: bytes.u32_be(36),
+                full_length: bytes.be_u32(32),
+                chunk_offset: bytes.be_u32(36),
                 chunk_length: rest.len().saturating_sub(40) as u32,
             };
             if rest.len() >= 40 {
@@ -323,9 +284,9 @@ pub fn parse_app(index: u8, payload: &[u8], payload_offset: u64, metadata: &mut 
         11 if payload.starts_with(b"JP") && payload.len() >= 16 => {
             let bytes = Bytes(payload);
             AppSegment::JpegXt(JpegXtSegment {
-                instance: bytes.u16_be(2),
-                sequence: bytes.u32_be(4),
-                box_length: bytes.u32_be(8),
+                instance: bytes.be_u16(2),
+                sequence: bytes.be_u32(4),
+                box_length: bytes.be_u32(8),
                 box_type: printable_ascii(&payload[12..16]),
             })
         }
@@ -339,9 +300,9 @@ pub fn parse_app(index: u8, payload: &[u8], payload_offset: u64, metadata: &mut 
         14 if payload.starts_with(b"Adobe") && payload.len() >= 10 => {
             let bytes = Bytes(payload);
             AppSegment::Adobe(AdobeSegment {
-                version: bytes.u16_be(5),
-                flags0: bytes.u16_be(7),
-                flags1: bytes.u16_be(9),
+                version: bytes.be_u16(5),
+                flags0: bytes.be_u16(7),
+                flags1: bytes.be_u16(9),
                 color_transform: bytes.u8(11),
                 truncated: payload.len() < 12,
             })
@@ -373,8 +334,8 @@ fn parse_jfif(body: &[u8]) -> JfifSegment {
         version_major: bytes.u8(0),
         version_minor: bytes.u8(1),
         density_units: bytes.u8(2),
-        x_density: bytes.u16_be(3),
-        y_density: bytes.u16_be(5),
+        x_density: bytes.be_u16(3),
+        y_density: bytes.be_u16(5),
         thumbnail_width,
         thumbnail_height,
         thumbnail_length: declared_thumbnail.min(available_thumbnail) as u32,
@@ -388,14 +349,14 @@ fn parse_spiff(body: &[u8]) -> SpiffSegment {
         version_minor: bytes.u8(1),
         profile_id: bytes.u8(2),
         component_count: bytes.u8(3),
-        height: bytes.u32_be(4),
-        width: bytes.u32_be(8),
+        height: bytes.be_u32(4),
+        width: bytes.be_u32(8),
         color_space: bytes.u8(12),
         bits_per_sample: bytes.u8(13),
         compression_type: bytes.u8(14),
         resolution_units: bytes.u8(15),
-        vertical_resolution: bytes.u32_be(16),
-        horizontal_resolution: bytes.u32_be(20),
+        vertical_resolution: bytes.be_u32(16),
+        horizontal_resolution: bytes.be_u32(20),
         truncated: body.len() < 24,
     }
 }

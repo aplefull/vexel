@@ -1,6 +1,6 @@
 use std::io::{Read, Seek};
 
-use crate::decoders::jpeg_xr::bitreader::XrBitReader;
+use crate::decoders::jpeg_xr::bitreader::xr_bit_reader;
 use crate::decoders::jpeg_xr::coeffs::{decode_coefficients, DecodeConfig, PlaneCoefficients, COEFFS_PER_PLANE};
 use crate::decoders::jpeg_xr::container::{self, Container};
 use crate::decoders::jpeg_xr::headers::{parse_image_header, parse_plane_header, ImageHeader, PlaneHeader};
@@ -131,7 +131,7 @@ fn decode_plane_group(
     let stream =
         data.get(offset..).ok_or_else(|| VexelError::Custom("JPEG XR: codestream offset out of range".to_string()))?;
 
-    let mut reader = XrBitReader::new(stream);
+    let mut reader = xr_bit_reader(stream);
     let image = parse_image_header(&mut reader)?;
     let plane = parse_plane_header(&mut reader, &image)?;
 
@@ -144,7 +144,7 @@ fn decode_plane_group(
     limits.check_dimensions(image.width, image.height)?;
 
     let layout = TileLayout::new(&image);
-    let header_end = reader.byte_pos();
+    let header_end = reader.byte_position();
 
     let macroblocks = (layout.mb_width as u64).saturating_mul(layout.mb_height as u64);
     let coefficient_bytes = coefficient_bytes(macroblocks, &plane)

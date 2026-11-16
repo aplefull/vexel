@@ -1,29 +1,6 @@
 use crate::log_warn;
+use crate::utils::codecs::rle;
 use crate::utils::error::{VexelError, VexelResult};
-
-fn unpack_segment(data: &[u8], output: &mut Vec<u8>, expected: usize) {
-    let mut pos = 0;
-
-    while pos < data.len() && output.len() < expected {
-        let n = data[pos];
-        pos += 1;
-
-        if n <= 127 {
-            let count = (n as usize + 1).min(expected - output.len());
-            let available = (data.len() - pos).min(n as usize + 1);
-            output.extend_from_slice(&data[pos..pos + available.min(count)]);
-            pos += n as usize + 1;
-        } else if n >= 129 {
-            if pos >= data.len() {
-                break;
-            }
-            let count = (257 - n as usize).min(expected - output.len());
-            let byte = data[pos];
-            pos += 1;
-            output.resize(output.len() + count, byte);
-        }
-    }
-}
 
 pub fn decode_rle_frame(
     data: &[u8],
@@ -72,7 +49,7 @@ pub fn decode_rle_frame(
         };
 
         segment.clear();
-        unpack_segment(&data[start..end], &mut segment, pixels_per_frame);
+        rle::decode(&data[start..end], &mut segment, pixels_per_frame, 1, rle::packbits_packet);
 
         if segment.len() < pixels_per_frame {
             log_warn!(

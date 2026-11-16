@@ -1,6 +1,6 @@
-use crate::decoders::jbig2::arith::{ArithDecoder, Cx};
 use crate::decoders::jbig2::bitmap::Bitmap;
 use crate::log_warn;
+use crate::utils::entropy::mq::{MqContext, MqDecoder};
 
 pub struct RefinementParams<'a> {
     pub template: u8,
@@ -82,8 +82,8 @@ fn typical_prediction(params: &RefinementParams, x: i64, y: i64) -> Option<u32> 
 }
 
 pub fn decode_refinement_region(
-    arith: &mut ArithDecoder,
-    stats: &mut [Cx],
+    arith: &mut MqDecoder,
+    stats: &mut [MqContext],
     bitmap: &mut Bitmap,
     params: &RefinementParams,
 ) {

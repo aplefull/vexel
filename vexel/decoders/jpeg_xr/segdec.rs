@@ -1,9 +1,10 @@
 use crate::decoders::jpeg_xr::adapthuff::{get_huff, get_huff_short, AdaptiveHuffman};
-use crate::decoders::jpeg_xr::bitreader::XrBitReader;
+use crate::decoders::jpeg_xr::bitreader::XrBits;
 use crate::decoders::jpeg_xr::predict::MacroblockInfo;
 use crate::decoders::jpeg_xr::tables::*;
 use crate::decoders::jpeg_xr::types::*;
 use crate::log_warn;
+use crate::utils::bits::MsbBitReader;
 use crate::utils::error::{VexelError, VexelResult};
 
 const MAXTOTAL: u32 = 32767;
@@ -233,7 +234,7 @@ pub fn update_model_mb(
     }
 }
 
-pub fn decode_significant_abs_level(huff: &mut AdaptiveHuffman, reader: &mut XrBitReader) -> i32 {
+pub fn decode_significant_abs_level(huff: &mut AdaptiveHuffman, reader: &mut MsbBitReader) -> i32 {
     const REMAP: [i32; 6] = [2, 3, 4, 6, 10, 14];
     const FIXED_LENGTH: [u32; 6] = [0, 0, 1, 2, 2, 2];
 
@@ -262,20 +263,20 @@ pub fn decode_significant_abs_level(huff: &mut AdaptiveHuffman, reader: &mut XrB
     level
 }
 
-pub fn decode_significant_run(max_run: i32, huff: &mut AdaptiveHuffman, reader: &mut XrBitReader) -> i32 {
+pub fn decode_significant_run(max_run: i32, huff: &mut AdaptiveHuffman, reader: &mut MsbBitReader) -> i32 {
     const REMAP: [i32; 15] = [1, 2, 3, 5, 7, 1, 2, 3, 5, 7, 1, 2, 3, 4, 5];
 
     if max_run < 5 {
         if max_run == 1 {
             return 1;
         }
-        if reader.read_bool() {
+        if reader.read_bit() {
             return 1;
         }
-        if max_run == 2 || reader.read_bool() {
+        if max_run == 2 || reader.read_bit() {
             return 2;
         }
-        if max_run == 3 || reader.read_bool() {
+        if max_run == 3 || reader.read_bit() {
             return 3;
         }
         return 4;
@@ -294,8 +295,8 @@ pub fn decode_significant_run(max_run: i32, huff: &mut AdaptiveHuffman, reader: 
     run
 }
 
-pub fn decode_qp_index(reader: &mut XrBitReader, bits: u8) -> u8 {
-    if !reader.read_bool() {
+pub fn decode_qp_index(reader: &mut MsbBitReader, bits: u8) -> u8 {
+    if !reader.read_bit() {
         return 0;
     }
     (reader.read(u32::from(bits)) + 1) as u8
@@ -306,7 +307,7 @@ fn decode_block(
     local_coef: &mut [i32; 32],
     context: &mut CodingContext,
     context_offset: usize,
-    reader: &mut XrBitReader,
+    reader: &mut MsbBitReader,
     mut location: i32,
 ) -> usize {
     let base = context_offset + usize::from(chroma) * 3;
@@ -369,7 +370,7 @@ fn decode_block(
 fn decode_block_highpass(
     chroma: bool,
     context: &mut CodingContext,
-    reader: &mut XrBitReader,
+    reader: &mut MsbBitReader,
     qp: i32,
     coeffs: &mut [i32],
     vertical: bool,
@@ -453,7 +454,7 @@ fn store_highpass(context: &mut CodingContext, coeffs: &mut [i32], loc: usize, l
     }
 }
 
-fn decode_first_index_at(context: &mut CodingContext, index: usize, reader: &mut XrBitReader) -> usize {
+fn decode_first_index_at(context: &mut CodingContext, index: usize, reader: &mut MsbBitReader) -> usize {
     if index >= context.expt.len() {
         return 0;
     }
@@ -464,7 +465,7 @@ fn decode_first_index_at(context: &mut CodingContext, index: usize, reader: &mut
     symbol
 }
 
-fn decode_index_at(context: &mut CodingContext, index: usize, location: i32, reader: &mut XrBitReader) -> usize {
+fn decode_index_at(context: &mut CodingContext, index: usize, location: i32, reader: &mut MsbBitReader) -> usize {
     if location < 15 {
         if index >= context.expt.len() {
             return 0;
@@ -477,26 +478,31 @@ fn decode_index_at(context: &mut CodingContext, index: usize, location: i32, rea
     }
 
     if location == 15 {
-        if !reader.read_bool() {
+        if !reader.read_bit() {
             return 0;
         }
-        if !reader.read_bool() {
+        if !reader.read_bit() {
             return 2;
         }
-        return 1 + 2 * usize::from(reader.read_bool());
+        return 1 + 2 * usize::from(reader.read_bit());
     }
 
     reader.read(1) as usize
 }
 
-fn decode_significant_abs_level_at(context: &mut CodingContext, index: usize, reader: &mut XrBitReader) -> i32 {
+fn decode_significant_abs_level_at(context: &mut CodingContext, index: usize, reader: &mut MsbBitReader) -> i32 {
     if index >= context.expt.len() {
         return 1;
     }
     decode_significant_abs_level(&mut context.expt[index], reader)
 }
 
-fn decode_significant_run_at(context: &mut CodingContext, index: usize, max_run: i32, reader: &mut XrBitReader) -> i32 {
+fn decode_significant_run_at(
+    context: &mut CodingContext,
+    index: usize,
+    max_run: i32,
+    reader: &mut MsbBitReader,
+) -> i32 {
     if index >= context.expt.len() {
         return 1;
     }
@@ -505,7 +511,7 @@ fn decode_significant_run_at(context: &mut CodingContext, index: usize, max_run:
 
 pub fn decode_macroblock_dc(
     context: &mut CodingContext,
-    reader: &mut XrBitReader,
+    reader: &mut MsbBitReader,
     mb: &mut MacroblockInfo,
     color_format: ColorFormat,
     channels: usize,
@@ -555,14 +561,14 @@ pub fn decode_macroblock_dc(
         let mut slot = 0usize;
         for ch in 0..channels.min(MAX_CHANNELS) {
             let mut value = 0i32;
-            if reader.read_bool() {
+            if reader.read_bit() {
                 value = decode_significant_abs_level_at(context, 3, reader) - 1;
                 laplacian[slot] += 1;
             }
             if model_bits > 0 {
                 value = value.wrapping_shl(model_bits as u32) | reader.read_i32(model_bits as u32);
             }
-            if value != 0 && reader.read_bool() {
+            if value != 0 && reader.read_bit() {
                 value = value.wrapping_neg();
             }
             mb.block_dc[ch][0] = value;
@@ -587,7 +593,7 @@ pub fn decode_macroblock_dc(
         if model_bits > 0 {
             dc_y = dc_y.wrapping_shl(model_bits as u32) | reader.read_i32(model_bits as u32);
         }
-        if dc_y != 0 && reader.read_bool() {
+        if dc_y != 0 && reader.read_bit() {
             dc_y = dc_y.wrapping_neg();
         }
         mb.block_dc[0][0] = dc_y;
@@ -601,7 +607,7 @@ pub fn decode_macroblock_dc(
         if model_bits > 0 {
             dc_u = dc_u.wrapping_shl(model_bits as u32) | reader.read_i32(model_bits as u32);
         }
-        if dc_u != 0 && reader.read_bool() {
+        if dc_u != 0 && reader.read_bit() {
             dc_u = dc_u.wrapping_neg();
         }
         mb.block_dc[1][0] = dc_u;
@@ -613,7 +619,7 @@ pub fn decode_macroblock_dc(
         if model_bits > 0 {
             dc_v = dc_v.wrapping_shl(model_bits as u32) | reader.read_i32(model_bits as u32);
         }
-        if dc_v != 0 && reader.read_bool() {
+        if dc_v != 0 && reader.read_bit() {
             dc_v = dc_v.wrapping_neg();
         }
         mb.block_dc[2][0] = dc_v;
@@ -626,7 +632,7 @@ pub fn decode_macroblock_dc(
 
 pub fn decode_macroblock_lowpass(
     context: &mut CodingContext,
-    reader: &mut XrBitReader,
+    reader: &mut MsbBitReader,
     mb: &mut MacroblockInfo,
     color_format: ColorFormat,
     channels: usize,
@@ -657,7 +663,7 @@ pub fn decode_macroblock_lowpass(
 
         if count_zero <= 0 || count_max < 0 {
             cbp = 0;
-            if reader.read_bool() {
+            if reader.read_bit() {
                 cbp = 1;
                 let k = reader.read_i32(full_planes as u32 - 1);
                 if k != 0 {
@@ -761,7 +767,7 @@ pub fn decode_macroblock_lowpass(
     Ok(())
 }
 
-fn refine_lowpass(value: i32, model_bits: i32, reader: &mut XrBitReader) -> i32 {
+fn refine_lowpass(value: i32, model_bits: i32, reader: &mut MsbBitReader) -> i32 {
     let bits = model_bits as u32;
 
     let shifted = value.wrapping_shl(bits);
@@ -777,7 +783,7 @@ fn refine_lowpass(value: i32, model_bits: i32, reader: &mut XrBitReader) -> i32 
 
 pub fn decode_cbp(
     context: &mut CodingContext,
-    reader: &mut XrBitReader,
+    reader: &mut MsbBitReader,
     mb: &mut MacroblockInfo,
     color_format: ColorFormat,
     channels: usize,
@@ -805,7 +811,7 @@ pub fn decode_cbp(
                     5
                 } else {
                     const TAB: [i32; 4] = [6, 9, 10, 12];
-                    let idx = (code * 2 + i32::from(reader.read_bool()) - 4).clamp(0, 3);
+                    let idx = (code * 2 + i32::from(reader.read_bit()) - 4).clamp(0, 3);
                     TAB[idx as usize]
                 }
             }
@@ -836,17 +842,17 @@ pub fn decode_cbp(
             let mut block_cbp = 0i32;
 
             if val >= 6 {
-                if reader.read_bool() {
+                if reader.read_bit() {
                     block_cbp = 0x10;
-                } else if reader.read_bool() {
+                } else if reader.read_bit() {
                     block_cbp = 0x20;
                 } else {
                     block_cbp = 0x30;
                 }
 
                 if val == 9 {
-                    if reader.read_bool() {
-                    } else if reader.read_bool() {
+                    if reader.read_bit() {
+                    } else if reader.read_bit() {
                         val = 10;
                     } else {
                         val = 11;
@@ -885,7 +891,7 @@ pub fn decode_cbp(
                                     5
                                 } else {
                                     const TAB: [i32; 4] = [6, 9, 10, 12];
-                                    let idx = (c * 2 + i32::from(reader.read_bool()) - 4).clamp(0, 3);
+                                    let idx = (c * 2 + i32::from(reader.read_bit()) - 4).clamp(0, 3);
                                     TAB[idx as usize]
                                 }
                             }
@@ -915,9 +921,9 @@ pub fn decode_cbp(
                             continue;
                         }
                         let mut code = 5i32;
-                        if reader.read_bool() {
+                        if reader.read_bit() {
                             code = 1;
-                        } else if reader.read_bool() {
+                        } else if reader.read_bit() {
                             code = 4;
                         }
                         code <<= SHIFT[block];
@@ -947,8 +953,8 @@ fn decode_block_adaptive<'a>(
     no_skip: bool,
     chroma: bool,
     context: &mut CodingContext,
-    reader: &mut XrBitReader<'a>,
-    flex_reader: Option<&mut XrBitReader<'a>>,
+    reader: &mut MsbBitReader<'a>,
+    flex_reader: Option<&mut MsbBitReader<'a>>,
     coeffs: &mut [i32],
     model_bits: i32,
     trim: i32,
@@ -1012,8 +1018,8 @@ pub struct HighpassParams<'a> {
 
 pub fn decode_coeffs<'a>(
     context: &mut CodingContext,
-    reader: &mut XrBitReader<'a>,
-    flex_reader: Option<&mut XrBitReader<'a>>,
+    reader: &mut MsbBitReader<'a>,
+    flex_reader: Option<&mut MsbBitReader<'a>>,
     mb: &MacroblockInfo,
     coeffs: &mut [Vec<i32>],
     params: &HighpassParams,

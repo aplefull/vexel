@@ -6,7 +6,7 @@ use crate::decoders::dicom::info::{scan, DicomInfo};
 use crate::decoders::dicom::parser::{DataCursor, DataSet, ElementValue, Parser};
 use crate::decoders::dicom::pixels::{expand_segmented_lut, Lut, MonoTransform, PixelParams};
 use crate::decoders::dicom::types::{tags, Photometric, TransferSyntax, VoiFunction, Vr};
-use crate::utils::deflate::DeflateDecoder;
+use crate::utils::codecs::deflate::DeflateDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::frames::{FrameSource, Frames};
 use crate::utils::image::Image;

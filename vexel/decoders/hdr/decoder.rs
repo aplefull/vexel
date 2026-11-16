@@ -2,9 +2,9 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::info::{HdrFormat, HdrHeader, HdrInfo, HdrPixelData, HdrResolution, HdrScanlineEncoding, HdrSection};
 use super::pixels::PixelDecoder;
-use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::{ColorModel, ImageSummary, SampleFormat};
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits};
 
 const MAX_LINE_LENGTH: usize = 64 * 1024;
@@ -15,7 +15,7 @@ pub struct HdrDecoder<R: Read + Seek> {
     limits: Limits,
     format: HdrFormat,
     resolution: Option<HdrResolution>,
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     info: Option<HdrInfo>,
 }
 
@@ -27,7 +27,7 @@ impl<R: Read + Seek> HdrDecoder<R> {
             limits: Limits::default(),
             format: HdrFormat::RGBE,
             resolution: None,
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
             info: None,
         }
     }

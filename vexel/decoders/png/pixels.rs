@@ -1,6 +1,6 @@
 use super::filters::FilterDecoder;
 use super::types::{ColorType, CompressionMethod, TransparencyData};
-use crate::utils::deflate::ZlibDecoder;
+use crate::utils::codecs::deflate::ZlibDecoder;
 use crate::utils::error::VexelResult;
 use crate::{log_warn, PixelData};
 

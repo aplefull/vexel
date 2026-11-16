@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use crate::log_warn;
-use crate::utils::lzw::{decode_padded, LzwOptions, INPUT_PADDING};
+use crate::utils::codecs::lzw::{decode_padded, LzwOptions, INPUT_PADDING};
 
 const OVERSIZED_MIN_BYTES: usize = 64 << 20;
 

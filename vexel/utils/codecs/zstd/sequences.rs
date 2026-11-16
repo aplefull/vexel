@@ -1,6 +1,6 @@
 use crate::log_warn;
-use crate::utils::zstd::bitstream::{BackwardBits, ForwardBits};
-use crate::utils::zstd::fse::FseTable;
+use crate::utils::codecs::zstd::bitstream::{BackwardBits, ForwardBits};
+use crate::utils::codecs::zstd::fse::FseTable;
 
 pub const LITERAL_LENGTH_DEFAULT_DIST: [i16; 36] =
     [4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1, -1, -1, -1, -1];

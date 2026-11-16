@@ -274,18 +274,17 @@ impl<R: Read + Seek> JpegDecoder<R> {
     }
 
     pub(super) fn read_huffman_entry(&mut self) -> std::io::Result<RawHuffmanTable> {
-        let table_spec = self.reader.read_bits(8)?;
-        let id = (table_spec & 0x0F) as u8;
-        let class = ((table_spec >> 4) & 0x0F) as u8;
+        let table_spec = self.reader.read_u8()?;
+        let id = table_spec & 0x0F;
+        let class = table_spec >> 4;
 
-        let mut counts = Vec::with_capacity(16);
+        let mut counts = vec![0u8; 16];
+        self.reader.read_exact(&mut counts)?;
+
         let mut offsets = Vec::with_capacity(17);
         let mut total_symbols: u32 = 0;
-
         offsets.push(0);
-        for _ in 0..16 {
-            let count = self.reader.read_bits(8)? as u8;
-            counts.push(count);
+        for &count in &counts {
             total_symbols += count as u32;
             offsets.push(total_symbols);
         }
@@ -298,16 +297,14 @@ impl<R: Read + Seek> JpegDecoder<R> {
             }
         }
 
-        let mut symbols = Vec::with_capacity(total_symbols as usize);
-        for _ in 0..total_symbols {
-            symbols.push(self.reader.read_bits(8)? as u8);
-        }
+        let mut symbols = vec![0u8; total_symbols as usize];
+        self.reader.read_exact(&mut symbols)?;
 
         Ok(RawHuffmanTable { id, class, counts, offsets, symbols })
     }
 
     pub(super) fn read_huffman_table(&mut self, segment_start: u64) -> VexelResult<()> {
-        let total_length = self.reader.read_bits(16)? as u16;
+        let total_length = self.reader.read_u16()?;
         let mut segment_length = (total_length as i16).saturating_sub(2);
 
         let mut info_tables = Vec::new();

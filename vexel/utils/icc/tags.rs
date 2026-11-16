@@ -1,10 +1,11 @@
 use super::types::*;
 use super::{
-    decode_utf16_be, parse_xyz_number, read_f16_be, read_f32_be, read_s15_fixed16, read_spectral_range, read_u16_be,
-    read_u32_be, read_u8, sig_at, sig_to_string,
+    decode_utf16_be, parse_xyz_number, read_f16_be, read_f32_be, read_s15_fixed16, read_spectral_range, read_u8,
+    sig_at, sig_to_string,
 };
 use crate::log_warn;
-use crate::utils::deflate::ZlibDecoder;
+use crate::utils::bytes::{be_u16, be_u32};
+use crate::utils::codecs::deflate::ZlibDecoder;
 
 const MAX_RECURSION_DEPTH: u8 = 6;
 const MAX_DECOMPRESSED_TEXT: usize = 16 * 1024 * 1024;
@@ -182,8 +183,8 @@ fn parse_zip_xml_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
 }
 
 fn parse_mluc_strings(data: &[u8], budget: &mut TagBudget) -> Option<Vec<LocalizedString>> {
-    let count = read_u32_be(data, 8)?;
-    let record_size = read_u32_be(data, 12)?;
+    let count = be_u32(data, 8)?;
+    let record_size = be_u32(data, 12)?;
     if record_size < 12 {
         return None;
     }
@@ -197,8 +198,8 @@ fn parse_mluc_strings(data: &[u8], budget: &mut TagBudget) -> Option<Vec<Localiz
         let language = String::from_utf8_lossy(&data[record_offset..record_offset + 2]).to_string();
         let country = String::from_utf8_lossy(&data[record_offset + 2..record_offset + 4]).to_string();
 
-        let Some(str_len) = read_u32_be(data, record_offset + 4) else { continue };
-        let Some(str_offset) = read_u32_be(data, record_offset + 8) else { continue };
+        let Some(str_len) = be_u32(data, record_offset + 4) else { continue };
+        let Some(str_offset) = be_u32(data, record_offset + 8) else { continue };
 
         let start = str_offset as usize;
         let Some(end) = start.checked_add(str_len as usize) else { continue };
@@ -241,17 +242,17 @@ fn parse_xyz_tag(data: &[u8]) -> ICCTagData {
 }
 
 fn parse_curve_data(data: &[u8]) -> Option<CurveData> {
-    let count = read_u32_be(data, 8)?;
+    let count = be_u32(data, 8)?;
     match count {
         0 => Some(CurveData::Identity),
         1 => {
-            let val = read_u16_be(data, 12)?;
+            let val = be_u16(data, 12)?;
             Some(CurveData::Gamma(val as f64 / 256.0))
         }
         n => {
             let mut table = Vec::new();
             for i in 0..n as usize {
-                match read_u16_be(data, 12 + i * 2) {
+                match be_u16(data, 12 + i * 2) {
                     Some(v) => table.push(v),
                     None => break,
                 }
@@ -272,7 +273,7 @@ fn parse_curve_tag(data: &[u8]) -> ICCTagData {
 }
 
 fn parse_parametric_data(data: &[u8]) -> Option<ParametricCurveData> {
-    let function_type = read_u16_be(data, 8)?;
+    let function_type = be_u16(data, 8)?;
     let param_count = parametric_param_count(function_type);
 
     let mut params = Vec::with_capacity(param_count);
@@ -299,7 +300,7 @@ fn parse_segmented_curve(data: &[u8]) -> Option<SegmentedCurveData> {
     if data.len() < 12 || &data[0..4] != b"curf" {
         return None;
     }
-    let segment_count = read_u16_be(data, 8)? as usize;
+    let segment_count = be_u16(data, 8)? as usize;
 
     let mut break_points = Vec::new();
     let mut pos = 12;
@@ -315,7 +316,7 @@ fn parse_segmented_curve(data: &[u8]) -> Option<SegmentedCurveData> {
         }
         match &data[pos..pos + 4] {
             b"parf" => {
-                let function_type = read_u16_be(data, pos + 8)?;
+                let function_type = be_u16(data, pos + 8)?;
                 let count = formula_param_count(function_type)?;
                 let mut params = Vec::with_capacity(count);
                 for i in 0..count {
@@ -325,7 +326,7 @@ fn parse_segmented_curve(data: &[u8]) -> Option<SegmentedCurveData> {
                 pos += 12 + count * 4;
             }
             b"samf" => {
-                let count = read_u32_be(data, pos + 8)? as usize;
+                let count = be_u32(data, pos + 8)? as usize;
                 let mut values = Vec::new();
                 for i in 0..count {
                     match read_f32_be(data, pos + 12 + i * 4) {
@@ -415,7 +416,7 @@ fn parse_lut8_tag(data: &[u8]) -> ICCTagData {
 fn read_u16_table(data: &[u8], offset: usize, count: usize) -> Vec<u16> {
     let mut table = Vec::with_capacity(count.min((data.len().saturating_sub(offset)) / 2));
     for i in 0..count {
-        match read_u16_be(data, offset.saturating_add(i * 2)) {
+        match be_u16(data, offset.saturating_add(i * 2)) {
             Some(v) => table.push(v),
             None => break,
         }
@@ -433,8 +434,8 @@ fn parse_lut16_tag(data: &[u8]) -> ICCTagData {
     let Some(matrix) = read_matrix_3x3(data, 12) else {
         return unknown_tag(data);
     };
-    let input_entries = read_u16_be(data, 48).unwrap_or(0) as usize;
-    let output_entries = read_u16_be(data, 50).unwrap_or(0) as usize;
+    let input_entries = be_u16(data, 48).unwrap_or(0) as usize;
+    let output_entries = be_u16(data, 50).unwrap_or(0) as usize;
 
     let mut pos = 52;
     let mut input_tables = Vec::with_capacity(input_channels as usize);
@@ -467,11 +468,11 @@ fn parse_lut16_tag(data: &[u8]) -> ICCTagData {
 fn embedded_curve_size(data: &[u8], pos: usize) -> Option<usize> {
     match &data[pos..pos + 4] {
         b"curv" => {
-            let count = read_u32_be(data, pos + 8)? as usize;
+            let count = be_u32(data, pos + 8)? as usize;
             Some(12 + count * 2)
         }
         b"para" => {
-            let function_type = read_u16_be(data, pos + 8)?;
+            let function_type = be_u16(data, pos + 8)?;
             Some(12 + parametric_param_count(function_type) * 4)
         }
         _ => None,
@@ -518,7 +519,7 @@ fn parse_lut_ab_clut(data: &[u8], offset: usize, input_channels: u8, output_chan
     for i in 0..expected.min(usize::MAX as u64) as usize {
         let value = match precision {
             1 => read_u8(data, value_start + i).map(|v| v as f64 / 255.0),
-            2 => read_u16_be(data, value_start + i * 2).map(|v| v as f64 / 65535.0),
+            2 => be_u16(data, value_start + i * 2).map(|v| v as f64 / 65535.0),
             _ => None,
         };
         match value {
@@ -536,11 +537,11 @@ fn parse_lut_ab_tag(data: &[u8], is_a_to_b: bool) -> ICCTagData {
     }
     let input_channels = data[8];
     let output_channels = data[9];
-    let offset_b = read_u32_be(data, 12).unwrap_or(0) as usize;
-    let offset_matrix = read_u32_be(data, 16).unwrap_or(0) as usize;
-    let offset_m = read_u32_be(data, 20).unwrap_or(0) as usize;
-    let offset_clut = read_u32_be(data, 24).unwrap_or(0) as usize;
-    let offset_a = read_u32_be(data, 28).unwrap_or(0) as usize;
+    let offset_b = be_u32(data, 12).unwrap_or(0) as usize;
+    let offset_matrix = be_u32(data, 16).unwrap_or(0) as usize;
+    let offset_m = be_u32(data, 20).unwrap_or(0) as usize;
+    let offset_clut = be_u32(data, 24).unwrap_or(0) as usize;
+    let offset_a = be_u32(data, 28).unwrap_or(0) as usize;
 
     let (a_count, m_count, b_count) = if is_a_to_b {
         (input_channels, output_channels, output_channels)
@@ -585,9 +586,9 @@ fn parse_ncl2_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 84 {
         return unknown_tag(data);
     }
-    let vendor_flag = read_u32_be(data, 8).unwrap_or(0);
-    let count = read_u32_be(data, 12).unwrap_or(0) as usize;
-    let device_coord_count = read_u32_be(data, 16).unwrap_or(0);
+    let vendor_flag = be_u32(data, 8).unwrap_or(0);
+    let count = be_u32(data, 12).unwrap_or(0) as usize;
+    let device_coord_count = be_u32(data, 16).unwrap_or(0);
     let prefix = String::from_utf8_lossy(&data[20..52]).trim_end_matches('\0').to_string();
     let suffix = String::from_utf8_lossy(&data[52..84]).trim_end_matches('\0').to_string();
 
@@ -600,13 +601,13 @@ fn parse_ncl2_tag(data: &[u8]) -> ICCTagData {
         }
         let name = String::from_utf8_lossy(&data[pos..pos + 32]).trim_end_matches('\0').to_string();
         let pcs = [
-            read_u16_be(data, pos + 32).unwrap_or(0),
-            read_u16_be(data, pos + 34).unwrap_or(0),
-            read_u16_be(data, pos + 36).unwrap_or(0),
+            be_u16(data, pos + 32).unwrap_or(0),
+            be_u16(data, pos + 34).unwrap_or(0),
+            be_u16(data, pos + 36).unwrap_or(0),
         ];
         let mut device = Vec::with_capacity(device_coord_count as usize);
         for i in 0..device_coord_count as usize {
-            device.push(read_u16_be(data, pos + 38 + i * 2).unwrap_or(0));
+            device.push(be_u16(data, pos + 38 + i * 2).unwrap_or(0));
         }
         colors.push(NamedColorEntry { name, pcs, device });
         pos += entry_size;
@@ -621,20 +622,20 @@ fn parse_embedded_text(data: &[u8], pos: usize, budget: &mut TagBudget) -> Optio
     }
     match &data[pos..pos + 4] {
         b"desc" => {
-            let ascii_len = read_u32_be(data, pos + 8)? as usize;
+            let ascii_len = be_u32(data, pos + 8)? as usize;
             let ascii_end = pos.checked_add(12)?.checked_add(ascii_len)?;
             if ascii_end > data.len() {
                 return None;
             }
             let text = String::from_utf8_lossy(&data[pos + 12..ascii_end]).trim_end_matches('\0').to_string();
-            let unicode_count = read_u32_be(data, ascii_end + 4).unwrap_or(0) as usize;
+            let unicode_count = be_u32(data, ascii_end + 4).unwrap_or(0) as usize;
             let consumed = 12 + ascii_len + 8 + unicode_count * 2 + 3 + 67;
             Some((text, consumed))
         }
         b"mluc" => {
             let sub = &data[pos..];
-            let count = read_u32_be(sub, 8)? as usize;
-            let record_size = read_u32_be(sub, 12)? as usize;
+            let count = be_u32(sub, 8)? as usize;
+            let record_size = be_u32(sub, 12)? as usize;
             if record_size < 12 {
                 return None;
             }
@@ -644,8 +645,8 @@ fn parse_embedded_text(data: &[u8], pos: usize, budget: &mut TagBudget) -> Optio
                 if record_offset >= sub.len() {
                     break;
                 }
-                let Some(len) = read_u32_be(sub, record_offset + 4) else { continue };
-                let Some(off) = read_u32_be(sub, record_offset + 8) else { continue };
+                let Some(len) = be_u32(sub, record_offset + 4) else { continue };
+                let Some(off) = be_u32(sub, record_offset + 8) else { continue };
                 if let Some(record_end) = (off as usize).checked_add(len as usize) {
                     end = end.max(record_end);
                 }
@@ -676,7 +677,7 @@ fn parse_pseq_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
-    let count = read_u32_be(data, 8).unwrap_or(0) as usize;
+    let count = be_u32(data, 8).unwrap_or(0) as usize;
 
     let mut descriptions = Vec::new();
     let mut pos = 12;
@@ -712,13 +713,13 @@ fn parse_psid_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
-    let count = read_u32_be(data, 8).unwrap_or(0) as usize;
+    let count = be_u32(data, 8).unwrap_or(0) as usize;
 
     let mut entries = Vec::new();
     for i in 0..count {
         let table_offset = 12 + i * 8;
-        let Some(offset) = read_u32_be(data, table_offset) else { break };
-        let Some(size) = read_u32_be(data, table_offset + 4) else { break };
+        let Some(offset) = be_u32(data, table_offset) else { break };
+        let Some(size) = be_u32(data, table_offset + 4) else { break };
         let start = offset as usize;
         let Some(end) = start.checked_add(size as usize) else { continue };
         if end > data.len() || start + 16 > data.len() {
@@ -740,12 +741,12 @@ fn parse_rcs2_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
-    let channels = read_u16_be(data, 8).unwrap_or(0);
-    let count = read_u16_be(data, 10).unwrap_or(0) as usize;
+    let channels = be_u16(data, 8).unwrap_or(0);
+    let count = be_u16(data, 10).unwrap_or(0) as usize;
 
     let mut measurements = Vec::new();
     for i in 0..count {
-        let Some(offset) = read_u32_be(data, 12 + i * 4) else { break };
+        let Some(offset) = be_u32(data, 12 + i * 4) else { break };
         let base = offset as usize;
         if base + 4 + channels as usize * 4 > data.len() {
             continue;
@@ -754,7 +755,7 @@ fn parse_rcs2_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
 
         let mut counts = Vec::with_capacity(channels as usize);
         for c in 0..channels as usize {
-            counts.push(read_u32_be(data, base + 4 + c * 4).unwrap_or(0) as usize);
+            counts.push(be_u32(data, base + 4 + c * 4).unwrap_or(0) as usize);
         }
 
         let mut pos = base + 4 + channels as usize * 4;
@@ -771,7 +772,7 @@ fn parse_rcs2_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
         for &response_count in &counts {
             let mut responses = Vec::new();
             for _ in 0..response_count {
-                let Some(device_code) = read_u16_be(data, pos) else { break };
+                let Some(device_code) = be_u16(data, pos) else { break };
                 let Some(value) = read_s15_fixed16(data, pos + 4) else { break };
                 responses.push(ResponseNumber { device_code, value });
                 pos += 8;
@@ -793,8 +794,8 @@ fn parse_dict_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
-    let count = read_u32_be(data, 8).unwrap_or(0) as usize;
-    let record_size = read_u32_be(data, 12).unwrap_or(0) as usize;
+    let count = be_u32(data, 8).unwrap_or(0) as usize;
+    let record_size = be_u32(data, 12).unwrap_or(0) as usize;
     if record_size != 16 && record_size != 24 && record_size != 32 {
         return unknown_tag(data);
     }
@@ -826,21 +827,21 @@ fn parse_dict_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
         if record + record_size > data.len() {
             break;
         }
-        let name_offset = read_u32_be(data, record).unwrap_or(0);
-        let name_size = read_u32_be(data, record + 4).unwrap_or(0);
-        let value_offset = read_u32_be(data, record + 8).unwrap_or(0);
-        let value_size = read_u32_be(data, record + 12).unwrap_or(0);
+        let name_offset = be_u32(data, record).unwrap_or(0);
+        let name_size = be_u32(data, record + 4).unwrap_or(0);
+        let value_offset = be_u32(data, record + 8).unwrap_or(0);
+        let value_size = be_u32(data, record + 12).unwrap_or(0);
 
         let mut display_name = Vec::new();
         let mut display_value = Vec::new();
         if record_size >= 24 {
-            let offset = read_u32_be(data, record + 16).unwrap_or(0);
-            let size = read_u32_be(data, record + 20).unwrap_or(0);
+            let offset = be_u32(data, record + 16).unwrap_or(0);
+            let size = be_u32(data, record + 20).unwrap_or(0);
             display_name = read_localized(offset, size, budget);
         }
         if record_size >= 32 {
-            let offset = read_u32_be(data, record + 24).unwrap_or(0);
-            let size = read_u32_be(data, record + 28).unwrap_or(0);
+            let offset = be_u32(data, record + 24).unwrap_or(0);
+            let size = be_u32(data, record + 28).unwrap_or(0);
             display_value = read_localized(offset, size, budget);
         }
 
@@ -856,13 +857,13 @@ fn parse_dict_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
 }
 
 fn parse_mpe_curve_set(data: &[u8], budget: &mut TagBudget) -> CurveSetElement {
-    let input_channels = read_u16_be(data, 8).unwrap_or(0);
-    let output_channels = read_u16_be(data, 10).unwrap_or(0);
+    let input_channels = be_u16(data, 8).unwrap_or(0);
+    let output_channels = be_u16(data, 10).unwrap_or(0);
 
     let mut curves = Vec::new();
     for i in 0..input_channels as usize {
-        let Some(offset) = read_u32_be(data, 12 + i * 8) else { break };
-        let Some(size) = read_u32_be(data, 12 + i * 8 + 4) else { break };
+        let Some(offset) = be_u32(data, 12 + i * 8) else { break };
+        let Some(size) = be_u32(data, 12 + i * 8 + 4) else { break };
         let start = offset as usize;
         let Some(end) = start.checked_add(size as usize) else { continue };
         if end > data.len() || start >= end {
@@ -881,8 +882,8 @@ fn parse_mpe_curve_set(data: &[u8], budget: &mut TagBudget) -> CurveSetElement {
 }
 
 fn parse_mpe_matrix(data: &[u8]) -> MatrixElement {
-    let input_channels = read_u16_be(data, 8).unwrap_or(0);
-    let output_channels = read_u16_be(data, 10).unwrap_or(0);
+    let input_channels = be_u16(data, 8).unwrap_or(0);
+    let output_channels = be_u16(data, 10).unwrap_or(0);
 
     let matrix_count = input_channels as usize * output_channels as usize;
     let mut matrix = Vec::with_capacity(matrix_count.min(data.len() / 4));
@@ -906,8 +907,8 @@ fn parse_mpe_matrix(data: &[u8]) -> MatrixElement {
 }
 
 fn parse_mpe_clut(data: &[u8]) -> Option<ClutElement> {
-    let input_channels = read_u16_be(data, 8)?;
-    let output_channels = read_u16_be(data, 10)?;
+    let input_channels = be_u16(data, 8)?;
+    let output_channels = be_u16(data, 10)?;
     if data.len() < 28 {
         return None;
     }
@@ -940,15 +941,15 @@ fn parse_mpe_element(data: &[u8], budget: &mut TagBudget) -> Option<ProcessingEl
             Some(clut) => ProcessingElement::Clut(clut),
             None => ProcessingElement::Unknown(UnknownElement {
                 signature: sig_to_string(&data[0..4]),
-                input_channels: read_u16_be(data, 8).unwrap_or(0),
-                output_channels: read_u16_be(data, 10).unwrap_or(0),
+                input_channels: be_u16(data, 8).unwrap_or(0),
+                output_channels: be_u16(data, 10).unwrap_or(0),
                 size: data.len() as u32,
             }),
         },
         other => ProcessingElement::Unknown(UnknownElement {
             signature: sig_to_string(other),
-            input_channels: read_u16_be(data, 8).unwrap_or(0),
-            output_channels: read_u16_be(data, 10).unwrap_or(0),
+            input_channels: be_u16(data, 8).unwrap_or(0),
+            output_channels: be_u16(data, 10).unwrap_or(0),
             size: data.len() as u32,
         }),
     };
@@ -959,15 +960,15 @@ fn parse_mpet_tag(data: &[u8], budget: &mut TagBudget) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
-    let input_channels = read_u16_be(data, 8).unwrap_or(0);
-    let output_channels = read_u16_be(data, 10).unwrap_or(0);
-    let count = read_u32_be(data, 12).unwrap_or(0) as usize;
+    let input_channels = be_u16(data, 8).unwrap_or(0);
+    let output_channels = be_u16(data, 10).unwrap_or(0);
+    let count = be_u32(data, 12).unwrap_or(0) as usize;
 
     let mut elements = Vec::new();
     for i in 0..count {
         let table_offset = 16 + i * 8;
-        let Some(offset) = read_u32_be(data, table_offset) else { break };
-        let Some(size) = read_u32_be(data, table_offset + 4) else { break };
+        let Some(offset) = be_u32(data, table_offset) else { break };
+        let Some(size) = be_u32(data, table_offset + 4) else { break };
         let start = offset as usize;
         let Some(end) = start.checked_add(size as usize) else { continue };
         if end > data.len() || start >= end {
@@ -989,7 +990,7 @@ fn parse_svcn_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 20 {
         return unknown_tag(data);
     }
-    let standard_observer = decode_standard_observer(read_u32_be(data, 8).unwrap_or(0));
+    let standard_observer = decode_standard_observer(be_u32(data, 8).unwrap_or(0));
     let Some(observer_range) = read_spectral_range(data, 12) else {
         return unknown_tag(data);
     };
@@ -1005,7 +1006,7 @@ fn parse_svcn_tag(data: &[u8]) -> ICCTagData {
     }
     pos += observer_count * 4;
 
-    let standard_illuminant = decode_illuminant(read_u32_be(data, pos).unwrap_or(0));
+    let standard_illuminant = decode_illuminant(be_u32(data, pos).unwrap_or(0));
     let color_temperature = read_f32_be(data, pos + 4).unwrap_or(0.0);
     let Some(illuminant_range) = read_spectral_range(data, pos + 8) else {
         return unknown_tag(data);
@@ -1065,13 +1066,13 @@ fn parse_tstr_tag(data: &[u8], depth: u8, budget: &mut TagBudget) -> ICCTagData 
         return unknown_tag(data);
     }
     let struct_type = sig_at(data, 8);
-    let count = read_u32_be(data, 12).unwrap_or(0) as usize;
+    let count = be_u32(data, 12).unwrap_or(0) as usize;
 
     let mut members = Vec::new();
     for i in 0..count {
         let entry_offset = 16 + i * 12;
-        let Some(offset) = read_u32_be(data, entry_offset + 4) else { break };
-        let Some(size) = read_u32_be(data, entry_offset + 8) else { break };
+        let Some(offset) = be_u32(data, entry_offset + 4) else { break };
+        let Some(size) = be_u32(data, entry_offset + 8) else { break };
         if entry_offset + 12 > data.len() {
             break;
         }
@@ -1098,13 +1099,13 @@ fn parse_tary_tag(data: &[u8], depth: u8, budget: &mut TagBudget) -> ICCTagData 
         return unknown_tag(data);
     }
     let array_type = sig_at(data, 8);
-    let count = read_u32_be(data, 12).unwrap_or(0) as usize;
+    let count = be_u32(data, 12).unwrap_or(0) as usize;
 
     let mut elements = Vec::new();
     for i in 0..count {
         let entry_offset = 16 + i * 8;
-        let Some(offset) = read_u32_be(data, entry_offset) else { break };
-        let Some(size) = read_u32_be(data, entry_offset + 4) else { break };
+        let Some(offset) = be_u32(data, entry_offset) else { break };
+        let Some(size) = be_u32(data, entry_offset + 4) else { break };
         let start = offset as usize;
         let Some(end) = start.checked_add(size as usize) else { continue };
         if end > data.len() || start + 4 > end {
@@ -1126,11 +1127,11 @@ fn parse_meas_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 36 {
         return unknown_tag(data);
     }
-    let observer = read_u32_be(data, 8).unwrap_or(0);
+    let observer = be_u32(data, 8).unwrap_or(0);
     let backing_xyz = parse_xyz_number(data, 12).unwrap_or(XYZNumber { x: 0.0, y: 0.0, z: 0.0 });
-    let geometry = read_u32_be(data, 24).unwrap_or(0);
-    let flare = read_u32_be(data, 28).unwrap_or(0) as f64 / 65536.0;
-    let illuminant = read_u32_be(data, 32).unwrap_or(0);
+    let geometry = be_u32(data, 24).unwrap_or(0);
+    let flare = be_u32(data, 28).unwrap_or(0) as f64 / 65536.0;
+    let illuminant = be_u32(data, 32).unwrap_or(0);
 
     ICCTagData::Measurement(MeasurementData {
         standard_observer: decode_standard_observer(observer),
@@ -1146,12 +1147,12 @@ fn parse_dtim_tag(data: &[u8]) -> ICCTagData {
         return unknown_tag(data);
     }
     ICCTagData::DateTime(DateTimeNumber {
-        year: read_u16_be(data, 8).unwrap_or(0),
-        month: read_u16_be(data, 10).unwrap_or(0),
-        day: read_u16_be(data, 12).unwrap_or(0),
-        hours: read_u16_be(data, 14).unwrap_or(0),
-        minutes: read_u16_be(data, 16).unwrap_or(0),
-        seconds: read_u16_be(data, 18).unwrap_or(0),
+        year: be_u16(data, 8).unwrap_or(0),
+        month: be_u16(data, 10).unwrap_or(0),
+        day: be_u16(data, 12).unwrap_or(0),
+        hours: be_u16(data, 14).unwrap_or(0),
+        minutes: be_u16(data, 16).unwrap_or(0),
+        seconds: be_u16(data, 18).unwrap_or(0),
     })
 }
 
@@ -1166,7 +1167,7 @@ fn parse_data_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
-    let flag = read_u32_be(data, 8).unwrap_or(0);
+    let flag = be_u32(data, 8).unwrap_or(0);
     ICCTagData::Data(DataTagData { flag, data: data[12..].to_vec() })
 }
 
@@ -1174,10 +1175,10 @@ fn parse_chrm_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
-    let Some(num_channels) = read_u16_be(data, 8) else {
+    let Some(num_channels) = be_u16(data, 8) else {
         return unknown_tag(data);
     };
-    let Some(colorant_type) = read_u16_be(data, 10) else {
+    let Some(colorant_type) = be_u16(data, 10) else {
         return unknown_tag(data);
     };
 
@@ -1187,8 +1188,8 @@ fn parse_chrm_tag(data: &[u8]) -> ICCTagData {
         if offset + 8 > data.len() {
             break;
         }
-        let x = read_u32_be(data, offset).unwrap_or(0) as f64 / 65536.0;
-        let y = read_u32_be(data, offset + 4).unwrap_or(0) as f64 / 65536.0;
+        let x = be_u32(data, offset).unwrap_or(0) as f64 / 65536.0;
+        let y = be_u32(data, offset + 4).unwrap_or(0) as f64 / 65536.0;
         channels.push([x, y]);
     }
 
@@ -1199,7 +1200,7 @@ fn parse_clro_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
-    let Some(count) = read_u32_be(data, 8) else {
+    let Some(count) = be_u32(data, 8) else {
         return unknown_tag(data);
     };
     let order: Vec<u8> = data[12..].iter().take(count as usize).copied().collect();
@@ -1210,7 +1211,7 @@ fn parse_clrt_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
-    let Some(count) = read_u32_be(data, 8) else {
+    let Some(count) = be_u32(data, 8) else {
         return unknown_tag(data);
     };
     let mut entries = Vec::new();
@@ -1221,9 +1222,9 @@ fn parse_clrt_tag(data: &[u8]) -> ICCTagData {
         }
         let name = String::from_utf8_lossy(&data[offset..offset + 32]).trim_end_matches('\0').to_string();
         let pcs = [
-            read_u16_be(data, offset + 32).unwrap_or(0),
-            read_u16_be(data, offset + 34).unwrap_or(0),
-            read_u16_be(data, offset + 36).unwrap_or(0),
+            be_u16(data, offset + 32).unwrap_or(0),
+            be_u16(data, offset + 34).unwrap_or(0),
+            be_u16(data, offset + 36).unwrap_or(0),
         ];
         entries.push(ColorantEntry { name, pcs });
         offset += 38;
@@ -1237,7 +1238,7 @@ fn parse_view_tag(data: &[u8]) -> ICCTagData {
     }
     let illuminant_xyz = parse_xyz_number(data, 8).unwrap_or(XYZNumber { x: 0.0, y: 0.0, z: 0.0 });
     let surround_xyz = parse_xyz_number(data, 20).unwrap_or(XYZNumber { x: 0.0, y: 0.0, z: 0.0 });
-    let illuminant_type = read_u32_be(data, 32).unwrap_or(0);
+    let illuminant_type = be_u32(data, 32).unwrap_or(0);
     ICCTagData::ViewingConditions(ViewingConditionsData {
         illuminant_xyz,
         surround_xyz,
@@ -1249,8 +1250,8 @@ fn parse_scrn_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
-    let flag = read_u32_be(data, 8).unwrap_or(0);
-    let count = read_u32_be(data, 12).unwrap_or(0) as usize;
+    let flag = be_u32(data, 8).unwrap_or(0);
+    let count = be_u32(data, 12).unwrap_or(0) as usize;
 
     let mut channels = Vec::new();
     for i in 0..count {
@@ -1261,7 +1262,7 @@ fn parse_scrn_tag(data: &[u8]) -> ICCTagData {
         channels.push(ScreeningChannel {
             frequency: read_s15_fixed16(data, offset).unwrap_or(0.0),
             angle: read_s15_fixed16(data, offset + 4).unwrap_or(0.0),
-            spot_shape: decode_spot_shape(read_u32_be(data, offset + 8).unwrap_or(0)),
+            spot_shape: decode_spot_shape(be_u32(data, offset + 8).unwrap_or(0)),
         });
     }
 
@@ -1275,11 +1276,11 @@ fn parse_bfd_tag(data: &[u8]) -> ICCTagData {
 
     let mut pos = 8;
     let read_curve = |pos: &mut usize| -> Vec<u16> {
-        let Some(count) = read_u32_be(data, *pos) else { return Vec::new() };
+        let Some(count) = be_u32(data, *pos) else { return Vec::new() };
         *pos += 4;
         let mut curve = Vec::new();
         for _ in 0..count {
-            match read_u16_be(data, *pos) {
+            match be_u16(data, *pos) {
                 Some(v) => {
                     curve.push(v);
                     *pos += 2;
@@ -1309,7 +1310,7 @@ fn parse_crdi_tag(data: &[u8]) -> ICCTagData {
     let mut pos = 8;
     let mut strings = Vec::new();
     for _ in 0..5 {
-        let Some(count) = read_u32_be(data, pos) else { break };
+        let Some(count) = be_u32(data, pos) else { break };
         pos += 4;
         let end = pos.saturating_add(count as usize).min(data.len());
         strings.push(String::from_utf8_lossy(&data[pos.min(data.len())..end]).trim_end_matches('\0').to_string());
@@ -1345,7 +1346,7 @@ fn parse_uf32_tag(data: &[u8]) -> ICCTagData {
     let count = payload.len() / 4;
     let mut values = Vec::with_capacity(count);
     for i in 0..count {
-        if let Some(raw) = read_u32_be(payload, i * 4) {
+        if let Some(raw) = be_u32(payload, i * 4) {
             values.push(raw as f64 / 65536.0);
         }
     }
@@ -1367,7 +1368,7 @@ fn parse_ui16_tag(data: &[u8]) -> ICCTagData {
     let count = payload.len() / 2;
     let mut values = Vec::with_capacity(count);
     for i in 0..count {
-        if let Some(v) = read_u16_be(payload, i * 2) {
+        if let Some(v) = be_u16(payload, i * 2) {
             values.push(v);
         }
     }
@@ -1382,7 +1383,7 @@ fn parse_ui32_tag(data: &[u8]) -> ICCTagData {
     let count = payload.len() / 4;
     let mut values = Vec::with_capacity(count);
     for i in 0..count {
-        if let Some(v) = read_u32_be(payload, i * 4) {
+        if let Some(v) = be_u32(payload, i * 4) {
             values.push(v);
         }
     }
@@ -1398,8 +1399,8 @@ fn parse_ui64_tag(data: &[u8]) -> ICCTagData {
     let mut values = Vec::with_capacity(count);
     for i in 0..count {
         let offset = i * 8;
-        let hi = read_u32_be(payload, offset).unwrap_or(0);
-        let lo = read_u32_be(payload, offset + 4).unwrap_or(0);
+        let hi = be_u32(payload, offset).unwrap_or(0);
+        let lo = be_u32(payload, offset + 4).unwrap_or(0);
         values.push([hi, lo]);
     }
     ICCTagData::UInt64Array(values)
@@ -1444,8 +1445,8 @@ fn parse_fl64_tag(data: &[u8]) -> ICCTagData {
     let mut values = Vec::with_capacity(count);
     for i in 0..count {
         let offset = i * 8;
-        let hi = read_u32_be(payload, offset).unwrap_or(0) as u64;
-        let lo = read_u32_be(payload, offset + 4).unwrap_or(0) as u64;
+        let hi = be_u32(payload, offset).unwrap_or(0) as u64;
+        let lo = be_u32(payload, offset + 4).unwrap_or(0) as u64;
         values.push(f64::from_bits((hi << 32) | lo));
     }
     ICCTagData::Float64Array(values)
@@ -1467,7 +1468,7 @@ fn parse_desc_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 12 {
         return unknown_tag(data);
     }
-    let Some(ascii_len) = read_u32_be(data, 8) else {
+    let Some(ascii_len) = be_u32(data, 8) else {
         return unknown_tag(data);
     };
 
@@ -1483,15 +1484,15 @@ fn parse_desc_tag(data: &[u8]) -> ICCTagData {
     let mut script = Vec::new();
 
     if ascii_end + 8 <= data.len() {
-        unicode_language_code = read_u32_be(data, ascii_end).unwrap_or(0);
-        let unicode_count = read_u32_be(data, ascii_end + 4).unwrap_or(0);
+        unicode_language_code = be_u32(data, ascii_end).unwrap_or(0);
+        let unicode_count = be_u32(data, ascii_end + 4).unwrap_or(0);
         let unicode_start = ascii_end + 8;
         let unicode_end = unicode_start.saturating_add(unicode_count as usize * 2);
         if unicode_end <= data.len() {
             unicode = decode_utf16_be(&data[unicode_start..unicode_end]);
 
             if unicode_end + 3 <= data.len() {
-                script_code = read_u16_be(data, unicode_end).unwrap_or(0);
+                script_code = be_u16(data, unicode_end).unwrap_or(0);
                 let script_len = read_u8(data, unicode_end + 2).unwrap_or(0) as usize;
                 let script_start = unicode_end + 3;
                 let script_end = (script_start + script_len).min(data.len());
@@ -1507,10 +1508,10 @@ fn parse_gbd_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 20 {
         return unknown_tag(data);
     }
-    let pcs_channels = read_u16_be(data, 8).unwrap_or(0);
-    let device_channels = read_u16_be(data, 10).unwrap_or(0);
-    let vertex_count = read_u32_be(data, 12).unwrap_or(0) as usize;
-    let triangle_count = read_u32_be(data, 16).unwrap_or(0) as usize;
+    let pcs_channels = be_u16(data, 8).unwrap_or(0);
+    let device_channels = be_u16(data, 10).unwrap_or(0);
+    let vertex_count = be_u32(data, 12).unwrap_or(0) as usize;
+    let triangle_count = be_u32(data, 16).unwrap_or(0) as usize;
 
     let mut pos = 20;
     let mut triangles = Vec::new();
@@ -1519,9 +1520,9 @@ fn parse_gbd_tag(data: &[u8]) -> ICCTagData {
             break;
         }
         triangles.push([
-            read_u32_be(data, pos).unwrap_or(0),
-            read_u32_be(data, pos + 4).unwrap_or(0),
-            read_u32_be(data, pos + 8).unwrap_or(0),
+            be_u32(data, pos).unwrap_or(0),
+            be_u32(data, pos + 4).unwrap_or(0),
+            be_u32(data, pos + 8).unwrap_or(0),
         ]);
         pos += 12;
     }
@@ -1550,21 +1551,21 @@ fn parse_smat_tag(data: &[u8]) -> ICCTagData {
     if data.len() < 16 {
         return unknown_tag(data);
     }
-    let channels = read_u16_be(data, 8).unwrap_or(0);
-    let matrix_type = read_u16_be(data, 10).unwrap_or(0);
-    let count = read_u32_be(data, 12).unwrap_or(0);
+    let channels = be_u16(data, 8).unwrap_or(0);
+    let matrix_type = be_u16(data, 10).unwrap_or(0);
+    let count = be_u32(data, 12).unwrap_or(0);
 
     let mut matrices = Vec::new();
     let mut pos = 16;
     'outer: for _ in 0..count {
-        let (Some(rows), Some(cols)) = (read_u16_be(data, pos), read_u16_be(data, pos + 2)) else {
+        let (Some(rows), Some(cols)) = (be_u16(data, pos), be_u16(data, pos + 2)) else {
             break;
         };
         pos += 4;
 
         let mut row_starts = Vec::with_capacity(rows as usize + 1);
         for i in 0..=rows as usize {
-            match read_u16_be(data, pos + i * 2) {
+            match be_u16(data, pos + i * 2) {
                 Some(v) => row_starts.push(v),
                 None => break 'outer,
             }
@@ -1575,7 +1576,7 @@ fn parse_smat_tag(data: &[u8]) -> ICCTagData {
 
         let mut column_indices = Vec::with_capacity(entry_count);
         for i in 0..entry_count {
-            match read_u16_be(data, pos + i * 2) {
+            match be_u16(data, pos + i * 2) {
                 Some(v) => column_indices.push(v),
                 None => break 'outer,
             }
@@ -1613,8 +1614,8 @@ fn parse_embedded_image_tag(data: &[u8], is_height_map: bool) -> ICCTagData {
     if data.len() < header_size {
         return unknown_tag(data);
     }
-    let seamless = read_u32_be(data, 8).unwrap_or(0) != 0;
-    let encoding = match read_u32_be(data, 12).unwrap_or(u32::MAX) {
+    let seamless = be_u32(data, 8).unwrap_or(0) != 0;
+    let encoding = match be_u32(data, 12).unwrap_or(u32::MAX) {
         0 => "PNG".to_string(),
         1 => "TIFF".to_string(),
         v => format!("Unknown({})", v),

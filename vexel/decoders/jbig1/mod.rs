@@ -1,4 +1,3 @@
-pub mod arithmetic;
 pub mod decoder;
 pub mod info;
 pub mod types;

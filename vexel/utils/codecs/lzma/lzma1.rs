@@ -1,5 +1,5 @@
-use crate::utils::lzma::dictionary::Dictionary;
-use crate::utils::lzma::range_decoder::{RangeDecoder, PROB_INIT};
+use crate::utils::codecs::lzma::dictionary::Dictionary;
+use crate::utils::codecs::lzma::range_decoder::{RangeDecoder, PROB_INIT};
 
 pub const LCLP_MAX: u32 = 4;
 pub const PB_MAX: u32 = 4;

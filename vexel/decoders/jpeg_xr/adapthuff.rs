@@ -1,5 +1,5 @@
-use crate::decoders::jpeg_xr::bitreader::XrBitReader;
 use crate::decoders::jpeg_xr::tables::*;
+use crate::utils::bits::MsbBitReader;
 
 const THRESHOLD: i32 = 8;
 const MEMORY: i32 = 8;
@@ -167,7 +167,7 @@ fn slice_row(table: &'static [i32], index: usize, stride: usize) -> Option<&'sta
     table.get(start..start + stride)
 }
 
-pub fn get_huff(lookup: &[i16], reader: &mut XrBitReader) -> usize {
+pub fn get_huff(lookup: &[i16], reader: &mut MsbBitReader) -> usize {
     if lookup.is_empty() {
         return 0;
     }
@@ -203,7 +203,7 @@ pub fn get_huff(lookup: &[i16], reader: &mut XrBitReader) -> usize {
     symbol.max(0) as usize
 }
 
-pub fn get_huff_short(lookup: &[i16], reader: &mut XrBitReader) -> usize {
+pub fn get_huff_short(lookup: &[i16], reader: &mut MsbBitReader) -> usize {
     if lookup.is_empty() {
         return 0;
     }

@@ -1,4 +1,5 @@
 use crate::log_warn;
+use crate::utils::codecs::rle::{self, Packet};
 
 #[derive(Debug, Clone)]
 pub struct BitMask {
@@ -39,59 +40,22 @@ impl BitMask {
 }
 
 pub fn rle_decompress(src: &[u8], out: &mut [u8]) -> bool {
-    let mut pos = 0usize;
-    let mut idx = 0usize;
-    let mut complete = false;
+    let mut decoded = Vec::with_capacity(out.len());
+    let result = rle::decode(src, &mut decoded, out.len(), 1, |input| {
+        let header = input.get(..2)?;
+        let count = i16::from_le_bytes([header[0], header[1]]);
+        *input = &input[2..];
+        Some(match count {
+            i16::MIN => Packet::End,
+            1.. => Packet::Literal(count as usize),
+            _ => Packet::Run(count.unsigned_abs() as usize),
+        })
+    });
 
-    while pos + 2 <= src.len() {
-        let cnt = i16::from_le_bytes([src[pos], src[pos + 1]]);
-        pos += 2;
-
-        if cnt == -32768 {
-            complete = true;
-            break;
-        }
-
-        if cnt > 0 {
-            let count = cnt as usize;
-            let available = src.len().saturating_sub(pos).min(count);
-            let writable = out.len().saturating_sub(idx).min(available);
-
-            if writable > 0 {
-                out[idx..idx + writable].copy_from_slice(&src[pos..pos + writable]);
-                idx += writable;
-            }
-
-            pos += available;
-
-            if available < count || writable < available {
-                break;
-            }
-        } else {
-            let count = (-(cnt as i32)) as usize;
-
-            if pos >= src.len() {
-                break;
-            }
-
-            let value = src[pos];
-            pos += 1;
-
-            let writable = out.len().saturating_sub(idx).min(count);
-            if writable > 0 {
-                out[idx..idx + writable].fill(value);
-                idx += writable;
-            }
-
-            if writable < count {
-                break;
-            }
-        }
+    if !result.ended && decoded.len() < out.len() {
+        log_warn!("LERC mask RLE stream ended without a terminator, using {} decoded bytes", decoded.len());
     }
 
-    if !complete {
-        log_warn!("LERC mask RLE stream ended without a terminator, using {} decoded bytes", idx);
-    }
-
-    idx > 0
+    out[..decoded.len()].copy_from_slice(&decoded);
+    !decoded.is_empty()
 }

@@ -2,10 +2,10 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::info::{FarbfeldHeader, FarbfeldInfo, FarbfeldPixelData, FarbfeldSection};
 use super::simd::{decode_be_u16, drop_alpha_u16, is_opaque_u16};
-use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
 use crate::utils::info::{ColorModel, DataExtent, ImageSummary};
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits};
 
 pub const MAGIC: &[u8; 8] = b"farbfeld";
@@ -17,13 +17,19 @@ pub struct FarbfeldDecoder<R: Read + Seek> {
     width: u32,
     height: u32,
     limits: Limits,
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     info: Option<FarbfeldInfo>,
 }
 
 impl<R: Read + Seek> FarbfeldDecoder<R> {
     pub fn new(reader: R) -> Self {
-        FarbfeldDecoder { width: 0, height: 0, limits: Limits::default(), reader: BitReader::new(reader), info: None }
+        FarbfeldDecoder {
+            width: 0,
+            height: 0,
+            limits: Limits::default(),
+            reader: StreamReader::new(reader),
+            info: None,
+        }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {

@@ -954,7 +954,7 @@ impl<'a> DeflateDecoder<'a> {
     }
 
     pub fn decode_with_capacity(&self, capacity_hint: usize) -> Vec<u8> {
-        let max_output = if capacity_hint > 0 { capacity_hint.saturating_mul(4) } else { 256 * 1024 * 1024 };
+        let max_output = super::output_cap(capacity_hint);
         let initial = if capacity_hint > 0 { capacity_hint } else { self.data.len().saturating_mul(4) };
         Inflater::new(self.data, initial, max_output).inflate()
     }

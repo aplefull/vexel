@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::decoders::exr::compression::{b44_decompress, pxr24_reconstruct, rle_decompress, unpredict_and_reorder};
+use crate::decoders::exr::compression::{
+    b44_decompress, decompress_bytes, decompress_stored, inflate, pxr24_reconstruct,
+};
 use crate::decoders::exr::deep::{self, DeepChunkPixels};
 use crate::decoders::exr::dwa::dwa_decompress;
 use crate::decoders::exr::htj2k::htj2k_decompress;
@@ -9,10 +11,9 @@ use crate::decoders::exr::info::{scan, ExrInfo};
 use crate::decoders::exr::parser::{self, ByteCursor, ExrFile};
 use crate::decoders::exr::piz::piz_decompress;
 use crate::decoders::exr::types::{Box2i, ChunkChannel, ExrCompression, ExrPixelType, PartHeader};
-use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::float::half_to_f32;
 use crate::utils::image::{Image, PixelData};
-use crate::utils::tiff::color::half_to_f32;
 use crate::{log_debug, log_warn, Limits};
 
 const DEFAULT_LUMINANCE_WEIGHTS: [f32; 3] = [0.212639, 0.715169, 0.072192];
@@ -531,38 +532,14 @@ fn decompress_chunk_inner(
         return Ok(repack_planar(&planar, layout));
     }
 
-    if data.len() == unpacked {
-        return Ok(data.to_vec());
+    if let Some(stored) = decompress_stored(data, unpacked) {
+        return Ok(stored);
     }
-
-    if data.len() > unpacked {
-        log_warn!(
-            "EXR: chunk data is larger than its uncompressed size ({} > {}), treating as uncompressed",
-            data.len(),
-            unpacked
-        );
-        return Ok(data[..unpacked].to_vec());
+    if let Some(bytes) = decompress_bytes(compression, data, unpacked) {
+        return Ok(bytes);
     }
 
     match compression {
-        ExrCompression::None => {
-            log_warn!("EXR: uncompressed chunk is truncated ({} of {} bytes), padding", data.len(), unpacked);
-            let mut out = data.to_vec();
-            out.resize(unpacked, 0);
-            Ok(out)
-        }
-        ExrCompression::Rle => {
-            let decoded = rle_decompress(data, unpacked)?;
-            Ok(unpredict_and_reorder(decoded))
-        }
-        ExrCompression::Zips | ExrCompression::Zip => {
-            let mut inflated = ZlibDecoder::from_slice(data).decode_with_max(unpacked);
-            if inflated.len() < unpacked {
-                log_warn!("EXR: zip chunk inflated to {} of {} expected bytes, padding", inflated.len(), unpacked);
-                inflated.resize(unpacked, 0);
-            }
-            Ok(unpredict_and_reorder(inflated))
-        }
         ExrCompression::Pxr24 => {
             let expected_planes: usize = layout
                 .rows
@@ -585,15 +562,7 @@ fn decompress_chunk_inner(
                 })
                 .sum();
 
-            let mut inflated = ZlibDecoder::from_slice(data).decode_with_max(expected_planes);
-            if inflated.len() < expected_planes {
-                log_warn!(
-                    "EXR: pxr24 chunk inflated to {} of {} expected bytes, padding",
-                    inflated.len(),
-                    expected_planes
-                );
-                inflated.resize(expected_planes, 0);
-            }
+            let inflated = inflate(data, expected_planes, "EXR pxr24 chunk");
 
             let presence: Vec<Vec<bool>> = layout.rows.iter().map(|(_, p)| p.clone()).collect();
             pxr24_reconstruct(&inflated, &layout.channels, &presence, unpacked)

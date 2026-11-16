@@ -1,4 +1,4 @@
-use crate::decoders::jpeg_xr::bitreader::XrBitReader;
+use crate::decoders::jpeg_xr::bitreader::{xr_bit_reader, XrBits};
 use crate::decoders::jpeg_xr::headers::{ImageHeader, PlaneHeader};
 use crate::decoders::jpeg_xr::predict::{pred_ac, pred_cbp, pred_dc_ac, update_pred_info, MacroblockInfo, PredContext};
 use crate::decoders::jpeg_xr::segdec::*;
@@ -7,6 +7,7 @@ use crate::decoders::jpeg_xr::tile::{
 };
 use crate::decoders::jpeg_xr::types::*;
 use crate::log_warn;
+use crate::utils::bits::MsbBitReader;
 use crate::utils::error::{VexelError, VexelResult};
 
 pub const COEFFS_PER_PLANE: usize = 256;
@@ -35,14 +36,14 @@ impl PlaneCoefficients {
 }
 
 pub struct SubbandStreams<'a> {
-    pub dc: XrBitReader<'a>,
-    pub lp: Option<XrBitReader<'a>>,
-    pub ac: Option<XrBitReader<'a>>,
-    pub fl: Option<XrBitReader<'a>>,
+    pub dc: MsbBitReader<'a>,
+    pub lp: Option<MsbBitReader<'a>>,
+    pub ac: Option<MsbBitReader<'a>>,
+    pub fl: Option<MsbBitReader<'a>>,
 }
 
 impl<'a> SubbandStreams<'a> {
-    pub fn spatial(reader: XrBitReader<'a>) -> Self {
+    pub fn spatial(reader: MsbBitReader<'a>) -> Self {
         SubbandStreams { dc: reader, lp: None, ac: None, fl: None }
     }
 }
@@ -56,7 +57,7 @@ pub fn num_subbands(subband: Subband) -> usize {
     }
 }
 
-pub fn read_packet_header(reader: &mut XrBitReader) -> VexelResult<()> {
+pub fn read_packet_header(reader: &mut MsbBitReader) -> VexelResult<()> {
     if reader.read(8) != 0 || reader.read(8) != 0 || reader.read(8) != 1 {
         return Err(VexelError::Custom("JPEG XR: bad packet header".to_string()));
     }
@@ -70,7 +71,7 @@ pub struct IndexTable {
     pub packet_starts: Vec<usize>,
 }
 
-pub fn read_index_table(reader: &mut XrBitReader, entries: usize, present: bool) -> VexelResult<IndexTable> {
+pub fn read_index_table(reader: &mut MsbBitReader, entries: usize, present: bool) -> VexelResult<IndexTable> {
     let mut offsets = Vec::new();
 
     if present {
@@ -78,7 +79,7 @@ pub fn read_index_table(reader: &mut XrBitReader, entries: usize, present: bool)
             return Err(VexelError::Custom("JPEG XR: bad index table marker".to_string()));
         }
 
-        let available = ((reader.total_bits() >> 3) as usize).saturating_sub(reader.byte_pos());
+        let available = ((reader.total_bits() >> 3) as usize).saturating_sub(reader.byte_position());
         let count = entries.min(available);
         if count < entries {
             log_warn!("JPEG XR: index table declares {} entries but only {} fit in the stream", entries, count);
@@ -92,9 +93,9 @@ pub fn read_index_table(reader: &mut XrBitReader, entries: usize, present: bool)
     }
 
     let (extra, _) = reader.read_vl_word_esc();
-    reader.align_byte();
+    reader.align(8);
 
-    let header_size = usize::try_from(extra).unwrap_or(usize::MAX).saturating_add(reader.byte_pos());
+    let header_size = usize::try_from(extra).unwrap_or(usize::MAX).saturating_add(reader.byte_position());
 
     let mut packet_starts: Vec<usize> = offsets.iter().filter_map(|&o| header_size.checked_add(o as usize)).collect();
     packet_starts.sort_unstable();
@@ -147,7 +148,7 @@ pub fn decode_coefficients(
 
     let packets_per_row = if spatial { tile_cols } else { tile_cols * subbands };
 
-    let mut cursor = XrBitReader::new(stream);
+    let mut cursor = xr_bit_reader(stream);
     cursor.seek_bytes(header_end);
 
     let entries = packets_per_row * tile_rows;
@@ -259,7 +260,7 @@ pub fn decode_coefficients(
                         }
 
                         if subbands > 1 {
-                            let lp_reader: &mut XrBitReader = match set.lp.as_mut() {
+                            let lp_reader: &mut MsbBitReader = match set.lp.as_mut() {
                                 Some(lp) => lp,
                                 None => &mut set.dc,
                             };
@@ -302,7 +303,7 @@ pub fn decode_coefficients(
                             }
 
                             if !spatial && tile.bits_hp > 0 {
-                                let ac_reader: &mut XrBitReader = match set.ac.as_mut() {
+                                let ac_reader: &mut MsbBitReader = match set.ac.as_mut() {
                                     Some(ac) => ac,
                                     None => &mut set.dc,
                                 };
@@ -315,7 +316,7 @@ pub fn decode_coefficients(
                             }
 
                             {
-                                let ac_reader: &mut XrBitReader = match set.ac.as_mut() {
+                                let ac_reader: &mut MsbBitReader = match set.ac.as_mut() {
                                     Some(ac) => ac,
                                     None => &mut set.dc,
                                 };
@@ -418,7 +419,7 @@ fn store_macroblock(coeffs: &mut PlaneCoefficients, offset: usize, blocks: Vec<V
 
 fn split_ac_flex<'a, 'b>(
     set: &'a mut SubbandStreams<'b>,
-) -> (&'a mut XrBitReader<'b>, Option<&'a mut XrBitReader<'b>>) {
+) -> (&'a mut MsbBitReader<'b>, Option<&'a mut MsbBitReader<'b>>) {
     match (set.ac.as_mut(), set.fl.as_mut()) {
         (Some(ac), fl) => (ac, fl),
         (None, _) => (&mut set.dc, None),
@@ -441,7 +442,7 @@ fn open_row_streams<'a>(
         if let Some(table) = index {
             let packet_index = tile_row * packets_per_row + if spatial { tile_col } else { tile_col * subbands };
 
-            let open = |slot: usize| -> Option<XrBitReader<'a>> {
+            let open = |slot: usize| -> Option<MsbBitReader<'a>> {
                 let offset = table.offsets.get(packet_index + slot).copied()?;
                 let start = base.checked_add(offset as usize)?;
                 if start >= stream.len() {
@@ -451,7 +452,7 @@ fn open_row_streams<'a>(
                 let next = table.packet_starts.partition_point(|&o| o <= start);
                 let end = table.packet_starts.get(next).copied().unwrap_or(stream.len());
 
-                let mut reader = XrBitReader::new(stream);
+                let mut reader = xr_bit_reader(stream);
                 reader.set_limit_bytes(end);
                 reader.seek_bytes(start);
                 Some(reader)
@@ -478,7 +479,7 @@ fn open_row_streams<'a>(
                 ));
             }
 
-            let mut reader = XrBitReader::new(stream);
+            let mut reader = xr_bit_reader(stream);
             reader.seek_bytes(base);
             out.push(SubbandStreams::spatial(reader));
         }

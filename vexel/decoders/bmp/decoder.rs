@@ -1,7 +1,6 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use crate::bitreader::BitReader;
-use crate::decoders::bmp::compression::RleDecoder;
+use crate::decoders::bmp::compression::{RleDecoder, RleKind};
 use crate::decoders::bmp::headers::HeaderReader;
 use crate::decoders::bmp::info::{
     compression_name, BmpIccProfile, BmpInfo, BmpLinkedProfile, BmpPixelData, BmpSection, CS_TYPE_LINKED,
@@ -13,6 +12,7 @@ use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, DataExtent, ImageSummary};
+use crate::utils::stream::StreamReader;
 use crate::{log_error, log_warn, Image, Limits};
 
 const BA_HEADER_SIZE: u64 = 14;
@@ -45,7 +45,7 @@ pub struct BmpDecoder<R: Read + Seek> {
     fallback_pixel_offset: u64,
     collected: BmpInfo,
     info: Option<BmpInfo>,
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
 }
 
 impl<R: Read + Seek> BmpDecoder<R> {
@@ -65,7 +65,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
             fallback_pixel_offset: 0,
             collected: BmpInfo::default(),
             info: None,
-            reader: BitReader::with_le(reader),
+            reader: StreamReader::with_le(reader),
         }
     }
 
@@ -611,7 +611,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 let raw_size = self.data.len();
                 let decoded_size = u64::from(self.width).saturating_mul(u64::from(self.height));
                 self.limits.reserve(decoded_size)?;
-                self.data = RleDecoder::decode_rle8(&self.data, self.width, self.height)?;
+                self.data = RleDecoder::decode_rle(&self.data, self.width, self.height, RleKind::Rle8);
                 self.limits.free_usize(raw_size);
                 self.rle_decoded = true;
 
@@ -627,7 +627,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 let raw_size = self.data.len();
                 let decoded_size = u64::from(self.width).saturating_mul(u64::from(self.height));
                 self.limits.reserve(decoded_size)?;
-                self.data = RleDecoder::decode_rle4(&self.data, self.width, self.height)?;
+                self.data = RleDecoder::decode_rle(&self.data, self.width, self.height, RleKind::Rle4);
                 self.limits.free_usize(raw_size);
                 self.rle_decoded = true;
 
@@ -679,7 +679,7 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 let stride = (u64::from(self.width) * 3 + 3) & !3;
                 let decoded_size = stride.saturating_mul(u64::from(self.height));
                 self.limits.reserve(decoded_size)?;
-                self.data = RleDecoder::decode_rle24(&self.data, self.width, self.height);
+                self.data = RleDecoder::decode_rle(&self.data, self.width, self.height, RleKind::Rle24);
                 self.limits.free_usize(raw_size);
 
                 return Ok(PixelDecoder::decode_24bit_image(&self.data, self.width, self.height, bottom_up));
@@ -700,14 +700,14 @@ impl<R: Read + Seek> BmpDecoder<R> {
             2 => PixelDecoder::decode_2bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table),
             4 => {
                 if self.rle_decoded {
-                    RleDecoder::decode_rle4_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
+                    RleDecoder::decode_indexed_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 } else {
                     PixelDecoder::decode_4bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 }
             }
             8 => {
                 if self.rle_decoded {
-                    RleDecoder::decode_rle8_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
+                    RleDecoder::decode_indexed_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 } else {
                     PixelDecoder::decode_8bit_image(&self.data, self.width, self.height, bottom_up, &self.color_table)
                 }

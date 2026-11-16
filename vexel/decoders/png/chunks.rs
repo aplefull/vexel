@@ -2,7 +2,7 @@ use super::info::{
     CompressedTextChunk, GamaChunk, IccpChunk, IhdrChunk, InternationalTextChunk, PhysChunk, SrgbChunk, TextChunk,
 };
 use super::types::*;
-use crate::utils::deflate::ZlibDecoder;
+use crate::utils::codecs::deflate::ZlibDecoder;
 use crate::utils::error::VexelResult;
 use crate::utils::icc::ICCProfile;
 use crate::utils::limits::Limits;

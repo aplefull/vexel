@@ -1,9 +1,8 @@
-use crate::decoders::exr::compression::{rle_decompress, unpredict_and_reorder};
+use crate::decoders::exr::compression::{decompress_bytes, decompress_stored};
 use crate::decoders::exr::parser::ByteCursor;
 use crate::decoders::exr::types::{ExrCompression, ExrPixelType, PartHeader};
-use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::tiff::color::half_to_f32;
+use crate::utils::float::half_to_f32;
 use crate::{log_warn, Limits};
 
 pub struct DeepChunkPixels {
@@ -157,43 +156,12 @@ fn read_deep_region(header: &PartHeader, cursor: &mut ByteCursor) -> VexelResult
 }
 
 fn decompress_deep_blob(compression: ExrCompression, data: &[u8], unpacked: usize) -> VexelResult<Vec<u8>> {
-    if data.len() == unpacked {
-        return Ok(data.to_vec());
+    if let Some(stored) = decompress_stored(data, unpacked) {
+        return Ok(stored);
     }
-
-    if data.len() > unpacked {
-        log_warn!(
-            "EXR: deep chunk blob is larger than its uncompressed size ({} > {}), treating as uncompressed",
-            data.len(),
-            unpacked
-        );
-        return Ok(data[..unpacked].to_vec());
-    }
-
-    match compression {
-        ExrCompression::None => {
-            log_warn!("EXR: uncompressed deep blob is truncated ({} of {} bytes), padding", data.len(), unpacked);
-            let mut out = data.to_vec();
-            out.resize(unpacked, 0);
-            Ok(out)
-        }
-        ExrCompression::Rle => {
-            let decoded = rle_decompress(data, unpacked)?;
-            Ok(unpredict_and_reorder(decoded))
-        }
-        ExrCompression::Zips | ExrCompression::Zip => {
-            let mut inflated = ZlibDecoder::from_slice(data).decode_with_max(unpacked);
-            if inflated.len() < unpacked {
-                log_warn!("EXR: deep zip blob inflated to {} of {} expected bytes, padding", inflated.len(), unpacked);
-                inflated.resize(unpacked, 0);
-            }
-            Ok(unpredict_and_reorder(inflated))
-        }
-        other => Err(VexelError::UnsupportedFormat(format!(
-            "EXR: {} compression is not supported for deep data",
-            other.name()
-        ))),
-    }
+    decompress_bytes(compression, data, unpacked).ok_or_else(|| {
+        VexelError::UnsupportedFormat(format!("EXR: {} compression is not supported for deep data", compression.name()))
+    })
 }
 
 fn parse_sample_counts(table: &[u8], width: usize, rows: usize) -> (Vec<u32>, Vec<u32>, Vec<u64>) {

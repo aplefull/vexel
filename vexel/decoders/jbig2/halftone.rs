@@ -1,8 +1,8 @@
-use crate::decoders::jbig2::arith::{ArithDecoder, Cx};
 use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp, WorkBudget};
 use crate::decoders::jbig2::generic::{decode_generic_region, GenericParams};
 use crate::log_warn;
-use crate::utils::tiff::fax;
+use crate::utils::codecs::ccitt::{self, FaxMode};
+use crate::utils::entropy::mq::{MqContext, MqDecoder};
 
 pub struct PatternDict {
     pub patterns: Vec<Bitmap>,
@@ -21,7 +21,7 @@ pub struct PatternDictParams {
 pub fn decode_pattern_dict(
     data: &[u8],
     params: &PatternDictParams,
-    gb_stats: &mut [Cx],
+    gb_stats: &mut [MqContext],
     budget: &mut WorkBudget,
 ) -> Option<PatternDict> {
     let count = params.gray_max.checked_add(1)?;
@@ -53,10 +53,10 @@ pub fn decode_pattern_dict(
     };
 
     if params.mmr {
-        let (decoded, _) = fax::decode_mmr(data, collective_width, params.height as usize);
+        let decoded = ccitt::decode(data, collective_width, params.height as usize, FaxMode::Group4).pixels;
         copy_packed(&mut collective, &decoded, collective_width, params.height);
     } else {
-        let mut arith = ArithDecoder::new(data);
+        let mut arith = MqDecoder::new(data);
         decode_generic_region(&mut arith, gb_stats, &mut collective, &generic_params);
     }
 
@@ -90,7 +90,7 @@ pub fn decode_halftone_region(
     params: &HalftoneParams,
     patterns: &PatternDict,
     bitmap: &mut Bitmap,
-    gb_stats: &mut [Cx],
+    gb_stats: &mut [MqContext],
     budget: &mut WorkBudget,
 ) {
     bitmap.fill(params.def_pixel);
@@ -173,7 +173,7 @@ fn decode_gray_scale_image(
     params: &HalftoneParams,
     bits_per_value: u32,
     skip: Option<&Bitmap>,
-    gb_stats: &mut [Cx],
+    gb_stats: &mut [MqContext],
 ) -> Option<Vec<u16>> {
     let width = params.grid_width;
     let height = params.grid_height;
@@ -199,12 +199,13 @@ fn decode_gray_scale_image(
         let mut consumed = 0usize;
         for index in (0..bits_per_value as usize).rev() {
             let slice = data.get(consumed..).unwrap_or(&[]);
-            let (decoded, used) = fax::decode_mmr(slice, width, height as usize);
+            let mmr = ccitt::decode(slice, width, height as usize, FaxMode::Group4);
+            let (decoded, used) = (mmr.pixels, mmr.bytes_used);
             copy_packed(&mut planes[index], &decoded, width, height);
             consumed += used;
         }
     } else {
-        let mut arith = ArithDecoder::new(data);
+        let mut arith = MqDecoder::new(data);
         for index in (0..bits_per_value as usize).rev() {
             decode_generic_region(&mut arith, gb_stats, &mut planes[index], &generic_params);
         }

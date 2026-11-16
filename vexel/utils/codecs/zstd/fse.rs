@@ -1,5 +1,5 @@
 use crate::log_warn;
-use crate::utils::zstd::bitstream::{BackwardBits, ForwardBits};
+use crate::utils::codecs::zstd::bitstream::{BackwardBits, ForwardBits};
 
 pub const MAX_ACCURACY_LOG: u32 = 15;
 pub const MAX_SYMBOLS: usize = 256;

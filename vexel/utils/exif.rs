@@ -3,9 +3,10 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use serde::Serialize;
 use tsify::Tsify;
 
-use crate::bitreader::BitReader;
+use crate::utils::bytes::u64_at;
 use crate::utils::info::InfoWriter;
 use crate::utils::limits::Limits;
+use crate::utils::stream::StreamReader;
 use crate::utils::tiff::ifd::{read_file_header, type_size, Ifd, IfdCycleGuard, IfdEntry, IfdFormat};
 use crate::utils::types::ByteOrder;
 
@@ -70,7 +71,7 @@ pub struct ExifReader;
 impl ExifReader {
     pub fn parse(tiff_data: &[u8]) -> Option<ExifData> {
         let mut cursor = Cursor::new(tiff_data);
-        let mut reader = BitReader::new(&mut cursor);
+        let mut reader = StreamReader::new(&mut cursor);
         let header = read_file_header(&mut reader).ok()?;
         let byte_order = header.byte_order;
         let format = header.format;
@@ -141,7 +142,7 @@ pub(crate) fn exif_thumbnail(tiff_data: &[u8]) -> Option<&[u8]> {
 }
 
 fn read_guarded<R: Read + Seek>(
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     offset: u64,
     format: IfdFormat,
     limits: &mut Limits,
@@ -158,7 +159,7 @@ fn load_sub_ifd<R: Read + Seek>(
     pointer_tag: u16,
     ifd_type: IfdType,
     format: IfdFormat,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &mut Limits,
     guard: &mut IfdCycleGuard,
 ) -> Option<ExifIfd> {
@@ -171,7 +172,7 @@ fn load_sub_ifd<R: Read + Seek>(
 fn materialize_ifd<R: Read + Seek>(
     ifd: &Ifd,
     ifd_type: IfdType,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &mut Limits,
 ) -> ExifIfd {
     let mut entries = Vec::new();
@@ -187,7 +188,7 @@ fn materialize_entry<R: Read + Seek>(
     ifd: &Ifd,
     entry: &IfdEntry,
     ifd_type: IfdType,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &mut Limits,
 ) -> Option<ExifEntry> {
     let size = type_size(entry.field_type)?;
@@ -335,20 +336,12 @@ pub(crate) fn parse_value(data_type: u16, count: usize, bytes: &[u8], byte_order
                 })
                 .collect(),
         ),
-        16 | 18 => ExifValue::Long8((0..count).filter_map(|i| read_u64_at(bytes, i, byte_order)).collect()),
+        16 | 18 => ExifValue::Long8((0..count).filter_map(|i| u64_at(bytes, i * 8, byte_order)).collect()),
         17 => {
-            ExifValue::SLong8((0..count).filter_map(|i| read_u64_at(bytes, i, byte_order).map(|v| v as i64)).collect())
+            ExifValue::SLong8((0..count).filter_map(|i| u64_at(bytes, i * 8, byte_order).map(|v| v as i64)).collect())
         }
         _ => ExifValue::Undefined(bytes.iter().take(count).copied().collect()),
     }
-}
-
-fn read_u64_at(bytes: &[u8], index: usize, byte_order: ByteOrder) -> Option<u64> {
-    let b: [u8; 8] = bytes.get(index * 8..index * 8 + 8)?.try_into().ok()?;
-    Some(match byte_order {
-        ByteOrder::LittleEndian => u64::from_le_bytes(b),
-        ByteOrder::BigEndian => u64::from_be_bytes(b),
-    })
 }
 
 fn ifd_pointer_offset(value: &ExifValue) -> Option<u64> {

@@ -9,9 +9,11 @@ use super::types::{
     FLAG_ALPHA_SIZE_MASK, FLAG_ORIGIN_RIGHT, FLAG_ORIGIN_TOP, IMAGE_TYPE_FLAG_RLE, IMAGE_TYPE_MASK,
     IMAGE_TYPE_MONOCHROME, IMAGE_TYPE_PALETTED, TGA_FOOTER_SIZE, TGA_SIGNATURE,
 };
-use crate::utils::bitreader::BitReader;
+use crate::utils::codecs::rle::{self, Packet};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::{ColorModel, DataExtent, ImageSummary};
+use crate::utils::read::read_vec_up_to;
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits, PixelData};
 
 const HEADER_SIZE: u64 = 18;
@@ -24,14 +26,14 @@ struct TgaStructure {
 }
 
 pub struct TgaDecoder<R: Read + Seek> {
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     limits: Limits,
     info: Option<TgaInfo>,
 }
 
 impl<R: Read + Seek> TgaDecoder<R> {
     pub fn new(reader: R) -> Self {
-        Self { reader: BitReader::with_le(reader), limits: Limits::default(), info: None }
+        Self { reader: StreamReader::with_le(reader), limits: Limits::default(), info: None }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {
@@ -512,54 +514,53 @@ impl<R: Read + Seek> TgaDecoder<R> {
         palette.get(index).or(palette.last()).copied().unwrap_or([0, 0, 0, 255])
     }
 
-    fn read_pixel(&mut self, bpp: u8, image_type: u8, has_alpha: bool) -> Option<[u8; 4]> {
-        let b0 = self.reader.read_u8().ok()?;
-        Some(match bpp {
-            8 => [b0, b0, b0, 255],
-            16 if image_type == IMAGE_TYPE_MONOCHROME => {
-                let a = self.reader.read_u8().unwrap_or(255);
-                [b0, b0, b0, if has_alpha { a } else { 255 }]
-            }
-            15 | 16 => {
-                let word = b0 as u16 | ((self.reader.read_u8().unwrap_or(0) as u16) << 8);
-                let [r, g, b] = Self::rgb_from_word(word);
-                let a = if has_alpha && (word & 0x8000) == 0 { 0 } else { 255 };
-                [r, g, b, a]
-            }
-            24 => {
-                let g = self.reader.read_u8().unwrap_or(0);
-                let r = self.reader.read_u8().unwrap_or(0);
-                [r, g, b0, 255]
-            }
-            32 => {
-                let g = self.reader.read_u8().unwrap_or(0);
-                let r = self.reader.read_u8().unwrap_or(0);
-                let a = self.reader.read_u8().unwrap_or(255);
-                [r, g, b0, if has_alpha { a } else { 255 }]
-            }
-            _ => [b0, b0, b0, 255],
-        })
+    fn source_pixel_bytes(bpp: u8, image_type: u8) -> usize {
+        if image_type == IMAGE_TYPE_PALETTED {
+            return (bpp as usize).div_ceil(8).clamp(1, 4);
+        }
+        match bpp {
+            15 | 16 => 2,
+            24 => 3,
+            32 => 4,
+            _ => 1,
+        }
     }
 
-    fn read_source_pixel(
-        &mut self,
-        bpp: u8,
-        image_type: u8,
-        has_alpha: bool,
-        palette: &[[u8; 4]],
-        palette_first: usize,
-    ) -> Option<[u8; 4]> {
-        if image_type != IMAGE_TYPE_PALETTED {
-            return self.read_pixel(bpp, image_type, has_alpha);
+    fn convert_pixel(src: &[u8], bpp: u8, image_type: u8, has_alpha: bool) -> [u8; 4] {
+        let alpha = |a: u8| if has_alpha { a } else { 255 };
+        match (bpp, src) {
+            (16, &[l, a]) if image_type == IMAGE_TYPE_MONOCHROME => [l, l, l, alpha(a)],
+            (15 | 16, &[lo, hi]) => {
+                let word = u16::from_le_bytes([lo, hi]);
+                let [r, g, b] = Self::rgb_from_word(word);
+                [r, g, b, if has_alpha && word & 0x8000 == 0 { 0 } else { 255 }]
+            }
+            (24, &[b, g, r]) => [r, g, b, 255],
+            (32, &[b, g, r, a]) => [r, g, b, alpha(a)],
+            (_, &[l, ..]) => [l, l, l, 255],
+            _ => [0, 0, 0, 255],
+        }
+    }
+
+    fn tga_packet(input: &mut &[u8]) -> Option<Packet> {
+        let header = rle::take_byte(input)?;
+        let count = (header & 0x7f) as usize + 1;
+        Some(if header & 0x80 != 0 { Packet::Run(count) } else { Packet::Literal(count) })
+    }
+
+    fn read_raw_pixels(&mut self, total_pixels: usize, pixel_bytes: usize, is_rle: bool) -> Vec<u8> {
+        let expected = total_pixels.saturating_mul(pixel_bytes);
+        let stored = if is_rle { total_pixels.saturating_mul(pixel_bytes + 1) } else { expected };
+        let packed = read_vec_up_to(self.reader.get_mut(), stored).unwrap_or_default();
+        if !is_rle {
+            return packed;
         }
 
-        let index_bytes = (bpp as usize).div_ceil(8).clamp(1, 4);
-        let mut index = self.reader.read_u8().ok()? as usize;
-        for i in 1..index_bytes {
-            index |= (self.reader.read_u8().unwrap_or(0) as usize) << (8 * i);
-        }
-
-        Some(Self::lookup_palette(palette, index.saturating_sub(palette_first)))
+        let mut raw = Vec::with_capacity(expected);
+        let result = rle::decode(&packed, &mut raw, expected, pixel_bytes, Self::tga_packet);
+        let unread = (packed.len() - result.consumed) as i64;
+        let _ = self.reader.seek(SeekFrom::Current(-unread));
+        raw
     }
 
     fn decode_image_data(&mut self, header: &TgaHeader, palette: &[[u8; 4]], has_alpha: bool, is_rle: bool) -> Vec<u8> {
@@ -567,43 +568,22 @@ impl<R: Read + Seek> TgaDecoder<R> {
         let image_type = header.image_type_raw & IMAGE_TYPE_MASK;
         let palette_first = header.palette_first as usize;
         let bpp = header.bpp;
+        let pixel_bytes = Self::source_pixel_bytes(bpp, image_type);
 
+        let raw = self.read_raw_pixels(total_pixels, pixel_bytes, is_rle);
         let mut pixels = vec![0u8; total_pixels * 4];
-        let mut written = 0usize;
+        let written = (raw.len() / pixel_bytes).min(total_pixels);
 
-        if is_rle {
-            'packets: while written < total_pixels {
-                let Ok(packet) = self.reader.read_u8() else {
-                    break;
-                };
-                let count = ((packet & 0x7f) as usize + 1).min(total_pixels - written);
-
-                if packet & 0x80 != 0 {
-                    let Some(px) = self.read_source_pixel(bpp, image_type, has_alpha, palette, palette_first) else {
-                        break;
-                    };
-                    for chunk in pixels[written * 4..(written + count) * 4].chunks_exact_mut(4) {
-                        chunk.copy_from_slice(&px);
-                    }
-                    written += count;
-                } else {
-                    for _ in 0..count {
-                        let Some(px) = self.read_source_pixel(bpp, image_type, has_alpha, palette, palette_first)
-                        else {
-                            break 'packets;
-                        };
-                        pixels[written * 4..written * 4 + 4].copy_from_slice(&px);
-                        written += 1;
-                    }
-                }
+        let sources = raw.chunks_exact(pixel_bytes);
+        let (targets, _) = pixels.as_chunks_mut::<4>();
+        if image_type == IMAGE_TYPE_PALETTED {
+            for (dst, src) in targets.iter_mut().zip(sources) {
+                let index = src.iter().rev().fold(0usize, |acc, &byte| (acc << 8) | byte as usize);
+                *dst = Self::lookup_palette(palette, index.saturating_sub(palette_first));
             }
         } else {
-            while written < total_pixels {
-                let Some(px) = self.read_source_pixel(bpp, image_type, has_alpha, palette, palette_first) else {
-                    break;
-                };
-                pixels[written * 4..written * 4 + 4].copy_from_slice(&px);
-                written += 1;
+            for (dst, src) in targets.iter_mut().zip(sources) {
+                *dst = Self::convert_pixel(src, bpp, image_type, has_alpha);
             }
         }
 

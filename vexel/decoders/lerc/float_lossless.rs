@@ -1,6 +1,9 @@
-use super::huffman::{Huffman, HuffmanBitStream};
+use super::huffman::{word_swapped, Huffman};
 use super::reader::ByteReader;
 use crate::log_warn;
+use crate::utils::bits::MsbBitReader;
+use crate::utils::codecs::pad_to;
+use crate::utils::codecs::rle::{self, Packet};
 use crate::utils::error::VexelResult;
 
 const MAX_DELTA: u8 = 5;
@@ -68,42 +71,13 @@ fn undo_move_bits_to_front(a: u32) -> u32 {
 
 fn decode_packbits(src: &[u8], expected: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(expected);
-    let mut i = 0usize;
-
-    while i < src.len() && out.len() < expected {
-        let b = src[i] as usize;
-        i += 1;
-
-        if b <= 127 {
-            let count = b + 1;
-            let available = src.len().saturating_sub(i).min(count);
-            let writable = expected.saturating_sub(out.len()).min(available);
-            out.extend_from_slice(&src[i..i + writable]);
-            i += available;
-
-            if available < count {
-                break;
-            }
-        } else {
-            if i >= src.len() {
-                break;
-            }
-
-            let count = b - 127 + 1;
-            let value = src[i];
-            i += 1;
-
-            let writable = expected.saturating_sub(out.len()).min(count);
-            out.extend(std::iter::repeat_n(value, writable));
-        }
-    }
-
-    if out.len() < expected {
-        log_warn!("LERC packbits plane truncated, padding {} bytes", expected - out.len());
-        out.resize(expected, 0);
-    }
-
-    out
+    rle::decode(src, &mut out, expected, 1, |input| {
+        Some(match rle::take_byte(input)? {
+            n @ 0..=127 => Packet::Literal(n as usize + 1),
+            n => Packet::Run(n as usize - 126),
+        })
+    });
+    pad_to(out, expected, "LERC packbits plane")
 }
 
 fn decode_esri_huffman(src: &[u8], expected: usize) -> Vec<u8> {
@@ -144,11 +118,12 @@ fn decode_esri_huffman(src: &[u8], expected: usize) -> Vec<u8> {
                 }
             };
 
-            let mut stream = HuffmanBitStream::new(reader.tail());
+            let words = word_swapped(reader.tail());
+            let mut stream = MsbBitReader::new(&words);
             let mut out = Vec::with_capacity(expected);
 
             for _ in 0..expected {
-                match stream.decode_one(&huffman) {
+                match huffman.decode(&mut stream) {
                     Ok(value) => out.push(value as u8),
                     Err(e) => {
                         log_warn!("LERC float byte plane decode stopped early: {}", e);

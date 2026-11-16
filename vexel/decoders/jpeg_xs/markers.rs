@@ -1,6 +1,6 @@
-use super::bitreader::XsBitReader;
 use super::types::*;
 use crate::log_warn;
+use crate::utils::bits::MsbBitReader;
 
 pub struct HeaderParse {
     pub config: Config,
@@ -27,23 +27,23 @@ fn marker_name(marker: u16) -> &'static str {
     }
 }
 
-pub fn parse_header(reader: &mut XsBitReader) -> HeaderParse {
+pub fn parse_header(reader: &mut MsbBitReader) -> HeaderParse {
     let mut out =
         HeaderParse { config: Config::default(), image: ImageParams::default(), saw_pih: false, saw_cdt: false };
 
-    if reader.peek(16) as u16 == MARKER_SOC {
-        reader.read(16);
+    if reader.peek_u64(16) as u16 == MARKER_SOC {
+        reader.read_u64(16);
     } else {
         log_warn!("JPEG XS: missing SOC marker, attempting to continue");
     }
 
     loop {
-        if !reader.can_peek(16) {
+        if reader.bits_left() < 16 {
             log_warn!("JPEG XS: unexpected end of stream while parsing headers");
             break;
         }
 
-        let marker = reader.peek(16) as u16;
+        let marker = reader.peek_u64(16) as u16;
 
         if marker == MARKER_SLH || marker == MARKER_EOC {
             break;
@@ -54,11 +54,11 @@ pub fn parse_header(reader: &mut XsBitReader) -> HeaderParse {
             break;
         }
 
-        reader.read(16);
+        reader.read_u64(16);
 
-        let length = if reader.can_peek(16) { reader.peek(16) as u32 } else { 0 };
+        let length = if reader.bits_left() >= 16 { reader.peek_u64(16) as u32 } else { 0 };
 
-        let segment_start = reader.consumed_bits();
+        let segment_start = reader.position();
 
         let handled = match marker {
             MARKER_CAP => parse_cap(reader, &mut out.config),
@@ -89,7 +89,7 @@ pub fn parse_header(reader: &mut XsBitReader) -> HeaderParse {
 
         let segment_end = segment_start + u64::from(length) * 8;
 
-        if segment_end < reader.consumed_bits() {
+        if segment_end < reader.position() {
             log_warn!("JPEG XS: marker {} overran its declared length", marker_name(marker));
         }
 
@@ -104,8 +104,8 @@ pub fn parse_header(reader: &mut XsBitReader) -> HeaderParse {
     out
 }
 
-fn parse_cap(reader: &mut XsBitReader, config: &mut Config) -> bool {
-    let length = reader.read(16);
+fn parse_cap(reader: &mut MsbBitReader, config: &mut Config) -> bool {
+    let length = reader.read_u64(16);
 
     if !(2..=4).contains(&length) {
         return false;
@@ -114,52 +114,52 @@ fn parse_cap(reader: &mut XsBitReader, config: &mut Config) -> bool {
     let payload = length - 2;
 
     config.cap_bits = match payload {
-        1 => (reader.read(8) << 8) as u16,
-        2 => reader.read(16) as u16,
+        1 => (reader.read_u64(8) << 8) as u16,
+        2 => reader.read_u64(16) as u16,
         _ => 0,
     };
 
     true
 }
 
-fn parse_pih(reader: &mut XsBitReader, config: &mut Config, image: &mut ImageParams) -> bool {
-    let length = reader.read(16);
+fn parse_pih(reader: &mut MsbBitReader, config: &mut Config, image: &mut ImageParams) -> bool {
+    let length = reader.read_u64(16);
 
     if length != 26 {
         log_warn!("JPEG XS: PIH length {} is not 26, parsing anyway", length);
     }
 
-    config.bitstream_size = reader.read(32);
-    config.profile = reader.read(16) as u16;
+    config.bitstream_size = reader.read_u64(32);
+    config.profile = reader.read_u64(16) as u16;
 
-    let plev = reader.read(16);
+    let plev = reader.read_u64(16);
     config.level = ((plev >> 8) & 0xff) as u8;
     config.sublevel = (plev & 0xff) as u8;
 
-    image.width = reader.read(16) as u32;
-    image.height = reader.read(16) as u32;
+    image.width = reader.read_u64(16) as u32;
+    image.height = reader.read_u64(16) as u32;
 
-    config.cw = reader.read(16) as u16;
-    config.slice_height = reader.read(16) as u32;
+    config.cw = reader.read_u64(16) as u16;
+    config.slice_height = reader.read_u64(16) as u32;
 
-    image.ncomps = reader.read(8) as usize;
+    image.ncomps = reader.read_u64(8) as usize;
 
-    config.n_g = reader.read(8) as u8;
-    config.s_s = reader.read(8) as u8;
-    config.bw = reader.read(8) as u8;
-    config.fq = reader.read(4) as u8;
-    config.b_r = reader.read(4) as u8;
-    config.fslc = reader.read(1) as u8;
-    config.ppoc = reader.read(3) as u8;
-    config.color_transform = ColorTransform::from_bits(reader.read(4) as u8);
-    config.nlx = reader.read(4) as u8;
-    config.nly = reader.read(4) as u8;
+    config.n_g = reader.read_u64(8) as u8;
+    config.s_s = reader.read_u64(8) as u8;
+    config.bw = reader.read_u64(8) as u8;
+    config.fq = reader.read_u64(4) as u8;
+    config.b_r = reader.read_u64(4) as u8;
+    config.fslc = reader.read_u64(1) as u8;
+    config.ppoc = reader.read_u64(3) as u8;
+    config.color_transform = ColorTransform::from_bits(reader.read_u64(4) as u8);
+    config.nlx = reader.read_u64(4) as u8;
+    config.nly = reader.read_u64(4) as u8;
     config.slice_height = config.slice_height.saturating_mul(1 << config.nly.min(16));
-    config.lh = reader.read(1) as u8;
-    config.rl = reader.read(1) as u8;
-    config.qpih = reader.read(2) as u8;
-    config.fs = reader.read(2) as u8;
-    config.rm = reader.read(2) as u8;
+    config.lh = reader.read_u64(1) as u8;
+    config.rl = reader.read_u64(1) as u8;
+    config.qpih = reader.read_u64(2) as u8;
+    config.fs = reader.read_u64(2) as u8;
+    config.rm = reader.read_u64(2) as u8;
 
     if image.ncomps > MAX_NCOMPS {
         log_warn!("JPEG XS: ncomps {} exceeds maximum {}, clamping", image.ncomps, MAX_NCOMPS);
@@ -169,8 +169,8 @@ fn parse_pih(reader: &mut XsBitReader, config: &mut Config, image: &mut ImagePar
     true
 }
 
-fn parse_cdt(reader: &mut XsBitReader, image: &mut ImageParams) -> bool {
-    let length = reader.read(16);
+fn parse_cdt(reader: &mut MsbBitReader, image: &mut ImageParams) -> bool {
+    let length = reader.read_u64(16);
     let declared = length.saturating_sub(2) / 2;
     let count = image.ncomps.min(declared as usize).min(MAX_NCOMPS);
 
@@ -179,10 +179,10 @@ fn parse_cdt(reader: &mut XsBitReader, image: &mut ImageParams) -> bool {
     }
 
     for c in 0..count {
-        image.depth = reader.read(8) as u8;
+        image.depth = reader.read_u64(8) as u8;
 
-        let sx = reader.read(4) as u8;
-        let sy = reader.read(4) as u8;
+        let sx = reader.read_u64(4) as u8;
+        let sy = reader.read_u64(4) as u8;
 
         image.sx[c] = if sx == 1 || sx == 2 {
             sx
@@ -207,8 +207,8 @@ fn parse_cdt(reader: &mut XsBitReader, image: &mut ImageParams) -> bool {
     true
 }
 
-fn parse_wgt(reader: &mut XsBitReader, config: &mut Config) -> bool {
-    let length = reader.read(16);
+fn parse_wgt(reader: &mut MsbBitReader, config: &mut Config) -> bool {
+    let length = reader.read_u64(16);
 
     if length < 2 {
         return false;
@@ -227,32 +227,32 @@ fn parse_wgt(reader: &mut XsBitReader, config: &mut Config) -> bool {
     config.lvl_priorities.clear();
 
     for _ in 0..count {
-        config.lvl_gains.push(reader.read(8) as u8);
-        config.lvl_priorities.push(reader.read(8) as u8);
+        config.lvl_gains.push(reader.read_u64(8) as u8);
+        config.lvl_priorities.push(reader.read_u64(8) as u8);
     }
 
     true
 }
 
-fn parse_nlt(reader: &mut XsBitReader, config: &mut Config) -> bool {
-    let length = reader.read(16);
+fn parse_nlt(reader: &mut MsbBitReader, config: &mut Config) -> bool {
+    let length = reader.read_u64(16);
 
     if length != 5 && length != 12 {
         log_warn!("JPEG XS: unexpected NLT length {}", length);
     }
 
-    match reader.read(8) {
+    match reader.read_u64(8) {
         1 => {
             config.tnlt = NltType::Quadratic;
-            config.quadratic.sigma = reader.read(1) as u16;
-            config.quadratic.alpha = reader.read(15) as u16;
+            config.quadratic.sigma = reader.read_u64(1) as u16;
+            config.quadratic.alpha = reader.read_u64(15) as u16;
             true
         }
         2 => {
             config.tnlt = NltType::Extended;
-            config.extended.t1 = reader.read(32) as u32;
-            config.extended.t2 = reader.read(32) as u32;
-            config.extended.e = reader.read(8) as u8;
+            config.extended.t1 = reader.read_u64(32) as u32;
+            config.extended.t2 = reader.read_u64(32) as u32;
+            config.extended.e = reader.read_u64(8) as u8;
             true
         }
         other => {
@@ -263,27 +263,27 @@ fn parse_nlt(reader: &mut XsBitReader, config: &mut Config) -> bool {
     }
 }
 
-fn parse_cwd(reader: &mut XsBitReader, config: &mut Config) -> bool {
-    let length = reader.read(16);
+fn parse_cwd(reader: &mut MsbBitReader, config: &mut Config) -> bool {
+    let length = reader.read_u64(16);
 
     if length != 3 {
         log_warn!("JPEG XS: unexpected CWD length {}", length);
     }
 
-    config.sd = reader.read(8) as u8;
+    config.sd = reader.read_u64(8) as u8;
     true
 }
 
-fn parse_cts(reader: &mut XsBitReader, config: &mut Config) -> bool {
-    let length = reader.read(16);
+fn parse_cts(reader: &mut MsbBitReader, config: &mut Config) -> bool {
+    let length = reader.read_u64(16);
 
     if length != 4 {
         log_warn!("JPEG XS: unexpected CTS length {}", length);
     }
 
-    reader.read(4);
+    reader.read_u64(4);
 
-    config.tetrix.cf = match reader.read(4) {
+    config.tetrix.cf = match reader.read_u64(4) {
         0 => TetrixMode::Full,
         3 => TetrixMode::Inline,
         other => {
@@ -292,8 +292,8 @@ fn parse_cts(reader: &mut XsBitReader, config: &mut Config) -> bool {
         }
     };
 
-    config.tetrix.e1 = reader.read(4) as u8;
-    config.tetrix.e2 = reader.read(4) as u8;
+    config.tetrix.e1 = reader.read_u64(4) as u8;
+    config.tetrix.e2 = reader.read_u64(4) as u8;
 
     true
 }
@@ -305,8 +305,8 @@ const CRG_PATTERNS: [(CfaPattern, [u16; 4], [u16; 4]); 4] = [
     (CfaPattern::Gbrg, [0, 0, 32768, 32768], [32768, 0, 32768, 0]),
 ];
 
-fn parse_crg(reader: &mut XsBitReader, config: &mut Config, image: &ImageParams) -> bool {
-    let length = reader.read(16);
+fn parse_crg(reader: &mut MsbBitReader, config: &mut Config, image: &ImageParams) -> bool {
+    let length = reader.read_u64(16);
     let declared = length.saturating_sub(2) / 4;
     let count = declared.min(MAX_NCOMPS as u64) as usize;
 
@@ -314,8 +314,8 @@ fn parse_crg(reader: &mut XsBitReader, config: &mut Config, image: &ImageParams)
     let mut ycrg = [0u16; MAX_NCOMPS];
 
     for c in 0..count {
-        xcrg[c] = reader.read(16) as u16;
-        ycrg[c] = reader.read(16) as u16;
+        xcrg[c] = reader.read_u64(16) as u16;
+        ycrg[c] = reader.read_u64(16) as u16;
     }
 
     if image.ncomps != 4 || count < 4 {
@@ -333,21 +333,21 @@ fn parse_crg(reader: &mut XsBitReader, config: &mut Config, image: &ImageParams)
     false
 }
 
-pub fn parse_slice_header(reader: &mut XsBitReader) -> Option<u32> {
-    if !reader.can_peek(16) {
+pub fn parse_slice_header(reader: &mut MsbBitReader) -> Option<u32> {
+    if reader.bits_left() < 16 {
         return None;
     }
 
-    if reader.peek(16) as u16 != MARKER_SLH {
+    if reader.peek_u64(16) as u16 != MARKER_SLH {
         return None;
     }
 
-    reader.read(16);
+    reader.read_u64(16);
 
-    let length = reader.read(16);
+    let length = reader.read_u64(16);
     if length != 4 {
         log_warn!("JPEG XS: unexpected SLH length {}", length);
     }
 
-    Some(reader.read(16) as u32)
+    Some(reader.read_u64(16) as u32)
 }

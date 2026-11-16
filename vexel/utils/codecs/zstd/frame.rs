@@ -1,8 +1,8 @@
 use crate::log_warn;
-use crate::utils::zstd::bitstream::ForwardBits;
-use crate::utils::zstd::fse::FseTable;
-use crate::utils::zstd::huffman::HuffmanTable;
-use crate::utils::zstd::sequences::{decode_sequences, decode_table, SeqPart, Sequence};
+use crate::utils::codecs::zstd::bitstream::ForwardBits;
+use crate::utils::codecs::zstd::fse::FseTable;
+use crate::utils::codecs::zstd::huffman::HuffmanTable;
+use crate::utils::codecs::zstd::sequences::{decode_sequences, decode_table, SeqPart, Sequence};
 
 pub const MAGIC_NUMBER: u32 = 0xFD2F_B528;
 const SKIPPABLE_MAGIC_MASK: u32 = 0xFFFF_FFF0;

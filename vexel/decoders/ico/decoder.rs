@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use crate::bitreader::BitReader;
 use crate::decoders::bmp::decoder::BmpDecoder;
 use crate::decoders::bmp::headers::HeaderReader;
 use crate::decoders::bmp::types::{BitmapCompression, DibKind};
@@ -13,6 +12,7 @@ use crate::decoders::png::decoder::PngDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, ImageFrame, PixelData};
 use crate::utils::info::{ColorModel, ImageSummary};
+use crate::utils::stream::StreamReader;
 use crate::{log_error, log_warn, Limits};
 
 const DIRECTORY_SIZE: u64 = 6;
@@ -33,7 +33,7 @@ pub struct IcoDecoder<R: Read + Seek> {
     sorted_offsets: Vec<u64>,
     bytes_read: u64,
     info: Option<IcoInfo>,
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
 }
 
 impl<R: Read + Seek> IcoDecoder<R> {
@@ -51,7 +51,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
             sorted_offsets: Vec::new(),
             bytes_read: 0,
             info: None,
-            reader: BitReader::with_le(reader),
+            reader: StreamReader::with_le(reader),
         }
     }
 
@@ -234,7 +234,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
     }
 
     fn inspect_bmp(bytes: &[u8]) -> EmbeddedBmp {
-        let mut reader = BitReader::with_le(Cursor::new(bytes));
+        let mut reader = StreamReader::with_le(Cursor::new(bytes));
         let dib = HeaderReader::read_info_header(&mut reader).ok().map(|(dib, _, _)| dib);
 
         let Some(header) = &dib else {

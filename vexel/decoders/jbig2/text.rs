@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use crate::decoders::jbig2::arith::{ArithDecoder, IaidCtx, IntCtx};
+use crate::decoders::jbig2::arith::{IaidCtx, IntCtx};
 use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp, WorkBudget};
-use crate::decoders::jbig2::huffman::{HuffmanReader, HuffmanTable, HuffmanValue};
+use crate::decoders::jbig2::huffman::{HuffmanTable, HuffmanValue};
 use crate::decoders::jbig2::refinement::{decode_refinement_region, RefinementParams};
 use crate::log_warn;
+use crate::utils::bits::MsbBitReader;
+use crate::utils::entropy::mq::{MqContext, MqDecoder};
 
 const PLACEMENT_COST: u64 = 1024;
 
@@ -96,8 +98,8 @@ impl TextArithContexts {
 }
 
 pub enum TextCoder<'a, 'b> {
-    Arith { arith: &'a mut ArithDecoder<'b>, contexts: &'a mut TextArithContexts },
-    Huffman { reader: &'a mut HuffmanReader<'b>, tables: &'a TextRegionHuffman },
+    Arith { arith: &'a mut MqDecoder<'b>, contexts: &'a mut TextArithContexts },
+    Huffman { reader: &'a mut MsbBitReader<'b>, tables: &'a TextRegionHuffman },
 }
 
 pub struct Placement {
@@ -113,7 +115,7 @@ pub fn decode_text_region(
     symbols: &[Arc<Bitmap>],
     params: &TextRegionParams,
     coder: &mut TextCoder,
-    refine_stats: &mut [crate::decoders::jbig2::arith::Cx],
+    refine_stats: &mut [MqContext],
     budget: &mut WorkBudget,
 ) {
     decode_text_region_tracked(bitmap, symbols, params, coder, refine_stats, None, budget);
@@ -124,7 +126,7 @@ pub fn decode_text_region_tracked(
     symbols: &[Arc<Bitmap>],
     params: &TextRegionParams,
     coder: &mut TextCoder,
-    refine_stats: &mut [crate::decoders::jbig2::arith::Cx],
+    refine_stats: &mut [MqContext],
     mut placements: Option<&mut Vec<Placement>>,
     budget: &mut WorkBudget,
 ) {
@@ -174,7 +176,7 @@ fn place_instances(
     symbols: &[Arc<Bitmap>],
     params: &TextRegionParams,
     coder: &mut TextCoder,
-    refine_stats: &mut [crate::decoders::jbig2::arith::Cx],
+    refine_stats: &mut [MqContext],
     mut placements: Option<&mut Vec<Placement>>,
     budget: &mut WorkBudget,
     checkpoint: &mut Option<BeforeFirstInvalidSymbol>,
@@ -294,18 +296,20 @@ fn place_instances(
                                 decode_refinement_region(arith, refine_stats, &mut target, &refine_params);
                             }
                             TextCoder::Huffman { reader, .. } => {
-                                reader.align();
-                                let start = reader.byte_offset();
+                                reader.align(8);
+                                let start = reader.byte_position();
                                 let slice = &reader.data()[start.min(reader.data().len())..];
-                                let mut arith = ArithDecoder::new(slice);
+                                let mut arith = MqDecoder::new(slice);
                                 decode_refinement_region(&mut arith, refine_stats, &mut target, &refine_params);
-                                reader.advance_bytes(bmsize as usize);
+                                reader.align(8);
+                                reader.skip(bmsize as u64 * 8);
                             }
                         }
                         refined_bitmap = Some(target);
                     }
                 } else if let TextCoder::Huffman { reader, .. } = coder {
-                    reader.advance_bytes(bmsize as usize);
+                    reader.align(8);
+                    reader.skip(bmsize as u64 * 8);
                 }
             }
 
@@ -400,7 +404,7 @@ fn read_ids(coder: &mut TextCoder) -> Option<Option<i32>> {
 fn read_curt(coder: &mut TextCoder, log_strips: u32) -> Option<i32> {
     match coder {
         TextCoder::Arith { arith, contexts } => contexts.iait.decode(arith),
-        TextCoder::Huffman { reader, .. } => reader.read_bits(log_strips).map(|value| value as i32),
+        TextCoder::Huffman { reader, .. } => reader.try_read(log_strips).map(|value| value as i32),
     }
 }
 
@@ -412,7 +416,7 @@ fn read_id(coder: &mut TextCoder) -> Option<u32> {
                 HuffmanValue::Value(value) => Some(value.max(0) as u32),
                 HuffmanValue::Oob => None,
             },
-            SymbolCodes::Fixed(bits) => reader.read_bits(*bits),
+            SymbolCodes::Fixed(bits) => reader.try_read(*bits),
         },
     }
 }
@@ -420,7 +424,7 @@ fn read_id(coder: &mut TextCoder) -> Option<u32> {
 fn read_ri(coder: &mut TextCoder) -> Option<i32> {
     match coder {
         TextCoder::Arith { arith, contexts } => contexts.iari.decode(arith),
-        TextCoder::Huffman { reader, .. } => reader.read_bits(1).map(|value| value as i32),
+        TextCoder::Huffman { reader, .. } => reader.try_read(1).map(|value| value as i32),
     }
 }
 
@@ -439,7 +443,7 @@ fn read_refinement_deltas(coder: &mut TextCoder) -> Option<(i32, i32, i32, i32, 
             let rdx = expect_value(tables.rdx.decode(reader)?)?;
             let rdy = expect_value(tables.rdy.decode(reader)?)?;
             let bmsize = expect_value(tables.rsize.decode(reader)?)?;
-            reader.align();
+            reader.align(8);
             Some((rdw, rdh, rdx, rdy, bmsize))
         }
     }
@@ -452,10 +456,10 @@ fn expect_value(value: HuffmanValue) -> Option<i32> {
     }
 }
 
-pub fn decode_symbol_id_huffman_table(reader: &mut HuffmanReader, num_syms: u32) -> Option<HuffmanTable> {
+pub fn decode_symbol_id_huffman_table(reader: &mut MsbBitReader, num_syms: u32) -> Option<HuffmanTable> {
     let mut runcode_lengths = [0u32; 35];
     for length in runcode_lengths.iter_mut() {
-        *length = reader.read_bits(4)?;
+        *length = reader.try_read(4)?;
     }
     let runcode_table = crate::decoders::jbig2::huffman::build_runcode_table(&runcode_lengths);
 
@@ -475,10 +479,10 @@ pub fn decode_symbol_id_huffman_table(reader: &mut HuffmanReader, num_syms: u32)
             0..=31 => (code as u32, 1u32),
             32 => {
                 let previous = *lengths.last()?;
-                (previous, reader.read_bits(2)? + 3)
+                (previous, reader.try_read(2)? + 3)
             }
-            33 => (0, reader.read_bits(3)? + 3),
-            _ => (0, reader.read_bits(7)? + 11),
+            33 => (0, reader.try_read(3)? + 3),
+            _ => (0, reader.try_read(7)? + 11),
         };
 
         for _ in 0..range {
@@ -489,7 +493,7 @@ pub fn decode_symbol_id_huffman_table(reader: &mut HuffmanReader, num_syms: u32)
         }
     }
 
-    reader.align();
+    reader.align(8);
 
     let lines = lengths
         .iter()

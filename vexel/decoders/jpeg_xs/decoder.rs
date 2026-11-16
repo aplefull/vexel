@@ -1,6 +1,5 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use super::bitreader::XsBitReader;
 use super::ids::Ids;
 use super::info::{scan, JpegXsInfo};
 use super::markers::{parse_header, parse_slice_header};
@@ -9,13 +8,14 @@ use super::simd;
 use super::transform::{dwt_inverse, mct_inverse_rct, mct_inverse_tetrix, nlt_inverse};
 use super::types::*;
 use super::unpack::{sign_magnitude_to_value, Unpacker};
-use crate::bitreader::BitReader;
+use crate::utils::bits::MsbBitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits};
 
 pub struct JpegXsDecoder<R: Read + Seek> {
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     limits: Limits,
     config: Config,
     image: ImageParams,
@@ -26,7 +26,7 @@ pub struct JpegXsDecoder<R: Read + Seek> {
 impl<R: Read + Seek> JpegXsDecoder<R> {
     pub fn new(reader: R) -> Self {
         JpegXsDecoder {
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
             limits: Limits::default(),
             config: Config::default(),
             image: ImageParams::default(),
@@ -69,7 +69,7 @@ impl<R: Read + Seek> JpegXsDecoder<R> {
             return Err(VexelError::Custom("empty JPEG XS codestream".to_string()));
         }
 
-        let mut reader = XsBitReader::new(&data);
+        let mut reader = MsbBitReader::new(&data);
 
         let header = parse_header(&mut reader);
 
@@ -141,7 +141,7 @@ impl<R: Read + Seek> JpegXsDecoder<R> {
         }
     }
 
-    fn decode_planes(&mut self, reader: &mut XsBitReader, ids: &Ids) -> VexelResult<Vec<Vec<i32>>> {
+    fn decode_planes(&mut self, reader: &mut MsbBitReader, ids: &Ids) -> VexelResult<Vec<Vec<i32>>> {
         let mut total = 0u64;
         for comp in 0..ids.ncomps {
             let w = ids.comp_w[comp].max(0) as u64;

@@ -1,21 +1,14 @@
+use crate::utils::bits::MsbBitReader;
+use crate::utils::entropy::prefix::PrefixCodeTable;
 use crate::utils::error::{VexelError, VexelResult};
 
 const HUF_ENCBITS: u32 = 16;
 const HUF_DECBITS: u32 = 14;
 const HUF_ENCSIZE: usize = (1 << HUF_ENCBITS) + 1;
-const HUF_DECSIZE: usize = 1 << HUF_DECBITS;
-const HUF_DECMASK: u64 = (HUF_DECSIZE - 1) as u64;
 
 const SHORT_ZEROCODE_RUN: u64 = 59;
 const LONG_ZEROCODE_RUN: u64 = 63;
 const SHORTEST_LONG_RUN: u64 = 2 + LONG_ZEROCODE_RUN - SHORT_ZEROCODE_RUN;
-
-#[derive(Clone, Default)]
-struct HufDec {
-    len: u32,
-    lit: u32,
-    p: Vec<u32>,
-}
 
 #[inline(always)]
 fn huf_length(code: u64) -> u32 {
@@ -52,44 +45,18 @@ fn canonical_code_table(hcode: &mut [u64]) {
     }
 }
 
-struct BitReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-    c: u64,
-    lc: u32,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, c: 0, lc: 0 }
-    }
-
-    fn get_bits(&mut self, n_bits: u32) -> VexelResult<u64> {
-        while self.lc < n_bits {
-            if self.pos >= self.data.len() {
-                return Err(VexelError::Custom("EXR: huffman table data truncated".to_string()));
-            }
-            self.c = (self.c << 8) | self.data[self.pos] as u64;
-            self.pos += 1;
-            self.lc += 8;
-        }
-
-        self.lc -= n_bits;
-        Ok((self.c >> self.lc) & ((1u64 << n_bits) - 1))
-    }
-}
-
 fn unpack_enc_table(data: &[u8], im: usize, i_m: usize) -> VexelResult<(Vec<u64>, usize)> {
     let mut hcode = vec![0u64; HUF_ENCSIZE];
-    let mut reader = BitReader::new(data);
+    let mut reader = MsbBitReader::new(data);
+    let truncated = || VexelError::Custom("EXR: huffman table data truncated".to_string());
 
     let mut i = im;
     while i <= i_m {
-        let l = reader.get_bits(6)?;
+        let l = u64::from(reader.try_read(6).ok_or_else(truncated)?);
         hcode[i] = l;
 
         if l == LONG_ZEROCODE_RUN {
-            let zerun = reader.get_bits(8)? + SHORTEST_LONG_RUN;
+            let zerun = u64::from(reader.try_read(8).ok_or_else(truncated)?) + SHORTEST_LONG_RUN;
             if i as u64 + zerun > i_m as u64 + 1 {
                 return Err(VexelError::Custom("EXR: huffman table zero run too long".to_string()));
             }
@@ -114,207 +81,67 @@ fn unpack_enc_table(data: &[u8], im: usize, i_m: usize) -> VexelResult<(Vec<u64>
     }
 
     canonical_code_table(&mut hcode);
-    Ok((hcode, reader.pos))
+    Ok((hcode, reader.byte_position()))
 }
 
-fn build_dec_table(hcode: &[u64], im: usize, i_m: usize) -> VexelResult<Vec<HufDec>> {
-    let mut hdecod = vec![HufDec::default(); HUF_DECSIZE];
-
-    for (symbol, &code) in hcode.iter().enumerate().take(i_m + 1).skip(im) {
-        let c = huf_code(code);
-        let l = huf_length(code);
-
-        if l < 64 && (c >> l) != 0 {
-            return Err(VexelError::Custom("EXR: invalid huffman code".to_string()));
-        }
-
-        if l > HUF_DECBITS {
-            let index = (c >> (l - HUF_DECBITS)) as usize;
-            if index >= HUF_DECSIZE {
-                return Err(VexelError::Custom("EXR: invalid huffman code".to_string()));
-            }
-            let entry = &mut hdecod[index];
-            if entry.len != 0 {
-                return Err(VexelError::Custom("EXR: invalid huffman table".to_string()));
-            }
-            entry.lit += 1;
-            entry.p.push(symbol as u32);
-        } else if l != 0 {
-            let start = (c << (HUF_DECBITS - l)) as usize;
-            let count = 1usize << (HUF_DECBITS - l);
-            if start + count > HUF_DECSIZE {
-                return Err(VexelError::Custom("EXR: invalid huffman code".to_string()));
-            }
-            for entry in hdecod[start..start + count].iter_mut() {
-                if entry.len != 0 || !entry.p.is_empty() {
-                    return Err(VexelError::Custom("EXR: invalid huffman table".to_string()));
-                }
-                entry.len = l;
-                entry.lit = symbol as u32;
-            }
-        }
-    }
-
-    for entry in hdecod.iter_mut().filter(|entry| entry.p.len() > 1) {
-        entry.p.sort_unstable_by_key(|&symbol| {
-            let code = hcode[symbol as usize];
-            (huf_length(code), huf_code(code))
-        });
-    }
-
-    Ok(hdecod)
-}
-
-struct DecodeState<'a> {
-    input: &'a [u8],
-    pos: usize,
-    c: u64,
-    lc: i32,
-    out: Vec<u16>,
-    expected: usize,
-}
-
-impl<'a> DecodeState<'a> {
-    #[inline(always)]
-    fn get_char(&mut self) {
-        self.c = (self.c << 8) | self.input[self.pos] as u64;
-        self.pos += 1;
-        self.lc += 8;
-    }
-
-    fn emit(&mut self, symbol: u32, rlc: u32) -> VexelResult<()> {
-        if symbol == rlc {
-            if self.lc < 8 {
-                if self.pos >= self.input.len() {
-                    return Err(VexelError::Custom("EXR: huffman data truncated".to_string()));
-                }
-                self.get_char();
-            }
-
-            self.lc -= 8;
-            let cs = (self.c >> self.lc) as u8 as usize;
-
-            if self.out.len() + cs > self.expected {
-                return Err(VexelError::Custom("EXR: huffman run overflows output".to_string()));
-            }
-            let prev = match self.out.last() {
-                Some(&v) => v,
-                None => return Err(VexelError::Custom("EXR: huffman run with no previous symbol".to_string())),
-            };
-            for _ in 0..cs {
-                self.out.push(prev);
-            }
-        } else if self.out.len() < self.expected {
-            self.out.push(symbol as u16);
-        } else {
-            return Err(VexelError::Custom("EXR: huffman output overflow".to_string()));
-        }
-
-        Ok(())
-    }
+fn build_dec_table(hcode: &[u64], im: usize, i_m: usize) -> PrefixCodeTable<u32> {
+    let codes = (im..=i_m).filter_map(|symbol| {
+        let code = hcode[symbol];
+        let len = huf_length(code);
+        (len > 0).then(|| (len, huf_code(code), symbol as u32))
+    });
+    PrefixCodeTable::new(codes, HUF_DECBITS)
 }
 
 fn huf_decode(
-    hcode: &[u64],
-    hdecod: &[HufDec],
+    table: &PrefixCodeTable<u32>,
     data: &[u8],
     n_bits: u64,
     rlc: u32,
     expected: usize,
 ) -> VexelResult<Vec<u16>> {
+    let corrupt = || VexelError::Custom("EXR: corrupt huffman data".to_string());
     let byte_count = n_bits.div_ceil(8) as usize;
     if byte_count > data.len() {
         return Err(VexelError::Custom("EXR: huffman data truncated".to_string()));
     }
 
-    let mut state =
-        DecodeState { input: &data[..byte_count], pos: 0, c: 0, lc: 0, out: Vec::with_capacity(expected), expected };
+    let mut bits = MsbBitReader::new(&data[..byte_count]);
+    let mut out: Vec<u16> = Vec::with_capacity(expected);
 
-    while state.pos < state.input.len() {
-        state.get_char();
+    while bits.position() < n_bits {
+        let symbol = table.decode(&mut bits).ok_or_else(corrupt)?;
 
-        while state.lc >= HUF_DECBITS as i32 {
-            let offset = ((state.c >> (state.lc - HUF_DECBITS as i32)) & HUF_DECMASK) as usize;
-            let entry = &hdecod[offset];
-
-            if entry.len != 0 {
-                if entry.len as i32 > state.lc {
-                    return Err(VexelError::Custom("EXR: corrupt huffman data".to_string()));
-                }
-                state.lc -= entry.len as i32;
-                let lit = entry.lit;
-                state.emit(lit, rlc)?;
-            } else {
-                if entry.p.is_empty() {
-                    return Err(VexelError::Custom("EXR: corrupt huffman data".to_string()));
-                }
-
-                let mut found = None;
-                let mut start = 0usize;
-                while start < entry.p.len() {
-                    let length = huf_length(hcode[entry.p[start] as usize]);
-                    let end = start
-                        + entry.p[start..].partition_point(|&symbol| huf_length(hcode[symbol as usize]) == length);
-                    let l = length as i32;
-
-                    while state.lc < l && state.pos < state.input.len() {
-                        state.get_char();
-                    }
-
-                    if state.lc < l {
-                        break;
-                    }
-
-                    let mask = if l >= 64 { u64::MAX } else { (1u64 << l) - 1 };
-                    let value = (state.c >> (state.lc - l)) & mask;
-                    if let Ok(k) =
-                        entry.p[start..end].binary_search_by_key(&value, |&symbol| huf_code(hcode[symbol as usize]))
-                    {
-                        found = Some((entry.p[start + k], l));
-                        break;
-                    }
-
-                    start = end;
-                }
-
-                let Some((candidate, l)) = found else {
-                    return Err(VexelError::Custom("EXR: corrupt huffman data".to_string()));
-                };
-                state.lc -= l;
-                state.emit(candidate, rlc)?;
+        if symbol == rlc {
+            let count = bits.read(8) as usize;
+            if bits.position() > n_bits {
+                return Err(VexelError::Custom("EXR: huffman data truncated".to_string()));
             }
-        }
-    }
-
-    let trailing = (8u64.wrapping_sub(n_bits) & 7) as i32;
-    state.c >>= trailing;
-    state.lc -= trailing;
-
-    while state.lc > 0 {
-        let offset = ((state.c << (HUF_DECBITS as i32 - state.lc)) & HUF_DECMASK) as usize;
-        let entry = &hdecod[offset];
-
-        if entry.len != 0 {
-            if entry.len as i32 > state.lc {
-                return Err(VexelError::Custom("EXR: corrupt huffman data".to_string()));
+            let prev = *out
+                .last()
+                .ok_or_else(|| VexelError::Custom("EXR: huffman run with no previous symbol".to_string()))?;
+            if out.len() + count > expected {
+                return Err(VexelError::Custom("EXR: huffman run overflows output".to_string()));
             }
-            state.lc -= entry.len as i32;
-            let lit = entry.lit;
-            state.emit(lit, rlc)?;
+            out.resize(out.len() + count, prev);
+        } else if bits.position() > n_bits {
+            return Err(corrupt());
+        } else if out.len() < expected {
+            out.push(symbol as u16);
         } else {
-            return Err(VexelError::Custom("EXR: corrupt huffman data".to_string()));
+            return Err(VexelError::Custom("EXR: huffman output overflow".to_string()));
         }
     }
 
-    if state.out.len() != expected {
+    if out.len() != expected {
         return Err(VexelError::Custom(format!(
             "EXR: huffman decode produced {} of {} expected values",
-            state.out.len(),
+            out.len(),
             expected
         )));
     }
 
-    Ok(state.out)
+    Ok(out)
 }
 
 pub fn huf_decompress(compressed: &[u8], n_raw: usize) -> VexelResult<Vec<u16>> {
@@ -345,6 +172,6 @@ pub fn huf_decompress(compressed: &[u8], n_raw: usize) -> VexelResult<Vec<u16>> 
         return Err(VexelError::Custom("EXR: huffman bit count exceeds available data".to_string()));
     }
 
-    let hdecod = build_dec_table(&hcode, im, i_m)?;
-    huf_decode(&hcode, &hdecod, bit_data, n_bits, i_m as u32, n_raw)
+    let table = build_dec_table(&hcode, im, i_m);
+    huf_decode(&table, bit_data, n_bits, i_m as u32, n_raw)
 }

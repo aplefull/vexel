@@ -4,10 +4,10 @@ use std::io::{Read, Seek, SeekFrom};
 use serde::Serialize;
 use tsify::Tsify;
 
-use crate::bitreader::BitReader;
 use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat};
 use crate::utils::limits::Limits;
 use crate::utils::metadata::MetadataCollector;
+use crate::utils::stream::StreamReader;
 use crate::utils::tiff::info::{
     compression_name, first_u32, photometric_name, IfdKind, TiffEntry, TiffIfdSection, TiffImageIfd, TiffSection,
     TiffStructure,
@@ -167,7 +167,11 @@ fn select_raw(structure: &TiffStructure) -> Option<&TiffImageIfd> {
         .or_else(|| images.iter().max_by_key(area))
 }
 
-fn read_opcode_list<R: Read + Seek>(reader: &mut BitReader<R>, list: u8, entry: &TiffEntry) -> Option<DngOpcodeList> {
+fn read_opcode_list<R: Read + Seek>(
+    reader: &mut StreamReader<R>,
+    list: u8,
+    entry: &TiffEntry,
+) -> Option<DngOpcodeList> {
     let length = (entry.count as usize).min(MAX_OPCODE_LIST_BYTES);
     let mut data = vec![0u8; length];
     match entry.value_offset {
@@ -206,7 +210,7 @@ fn read_opcode_list<R: Read + Seek>(reader: &mut BitReader<R>, list: u8, entry: 
 fn parameters<R: Read + Seek>(
     structure: &TiffStructure,
     raw: Option<&TiffImageIfd>,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
 ) -> DngParameters {
     let primary = primary_ifd(structure);
     let raw_section = raw.and_then(|image| structure.ifd_section(image.index));
@@ -337,7 +341,7 @@ fn apply_metadata<R: Read + Seek>(
     structure: &TiffStructure,
     raw: &TiffImageIfd,
     summary: &mut ImageSummary,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &mut Limits,
 ) {
     let mut metadata = MetadataCollector::default();
@@ -352,7 +356,11 @@ fn apply_metadata<R: Read + Seek>(
     metadata.apply(summary);
 }
 
-pub fn build_info<R: Read + Seek>(structure: TiffStructure, reader: &mut BitReader<R>, limits: &mut Limits) -> DngInfo {
+pub fn build_info<R: Read + Seek>(
+    structure: TiffStructure,
+    reader: &mut StreamReader<R>,
+    limits: &mut Limits,
+) -> DngInfo {
     let raw = select_raw(&structure);
     let params = parameters(&structure, raw, reader);
     let mut summary = raw.and_then(|raw| summary(&structure, raw, &params));

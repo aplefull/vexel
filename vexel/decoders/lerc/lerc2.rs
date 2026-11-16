@@ -1,10 +1,11 @@
 use super::bitstuffer::decode_bit_stuffed;
 use super::float_lossless::decode_huffman_float;
-use super::huffman::{Huffman, HuffmanBitStream};
+use super::huffman::{bytes_consumed, word_swapped, Huffman};
 use super::mask::{rle_decompress, BitMask};
 use super::reader::ByteReader;
 use super::types::{ImageEncodeMode, Lerc2Header, LercDataType, CURRENT_VERSION, LERC2_MAGIC, MAX_MICRO_BLOCK_SIZE};
 use super::values::{read_value, reserve_elements, ValueBuffer};
+use crate::utils::bits::MsbBitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::{log_warn, Limits};
 
@@ -289,7 +290,8 @@ fn decode_huffman_int(
     let n_rows = header.n_rows as usize;
     let n_depth = header.n_depth as usize;
 
-    let mut stream = HuffmanBitStream::new(reader.tail());
+    let words = word_swapped(reader.tail());
+    let mut stream = MsbBitReader::new(&words);
     let all_valid = header.num_valid_pixel as usize == n_cols * n_rows;
 
     let wrap = |v: i64| -> f64 {
@@ -313,11 +315,11 @@ fn decode_huffman_int(
                             continue;
                         }
 
-                        let val = match stream.decode_one(&huffman) {
+                        let val = match huffman.decode(&mut stream) {
                             Ok(v) => v,
                             Err(e) => {
                                 log_warn!("LERC Huffman data ended early: {}", e);
-                                reader.skip(stream.bytes_consumed());
+                                reader.skip(bytes_consumed(&stream));
                                 return Ok(());
                             }
                         };
@@ -352,11 +354,11 @@ fn decode_huffman_int(
                     let m0 = k * n_depth;
 
                     for d in 0..n_depth {
-                        let val = match stream.decode_one(&huffman) {
+                        let val = match huffman.decode(&mut stream) {
                             Ok(v) => v,
                             Err(e) => {
                                 log_warn!("LERC Huffman data ended early: {}", e);
-                                reader.skip(stream.bytes_consumed());
+                                reader.skip(bytes_consumed(&stream));
                                 return Ok(());
                             }
                         };
@@ -369,7 +371,7 @@ fn decode_huffman_int(
         _ => return Err(VexelError::Custom(format!("Unsupported LERC Huffman image encode mode {:?}", mode))),
     }
 
-    reader.skip(stream.bytes_consumed());
+    reader.skip(bytes_consumed(&stream));
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 use crate::log_warn;
-use crate::utils::zstd::bitstream::{BackwardBits, ForwardBits};
-use crate::utils::zstd::fse::FseTable;
+use crate::utils::codecs::zstd::bitstream::{BackwardBits, ForwardBits};
+use crate::utils::codecs::zstd::fse::FseTable;
 
 const MAX_BITS: u32 = 16;
 const MAX_SYMBOLS: usize = 256;

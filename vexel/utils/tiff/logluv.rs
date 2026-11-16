@@ -1,4 +1,5 @@
 use crate::log_warn;
+use crate::utils::codecs::rle::{self, Packet};
 use crate::utils::types::ByteOrder;
 
 const UV_SQSIZ: f64 = 0.003_500;
@@ -272,47 +273,11 @@ pub fn xyz_to_rgb(xyz: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn decode_rle_plane(data: &[u8], offset: &mut usize, tp: &mut [u32], shift: u32) {
-    let npixels = tp.len();
-    let mut i = 0;
-
-    while i < npixels && *offset < data.len() {
-        let b = data[*offset];
-
-        if b >= 128 {
-            if data.len() - *offset < 2 {
-                break;
-            }
-
-            let rc = b as usize + 2 - 128;
-            let value = (data[*offset + 1] as u32) << shift;
-            *offset += 2;
-
-            let end = (i + rc).min(npixels);
-            for slot in &mut tp[i..end] {
-                *slot |= value;
-            }
-            i = end;
-        } else {
-            let rc = b as usize;
-            *offset += 1;
-
-            let available = rc.min(npixels - i).min(data.len() - *offset);
-            for slot in &mut tp[i..i + available] {
-                *slot |= (data[*offset] as u32) << shift;
-                *offset += 1;
-            }
-            i += available;
-
-            if available < rc {
-                break;
-            }
-        }
-    }
-
-    if i < npixels {
-        log_warn!("LogLuv row is short by {} pixels", npixels - i);
-    }
+fn logluv_packet(input: &mut &[u8]) -> Option<Packet> {
+    Some(match rle::take_byte(input)? {
+        n @ 0..=127 => Packet::Literal(n as usize),
+        n => Packet::Run(n as usize - 126),
+    })
 }
 
 fn decode_rle_rows(data: &[u8], width: usize, rows: usize, shifts: &[u32]) -> Vec<u32> {
@@ -321,12 +286,23 @@ fn decode_rle_rows(data: &[u8], width: usize, rows: usize, shifts: &[u32]) -> Ve
         return Vec::new();
     };
     let mut raw = vec![0u32; npixels];
-    let mut offset = 0;
+    if width == 0 {
+        return raw;
+    }
 
-    for row in 0..rows {
-        let tp = &mut raw[row * width..(row + 1) * width];
+    let mut input = data;
+    let mut plane = Vec::with_capacity(width);
+    for row in raw.chunks_exact_mut(width) {
         for &shift in shifts {
-            decode_rle_plane(data, &mut offset, tp, shift);
+            plane.clear();
+            let result = rle::decode(input, &mut plane, width, 1, logluv_packet);
+            input = &input[result.consumed..];
+            if plane.len() < width {
+                log_warn!("LogLuv row is short by {} pixels", width - plane.len());
+            }
+            for (slot, &byte) in row.iter_mut().zip(&plane) {
+                *slot |= u32::from(byte) << shift;
+            }
         }
     }
 

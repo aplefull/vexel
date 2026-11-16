@@ -1,18 +1,19 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
+use crate::utils::codecs::ccitt;
+use crate::utils::codecs::deflate::ZlibDecoder;
+use crate::utils::codecs::zstd::ZstdDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::ImageFrame;
 use crate::utils::info::{ColorModel, DataExtent, ImageSummary, SampleFormat as SummarySampleFormat};
 use crate::utils::metadata::MetadataCollector;
+use crate::utils::stream::StreamReader;
 use crate::utils::tiff::compression::{
-    apply_predictor_float, apply_predictor_horizontal, decompress_deflate_with_capacity, decompress_jpeg2000,
-    decompress_jpeg_xr, decompress_lerc, decompress_lzma_with_capacity, decompress_lzw_with_capacity, decompress_next,
-    decompress_packbits_with_capacity, decompress_png, decompress_sgilog, decompress_sgilog24, decompress_sgilog_l16,
-    decompress_thunderscan, decompress_zstd_with_capacity, predictor_x_factor, ChunkLayout,
+    apply_predictor, decompress_generic, decompress_jpeg2000, decompress_jpeg_xr, decompress_lerc, decompress_next,
+    decompress_png, decompress_sgilog, decompress_sgilog24, decompress_sgilog_l16, decompress_thunderscan, fax_mode,
+    ChunkLayout,
 };
-use crate::utils::tiff::fax::decompress_ccitt;
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard, IfdFormat};
 use crate::utils::tiff::info::{compression_name, walk_structure, IfdKind, TiffImageIfd, TiffInfo, TiffStructure};
 use crate::utils::tiff::jpeg::{jpeg_pixel_data, jpeg_rgb_bytes, splice_jpeg_tables};
@@ -32,7 +33,7 @@ pub struct TiffDecoder<R: Read + Seek> {
     byte_order: ByteOrder,
     ifd_format: IfdFormat,
     header: TiffHeader,
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     info: Option<TiffInfo>,
     subfile_type: u32,
     reserved_output: u64,
@@ -225,7 +226,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             byte_order: ByteOrder::LittleEndian,
             ifd_format: IfdFormat::classic(ByteOrder::LittleEndian),
             header: TiffHeader::default(),
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
             info: None,
             subfile_type: 0,
             reserved_output: 0,
@@ -567,16 +568,15 @@ impl<R: Read + Seek> TiffDecoder<R> {
         chunk_spp: usize,
         expected_bytes: usize,
     ) -> Vec<u8> {
+        if let Some(decompressed) = decompress_generic(self.header.compression, &data, expected_bytes) {
+            return decompressed;
+        }
+        if let Some(mode) = fax_mode(self.header.compression, self.header.t4_options) {
+            return ccitt::decode(&data, chunk_width as u32, chunk_rows, mode).pixels;
+        }
+
         match self.header.compression {
             Compression::None => data,
-            Compression::LZW => decompress_lzw_with_capacity(&data, expected_bytes),
-            Compression::PackBits => decompress_packbits_with_capacity(&data, expected_bytes),
-            Compression::AdobeDeflate | Compression::Deflate => decompress_deflate_with_capacity(&data, expected_bytes),
-            Compression::LZMA => decompress_lzma_with_capacity(&data, expected_bytes),
-            Compression::ZSTD => decompress_zstd_with_capacity(&data, expected_bytes),
-            Compression::CCITTRLE | Compression::CCITTRLEWord | Compression::CCITTFax3 | Compression::CCITTFax4 => {
-                decompress_ccitt(&data, chunk_width as u32, chunk_rows, self.header.compression, self.header.t4_options)
-            }
             Compression::ThunderScan => decompress_thunderscan(&data, chunk_width, chunk_rows),
             Compression::NeXT => decompress_next(&data, chunk_width, chunk_rows),
             Compression::SGILog24 => decompress_sgilog24(&data, chunk_width, chunk_rows),
@@ -599,8 +599,12 @@ impl<R: Read + Seek> TiffDecoder<R> {
             Compression::LERC => {
                 let blob = match self.header.lerc_additional_compression {
                     LercAdditionalCompression::None => data,
-                    LercAdditionalCompression::Deflate => decompress_deflate_with_capacity(&data, expected_bytes),
-                    LercAdditionalCompression::Zstd => decompress_zstd_with_capacity(&data, expected_bytes),
+                    LercAdditionalCompression::Deflate => {
+                        ZlibDecoder::from_slice(&data).decode_with_capacity(expected_bytes)
+                    }
+                    LercAdditionalCompression::Zstd => {
+                        ZstdDecoder::from_slice(&data).decode_with_capacity(expected_bytes)
+                    }
                 };
 
                 decompress_lerc(
@@ -624,23 +628,8 @@ impl<R: Read + Seek> TiffDecoder<R> {
     }
 
     fn apply_predictor(&self, data: &mut [u8], chunk_width: usize, spp: u16) {
-        let bps = self.bits_for(0);
-        match self.header.predictor {
-            Predictor::HorizontalDifferencing => {
-                apply_predictor_horizontal(data, chunk_width as u32, spp, bps, self.byte_order == ByteOrder::BigEndian);
-            }
-            Predictor::FloatingPoint | Predictor::FloatingPointX2 | Predictor::FloatingPointX4 => {
-                let x = predictor_x_factor(self.header.predictor);
-                apply_predictor_float(
-                    data,
-                    (chunk_width as u32 / x).max(1),
-                    spp.saturating_mul(x as u16),
-                    bps,
-                    self.byte_order == ByteOrder::BigEndian,
-                );
-            }
-            _ => {}
-        }
+        let big_endian = self.byte_order == ByteOrder::BigEndian;
+        apply_predictor(self.header.predictor, data, chunk_width as u32, spp, self.bits_for(0), big_endian);
     }
 
     fn read_image_chunks(&mut self) -> VexelResult<Vec<Vec<u8>>> {
@@ -1317,11 +1306,11 @@ impl<R: Read + Seek> TiffDecoder<R> {
     }
 }
 
-fn ifd_subfile_type<R: Read + Seek>(ifd: &Ifd, reader: &mut BitReader<R>) -> u32 {
+fn ifd_subfile_type<R: Read + Seek>(ifd: &Ifd, reader: &mut StreamReader<R>) -> u32 {
     ifd.value(TiffTags::NewSubfileType, reader).unwrap_or(0)
 }
 
-fn parse_header<R: Read + Seek>(ifd: &Ifd, reader: &mut BitReader<R>, limits: &mut Limits) -> (TiffHeader, bool) {
+fn parse_header<R: Read + Seek>(ifd: &Ifd, reader: &mut StreamReader<R>, limits: &mut Limits) -> (TiffHeader, bool) {
     let mut header = TiffHeader::default();
     if let Some(v) = ifd.value(TiffTags::ImageWidth, reader) {
         header.image_width = v;

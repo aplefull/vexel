@@ -1,5 +1,6 @@
 use crate::decoders::jpeg_xr::types::*;
 use crate::log_warn;
+use crate::utils::bytes::{le_u16, le_u32};
 use crate::utils::metadata::{jp2, MetadataCollector};
 
 const PIXEL_FORMAT_BASE: [u8; 15] =
@@ -102,14 +103,6 @@ pub fn pixel_format_from_guid(guid: &[u8]) -> PixelFormatKind {
     }
 }
 
-fn read_u16(data: &[u8], pos: usize) -> Option<u16> {
-    data.get(pos..pos.checked_add(2)?).map(|b| u16::from_le_bytes([b[0], b[1]]))
-}
-
-fn read_u32(data: &[u8], pos: usize) -> Option<u32> {
-    data.get(pos..pos.checked_add(4)?).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
 fn entry_type_size(kind: u16) -> usize {
     match kind {
         1 | 2 | 6 | 7 => 1,
@@ -133,7 +126,7 @@ pub fn parse_container(data: &[u8]) -> Option<Container> {
         return None;
     }
 
-    let first_ifd = read_u32(data, 4)? as usize;
+    let first_ifd = le_u32(data, 4)? as usize;
     let mut container = Container::default();
     let mut ifd_offset = first_ifd;
     let mut visited = Vec::new();
@@ -150,17 +143,17 @@ pub fn parse_container(data: &[u8]) -> Option<Container> {
             break;
         }
 
-        let count = match read_u16(data, ifd_offset) {
+        let count = match le_u16(data, ifd_offset) {
             Some(count) => count as usize,
             None => break,
         };
 
         for i in 0..count {
             let Some(entry) = ifd_offset.checked_add(2 + i * 12) else { break };
-            let Some(tag) = read_u16(data, entry) else { break };
-            let Some(kind) = read_u16(data, entry + 2) else { break };
-            let Some(items) = read_u32(data, entry + 4) else { break };
-            let Some(value) = read_u32(data, entry + 8) else { break };
+            let Some(tag) = le_u16(data, entry) else { break };
+            let Some(kind) = le_u16(data, entry + 2) else { break };
+            let Some(items) = le_u32(data, entry + 4) else { break };
+            let Some(value) = le_u32(data, entry + 8) else { break };
 
             let byte_len = entry_type_size(kind).saturating_mul(items as usize);
             let inline = byte_len <= 4;
@@ -188,7 +181,7 @@ pub fn parse_container(data: &[u8]) -> Option<Container> {
             }
         }
 
-        ifd_offset = match ifd_offset.checked_add(2 + count * 12).and_then(|at| read_u32(data, at)) {
+        ifd_offset = match ifd_offset.checked_add(2 + count * 12).and_then(|at| le_u32(data, at)) {
             Some(next) => next as usize,
             None => 0,
         };

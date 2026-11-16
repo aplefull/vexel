@@ -1,7 +1,8 @@
-use super::bitreader::XsBitReader;
 use super::ids::Ids;
 use super::precinct::{compute_gtli_tables, Precinct, SIGN_BIT_MASK};
 use super::types::*;
+use crate::decoders::jpeg_xs::bitreader::XsBits;
+use crate::utils::bits::MsbBitReader;
 
 pub struct Unpacker {
     pub gtli_data: Vec<i32>,
@@ -47,7 +48,7 @@ impl Unpacker {
 
     pub fn unpack_precinct(
         &mut self,
-        reader: &mut XsBitReader,
+        reader: &mut MsbBitReader,
         ids: &Ids,
         precinct: &mut Precinct,
         precinct_top: Option<&Precinct>,
@@ -60,19 +61,19 @@ impl Unpacker {
         let position_count = ids.pi.len();
         let long_headers = ids.use_long_precinct_headers;
 
-        let lprc = (reader.read(PREC_HDR_PREC_SIZE) as i64) << 3;
-        let quantization = reader.read(PREC_HDR_QUANTIZATION_SIZE) as i32;
-        let refinement = reader.read(PREC_HDR_REFINEMENT_SIZE) as i32;
+        let lprc = (reader.read_u64(PREC_HDR_PREC_SIZE) as i64) << 3;
+        let quantization = reader.read_u64(PREC_HDR_QUANTIZATION_SIZE) as i32;
+        let refinement = reader.read_u64(PREC_HDR_REFINEMENT_SIZE) as i32;
 
         let mut gcli_methods = Vec::with_capacity(precinct.band_count);
         for _ in 0..precinct.band_count {
-            let signaling = reader.read(GCLI_METHOD_NBITS) as u8;
+            let signaling = reader.read_u64(GCLI_METHOD_NBITS) as u8;
             gcli_methods.push(GcliMethod::from_signaling(signaling, self.rm));
         }
 
         reader.align(PREC_HDR_ALIGNMENT);
 
-        let bitpos_at_prc_data = reader.consumed_bits();
+        let bitpos_at_prc_data = reader.position();
 
         compute_gtli_tables(
             quantization,
@@ -112,11 +113,11 @@ impl Unpacker {
                 break;
             }
 
-            let uses_raw_fallback = reader.read(1) & 1 != 0;
+            let uses_raw_fallback = reader.read_u64(1) & 1 != 0;
 
-            let data_len = reader.read(if long_headers { PKT_HDR_DATA_SIZE_LONG } else { PKT_HDR_DATA_SIZE_SHORT });
-            let gcli_len = reader.read(if long_headers { PKT_HDR_GCLI_SIZE_LONG } else { PKT_HDR_GCLI_SIZE_SHORT });
-            let sign_len = reader.read(if long_headers { PKT_HDR_SIGN_SIZE_LONG } else { PKT_HDR_SIGN_SIZE_SHORT });
+            let data_len = reader.read_u64(if long_headers { PKT_HDR_DATA_SIZE_LONG } else { PKT_HDR_DATA_SIZE_SHORT });
+            let gcli_len = reader.read_u64(if long_headers { PKT_HDR_GCLI_SIZE_LONG } else { PKT_HDR_GCLI_SIZE_SHORT });
+            let sign_len = reader.read_u64(if long_headers { PKT_HDR_SIGN_SIZE_LONG } else { PKT_HDR_SIGN_SIZE_SHORT });
 
             reader.align(PKT_HDR_ALIGNMENT);
 
@@ -125,7 +126,7 @@ impl Unpacker {
             }
             reader.align(SUBPKT_ALIGNMENT);
 
-            let gcli_start = reader.consumed_bits();
+            let gcli_start = reader.position();
 
             for idx in idx_start..=idx_stop.min(position_count.saturating_sub(1)) {
                 let Some(packet) = ids.pi.get(idx) else {
@@ -150,12 +151,12 @@ impl Unpacker {
 
             reader.align(SUBPKT_ALIGNMENT);
 
-            if reader.consumed_bits() - gcli_start != gcli_len * 8 {
+            if reader.position() - gcli_start != gcli_len * 8 {
                 truncated = true;
                 reader.seek_bits(gcli_start + gcli_len * 8);
             }
 
-            let data_start = reader.consumed_bits();
+            let data_start = reader.position();
 
             for idx in idx_start..=idx_stop.min(position_count.saturating_sub(1)) {
                 let Some(packet) = ids.pi.get(idx) else {
@@ -175,13 +176,13 @@ impl Unpacker {
 
             reader.align(SUBPKT_ALIGNMENT);
 
-            if reader.consumed_bits() - data_start != data_len * 8 {
+            if reader.position() - data_start != data_len * 8 {
                 truncated = true;
                 reader.seek_bits(data_start + data_len * 8);
             }
 
             if self.use_sign_subpkt {
-                let sign_start = reader.consumed_bits();
+                let sign_start = reader.position();
 
                 for idx in idx_start..=idx_stop.min(position_count.saturating_sub(1)) {
                     let Some(packet) = ids.pi.get(idx) else {
@@ -200,7 +201,7 @@ impl Unpacker {
 
                 reader.align(SUBPKT_ALIGNMENT);
 
-                if reader.consumed_bits() - sign_start != sign_len * 8 {
+                if reader.position() - sign_start != sign_len * 8 {
                     truncated = true;
                     reader.seek_bits(sign_start + sign_len * 8);
                 }
@@ -211,7 +212,7 @@ impl Unpacker {
 
         if lprc > 0 {
             let target = bitpos_at_prc_data.saturating_add(lprc as u64);
-            if target >= reader.consumed_bits() {
+            if target >= reader.position() {
                 reader.seek_bits(target);
             } else {
                 truncated = true;
@@ -234,7 +235,7 @@ impl Unpacker {
 
     fn unpack_significance(
         &mut self,
-        reader: &mut XsBitReader,
+        reader: &mut MsbBitReader,
         ids: &Ids,
         precinct: &Precinct,
         methods: &[GcliMethod],
@@ -269,7 +270,7 @@ impl Unpacker {
             }
 
             for i in 0..groups {
-                let bit = reader.read(1);
+                let bit = reader.read_u64(1);
                 self.sig_flags[i] = if bit == 0 { 1 } else { 0 };
             }
 
@@ -292,7 +293,7 @@ impl Unpacker {
 
     fn unpack_gclis(
         &mut self,
-        reader: &mut XsBitReader,
+        reader: &mut MsbBitReader,
         precinct: &mut Precinct,
         precinct_top: Option<&Precinct>,
         gtli_table_top: &[i32],
@@ -317,7 +318,7 @@ impl Unpacker {
             };
 
             for value in gclis.iter_mut().take(gcli_width) {
-                *value = (reader.read(4) & 0xf) as i8;
+                *value = (reader.read_u64(4) & 0xf) as i8;
             }
 
             return;
@@ -465,7 +466,7 @@ impl Unpacker {
         }
     }
 
-    fn unpack_data(&mut self, reader: &mut XsBitReader, precinct: &mut Precinct, band: usize, ypos: usize, gtli: i32) {
+    fn unpack_data(&mut self, reader: &mut MsbBitReader, precinct: &mut Precinct, band: usize, ypos: usize, gtli: i32) {
         let Some(idx) = precinct.index_of(band, ypos) else {
             return;
         };
@@ -507,14 +508,14 @@ impl Unpacker {
 
             if !sign_packed {
                 if in_range && group_size <= 57 {
-                    let bits = reader.read(group_size as u32);
+                    let bits = reader.read_u64(group_size as u32);
                     for (k, value) in data[start..start + group_size].iter_mut().enumerate() {
                         let bit = (bits >> (group_size - 1 - k)) & 1;
                         *value |= (bit as u32) << 31;
                     }
                 } else {
                     for i in start..(start + group_size) {
-                        let bit = reader.read(1);
+                        let bit = reader.read_u64(1);
                         if let Some(value) = data.get_mut(i) {
                             *value |= (bit as u32) << 31;
                         }
@@ -525,14 +526,14 @@ impl Unpacker {
             let mut bp = gcli - 1;
             while bp >= gtli {
                 if in_range && group_size <= 57 && bp < 31 {
-                    let bits = reader.read(group_size as u32);
+                    let bits = reader.read_u64(group_size as u32);
                     for (k, value) in data[start..start + group_size].iter_mut().enumerate() {
                         let bit = (bits >> (group_size - 1 - k)) & 1;
                         *value |= (bit as u32) << bp;
                     }
                 } else {
                     for i in start..(start + group_size) {
-                        let bit = reader.read(1);
+                        let bit = reader.read_u64(1);
                         if let Some(value) = data.get_mut(i) {
                             if bp < 31 {
                                 *value |= ((bit & 1) as u32) << bp;
@@ -547,7 +548,7 @@ impl Unpacker {
         self.gclis_scratch = gclis;
     }
 
-    fn unpack_sign(&mut self, reader: &mut XsBitReader, precinct: &mut Precinct, band: usize, ypos: usize) {
+    fn unpack_sign(&mut self, reader: &mut MsbBitReader, precinct: &mut Precinct, band: usize, ypos: usize) {
         let Some(idx) = precinct.index_of(band, ypos) else {
             return;
         };
@@ -573,7 +574,7 @@ impl Unpacker {
                     continue;
                 }
 
-                let bit = reader.read(1);
+                let bit = reader.read_u64(1);
 
                 if i < width {
                     if let Some(slot) = data.get_mut(i) {

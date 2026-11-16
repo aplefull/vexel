@@ -1,11 +1,11 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::bitreader::BitReader;
 use crate::decoders::bmp::headers::HeaderReader;
 use crate::utils::error::VexelResult;
 use crate::utils::image::ImageFormat;
 use crate::utils::limits::Limits;
 use crate::utils::read::read_vec_up_to;
+use crate::utils::stream::StreamReader;
 use crate::utils::tiff::ifd::{read_file_header, Ifd, IfdCycleGuard};
 use crate::utils::tiff::types::TiffTags;
 
@@ -16,7 +16,7 @@ pub(crate) fn tiff_is_camera_raw<R: Read + Seek>(reader: &mut R) -> bool {
     const PHOTOMETRIC_CFA: u32 = 32803;
     const PHOTOMETRIC_LINEAR_RAW: u32 = 34892;
 
-    let mut reader = BitReader::new(reader);
+    let mut reader = StreamReader::new(reader);
     let Ok(header) = read_file_header(&mut reader) else {
         return false;
     };

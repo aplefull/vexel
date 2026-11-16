@@ -1,6 +1,7 @@
-use crate::decoders::jpeg2000::mq::MqDecoder;
+use crate::decoders::jpeg2000::bits::StuffedBitReader;
 use crate::decoders::jpeg2000::t1_luts::{LUT_CTXNO_SC, LUT_CTXNO_ZC, LUT_SPB};
 use crate::decoders::jpeg2000::types::*;
+use crate::utils::entropy::mq::{MqContext, MqDecoder};
 
 pub struct Segment {
     pub data_start: usize,
@@ -28,16 +29,9 @@ impl CodeBlock<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SegmentCoder {
-    Mq,
-    Raw,
-}
-
-impl SegmentCoder {
-    fn is_raw(&self) -> bool {
-        *self == SegmentCoder::Raw
-    }
+enum SegmentCoder<'a> {
+    Mq(MqDecoder<'a>),
+    Raw(StuffedBitReader<'a>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +52,7 @@ impl PassType {
 }
 
 pub struct T1Decoder {
-    mqc: MqDecoder,
+    contexts: [MqContext; T1_NUMCTXS],
     data: Vec<i64>,
     flags: Vec<u32>,
     w: u32,
@@ -68,7 +62,21 @@ pub struct T1Decoder {
 
 impl T1Decoder {
     pub fn new() -> Self {
-        Self { mqc: MqDecoder::new(), data: Vec::new(), flags: Vec::new(), w: 0, h: 0, flags_stride: 0 }
+        Self {
+            contexts: [MqContext::default(); T1_NUMCTXS],
+            data: Vec::new(),
+            flags: Vec::new(),
+            w: 0,
+            h: 0,
+            flags_stride: 0,
+        }
+    }
+
+    fn reset_contexts(&mut self) {
+        self.contexts = [MqContext::default(); T1_NUMCTXS];
+        self.contexts[T1_CTXNO_UNI] = MqContext::new(46);
+        self.contexts[T1_CTXNO_AGG] = MqContext::new(3);
+        self.contexts[T1_CTXNO_ZC] = MqContext::new(4);
     }
 
     pub fn data(&self) -> &[i64] {
@@ -180,13 +188,13 @@ impl T1Decoder {
 
     fn sigpass_step(
         &mut self,
+        coder: &mut SegmentCoder,
         index: usize,
         data_index: usize,
         oneplushalf: i32,
         ci: u32,
         vsc: bool,
         orient: BandOrient,
-        raw: bool,
     ) {
         let flags = self.flags[index];
 
@@ -197,22 +205,21 @@ impl T1Decoder {
             return;
         }
 
-        let significant = if raw {
-            self.mqc.raw_decode()
-        } else {
-            let ctx = self.getctxno_zc(orient, flags >> (ci * 3));
-            self.mqc.set_curctx(ctx);
-            self.mqc.decode()
+        let significant = match coder {
+            SegmentCoder::Raw(raw) => raw.read_bit(),
+            SegmentCoder::Mq(mq) => {
+                let ctx = self.getctxno_zc(orient, flags >> (ci * 3));
+                mq.decode(&mut self.contexts[ctx])
+            }
         };
 
         if significant != 0 {
-            let sign = if raw {
-                self.mqc.raw_decode()
-            } else {
-                let lu = Self::getctxno_sc_or_spb_index(flags, self.flags[index - 1], self.flags[index + 1], ci);
-                self.mqc.set_curctx(LUT_CTXNO_SC[lu] as usize);
-                let bit = self.mqc.decode();
-                bit ^ LUT_SPB[lu] as u32
+            let sign = match coder {
+                SegmentCoder::Raw(raw) => raw.read_bit(),
+                SegmentCoder::Mq(mq) => {
+                    let lu = Self::getctxno_sc_or_spb_index(flags, self.flags[index - 1], self.flags[index + 1], ci);
+                    mq.decode(&mut self.contexts[LUT_CTXNO_SC[lu] as usize]) ^ LUT_SPB[lu] as u32
+                }
             };
 
             self.data[data_index] = if sign != 0 { -(oneplushalf as i64) } else { oneplushalf as i64 };
@@ -222,7 +229,7 @@ impl T1Decoder {
         self.flags[index] |= T1_PI_THIS << (ci * 3);
     }
 
-    fn sigpass(&mut self, bpno: i32, cblksty: CodeBlockStyle, orient: BandOrient, raw: bool) {
+    fn sigpass(&mut self, coder: &mut SegmentCoder, bpno: i32, cblksty: CodeBlockStyle, orient: BandOrient) {
         let one = 1i32 << bpno;
         let half = one >> 1;
         let oneplushalf = one | half;
@@ -240,25 +247,22 @@ impl T1Decoder {
                 for j in 0..rows {
                     let vsc = vsc_mode && j == 0;
                     let data_index = ((k + j) * self.w + i) as usize;
-                    self.sigpass_step(index, data_index, oneplushalf, j, vsc, orient, raw);
+                    self.sigpass_step(coder, index, data_index, oneplushalf, j, vsc, orient);
                 }
             }
         }
     }
 
-    fn refpass_step(&mut self, index: usize, data_index: usize, poshalf: i32, ci: u32, raw: bool) {
+    fn refpass_step(&mut self, coder: &mut SegmentCoder, index: usize, data_index: usize, poshalf: i32, ci: u32) {
         let flags = self.flags[index];
 
         if flags & ((T1_SIGMA_THIS | T1_PI_THIS) << (ci * 3)) != T1_SIGMA_THIS << (ci * 3) {
             return;
         }
 
-        let v = if raw {
-            self.mqc.raw_decode()
-        } else {
-            let ctx = Self::getctxno_mag(flags >> (ci * 3));
-            self.mqc.set_curctx(ctx);
-            self.mqc.decode()
+        let v = match coder {
+            SegmentCoder::Raw(raw) => raw.read_bit(),
+            SegmentCoder::Mq(mq) => mq.decode(&mut self.contexts[Self::getctxno_mag(flags >> (ci * 3))]),
         };
 
         let value = self.data[data_index];
@@ -269,7 +273,7 @@ impl T1Decoder {
         self.flags[index] |= T1_MU_THIS << (ci * 3);
     }
 
-    fn refpass(&mut self, bpno: i32, raw: bool) {
+    fn refpass(&mut self, coder: &mut SegmentCoder, bpno: i32) {
         let one = 1i32 << bpno;
         let poshalf = one >> 1;
 
@@ -279,7 +283,7 @@ impl T1Decoder {
                 let index = self.flag_index(i, k / 4);
                 for j in 0..rows {
                     let data_index = ((k + j) * self.w + i) as usize;
-                    self.refpass_step(index, data_index, poshalf, j, raw);
+                    self.refpass_step(coder, index, data_index, poshalf, j);
                 }
             }
         }
@@ -287,6 +291,7 @@ impl T1Decoder {
 
     fn clnpass_step(
         &mut self,
+        mq: &mut MqDecoder,
         index: usize,
         data_index: usize,
         oneplushalf: i32,
@@ -304,21 +309,19 @@ impl T1Decoder {
 
         if !partial {
             let ctx = self.getctxno_zc(orient, flags >> (ci * 3));
-            self.mqc.set_curctx(ctx);
-            if self.mqc.decode() == 0 {
+            if mq.decode(&mut self.contexts[ctx]) == 0 {
                 return;
             }
         }
 
         let lu = Self::getctxno_sc_or_spb_index(self.flags[index], self.flags[index - 1], self.flags[index + 1], ci);
-        self.mqc.set_curctx(LUT_CTXNO_SC[lu] as usize);
-        let sign = self.mqc.decode() ^ LUT_SPB[lu] as u32;
+        let sign = mq.decode(&mut self.contexts[LUT_CTXNO_SC[lu] as usize]) ^ LUT_SPB[lu] as u32;
 
         self.data[data_index] = if sign != 0 { -(oneplushalf as i64) } else { oneplushalf as i64 };
         self.update_flags(index, ci, sign, vsc);
     }
 
-    fn clnpass(&mut self, bpno: i32, cblksty: CodeBlockStyle, orient: BandOrient) {
+    fn clnpass(&mut self, mq: &mut MqDecoder, bpno: i32, cblksty: CodeBlockStyle, orient: BandOrient) {
         let one = 1i32 << bpno;
         let half = one >> 1;
         let oneplushalf = one | half;
@@ -334,14 +337,12 @@ impl T1Decoder {
                 let mut partial = false;
 
                 if rows == 4 && self.flags[index] == 0 {
-                    self.mqc.set_curctx(T1_CTXNO_AGG);
-                    if self.mqc.decode() == 0 {
+                    if mq.decode(&mut self.contexts[T1_CTXNO_AGG]) == 0 {
                         continue;
                     }
 
-                    self.mqc.set_curctx(T1_CTXNO_UNI);
-                    let high = self.mqc.decode();
-                    let low = self.mqc.decode();
+                    let high = mq.decode(&mut self.contexts[T1_CTXNO_UNI]);
+                    let low = mq.decode(&mut self.contexts[T1_CTXNO_UNI]);
                     runlen = (high << 1) | low;
                     partial = true;
                 }
@@ -352,6 +353,7 @@ impl T1Decoder {
                     let is_first = j == runlen;
 
                     self.clnpass_step(
+                        mq,
                         index,
                         data_index,
                         oneplushalf,
@@ -370,12 +372,9 @@ impl T1Decoder {
         }
 
         if cblksty.segmentation_symbols() {
-            self.mqc.set_curctx(T1_CTXNO_UNI);
-            let mut symbol = self.mqc.decode();
-            symbol = (symbol << 1) | self.mqc.decode();
-            symbol = (symbol << 1) | self.mqc.decode();
-            symbol = (symbol << 1) | self.mqc.decode();
-            let _ = symbol;
+            for _ in 0..4 {
+                mq.decode(&mut self.contexts[T1_CTXNO_UNI]);
+            }
         }
     }
 
@@ -403,7 +402,7 @@ impl T1Decoder {
         let mut bpno_plus_one = total_bitplanes as i32;
 
         let mut passtype = PassType::Cleanup;
-        self.mqc.reset_dec_states();
+        self.reset_contexts();
 
         if !cblk.segments.iter().any(|s| s.num_passes > 0) {
             return true;
@@ -411,30 +410,30 @@ impl T1Decoder {
 
         for segment in cblk.segments.iter().filter(|s| s.num_passes > 0) {
             let use_raw = bpno_plus_one <= cblk.num_bps as i32 - 4 && passtype != PassType::Cleanup && cblksty.lazy();
-            let coder = if use_raw { SegmentCoder::Raw } else { SegmentCoder::Mq };
-
             let start = segment.data_start.min(cblk.data.len());
             let end = start.saturating_add(segment.data_len).min(cblk.data.len());
             let seg_data = &cblk.data[start..end];
 
-            match coder {
-                SegmentCoder::Raw => self.mqc.raw_init_dec(seg_data),
-                SegmentCoder::Mq => self.mqc.init_dec(seg_data),
-            }
+            let mut coder = if use_raw {
+                SegmentCoder::Raw(StuffedBitReader::new(seg_data, 0xFF))
+            } else {
+                SegmentCoder::Mq(MqDecoder::new(seg_data))
+            };
 
             for _ in 0..segment.num_passes {
                 if bpno_plus_one < 1 {
                     break;
                 }
 
-                match passtype {
-                    PassType::Significance => self.sigpass(bpno_plus_one, cblksty, orient, coder.is_raw()),
-                    PassType::Refinement => self.refpass(bpno_plus_one, coder.is_raw()),
-                    PassType::Cleanup => self.clnpass(bpno_plus_one, cblksty, orient),
+                match (passtype, &mut coder) {
+                    (PassType::Significance, coder) => self.sigpass(coder, bpno_plus_one, cblksty, orient),
+                    (PassType::Refinement, coder) => self.refpass(coder, bpno_plus_one),
+                    (PassType::Cleanup, SegmentCoder::Mq(mq)) => self.clnpass(mq, bpno_plus_one, cblksty, orient),
+                    (PassType::Cleanup, SegmentCoder::Raw(_)) => {}
                 }
 
-                if cblksty.reset() && coder == SegmentCoder::Mq {
-                    self.mqc.reset_dec_states();
+                if cblksty.reset() && matches!(coder, SegmentCoder::Mq(_)) {
+                    self.reset_contexts();
                 }
 
                 passtype = passtype.next();

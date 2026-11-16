@@ -1,6 +1,6 @@
 use crate::log_warn;
-use crate::utils::lzma::dictionary::Dictionary;
-use crate::utils::lzma::{bcj, delta, lzma2};
+use crate::utils::codecs::lzma::dictionary::Dictionary;
+use crate::utils::codecs::lzma::{bcj, delta, lzma2};
 
 pub const STREAM_MAGIC: [u8; 6] = [0xfd, b'7', b'z', b'X', b'Z', 0x00];
 const FOOTER_MAGIC: [u8; 2] = *b"YZ";

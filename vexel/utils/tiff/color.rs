@@ -41,33 +41,6 @@ pub fn float24_to_f32(bytes: &[u8], byte_order: ByteOrder) -> f32 {
     f32::from_bits(u32::from_le_bytes([q0, q1, q2, q3]))
 }
 
-pub fn half_to_f32(bits: u16) -> f32 {
-    let sign = ((bits >> 15) as u32) << 31;
-    let exp = ((bits >> 10) & 0x1F) as u32;
-    let mantissa = (bits & 0x3FF) as u32;
-
-    let f32_bits = if exp == 0 {
-        if mantissa == 0 {
-            sign
-        } else {
-            let mut m = mantissa;
-            let mut e = 127u32 - 14;
-            while m & 0x400 == 0 {
-                m <<= 1;
-                e -= 1;
-            }
-            m &= 0x3FF;
-            sign | (e << 23) | (m << 13)
-        }
-    } else if exp == 31 {
-        sign | 0x7F800000 | (mantissa << 13)
-    } else {
-        sign | ((exp + 127 - 15) << 23) | (mantissa << 13)
-    };
-
-    f32::from_bits(f32_bits)
-}
-
 pub fn float_bits_to_f64(bits: u64, bps: u16) -> f64 {
     if bps <= 1 {
         return (bits & 1) as f64;

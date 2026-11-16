@@ -36,7 +36,7 @@ save path loglevel="":
 
 # Run all tests or a specific test with output captured
 test name="" loglevel="":
-    cargo test --package vexel --test main {{ if name != "" { "\"" + name + "\"" } else { "" } }} -- --nocapture {{ if name != "" { "--exact" } else { "" } }} {{ if loglevel != "" { "--log-level " + loglevel } else { "" } }}
+    cargo test --package vexel --test main {{ if name != "" { "\"" + name + "\"" } else { "" } }} -- --nocapture {{ if name != "" { "--exact --include-ignored" } else { "" } }} {{ if loglevel != "" { "--log-level " + loglevel } else { "" } }}
 
 # Run benchmarks, optionally filtered by name
 bench *args="":

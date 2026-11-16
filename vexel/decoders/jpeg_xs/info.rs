@@ -3,11 +3,12 @@ use std::borrow::Cow;
 use serde::Serialize;
 use tsify::Tsify;
 
-use super::bitreader::XsBitReader;
 use super::ids::Ids;
 use super::markers::parse_header;
 use super::types::*;
 use crate::log_warn;
+use crate::utils::bits::MsbBitReader;
+use crate::utils::bytes::Bytes;
 use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoSection, InfoWriter, Section};
 
 const MAX_SLICE_SECTIONS: usize = 256;
@@ -109,42 +110,22 @@ pub enum JpegXsSection {
     EndOfCodestream,
 }
 
-struct Bytes<'a>(&'a [u8]);
-
-impl Bytes<'_> {
-    fn u8(&self, at: usize) -> u8 {
-        self.0.get(at).copied().unwrap_or(0)
-    }
-
-    fn u16(&self, at: usize) -> u16 {
-        u16::from_be_bytes([self.u8(at), self.u8(at + 1)])
-    }
-
-    fn u24(&self, at: usize) -> u32 {
-        u32::from_be_bytes([0, self.u8(at), self.u8(at + 1), self.u8(at + 2)])
-    }
-
-    fn u32(&self, at: usize) -> u32 {
-        u32::from_be_bytes([self.u8(at), self.u8(at + 1), self.u8(at + 2), self.u8(at + 3)])
-    }
-}
-
 fn parse_picture_header(body: &[u8]) -> JxsPictureHeader {
     let b = Bytes(body);
-    let plev = b.u16(6);
+    let plev = b.be_u16(6);
     let packed = b.u8(20);
     let packed2 = b.u8(21);
     let packed3 = b.u8(22);
     let packed4 = b.u8(23);
     JxsPictureHeader {
-        codestream_length: b.u32(0),
-        profile: b.u16(4),
+        codestream_length: b.be_u32(0),
+        profile: b.be_u16(4),
         level: (plev >> 8) as u8,
         sublevel: plev as u8,
-        width: b.u16(8),
-        height: b.u16(10),
-        column_width: b.u16(12),
-        slice_height: b.u16(14),
+        width: b.be_u16(8),
+        height: b.be_u16(10),
+        column_width: b.be_u16(12),
+        slice_height: b.be_u16(14),
         components: b.u8(16),
         group_size: b.u8(17),
         significance_group_size: b.u8(18),
@@ -178,7 +159,7 @@ fn parse_marker(code: u16, body: &[u8]) -> JpegXsSection {
         MARKER_COM => {
             let payload = body.get(2..).unwrap_or(&[]);
             JpegXsSection::Comment(JxsComment {
-                comment_type: b.u16(0),
+                comment_type: b.be_u16(0),
                 text: String::from_utf8_lossy(&payload[..payload.len().min(MAX_TEXT_BYTES)])
                     .trim_end_matches('\0')
                     .to_string(),
@@ -186,8 +167,8 @@ fn parse_marker(code: u16, body: &[u8]) -> JpegXsSection {
             })
         }
         MARKER_NLT => JpegXsSection::Nonlinearity(match b.u8(0) {
-            1 => JxsNonlinearity::Quadratic { sigma: b.u8(1) >> 7, alpha: b.u16(1) & 0x7FFF },
-            2 => JxsNonlinearity::Extended { t1: b.u32(1), t2: b.u32(5), e: b.u8(9) },
+            1 => JxsNonlinearity::Quadratic { sigma: b.u8(1) >> 7, alpha: b.be_u16(1) & 0x7FFF },
+            2 => JxsNonlinearity::Extended { t1: b.be_u32(1), t2: b.be_u32(5), e: b.u8(9) },
             other => JxsNonlinearity::Unknown(other),
         }),
         MARKER_CWD => JpegXsSection::ComponentDependentWavelet(b.u8(0)),
@@ -218,17 +199,17 @@ impl Scanner<'_> {
     fn walk_headers(&mut self) -> usize {
         let b = Bytes(self.data);
         let mut pos = 0usize;
-        if b.u16(0) == MARKER_SOC {
+        if b.be_u16(0) == MARKER_SOC {
             self.push(0, 2, JpegXsSection::StartOfCodestream);
             pos = 2;
         }
 
         while pos + 4 <= self.data.len() {
-            let code = b.u16(pos);
+            let code = b.be_u16(pos);
             if code == MARKER_SLH || code == MARKER_EOC || code & 0xFF00 != 0xFF00 {
                 break;
             }
-            let length = usize::from(b.u16(pos + 2));
+            let length = usize::from(b.be_u16(pos + 2));
             if length < 2 {
                 log_warn!("JPEG XS: marker 0x{:04X} has invalid length {}", code, length);
                 break;
@@ -270,18 +251,18 @@ impl Scanner<'_> {
         'rows: for row in 0..ids.npy {
             if (row as i32 * ids.ph) % slice_height == 0 {
                 finish(self, current.take(), pos);
-                if b.u16(pos) != MARKER_SLH {
+                if b.be_u16(pos) != MARKER_SLH {
                     log_warn!("JPEG XS: expected slice header at offset {}, stopping slice walk", pos);
                     break 'rows;
                 }
-                current = Some((pos, b.u16(pos + 4), 0));
+                current = Some((pos, b.be_u16(pos + 4), 0));
                 pos += 6;
             }
             for _ in 0..ids.npx {
                 if pos + header_bytes > self.data.len() {
                     break 'rows;
                 }
-                let precinct_length = b.u24(pos) as usize;
+                let precinct_length = b.be_u24(pos) as usize;
                 pos = pos.saturating_add(header_bytes).saturating_add(precinct_length);
                 if let Some((_, _, precincts)) = current.as_mut() {
                     *precincts += 1;
@@ -303,7 +284,7 @@ pub fn scan(data: &[u8]) -> JpegXsInfo {
     let mut scanner = Scanner { data, sections: Vec::new() };
     let header_end = scanner.walk_headers();
 
-    let mut reader = XsBitReader::new(data);
+    let mut reader = MsbBitReader::new(data);
     let header = parse_header(&mut reader);
     let mut config = header.config;
     let image = header.image;
@@ -328,9 +309,9 @@ pub fn scan(data: &[u8]) -> JpegXsInfo {
     }
 
     let tail = data.len().saturating_sub(2);
-    let eoc_at = if Bytes(data).u16(end) == MARKER_EOC {
+    let eoc_at = if Bytes(data).be_u16(end) == MARKER_EOC {
         Some(end)
-    } else if data.len() >= 2 && Bytes(data).u16(tail) == MARKER_EOC {
+    } else if data.len() >= 2 && Bytes(data).be_u16(tail) == MARKER_EOC {
         Some(tail)
     } else {
         None

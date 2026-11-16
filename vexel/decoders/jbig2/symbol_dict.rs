@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
-use crate::decoders::jbig2::arith::{ArithDecoder, Cx, IntCtx};
+use crate::decoders::jbig2::arith::IntCtx;
 use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp, WorkBudget};
 use crate::decoders::jbig2::generic::{decode_generic_region, GenericParams};
-use crate::decoders::jbig2::huffman::{HuffmanReader, HuffmanTable, HuffmanValue};
+use crate::decoders::jbig2::huffman::{HuffmanTable, HuffmanValue};
 use crate::decoders::jbig2::refinement::{decode_refinement_region, RefinementParams};
 use crate::decoders::jbig2::text::{
     decode_text_region, RefCorner, SymbolCodes, TextArithContexts, TextCoder, TextRegionHuffman, TextRegionParams,
 };
 use crate::log_warn;
-use crate::utils::tiff::fax;
+use crate::utils::bits::MsbBitReader;
+use crate::utils::codecs::ccitt::{self, FaxMode};
+use crate::utils::entropy::mq::{MqContext, MqDecoder};
 
 const MAX_EMPTY_HEIGHT_CLASSES: u32 = 64;
 const SYMBOL_COST: u64 = 512;
@@ -50,8 +52,8 @@ pub fn decode_symbol_dict(
     params: &SymbolDictParams,
     input_symbols: &[Arc<Bitmap>],
     huffman_tables: Option<&SymbolDictHuffman>,
-    gb_stats: &mut [Cx],
-    gr_stats: &mut [Cx],
+    gb_stats: &mut [MqContext],
+    gr_stats: &mut [MqContext],
     budget: &mut WorkBudget,
 ) -> DecodedSymbolDict {
     let mut new_symbols: Vec<Arc<Bitmap>> = Vec::new();
@@ -69,8 +71,8 @@ pub fn decode_symbol_dict(
         sym_code_len = sym_code_len.max(1);
     }
 
-    let mut reader = HuffmanReader::new(data);
-    let mut arith = ArithDecoder::new(data);
+    let mut reader = MsbBitReader::new(data);
+    let mut arith = MqDecoder::new(data);
 
     let mut iadh = IntCtx::new();
     let mut iadw = IntCtx::new();
@@ -295,15 +297,15 @@ pub fn decode_symbol_dict(
 }
 
 fn decode_single_refinement(
-    arith: &mut ArithDecoder,
-    reader: &mut HuffmanReader,
+    arith: &mut MqDecoder,
+    reader: &mut MsbBitReader,
     params: &SymbolDictParams,
     all_symbols: &[Arc<Bitmap>],
     sym_code_len: u32,
     width: u32,
     height: u32,
     contexts: &mut TextArithContexts,
-    gr_stats: &mut [Cx],
+    gr_stats: &mut [MqContext],
     huffman: Option<&TextRegionHuffman>,
 ) -> (Bitmap, bool) {
     let mut target = Bitmap::new(width, height);
@@ -313,7 +315,7 @@ fn decode_single_refinement(
         let Some(tables) = huffman else {
             return (target, false);
         };
-        let id = reader.read_bits(sym_code_len).unwrap_or_else(|| {
+        let id = reader.try_read(sym_code_len).unwrap_or_else(|| {
             decoded_cleanly = false;
             0
         });
@@ -338,7 +340,7 @@ fn decode_single_refinement(
                 0
             }
         };
-        reader.align();
+        reader.align(8);
         (id, rdx, rdy, bmsize)
     } else {
         let id = contexts.iaid.decode(arith);
@@ -363,11 +365,12 @@ fn decode_single_refinement(
     };
 
     if params.huffman {
-        let start = reader.byte_offset().min(reader.data().len());
-        let mut sub_arith = ArithDecoder::new(&reader.data()[start..]);
+        let start = reader.byte_position().min(reader.data().len());
+        let mut sub_arith = MqDecoder::new(&reader.data()[start..]);
         decode_refinement_region(&mut sub_arith, gr_stats, &mut target, &refine_params);
         let advance = if bmsize > 0 { bmsize as usize } else { target.stride * target.height as usize };
-        reader.advance_bytes(advance);
+        reader.align(8);
+        reader.skip(advance as u64 * 8);
     } else {
         decode_refinement_region(arith, gr_stats, &mut target, &refine_params);
     }
@@ -376,7 +379,7 @@ fn decode_single_refinement(
 }
 
 fn decode_collective_bitmap(
-    reader: &mut HuffmanReader,
+    reader: &mut MsbBitReader,
     huffman_tables: Option<&SymbolDictHuffman>,
     width: u32,
     height: u32,
@@ -387,8 +390,8 @@ fn decode_collective_bitmap(
         _ => return None,
     };
 
-    reader.align();
-    let start = reader.byte_offset();
+    reader.align(8);
+    let start = reader.byte_position();
     let data = reader.data();
     if start >= data.len() || width == 0 || height == 0 {
         return None;
@@ -416,10 +419,11 @@ fn decode_collective_bitmap(
             }
             bitmap.data[dst..dst + count].copy_from_slice(&data[src..src + count]);
         }
-        reader.advance_bytes(needed);
+        reader.align(8);
+        reader.skip(needed as u64 * 8);
     } else {
         let end = (start + bmsize).min(data.len());
-        let (decoded, _) = fax::decode_mmr(&data[start..end], width, height as usize);
+        let decoded = ccitt::decode(&data[start..end], width, height as usize, FaxMode::Group4).pixels;
         let stride = (width as usize).div_ceil(8);
         for row in 0..height as usize {
             let src = row * stride;
@@ -429,7 +433,8 @@ fn decode_collective_bitmap(
             }
             bitmap.data[dst..dst + stride].copy_from_slice(&decoded[src..src + stride]);
         }
-        reader.advance_bytes(bmsize);
+        reader.align(8);
+        reader.skip(bmsize as u64 * 8);
     }
 
     Some(bitmap)
@@ -439,8 +444,8 @@ fn export_symbols(
     params: &SymbolDictParams,
     input_symbols: &[Arc<Bitmap>],
     new_symbols: &[Arc<Bitmap>],
-    arith: &mut ArithDecoder,
-    reader: &mut HuffmanReader,
+    arith: &mut MqDecoder,
+    reader: &mut MsbBitReader,
     iaex: &mut IntCtx,
     huffman_tables: Option<&SymbolDictHuffman>,
 ) -> Vec<Arc<Bitmap>> {

@@ -6,13 +6,13 @@ use super::crc_simd::update_crc;
 use super::info::{ExifChunk, FdatChunk, IhdrChunk, PngChunk, PngChunkBody, PngInfo, PngSection, PngSignature};
 use super::pixels::PngFormat;
 use super::types::*;
-use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::ExifReader;
 use crate::utils::frames::{FrameExtent, FrameSource, Frames};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, ImageSummary};
 use crate::utils::metadata::{strip_exif_header, MetadataCollector};
+use crate::utils::stream::StreamReader;
 use crate::{log_debug, log_warn, Image, Limits};
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -61,7 +61,7 @@ pub struct PngDecoder<R: Read + Seek> {
     metadata: MetadataCollector,
     collected: PngInfo,
     info: Option<PngInfo>,
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
 }
 
 impl<R: Read + Seek> PngDecoder<R> {
@@ -83,7 +83,7 @@ impl<R: Read + Seek> PngDecoder<R> {
             metadata: MetadataCollector::default(),
             collected: PngInfo::default(),
             info: None,
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
         }
     }
 

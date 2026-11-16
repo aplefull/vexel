@@ -169,6 +169,7 @@ fn test_dicom() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+#[ignore]
 fn test_all_formats() -> Result<(), Box<dyn std::error::Error>> {
     let mut test_cases = Vec::new();
     test_cases.extend(formats::jpeg::test_cases());

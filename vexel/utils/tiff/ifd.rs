@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::bitreader::BitReader;
 use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::limits::Limits;
+use crate::utils::stream::StreamReader;
 use crate::utils::tiff::types::TiffTags;
 use crate::utils::types::ByteOrder;
 
@@ -69,7 +69,7 @@ impl IfdFormat {
         self.count_size() + self.entry_size() * entries as u64 + self.offset_size()
     }
 
-    fn read_offset<R: Read + Seek>(self, reader: &mut BitReader<R>) -> std::io::Result<u64> {
+    fn read_offset<R: Read + Seek>(self, reader: &mut StreamReader<R>) -> std::io::Result<u64> {
         if self.big {
             reader.read_u64()
         } else {
@@ -99,7 +99,7 @@ pub struct TiffFileHeader {
     pub first_ifd_offset: u64,
 }
 
-pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<TiffFileHeader> {
+pub fn read_file_header<R: Read + Seek>(reader: &mut StreamReader<R>) -> VexelResult<TiffFileHeader> {
     let mut byte_order_marker = [0u8; 2];
     reader.read_exact(&mut byte_order_marker)?;
 
@@ -190,7 +190,7 @@ pub struct Ifd {
 
 impl Ifd {
     pub fn read<R: Read + Seek>(
-        reader: &mut BitReader<R>,
+        reader: &mut StreamReader<R>,
         offset: u64,
         format: IfdFormat,
         limits: &mut Limits,
@@ -249,7 +249,7 @@ impl Ifd {
         self.entry(tag).is_some()
     }
 
-    pub fn value<T, R>(&self, tag: TiffTags, reader: &mut BitReader<R>) -> Option<T>
+    pub fn value<T, R>(&self, tag: TiffTags, reader: &mut StreamReader<R>) -> Option<T>
     where
         T: TryFrom<u64>,
         R: Read + Seek,
@@ -258,7 +258,7 @@ impl Ifd {
         read_single_value(entry, self.format, reader).ok()
     }
 
-    pub fn values<T, R>(&self, tag: TiffTags, reader: &mut BitReader<R>, limits: &mut Limits) -> Option<Vec<T>>
+    pub fn values<T, R>(&self, tag: TiffTags, reader: &mut StreamReader<R>, limits: &mut Limits) -> Option<Vec<T>>
     where
         T: TryFrom<u64>,
         R: Read + Seek,
@@ -267,7 +267,7 @@ impl Ifd {
         read_multiple_values(entry, self.format, reader, limits).ok()
     }
 
-    pub fn rational<R: Read + Seek>(&self, tag: TiffTags, reader: &mut BitReader<R>) -> Option<f32> {
+    pub fn rational<R: Read + Seek>(&self, tag: TiffTags, reader: &mut StreamReader<R>) -> Option<f32> {
         let entry = self.entry(tag)?;
         let (numerator, denominator) = if 8 <= self.format.inline_capacity() {
             let mut inline = inline_reader(entry, self.format);
@@ -282,7 +282,7 @@ impl Ifd {
     pub fn rationals<R: Read + Seek>(
         &self,
         tag: TiffTags,
-        reader: &mut BitReader<R>,
+        reader: &mut StreamReader<R>,
         limits: &mut Limits,
     ) -> Option<Vec<f32>> {
         let entry = self.entry(tag)?;
@@ -292,14 +292,14 @@ impl Ifd {
     pub fn signed_rationals<R: Read + Seek>(
         &self,
         tag: TiffTags,
-        reader: &mut BitReader<R>,
+        reader: &mut StreamReader<R>,
         limits: &mut Limits,
     ) -> Option<Vec<f32>> {
         let entry = self.entry(tag)?;
         read_rationals(entry, self.format, reader, limits, true).ok()
     }
 
-    pub fn string<R: Read + Seek>(&self, tag: TiffTags, reader: &mut BitReader<R>) -> Option<String> {
+    pub fn string<R: Read + Seek>(&self, tag: TiffTags, reader: &mut StreamReader<R>) -> Option<String> {
         let entry = self.entry(tag)?;
         let count = (entry.count as usize).min(256);
 
@@ -319,7 +319,7 @@ impl Ifd {
     pub fn byte_data<R: Read + Seek>(
         &self,
         tag: TiffTags,
-        reader: &mut BitReader<R>,
+        reader: &mut StreamReader<R>,
         limits: &mut Limits,
     ) -> Option<Vec<u8>> {
         let entry = self.entry(tag)?;
@@ -347,7 +347,7 @@ fn conversion_error() -> VexelError {
     VexelError::Custom("Value conversion error".to_string())
 }
 
-fn read_scalar<R: Read + Seek>(type_: u16, reader: &mut BitReader<R>) -> VexelResult<u64> {
+fn read_scalar<R: Read + Seek>(type_: u16, reader: &mut StreamReader<R>) -> VexelResult<u64> {
     Ok(match type_ {
         1 | 2 | 6 | 7 => u64::from(reader.read_u8()?),
         3 | 8 => u64::from(reader.read_u16()?),
@@ -357,8 +357,8 @@ fn read_scalar<R: Read + Seek>(type_: u16, reader: &mut BitReader<R>) -> VexelRe
     })
 }
 
-fn inline_reader(entry: &IfdEntry, format: IfdFormat) -> BitReader<std::io::Cursor<[u8; MAX_INLINE_BYTES]>> {
-    let mut inline = BitReader::new(std::io::Cursor::new(entry.inline));
+fn inline_reader(entry: &IfdEntry, format: IfdFormat) -> StreamReader<std::io::Cursor<[u8; MAX_INLINE_BYTES]>> {
+    let mut inline = StreamReader::new(std::io::Cursor::new(entry.inline));
     inline.set_endianness(format.byte_order);
     inline
 }
@@ -366,7 +366,7 @@ fn inline_reader(entry: &IfdEntry, format: IfdFormat) -> BitReader<std::io::Curs
 fn read_single_value<T, R: Read + Seek>(
     entry: &IfdEntry,
     format: IfdFormat,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
 ) -> VexelResult<T>
 where
     T: TryFrom<u64>,
@@ -392,7 +392,7 @@ where
 fn read_multiple_values<T, R: Read + Seek>(
     entry: &IfdEntry,
     format: IfdFormat,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &mut Limits,
 ) -> VexelResult<Vec<T>>
 where
@@ -437,7 +437,7 @@ where
 fn read_rationals<R: Read + Seek>(
     entry: &IfdEntry,
     format: IfdFormat,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &mut Limits,
     signed: bool,
 ) -> VexelResult<Vec<f32>> {

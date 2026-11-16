@@ -2,10 +2,10 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::info::{PgxByteOrder, PgxHeader, PgxInfo, PgxPixelData, PgxSection};
 use super::simd::{unpack_u16, unpack_u8};
-use crate::bitreader::BitReader;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::PixelData;
 use crate::utils::info::{ColorModel, DataExtent, ImageSummary, SampleFormat};
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits};
 
 pub const MAGIC: &[u8; 2] = b"PG";
@@ -19,7 +19,7 @@ pub struct PgxDecoder<R: Read + Seek> {
     signed: bool,
     byte_order: PgxByteOrder,
     limits: Limits,
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     info: Option<PgxInfo>,
 }
 
@@ -32,7 +32,7 @@ impl<R: Read + Seek> PgxDecoder<R> {
             signed: false,
             byte_order: PgxByteOrder::BigEndian,
             limits: Limits::default(),
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
             info: None,
         }
     }

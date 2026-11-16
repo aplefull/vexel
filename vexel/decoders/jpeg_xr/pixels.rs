@@ -1,6 +1,7 @@
 use crate::decoders::jpeg_xr::tables::{IDX_CC, IDX_CC_420};
 use crate::decoders::jpeg_xr::types::*;
 use crate::log_warn;
+use crate::utils::float::half_to_f32;
 use crate::utils::image::PixelData;
 
 pub const SHIFT_SCALED: i32 = SHIFTZERO + QPFRACBITS;
@@ -186,35 +187,6 @@ pub fn pixel_to_float(value: i32, exp_bias: i8, mantissa_len: u8) -> f32 {
 pub fn backward_half(value: i32) -> u16 {
     let sign = value >> 31;
     (((value & 0x7fff) ^ sign).wrapping_sub(sign)) as u16
-}
-
-fn half_to_f32(bits: u16) -> f32 {
-    let sign = u32::from(bits >> 15) << 31;
-    let exponent = u32::from((bits >> 10) & 0x1f);
-    let mantissa = u32::from(bits & 0x3ff);
-
-    if exponent == 0 {
-        if mantissa == 0 {
-            return f32::from_bits(sign);
-        }
-
-        let mut exponent = -1i32;
-        let mut mantissa = mantissa;
-        while mantissa & 0x400 == 0 {
-            mantissa <<= 1;
-            exponent -= 1;
-        }
-        let mantissa = mantissa & 0x3ff;
-        let biased = (exponent + 127 - 15 + 1) as u32;
-        return f32::from_bits(sign | (biased << 23) | (mantissa << 13));
-    }
-
-    if exponent == 31 {
-        return f32::from_bits(sign | 0x7f80_0000 | (mantissa << 13));
-    }
-
-    let biased = exponent + 127 - 15;
-    f32::from_bits(sign | (biased << 23) | (mantissa << 13))
 }
 
 fn midpoint(a: i32, b: i32) -> i32 {

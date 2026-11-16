@@ -5,6 +5,7 @@ use tsify::Tsify;
 
 use super::decoder::{parse_segments, ParsedSegment, JBIG2_FILE_ID};
 use super::segment::SegmentType;
+use crate::utils::bytes::{be_u16, be_u32};
 use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter};
 
 const MAX_SEGMENT_SECTIONS: usize = 1024;
@@ -459,18 +460,6 @@ impl InfoSection for Jbig2Section {
     }
 }
 
-fn be_u32(data: &[u8], at: usize) -> Option<u32> {
-    data.get(at..at + 4).map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-fn be_i32(data: &[u8], at: usize) -> Option<i32> {
-    be_u32(data, at).map(|value| value as i32)
-}
-
-fn be_u16(data: &[u8], at: usize) -> Option<u16> {
-    data.get(at..at + 2).map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
-}
-
 fn at_pixels(body: &[u8], offset: &mut usize, count: usize) -> Vec<Jbig2AtPixel> {
     let mut pixels = Vec::with_capacity(count);
     for _ in 0..count {
@@ -581,14 +570,16 @@ fn parse_known_body(segment_type: SegmentType, body: &[u8]) -> Option<Jbig2Segme
             flags: *body.get(17)?,
             grid_width: be_u32(body, 18),
             grid_height: be_u32(body, 22),
-            grid_x: be_i32(body, 26),
-            grid_y: be_i32(body, 30),
+            grid_x: be_u32(body, 26).map(|value| value as i32),
+            grid_y: be_u32(body, 30).map(|value| value as i32),
             vector_x: be_u16(body, 34),
             vector_y: be_u16(body, 36),
         },
-        SegmentType::Tables => {
-            Jbig2SegmentBody::Tables { flags: *body.first()?, low: be_i32(body, 1)?, high: be_i32(body, 5)? }
-        }
+        SegmentType::Tables => Jbig2SegmentBody::Tables {
+            flags: *body.first()?,
+            low: be_u32(body, 1).map(|value| value as i32)?,
+            high: be_u32(body, 5).map(|value| value as i32)?,
+        },
         SegmentType::ColorPalette => Jbig2SegmentBody::ColorPalette {
             components: *body.first()?,
             component_length: *body.get(1)?,

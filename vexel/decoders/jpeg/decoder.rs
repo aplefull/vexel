@@ -4,7 +4,6 @@ use std::io::{Read, Seek, SeekFrom};
 use super::color::JpegColorspace;
 use super::hierarchical::HierarchicalFrame;
 use super::thumbnails::scan_jpeg_thumbnails;
-use crate::bitreader::BitReader;
 use crate::decoders::jpeg::app::AppMetadata;
 use crate::decoders::jpeg::info::{coding_name, process_name, subsampling_name, JpegInfo, JpegSection};
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
@@ -15,6 +14,7 @@ use crate::decoders::jpeg::types::{
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::{ColorModel, ImageSummary};
 use crate::utils::marker::Marker;
+use crate::utils::stream::StreamReader;
 use crate::{log_debug, log_warn, Image, Limits};
 
 #[rustfmt::skip]
@@ -51,7 +51,7 @@ pub struct JpegDecoder<R: Read + Seek> {
     pub(super) scans: Vec<ScanData>,
     pub(super) info: Option<JpegInfo>,
     pub(super) walk_mode: WalkMode,
-    pub(super) reader: BitReader<R>,
+    pub(super) reader: StreamReader<R>,
     pub(super) adobe_color_transform: Option<u8>,
     pub(super) is_hierarchical: bool,
     pub(super) dhp_width: u32,
@@ -89,7 +89,7 @@ impl<R: Read + Seek> JpegDecoder<R> {
             scans: Vec::new(),
             info: None,
             walk_mode: WalkMode::Decode,
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
             adobe_color_transform: None,
             is_hierarchical: false,
             dhp_width: 0,

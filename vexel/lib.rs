@@ -8,7 +8,6 @@ use std::path::Path;
 use js_sys::Uint8ClampedArray;
 use serde::Serialize;
 use tsify::{Ts, Tsify};
-pub(crate) use utils::bitreader;
 pub use utils::error::{VexelError, VexelResult};
 pub use utils::frames::Frames;
 pub use utils::icc::ICCProfile;

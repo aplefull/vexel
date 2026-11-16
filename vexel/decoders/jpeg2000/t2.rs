@@ -1,61 +1,5 @@
+use crate::decoders::jpeg2000::bits::StuffedBitReader;
 use crate::decoders::jpeg2000::types::*;
-
-pub struct HeaderReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-    buf: u32,
-    ct: u32,
-    overrun: bool,
-}
-
-impl<'a> HeaderReader<'a> {
-    pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, buf: 0, ct: 0, overrun: false }
-    }
-
-    fn bytein(&mut self) {
-        self.buf = (self.buf << 8) & 0xFFFF;
-        self.ct = if self.buf == 0xFF00 { 7 } else { 8 };
-
-        if self.pos < self.data.len() {
-            self.buf |= self.data[self.pos] as u32;
-            self.pos += 1;
-        } else {
-            self.overrun = true;
-        }
-    }
-
-    pub fn exhausted(&self) -> bool {
-        self.overrun
-    }
-
-    fn getbit(&mut self) -> u32 {
-        if self.ct == 0 {
-            self.bytein();
-        }
-        self.ct -= 1;
-        (self.buf >> self.ct) & 1
-    }
-
-    pub fn read(&mut self, n: u32) -> u32 {
-        let mut value = 0;
-        for i in (0..n).rev() {
-            value |= self.getbit() << i;
-        }
-        value
-    }
-
-    pub fn inalign(&mut self) {
-        if self.buf & 0xFF == 0xFF {
-            self.bytein();
-        }
-        self.ct = 0;
-    }
-
-    pub fn num_bytes(&self) -> usize {
-        self.pos
-    }
-}
 
 pub struct TagTree {
     values: Vec<u32>,
@@ -113,7 +57,7 @@ impl TagTree {
         self.lows.iter_mut().for_each(|v| *v = 0);
     }
 
-    pub fn decode(&mut self, reader: &mut HeaderReader<'_>, leafno: usize, threshold: u32) -> bool {
+    pub fn decode(&mut self, reader: &mut StuffedBitReader<'_>, leafno: usize, threshold: u32) -> bool {
         if leafno >= self.values.len() {
             return false;
         }
@@ -158,7 +102,7 @@ impl TagTree {
     }
 }
 
-pub fn get_num_passes(reader: &mut HeaderReader<'_>) -> u32 {
+pub fn get_num_passes(reader: &mut StuffedBitReader<'_>) -> u32 {
     if reader.read(1) == 0 {
         return 1;
     }
@@ -179,7 +123,7 @@ pub fn get_num_passes(reader: &mut HeaderReader<'_>) -> u32 {
     37 + reader.read(7)
 }
 
-pub fn get_comma_code(reader: &mut HeaderReader<'_>) -> u32 {
+pub fn get_comma_code(reader: &mut StuffedBitReader<'_>) -> u32 {
     let mut n = 0;
     while reader.read(1) != 0 {
         n += 1;

@@ -1,6 +1,8 @@
 use serde::Serialize;
 use tsify::Tsify;
 
+use crate::utils::bytes::Bytes;
+
 pub const IPTC_RESOURCE: u16 = 0x0404;
 pub const ICC_RESOURCE: u16 = 0x040F;
 pub const EXIF_RESOURCE: u16 = 0x0422;
@@ -23,16 +25,6 @@ fn printable_ascii(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect()
 }
 
-fn u16_at(body: &[u8], at: usize) -> u16 {
-    let byte = |i: usize| body.get(i).copied().unwrap_or(0);
-    u16::from_be_bytes([byte(at), byte(at.saturating_add(1))])
-}
-
-fn u32_at(body: &[u8], at: usize) -> u32 {
-    let byte = |i: usize| body.get(i).copied().unwrap_or(0);
-    u32::from_be_bytes([byte(at), byte(at.saturating_add(1)), byte(at.saturating_add(2)), byte(at.saturating_add(3))])
-}
-
 pub fn parse_resources(body: &[u8]) -> Vec<ResourceBlock<'_>> {
     let mut blocks = Vec::new();
     let mut pos = 0usize;
@@ -42,13 +34,13 @@ pub fn parse_resources(body: &[u8]) -> Vec<ResourceBlock<'_>> {
         if !matches!(signature, b"8BIM" | b"PHUT" | b"AgHg" | b"DCSR" | b"MeSa") {
             break;
         }
-        let id = u16_at(body, pos + 4);
+        let id = Bytes(body).be_u16(pos + 4);
         let name_length = usize::from(body.get(pos + 6).copied().unwrap_or(0));
         let name_start = (pos + 7).min(body.len());
         let name_end = (name_start + name_length).min(body.len());
         let name = String::from_utf8_lossy(&body[name_start..name_end]).into_owned();
         let size_at = pos + 6 + ((1 + name_length + 1) & !1);
-        let size = u32_at(body, size_at);
+        let size = Bytes(body).be_u32(size_at);
 
         let data_start = (size_at + 4).min(body.len());
         let data_end = data_start.saturating_add(size as usize).min(body.len());

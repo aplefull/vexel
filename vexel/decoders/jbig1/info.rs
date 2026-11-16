@@ -4,6 +4,7 @@ use serde::Serialize;
 use tsify::Tsify;
 
 use super::types::*;
+use crate::utils::bytes::Bytes;
 use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter};
 
 const BIH_SIZE: usize = 20;
@@ -313,10 +314,6 @@ impl Scanner {
     }
 }
 
-fn be_u32(data: &[u8], at: usize) -> u32 {
-    u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
-}
-
 pub fn scan(data: &[u8]) -> Jbig1Info {
     let mut scanner =
         Scanner { info: Jbig1Info::default(), stripe_sections: 0, more: None, marker_sections: 0, more_markers: None };
@@ -329,9 +326,9 @@ pub fn scan(data: &[u8]) -> Jbig1Info {
         d: data[1],
         planes: data[2],
         reserved: data[3],
-        xd: be_u32(data, 4),
-        yd: be_u32(data, 8),
-        l0: be_u32(data, 12),
+        xd: Bytes(data).be_u32(4),
+        yd: Bytes(data).be_u32(8),
+        l0: Bytes(data).be_u32(12),
         mx: data[16],
         my: data[17],
         order: data[18],
@@ -381,7 +378,7 @@ pub fn scan(data: &[u8]) -> Jbig1Info {
                     break;
                 }
                 let at_move =
-                    Jbig1AtMove { line: be_u32(data, pos + 2), tx: data[pos + 6] as i8, ty: data[pos + 7] as i8 };
+                    Jbig1AtMove { line: Bytes(data).be_u32(pos + 2), tx: data[pos + 6] as i8, ty: data[pos + 7] as i8 };
                 scanner.push_marker(offset, Some(8), Jbig1Section::AtMove(at_move));
                 pos += 8;
             }
@@ -389,7 +386,7 @@ pub fn scan(data: &[u8]) -> Jbig1Info {
                 if pos + 5 >= data.len() {
                     break;
                 }
-                let new_height = be_u32(data, pos + 2);
+                let new_height = Bytes(data).be_u32(pos + 2);
                 let applied = bih.options & OPT_VLENGTH != 0;
                 if applied {
                     height = new_height;
@@ -402,7 +399,7 @@ pub fn scan(data: &[u8]) -> Jbig1Info {
                 if pos + 5 >= data.len() {
                     break;
                 }
-                let declared_length = be_u32(data, pos + 2);
+                let declared_length = Bytes(data).be_u32(pos + 2);
                 let text_end = (pos + 6).saturating_add(declared_length as usize).min(data.len());
                 let text = String::from_utf8_lossy(&data[pos + 6..text_end]).into_owned();
                 scanner.push_marker(

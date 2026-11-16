@@ -1,12 +1,12 @@
 use std::io::{Read, Seek};
 
-use crate::bitreader::BitReader;
 use crate::decoders::bmp::types::{
     BitmapArrayHeader, BitmapCompression, BitmapFileHeader, ColorMasks, ColorSpace, DibColorSpace, DibHeader, DibKind,
     DibV5Fields, Os2Fields, CIEXYZ,
 };
 use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::stream::StreamReader;
 
 pub struct FileHeaders {
     pub file_header: Option<BitmapFileHeader>,
@@ -19,11 +19,11 @@ pub struct HeaderReader;
 const MAX_BITMAP_ARRAY_DEPTH: u32 = 16;
 
 impl HeaderReader {
-    pub fn read_file_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<FileHeaders> {
+    pub fn read_file_header<R: Read + Seek>(reader: &mut StreamReader<R>) -> VexelResult<FileHeaders> {
         Self::read_file_header_at_depth(reader, 0)
     }
 
-    fn read_file_header_at_depth<R: Read + Seek>(reader: &mut BitReader<R>, depth: u32) -> VexelResult<FileHeaders> {
+    fn read_file_header_at_depth<R: Read + Seek>(reader: &mut StreamReader<R>, depth: u32) -> VexelResult<FileHeaders> {
         let peeked = reader.peek_bytes(16).unwrap_or_default();
         if peeked.len() >= 16 && Self::looks_like_headerless_dib(&peeked) {
             log_warn!("No BMP file header found; treating file as a headerless DIB");
@@ -98,7 +98,7 @@ impl HeaderReader {
         width != 0 && height != 0 && planes == 1 && matches!(bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32 | 64)
     }
 
-    fn find_bmp_after_vendor_prefix<R: Read + Seek>(reader: &mut BitReader<R>) -> Option<u64> {
+    fn find_bmp_after_vendor_prefix<R: Read + Seek>(reader: &mut StreamReader<R>) -> Option<u64> {
         const PREFIX_SCAN_LIMIT: usize = 512;
 
         let bytes_left = reader.bytes_left().ok()?;
@@ -151,7 +151,7 @@ impl HeaderReader {
         u64::from(pixel_offset).saturating_add(data_size) <= bytes_remaining.saturating_add(row_size)
     }
 
-    pub fn read_info_header<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<(DibHeader, u32, u32)> {
+    pub fn read_info_header<R: Read + Seek>(reader: &mut StreamReader<R>) -> VexelResult<(DibHeader, u32, u32)> {
         let header_size = reader.read_u32()?;
         let mut header = DibHeader::empty();
         header.header_size = header_size;
@@ -236,7 +236,7 @@ impl HeaderReader {
     }
 
     fn read_info_fields<R: Read + Seek>(
-        reader: &mut BitReader<R>,
+        reader: &mut StreamReader<R>,
         header: &mut DibHeader,
         os2: bool,
     ) -> VexelResult<()> {
@@ -258,7 +258,7 @@ impl HeaderReader {
         Ok(())
     }
 
-    fn read_color_space<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<ColorSpace> {
+    fn read_color_space<R: Read + Seek>(reader: &mut StreamReader<R>) -> VexelResult<ColorSpace> {
         Ok(ColorSpace {
             ciexyz_red: Self::read_ciexyz(reader)?,
             ciexyz_green: Self::read_ciexyz(reader)?,
@@ -266,7 +266,7 @@ impl HeaderReader {
         })
     }
 
-    fn read_ciexyz<R: Read + Seek>(reader: &mut BitReader<R>) -> VexelResult<CIEXYZ> {
+    fn read_ciexyz<R: Read + Seek>(reader: &mut StreamReader<R>) -> VexelResult<CIEXYZ> {
         Ok(CIEXYZ { x: reader.read_u32()? as i32, y: reader.read_u32()? as i32, z: reader.read_u32()? as i32 })
     }
 }

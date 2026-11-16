@@ -1,3 +1,8 @@
+use crate::utils::bits::MsbBitReader;
+use crate::utils::entropy::prefix::PrefixCodeTable;
+
+const LUT_BITS: u32 = 10;
+
 #[derive(Clone, Copy, Debug)]
 pub struct HuffmanLine {
     pub pref_len: u32,
@@ -28,8 +33,7 @@ impl HuffmanLine {
 #[derive(Clone)]
 pub struct HuffmanTable {
     lines: Vec<HuffmanLine>,
-    count_by_length: Vec<u64>,
-    lines_in_code_order: Vec<usize>,
+    codes: PrefixCodeTable<u32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -40,91 +44,29 @@ pub enum HuffmanValue {
 
 impl HuffmanTable {
     pub fn new(lines: Vec<HuffmanLine>) -> HuffmanTable {
-        let max_len = lines.iter().map(|line| line.pref_len).max().unwrap_or(0) as usize;
-        let mut count_by_length = vec![0u64; max_len + 1];
-        for line in lines.iter().filter(|line| line.pref_len > 0) {
-            count_by_length[line.pref_len as usize] += 1;
-        }
-
-        let mut lines_in_code_order: Vec<usize> = (0..lines.len()).filter(|&index| lines[index].pref_len > 0).collect();
-        lines_in_code_order.sort_by_key(|&index| lines[index].pref_len);
-
-        HuffmanTable { lines, count_by_length, lines_in_code_order }
+        let lengths: Vec<u32> = lines.iter().map(|line| line.pref_len).collect();
+        let indices: Vec<u32> = (0..lines.len() as u32).collect();
+        let codes = PrefixCodeTable::canonical(&lengths, &indices, LUT_BITS);
+        HuffmanTable { lines, codes }
     }
 
-    pub fn decode(&self, reader: &mut HuffmanReader) -> Option<HuffmanValue> {
-        let mut distance_from_first_code = 0u64;
-        let mut lines_before_length = 0usize;
-
-        for &count in self.count_by_length.iter().skip(1) {
-            distance_from_first_code = (distance_from_first_code << 1) | reader.read_bit()? as u64;
-
-            if distance_from_first_code < count {
-                let index = self.lines_in_code_order[lines_before_length + distance_from_first_code as usize];
-                return self.read_value(&self.lines[index], reader);
-            }
-
-            lines_before_length += count as usize;
-            distance_from_first_code -= count;
-            if distance_from_first_code > self.lines_in_code_order.len() as u64 {
-                return None;
-            }
+    pub fn decode(&self, reader: &mut MsbBitReader) -> Option<HuffmanValue> {
+        if reader.exhausted() {
+            return None;
+        }
+        let index = self.codes.decode(reader)?;
+        if reader.overrun() {
+            return None;
         }
 
-        None
-    }
-
-    fn read_value(&self, line: &HuffmanLine, reader: &mut HuffmanReader) -> Option<HuffmanValue> {
+        let line = &self.lines[index as usize];
         if line.is_oob {
             return Some(HuffmanValue::Oob);
         }
 
-        let offset = reader.read_bits(line.range_len)? as i64;
+        let offset = reader.try_read(line.range_len)? as i64;
         let value = if line.is_lower { line.range_low as i64 - offset } else { line.range_low as i64 + offset };
         Some(HuffmanValue::Value(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32))
-    }
-}
-
-pub struct HuffmanReader<'a> {
-    data: &'a [u8],
-    bit_pos: usize,
-}
-
-impl<'a> HuffmanReader<'a> {
-    pub fn new(data: &'a [u8]) -> HuffmanReader<'a> {
-        HuffmanReader { data, bit_pos: 0 }
-    }
-
-    pub fn read_bit(&mut self) -> Option<u32> {
-        let byte = self.data.get(self.bit_pos / 8)?;
-        let bit = (byte >> (7 - (self.bit_pos % 8))) & 1;
-        self.bit_pos += 1;
-        Some(bit as u32)
-    }
-
-    pub fn read_bits(&mut self, count: u32) -> Option<u32> {
-        let mut value = 0u32;
-        for _ in 0..count {
-            value = (value << 1) | self.read_bit()?;
-        }
-        Some(value)
-    }
-
-    pub fn align(&mut self) {
-        self.bit_pos = self.bit_pos.div_ceil(8).saturating_mul(8);
-    }
-
-    pub fn byte_offset(&self) -> usize {
-        self.bit_pos.div_ceil(8)
-    }
-
-    pub fn advance_bytes(&mut self, count: usize) {
-        self.align();
-        self.bit_pos = self.bit_pos.saturating_add(count.saturating_mul(8));
-    }
-
-    pub fn data(&self) -> &'a [u8] {
-        self.data
     }
 }
 
@@ -413,13 +355,13 @@ pub fn parse_custom_table(data: &[u8]) -> Option<HuffmanTable> {
         return None;
     }
 
-    let mut reader = HuffmanReader::new(&data[9..]);
+    let mut reader = MsbBitReader::new(&data[9..]);
     let mut lines = Vec::new();
     let mut cur_range_low = htlow as i64;
 
     while cur_range_low < hthigh as i64 {
-        let pref_len = reader.read_bits(htps)?;
-        let range_len = reader.read_bits(htrs)?;
+        let pref_len = reader.try_read(htps)?;
+        let range_len = reader.try_read(htrs)?;
         lines.push(HuffmanLine::normal(pref_len, range_len, cur_range_low as i32));
         if range_len >= 32 {
             break;
@@ -427,14 +369,14 @@ pub fn parse_custom_table(data: &[u8]) -> Option<HuffmanTable> {
         cur_range_low += 1i64 << range_len;
     }
 
-    let lower_pref = reader.read_bits(htps)?;
+    let lower_pref = reader.try_read(htps)?;
     lines.push(HuffmanLine::lower(lower_pref, htlow.saturating_sub(1)));
 
-    let upper_pref = reader.read_bits(htps)?;
+    let upper_pref = reader.try_read(htps)?;
     lines.push(HuffmanLine::upper(upper_pref, hthigh));
 
     if htoob {
-        let oob_pref = reader.read_bits(htps)?;
+        let oob_pref = reader.try_read(htps)?;
         lines.push(HuffmanLine::oob(oob_pref));
     }
 

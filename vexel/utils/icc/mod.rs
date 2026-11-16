@@ -6,59 +6,32 @@ use std::collections::HashMap;
 pub use types::*;
 
 use crate::log_warn;
+use crate::utils::bytes::{be_u16, be_u32};
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::float::half_to_f32;
 
 pub(crate) fn read_u8(data: &[u8], offset: usize) -> Option<u8> {
     data.get(offset).copied()
 }
 
-pub(crate) fn read_u16_be(data: &[u8], offset: usize) -> Option<u16> {
-    let bytes = data.get(offset..offset.checked_add(2)?)?;
-    Some(u16::from_be_bytes([bytes[0], bytes[1]]))
-}
-
-pub(crate) fn read_u32_be(data: &[u8], offset: usize) -> Option<u32> {
-    let bytes = data.get(offset..offset.checked_add(4)?)?;
-    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
 pub(crate) fn read_s15_fixed16(data: &[u8], offset: usize) -> Option<f64> {
-    let raw = read_u32_be(data, offset)? as i32;
+    let raw = be_u32(data, offset)? as i32;
     Some(raw as f64 / 65536.0)
 }
 
 pub(crate) fn read_f32_be(data: &[u8], offset: usize) -> Option<f32> {
-    Some(f32::from_bits(read_u32_be(data, offset)?))
-}
-
-pub(crate) fn f16_to_f32(bits: u16) -> f32 {
-    let sign = (bits >> 15) as u32 & 1;
-    let exponent = (bits >> 10) as u32 & 0x1F;
-    let mantissa = bits as u32 & 0x3FF;
-
-    let bits32 = match (exponent, mantissa) {
-        (0, 0) => sign << 31,
-        (0, m) => {
-            let shift = m.leading_zeros() - 21;
-            let exponent = 113 - shift;
-            let mantissa = (m << shift) & 0x3FF;
-            (sign << 31) | (exponent << 23) | (mantissa << 13)
-        }
-        (31, m) => (sign << 31) | (0xFF << 23) | (m << 13),
-        (e, m) => (sign << 31) | ((e + 112) << 23) | (m << 13),
-    };
-    f32::from_bits(bits32)
+    Some(f32::from_bits(be_u32(data, offset)?))
 }
 
 pub(crate) fn read_f16_be(data: &[u8], offset: usize) -> Option<f32> {
-    Some(f16_to_f32(read_u16_be(data, offset)?))
+    Some(half_to_f32(be_u16(data, offset)?))
 }
 
 pub(crate) fn read_spectral_range(data: &[u8], offset: usize) -> Option<SpectralRange> {
     Some(SpectralRange {
         start: read_f16_be(data, offset)?,
         end: read_f16_be(data, offset.checked_add(2)?)?,
-        steps: read_u16_be(data, offset.checked_add(4)?)?,
+        steps: be_u16(data, offset.checked_add(4)?)?,
     })
 }
 
@@ -206,10 +179,10 @@ impl ICCProfile {
     }
 
     fn parse_header(data: &[u8]) -> ProfileHeader {
-        let size = read_u32_be(data, 0).unwrap_or(0);
+        let size = be_u32(data, 0).unwrap_or(0);
         let preferred_cmm_type = sig_at(data, 4);
 
-        let raw_version = read_u32_be(data, 8).unwrap_or(0);
+        let raw_version = be_u32(data, 8).unwrap_or(0);
         let major = (raw_version >> 24) & 0xFF;
         let minor = (raw_version >> 20) & 0x0F;
         let patch = (raw_version >> 16) & 0x0F;
@@ -220,18 +193,18 @@ impl ICCProfile {
         let pcs = decode_color_space(&sig_at(data, 20));
 
         let creation_date = DateTimeNumber {
-            year: read_u16_be(data, 24).unwrap_or(0),
-            month: read_u16_be(data, 26).unwrap_or(0),
-            day: read_u16_be(data, 28).unwrap_or(0),
-            hours: read_u16_be(data, 30).unwrap_or(0),
-            minutes: read_u16_be(data, 32).unwrap_or(0),
-            seconds: read_u16_be(data, 34).unwrap_or(0),
+            year: be_u16(data, 24).unwrap_or(0),
+            month: be_u16(data, 26).unwrap_or(0),
+            day: be_u16(data, 28).unwrap_or(0),
+            hours: be_u16(data, 30).unwrap_or(0),
+            minutes: be_u16(data, 32).unwrap_or(0),
+            seconds: be_u16(data, 34).unwrap_or(0),
         };
 
         let signature = sig_at(data, 36);
         let platform = decode_platform(&sig_at(data, 40));
 
-        let raw_flags = read_u32_be(data, 44).unwrap_or(0);
+        let raw_flags = be_u32(data, 44).unwrap_or(0);
         let flags = ProfileFlags {
             raw: raw_flags,
             embedded_profile: (raw_flags & 0x01) != 0,
@@ -243,7 +216,7 @@ impl ICCProfile {
 
         let mut attributes_raw = [0u8; 8];
         attributes_raw.copy_from_slice(&data[56..64]);
-        let attr_low = read_u32_be(data, 60).unwrap_or(0);
+        let attr_low = be_u32(data, 60).unwrap_or(0);
         let attributes = DeviceAttributes {
             raw: attributes_raw,
             reflective: (attr_low & 0x01) == 0,
@@ -252,7 +225,7 @@ impl ICCProfile {
             color: (attr_low & 0x08) == 0,
         };
 
-        let rendering_intent = decode_rendering_intent(read_u32_be(data, 64).unwrap_or(0));
+        let rendering_intent = decode_rendering_intent(be_u32(data, 64).unwrap_or(0));
 
         let illuminant = parse_xyz_number(data, 68).unwrap_or(XYZNumber { x: 0.0, y: 0.0, z: 0.0 });
 
@@ -261,15 +234,15 @@ impl ICCProfile {
         let mut profile_id = [0u8; 16];
         profile_id.copy_from_slice(&data[84..100]);
 
-        let spectral_pcs_raw = read_u32_be(data, 100).unwrap_or(0);
+        let spectral_pcs_raw = be_u32(data, 100).unwrap_or(0);
         let spectral_pcs = if spectral_pcs_raw != 0 { Some(decode_spectral_pcs(&data[100..104])) } else { None };
         let spectral_range = read_spectral_range(data, 104).filter(|r| r.steps != 0);
         let bi_spectral_range = read_spectral_range(data, 110).filter(|r| r.steps != 0);
 
-        let mcs_raw = read_u32_be(data, 116).unwrap_or(0);
+        let mcs_raw = be_u32(data, 116).unwrap_or(0);
         let mcs = if mcs_raw != 0 { Some(sig_at(data, 116)) } else { None };
 
-        let sub_class_raw = read_u32_be(data, 120).unwrap_or(0);
+        let sub_class_raw = be_u32(data, 120).unwrap_or(0);
         let device_sub_class = if sub_class_raw != 0 { Some(sig_at(data, 120)) } else { None };
 
         ProfileHeader {
@@ -299,7 +272,7 @@ impl ICCProfile {
     }
 
     fn parse_tag_table(data: &[u8]) -> TagTable {
-        let Some(raw_count) = read_u32_be(data, HEADER_SIZE) else {
+        let Some(raw_count) = be_u32(data, HEADER_SIZE) else {
             log_warn!("ICC profile has no tag table, returning header-only profile");
             return TagTable { tag_count: 0, entries: Vec::new() };
         };
@@ -321,8 +294,8 @@ impl ICCProfile {
             let entry_offset = HEADER_SIZE + 4 + i * 12;
             let (Some(signature), Some(offset), Some(size)) = (
                 data.get(entry_offset..entry_offset + 4).map(sig_to_string),
-                read_u32_be(data, entry_offset + 4),
-                read_u32_be(data, entry_offset + 8),
+                be_u32(data, entry_offset + 4),
+                be_u32(data, entry_offset + 8),
             ) else {
                 break;
             };

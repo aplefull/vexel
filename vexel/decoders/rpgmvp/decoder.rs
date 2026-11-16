@@ -1,9 +1,9 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
-use crate::bitreader::BitReader;
 use crate::decoders::png::{PngDecoder, PngInfo};
 use crate::utils::error::VexelResult;
 use crate::utils::frames::Frames;
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits};
 
 pub const MAGIC: &[u8; 8] = b"RPGMV\0\0\0";
@@ -16,13 +16,13 @@ const PNG_PREFIX: [u8; ENCRYPTED_SIZE] =
 
 pub struct RpgmvpDecoder<R: Read + Seek> {
     limits: Limits,
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     info: Option<PngInfo>,
 }
 
 impl<R: Read + Seek> RpgmvpDecoder<R> {
     pub fn new(reader: R) -> Self {
-        RpgmvpDecoder { limits: Limits::default(), reader: BitReader::new(reader), info: None }
+        RpgmvpDecoder { limits: Limits::default(), reader: StreamReader::new(reader), info: None }
     }
 
     pub fn set_limits(&mut self, limits: Limits) {

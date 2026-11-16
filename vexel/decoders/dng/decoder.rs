@@ -1,16 +1,14 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use super::info::{build_info, DngInfo};
-use crate::bitreader::BitReader;
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::float::half_to_f32;
 use crate::utils::image::PixelData;
 use crate::utils::raster::RasterWindow;
-use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, half_to_f32, u16_from_bytes};
-use crate::utils::tiff::compression::{
-    apply_predictor_float, apply_predictor_horizontal, decompress_deflate_with_capacity, decompress_lzw_with_capacity,
-    decompress_packbits_with_capacity, predictor_x_factor,
-};
+use crate::utils::stream::StreamReader;
+use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, u16_from_bytes};
+use crate::utils::tiff::compression::{apply_predictor, decompress_generic};
 use crate::utils::tiff::ifd::{self, Ifd, IfdCycleGuard, IfdFormat};
 use crate::utils::tiff::info::walk_structure;
 use crate::utils::tiff::jpeg::splice_jpeg_tables;
@@ -107,7 +105,7 @@ struct IfdSummary {
 }
 
 pub struct DngDecoder<R: Read + Seek> {
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     limits: Limits,
     byte_order: ByteOrder,
     ifd_format: IfdFormat,
@@ -125,7 +123,7 @@ pub struct DngDecoder<R: Read + Seek> {
 impl<R: Read + Seek> DngDecoder<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
             limits: Limits::default(),
             byte_order: ByteOrder::LittleEndian,
             ifd_format: IfdFormat::classic(ByteOrder::LittleEndian),
@@ -855,7 +853,6 @@ impl<R: Read + Seek> DngDecoder<R> {
                 Err(_) => break,
             }
         }
-        self.reader.clear_buffer();
         if filled < data.len() {
             data = Vec::new();
         }
@@ -2070,51 +2067,35 @@ impl StripContext<'_> {
         let spp = (self.header.samples_per_pixel as usize).max(1);
         let count = rows * width * spp;
         let expected_bytes = count.saturating_mul(bps.clamp(16, 32) as usize / 8).max(1);
-        let decompressed_bytes = match self.header.compression {
+        let compression = self.header.compression;
+
+        let decompressed_bytes = match compression {
             Compression::None => data,
-            Compression::LZW => {
-                let mut d = decompress_lzw_with_capacity(&data, expected_bytes);
-                self.apply_row_predictor(&mut d, width, bps);
-                d
-            }
-            Compression::PackBits => decompress_packbits_with_capacity(&data, expected_bytes),
-            Compression::AdobeDeflate | Compression::Deflate => {
-                let mut d = decompress_deflate_with_capacity(&data, expected_bytes);
-                self.apply_row_predictor(&mut d, width, bps);
-                d
-            }
             Compression::JPEG | Compression::OldJPEG => {
                 let mut samples = vec![0u16; count];
                 self.decode_jpeg_lossless_into(data, rows, width, RasterWindow::contiguous(&mut samples, width * spp));
                 return Ok(samples);
             }
-            Compression::LossyJPEG => {
-                return self.decompress_jpeg_lossy(data, rows, width);
-            }
-            _ => {
-                log_warn!("Unsupported DNG compression {:?}, using raw bytes", self.header.compression);
-                data
-            }
+            Compression::LossyJPEG => return self.decompress_jpeg_lossy(data, rows, width),
+            _ => match decompress_generic(compression, &data, expected_bytes) {
+                Some(mut decompressed) => {
+                    if compression != Compression::PackBits {
+                        let big_endian = self.byte_order == ByteOrder::BigEndian;
+                        let spp = self.header.samples_per_pixel.max(1);
+                        apply_predictor(self.header.predictor, &mut decompressed, width as u32, spp, bps, big_endian);
+                    }
+                    decompressed
+                }
+                None => {
+                    log_warn!("Unsupported DNG compression {:?}, using raw bytes", compression);
+                    data
+                }
+            },
         };
 
         match self.float_scale {
             Some(scale) => Ok(self.unpack_float_pixels(&decompressed_bytes, count, bps, scale)),
             None => Ok(self.unpack_pixels(&decompressed_bytes, count, bps)),
-        }
-    }
-
-    fn apply_row_predictor(&self, data: &mut [u8], width: usize, bps: u16) {
-        let spp = self.header.samples_per_pixel.max(1);
-        let big_endian = self.byte_order == ByteOrder::BigEndian;
-        match self.header.predictor {
-            Predictor::None => {}
-            Predictor::HorizontalDifferencing => {
-                apply_predictor_horizontal(data, width as u32, spp, bps, big_endian);
-            }
-            Predictor::FloatingPoint | Predictor::FloatingPointX2 | Predictor::FloatingPointX4 => {
-                let x = predictor_x_factor(self.header.predictor);
-                apply_predictor_float(data, (width as u32 / x).max(1), spp.saturating_mul(x as u16), bps, big_endian);
-            }
         }
     }
 

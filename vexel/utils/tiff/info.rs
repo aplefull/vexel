@@ -4,12 +4,12 @@ use std::io::{Read, Seek, SeekFrom};
 use serde::Serialize;
 use tsify::Tsify;
 
-use crate::bitreader::BitReader;
 use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::{parse_value, tag_name as exif_tag_name, ExifValue, IfdType};
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter, Section};
 use crate::utils::limits::Limits;
+use crate::utils::stream::StreamReader;
 use crate::utils::tiff::ifd::{type_size, Ifd, IfdCycleGuard, IfdEntry, IfdFormat, BIGTIFF_MAGIC, TIFF_MAGIC};
 use crate::utils::tiff::types::TiffTags;
 use crate::utils::types::ByteOrder;
@@ -157,7 +157,7 @@ impl TiffEntry {
 }
 
 struct Walker<'a, R: Read + Seek> {
-    reader: &'a mut BitReader<R>,
+    reader: &'a mut StreamReader<R>,
     limits: &'a mut Limits,
     format: IfdFormat,
     stream_len: u64,
@@ -176,7 +176,7 @@ enum WalkTask {
     Finish(Box<TiffImageIfd>),
 }
 
-pub fn walk_structure<R: Read + Seek>(reader: &mut BitReader<R>, limits: &mut Limits) -> VexelResult<TiffStructure> {
+pub fn walk_structure<R: Read + Seek>(reader: &mut StreamReader<R>, limits: &mut Limits) -> VexelResult<TiffStructure> {
     reader.seek(SeekFrom::Start(0))?;
     let mut marker = [0u8; 2];
     reader.read_exact(&mut marker)?;

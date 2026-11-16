@@ -6,12 +6,11 @@ use classifier::{channel_prefix, channel_suffix, Rule, Scheme};
 use dct::{csc709_inverse, csc709_inverse_64, inverse_8x8, inverse_8x8_dc_only, zeroed_rows_for};
 use tables::{to_linear_table, ZIGZAG_TO_RASTER};
 
-use crate::decoders::exr::compression::f32_to_half;
+use crate::decoders::exr::compression::{inflate, rle_decompress, unpredict_and_reorder};
 use crate::decoders::exr::huffman::huf_decompress;
 use crate::decoders::exr::types::{ChunkChannel, ExrPixelType};
-use crate::utils::deflate::ZlibDecoder;
 use crate::utils::error::{VexelError, VexelResult};
-use crate::utils::tiff::color::half_to_f32;
+use crate::utils::float::{f32_to_half, half_to_f32};
 use crate::{log_warn, Limits};
 
 const NUM_SIZES_SINGLE: usize = 11;
@@ -156,65 +155,6 @@ fn classify(channels: &[ChunkChannel], names: &[String], rules: &[Rule]) -> (Vec
     }
 
     (schemes, csc_sets)
-}
-
-fn rle_decompress(src: &[u8], expected: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(expected);
-    let mut pos = 0usize;
-
-    while pos < src.len() && out.len() < expected {
-        let control = src[pos] as i8;
-        pos += 1;
-
-        if control < 0 {
-            let count = (-(control as i32)) as usize;
-            let count = count.min(src.len() - pos).min(expected - out.len());
-            out.extend_from_slice(&src[pos..pos + count]);
-            pos += count;
-        } else {
-            if pos >= src.len() {
-                break;
-            }
-            let count = (control as usize + 1).min(expected - out.len());
-            out.resize(out.len() + count, src[pos]);
-            pos += 1;
-        }
-    }
-
-    if out.len() < expected {
-        log_warn!("EXR: DWA RLE produced {} of {} expected bytes, padding with zeros", out.len(), expected);
-        out.resize(expected, 0);
-    }
-
-    out
-}
-
-fn inflate_padded(data: &[u8], expected: usize, what: &str) -> Vec<u8> {
-    let mut inflated = ZlibDecoder::from_slice(data).decode_with_max(expected);
-    if inflated.len() < expected {
-        log_warn!("EXR: DWA {} inflated to {} of {} expected bytes, padding", what, inflated.len(), expected);
-        inflated.resize(expected, 0);
-    }
-    inflated.truncate(expected);
-    inflated
-}
-
-fn unpredict_dc(data: &mut [u8]) {
-    for i in 1..data.len() {
-        let d = data[i - 1] as i32 + data[i] as i32 - 128;
-        data[i] = d as u8;
-    }
-}
-
-fn deinterleave_dc(data: &[u8]) -> Vec<u16> {
-    let half = data.len().div_ceil(2);
-    let (first, second) = data.split_at(half);
-
-    let mut out = Vec::with_capacity(data.len() / 2);
-    for i in 0..data.len() / 2 {
-        out.push(u16::from_le_bytes([first[i], second[i]]));
-    }
-    out
 }
 
 struct AcReader<'a> {
@@ -517,7 +457,7 @@ fn decode_sections(
         let (start, len) = section(Section::Unknown);
         if len > 0 {
             limits.reserve_usize(header.unknown_uncompressed_size)?;
-            let result = inflate_padded(&data[start..start + len], header.unknown_uncompressed_size, "unknown data");
+            let result = inflate(&data[start..start + len], header.unknown_uncompressed_size, "unknown data");
             limits.free_usize(header.unknown_uncompressed_size);
             result
         } else {
@@ -532,7 +472,7 @@ fn decode_sections(
             limits.reserve_usize(count * 2)?;
             let slice = &data[start..start + len];
             let mut values = match header.ac_compression {
-                AC_COMPRESSION_DEFLATE => inflate_padded(slice, count * 2, "AC data")
+                AC_COMPRESSION_DEFLATE => inflate(slice, count * 2, "AC data")
                     .chunks_exact(2)
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect(),
@@ -559,9 +499,11 @@ fn decode_sections(
         let count = header.dc_uncompressed_count;
         if len > 0 {
             limits.reserve_usize(count * 2)?;
-            let mut bytes = inflate_padded(&data[start..start + len], count * 2, "DC data");
-            unpredict_dc(&mut bytes);
-            let values = deinterleave_dc(&bytes);
+            let bytes = inflate(&data[start..start + len], count * 2, "DC data");
+            let values: Vec<u16> = unpredict_and_reorder(bytes)
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
             limits.free_usize(count * 2);
             values
         } else {
@@ -576,7 +518,7 @@ fn decode_sections(
         let (start, len) = section(Section::Rle);
         if header.rle_raw_size > 0 {
             limits.reserve_usize(header.rle_uncompressed_size + header.rle_raw_size)?;
-            let packed = inflate_padded(&data[start..start + len], header.rle_uncompressed_size, "RLE data");
+            let packed = inflate(&data[start..start + len], header.rle_uncompressed_size, "RLE data");
             let values = rle_decompress(&packed, header.rle_raw_size);
             limits.free_usize(header.rle_uncompressed_size + header.rle_raw_size);
             values

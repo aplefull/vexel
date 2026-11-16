@@ -1,6 +1,6 @@
-use crate::decoders::jpeg_xr::bitreader::XrBitReader;
 use crate::decoders::jpeg_xr::types::*;
 use crate::log_warn;
+use crate::utils::bits::MsbBitReader;
 use crate::utils::error::{VexelError, VexelResult};
 
 #[derive(Debug, Clone)]
@@ -85,7 +85,7 @@ impl PlaneHeader {
     }
 }
 
-fn read_quantizer_set(reader: &mut XrBitReader, indices: &mut [u8; MAX_CHANNELS], channels: usize) -> u8 {
+fn read_quantizer_set(reader: &mut MsbBitReader, indices: &mut [u8; MAX_CHANNELS], channels: usize) -> u8 {
     if channels >= MAX_CHANNELS {
         return 0;
     }
@@ -109,7 +109,7 @@ fn read_quantizer_set(reader: &mut XrBitReader, indices: &mut [u8; MAX_CHANNELS]
     ch_mode
 }
 
-pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> {
+pub fn parse_image_header(reader: &mut MsbBitReader) -> VexelResult<ImageHeader> {
     let mut signature = [0u8; 8];
     for byte in signature.iter_mut() {
         *byte = reader.read(8) as u8;
@@ -135,10 +135,10 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
 
     let hard_tile_boundaries = subversion & 0x8 != 0;
 
-    let tiling_present = reader.read_bool();
-    let bitstream_format = if reader.read_bool() { BitstreamFormat::Frequency } else { BitstreamFormat::Spatial };
+    let tiling_present = reader.read_bit();
+    let bitstream_format = if reader.read_bit() { BitstreamFormat::Frequency } else { BitstreamFormat::Spatial };
     let spatial_transform = reader.read(3);
-    let index_table_present = reader.read_bool();
+    let index_table_present = reader.read_bit();
 
     let overlap_bits = reader.read(2);
     let overlap = Overlap::from_bits(overlap_bits).unwrap_or_else(|| {
@@ -146,14 +146,14 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
         Overlap::None
     });
 
-    let short_header = reader.read_bool();
-    let long_word = reader.read_bool();
-    let windowing = reader.read_bool();
-    let trim_flexbits_flag = reader.read_bool();
-    let tile_stretch = reader.read_bool();
-    let red_blue_not_swapped = reader.read_bool();
-    let premultiplied_alpha = reader.read_bool();
-    let alpha_channel = reader.read_bool();
+    let short_header = reader.read_bit();
+    let long_word = reader.read_bit();
+    let windowing = reader.read_bit();
+    let trim_flexbits_flag = reader.read_bit();
+    let tile_stretch = reader.read_bit();
+    let red_blue_not_swapped = reader.read_bit();
+    let premultiplied_alpha = reader.read_bit();
+    let alpha_channel = reader.read_bit();
 
     let color_bits = reader.read(4);
     let source_color_format = ColorFormat::from_bits(color_bits).unwrap_or_else(|| {
@@ -236,7 +236,7 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
         height -= extra_bottom;
     }
 
-    reader.align_byte();
+    reader.align(8);
 
     Ok(ImageHeader {
         version,
@@ -272,7 +272,7 @@ pub fn parse_image_header(reader: &mut XrBitReader) -> VexelResult<ImageHeader> 
     })
 }
 
-pub fn parse_plane_header(reader: &mut XrBitReader, image: &ImageHeader) -> VexelResult<PlaneHeader> {
+pub fn parse_plane_header(reader: &mut MsbBitReader, image: &ImageHeader) -> VexelResult<PlaneHeader> {
     let color_bits = reader.read(3);
     let internal_color_format = ColorFormat::from_bits(color_bits)
         .ok_or_else(|| VexelError::Custom(format!("JPEG XR: unsupported internal color format {}", color_bits)))?;
@@ -281,7 +281,7 @@ pub fn parse_plane_header(reader: &mut XrBitReader, image: &ImageHeader) -> Vexe
         return Err(VexelError::Custom("JPEG XR: internal color format out of range".to_string()));
     }
 
-    let scaled_arith = reader.read_bool();
+    let scaled_arith = reader.read_bit();
     let subband_bits = reader.read(4);
     let subband = Subband::from_bits(subband_bits);
     if subband_bits > 4 {
@@ -326,7 +326,7 @@ pub fn parse_plane_header(reader: &mut XrBitReader, image: &ImageHeader) -> Vexe
     let mut qp_index_lp = [0u8; MAX_CHANNELS];
     let mut qp_index_hp = [0u8; MAX_CHANNELS];
 
-    if reader.read_bool() {
+    if reader.read_bit() {
         let ch_mode = read_quantizer_set(reader, &mut qp_index_dc, num_channels);
         qp_mode += u32::from(ch_mode) << 3;
     } else {
@@ -334,9 +334,9 @@ pub fn parse_plane_header(reader: &mut XrBitReader, image: &ImageHeader) -> Vexe
     }
 
     if subband != Subband::DcOnly {
-        if !reader.read_bool() {
+        if !reader.read_bit() {
             qp_mode += 0x200;
-            if reader.read_bool() {
+            if reader.read_bit() {
                 let ch_mode = read_quantizer_set(reader, &mut qp_index_lp, num_channels);
                 qp_mode += u32::from(ch_mode) << 5;
             } else {
@@ -347,9 +347,9 @@ pub fn parse_plane_header(reader: &mut XrBitReader, image: &ImageHeader) -> Vexe
         }
 
         if subband != Subband::NoHighpass {
-            if !reader.read_bool() {
+            if !reader.read_bit() {
                 qp_mode += 0x400;
-                if reader.read_bool() {
+                if reader.read_bit() {
                     let ch_mode = read_quantizer_set(reader, &mut qp_index_hp, num_channels);
                     qp_mode += u32::from(ch_mode) << 7;
                 } else {
@@ -371,7 +371,7 @@ pub fn parse_plane_header(reader: &mut XrBitReader, image: &ImageHeader) -> Vexe
         return Err(VexelError::Custom("JPEG XR: frame level QPs must be specified independently".to_string()));
     }
 
-    reader.align_byte();
+    reader.align(8);
 
     Ok(PlaneHeader {
         internal_color_format,

@@ -8,12 +8,12 @@ use super::info::{
 };
 use super::markers::{JpegLsMarker, JPEG_LS_MARKERS};
 use super::types::*;
-use crate::bitreader::BitReader;
 use crate::decoders::jpeg::app::{parse_app, parse_comment, AppMetadata, AppSection, AppSegment};
 use crate::decoders::jpeg::info::subsampling_name;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::info::{ColorModel, ImageSummary};
 use crate::utils::marker::Marker;
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits, PixelData};
 
 enum MappedSamples {
@@ -27,8 +27,23 @@ enum WalkMode {
     Decode,
 }
 
+const SCAN_CHUNK_SIZE: usize = 1 << 16;
+
+fn entropy_end(bytes: &[u8], at_eof: bool) -> (usize, bool) {
+    let mut search = 0;
+    while let Some(offset) = bytes[search..].iter().position(|&byte| byte == 0xFF) {
+        let pos = search + offset;
+        match bytes.get(pos + 1) {
+            None => return (pos, at_eof),
+            Some(&next) if next & 0x80 == 0 || (0xD0..=0xD7).contains(&next) => search = pos + 2,
+            Some(_) => return (pos, true),
+        }
+    }
+    (bytes.len(), at_eof)
+}
+
 pub struct JpegLsDecoder<R: Read + Seek> {
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
     limits: Limits,
     frame: Option<FrameHeader>,
     pending_scan: Option<ScanHeader>,
@@ -45,7 +60,7 @@ pub struct JpegLsDecoder<R: Read + Seek> {
 impl<R: Read + Seek> JpegLsDecoder<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
             limits: Limits::default(),
             frame: None,
             pending_scan: None,
@@ -91,11 +106,11 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
     }
 
     fn read_u8(&mut self) -> std::io::Result<u8> {
-        Ok(self.reader.read_bits(8)? as u8)
+        self.reader.read_u8()
     }
 
     fn read_u16(&mut self) -> std::io::Result<u16> {
-        Ok(self.reader.read_bits(16)? as u16)
+        self.reader.read_u16()
     }
 
     fn read_be_uint(&mut self, bytes: usize) -> std::io::Result<u32> {
@@ -475,29 +490,27 @@ impl<R: Read + Seek> JpegLsDecoder<R> {
 
     fn read_compressed_data(&mut self, collect: bool) -> std::io::Result<Vec<u8>> {
         let mut data = Vec::new();
-        while let Ok(b) = self.reader.read_bits(8) {
-            let byte = b as u8;
+        let mut chunk = vec![0u8; SCAN_CHUNK_SIZE];
 
-            if byte == 0xFF {
-                let next = match self.reader.read_bits(8) {
-                    Ok(b) => b as u8,
-                    Err(_) => break,
-                };
-
-                if next & 0x80 == 0 || (0xD0..=0xD7).contains(&next) {
-                    if collect {
-                        data.push(0xFF);
-                        data.push(next);
-                    }
-                } else {
-                    let _ = self.reader.seek(SeekFrom::Current(-2));
-                    break;
+        loop {
+            let start = self.reader.stream_position()?;
+            let mut filled = 0;
+            while filled < chunk.len() {
+                match self.reader.read(&mut chunk[filled..]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => filled += n,
                 }
-            } else if collect {
-                data.push(byte);
+            }
+
+            let (end, stop) = entropy_end(&chunk[..filled], filled < chunk.len());
+            if collect {
+                data.extend_from_slice(&chunk[..end]);
+            }
+            self.reader.seek(SeekFrom::Start(start + end as u64))?;
+            if stop {
+                return Ok(data);
             }
         }
-        Ok(data)
     }
 
     fn reset_state(&mut self) {

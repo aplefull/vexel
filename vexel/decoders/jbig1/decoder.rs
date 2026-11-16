@@ -1,14 +1,15 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::bitreader::BitReader;
-use crate::decoders::jbig1::arithmetic::ArithDecoder;
 use crate::decoders::jbig1::info::{scan, Jbig1Info};
 use crate::decoders::jbig1::types::{self, *};
+use crate::utils::entropy::qm::QmDecoder;
 use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits, PixelData};
 
 const MAX_AT_MOVES_PER_STRIPE: usize = 64;
 const MAX_DECODED_PLANES: u8 = 8;
+const CONTEXT_COUNT: usize = 4096;
 
 fn at_pixel(plane_data: &[u8], row_offset: usize, x: usize, tx: i32) -> u32 {
     let o = (x as i64 - i64::from(tx)) - (x as i64 & !7);
@@ -65,7 +66,7 @@ pub struct Jbig1Decoder<R: Read + Seek> {
     order: u8,
     options: u8,
 
-    ar_decoders: Vec<Vec<ArithDecoder>>,
+    contexts: Vec<Vec<Vec<u8>>>,
     tx: Vec<Vec<i32>>,
     ty: Vec<Vec<i32>>,
     reset_flags: Vec<Vec<bool>>,
@@ -94,7 +95,7 @@ pub struct Jbig1Decoder<R: Read + Seek> {
 
     info: Option<Jbig1Info>,
 
-    reader: BitReader<R>,
+    reader: StreamReader<R>,
 }
 
 impl<R: Read + Seek> Jbig1Decoder<R> {
@@ -111,7 +112,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             my: 0,
             order: 0,
             options: 0,
-            ar_decoders: Vec::new(),
+            contexts: Vec::new(),
             tx: Vec::new(),
             ty: Vec::new(),
             reset_flags: Vec::new(),
@@ -133,7 +134,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             line_l2: 0,
             line_l3: 0,
             info: None,
-            reader: BitReader::new(reader),
+            reader: StreamReader::new(reader),
         }
     }
 
@@ -195,7 +196,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         let num_layers = (self.d - self.dl) as usize + 1;
         let planes = self.decoded_planes();
 
-        self.ar_decoders = (0..planes).map(|_| (0..num_layers).map(|_| ArithDecoder::new()).collect()).collect();
+        self.contexts = vec![vec![vec![0u8; CONTEXT_COUNT]; num_layers]; planes];
         self.tx = vec![vec![0i32; num_layers]; planes];
         self.ty = vec![vec![0i32; num_layers]; planes];
         self.reset_flags = vec![vec![true; num_layers]; planes];
@@ -336,7 +337,9 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     let is_last_stripe = self.current_stripe.saturating_add(1) >= total_stripes;
                     let reuse_st = !is_last_stripe && !is_reset;
                     if plane < self.decoded_planes() {
-                        self.ar_decoders[plane][layer_idx].reset(reuse_st);
+                        if !reuse_st {
+                            self.contexts[plane][layer_idx].fill(0);
+                        }
 
                         self.reset_flags[plane][layer_idx] = is_reset;
                         if is_reset {
@@ -646,7 +649,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             std::ptr::null()
         };
 
-        let mut pos = 0usize;
+        let mut qm = QmDecoder::new(data);
 
         let mut line_h1 = self.line_h1;
         let mut line_h2 = self.line_h2;
@@ -676,7 +679,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             let lp1_off = if (i >> 1) >= ll - 1 || lo_line_next >= ly as usize { lp2_off } else { lo_line_next * lbpl };
 
             if use_tpdon && self.pseudo {
-                let raw = self.ar_decoders[plane][layer_idx].decode(TPDCX, data, &mut pos).unwrap_or(0);
+                let raw = qm.decode(&mut self.contexts[plane][layer_idx][TPDCX]);
                 lntp = raw != 0;
                 self.lntp[plane][layer_idx] = lntp;
             }
@@ -810,8 +813,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
 
                     let pix = self.decode_diff_pixel(
-                        plane, layer_idx, data, &mut pos, x, y, tx, line_h1, line_h2, line_h3, line_l1, line_l2,
-                        line_l3, use_dpon, dppriv,
+                        plane, layer_idx, &mut qm, x, y, tx, line_h1, line_h2, line_h3, line_l1, line_l2, line_l3,
+                        use_dpon, dppriv,
                     );
 
                     line_h1 = (line_h1 << 1) | pix as u32;
@@ -838,8 +841,8 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     }
 
                     let pix2 = self.decode_diff_pixel(
-                        plane, layer_idx, data, &mut pos, x, y, tx, line_h1, line_h2, line_h3, line_l1, line_l2,
-                        line_l3, use_dpon, dppriv,
+                        plane, layer_idx, &mut qm, x, y, tx, line_h1, line_h2, line_h3, line_l1, line_l2, line_l3,
+                        use_dpon, dppriv,
                     );
 
                     line_h1 = (line_h1 << 1) | pix2 as u32;
@@ -889,8 +892,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         &mut self,
         plane: usize,
         layer_idx: usize,
-        data: &[u8],
-        pos: &mut usize,
+        qm: &mut QmDecoder,
         x: usize,
         y: usize,
         tx: i32,
@@ -953,7 +955,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
         };
         let cx = cx | ((y as u32 & 1) << 11);
 
-        self.ar_decoders[plane][layer_idx].decode(cx as usize, data, pos).unwrap_or(0)
+        qm.decode(&mut self.contexts[plane][layer_idx][cx as usize])
     }
 
     fn decode_layer0_pscd(&mut self, plane: usize, data: &[u8], at_moves: &[AtMove]) {
@@ -981,7 +983,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
             return;
         }
 
-        let mut pos = 0usize;
+        let mut qm = QmDecoder::new(data);
         let use_two_line = self.options & OPT_LRLTWO != 0;
         let use_tpbon = self.options & OPT_TPBON != 0;
 
@@ -1007,8 +1009,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
 
             if use_tpbon && self.pseudo {
                 let tp_cx = if use_two_line { TPB2CX } else { TPB3CX };
-                let slntp = self.ar_decoders[plane][layer_idx].decode(tp_cx, data, &mut pos);
-                let slntp = slntp.unwrap_or(0);
+                let slntp = qm.decode(&mut self.contexts[plane][layer_idx][tp_cx]);
                 lntp = (slntp ^ (lntp as u8)) == 0;
                 self.lntp[plane][layer_idx] = lntp;
 
@@ -1103,7 +1104,7 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     ((line_h3 >> 7) & 0x380) | ((line_h2 >> 11) & 0x07c) | (line_h1 & 0x003)
                 };
 
-                let pix = self.ar_decoders[plane][layer_idx].decode(cx as usize, data, &mut pos).unwrap_or(0);
+                let pix = qm.decode(&mut self.contexts[plane][layer_idx][cx as usize]);
 
                 line_h1 = (line_h1 << 1) | pix as u32;
                 line_h2 <<= 1;

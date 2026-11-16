@@ -7,6 +7,7 @@ use super::codestream::{self, Jp2Container};
 use super::decoder::resolve_colorspace;
 use super::types::{Colorspace, JP2_SIGNATURE};
 use crate::log_warn;
+use crate::utils::bytes::Bytes;
 use crate::utils::exif::{ExifData, ExifReader};
 use crate::utils::icc::ICCProfile;
 use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat, Section};
@@ -245,22 +246,6 @@ pub enum Jpeg2000Section {
     MoreSections(J2kSectionRemainder),
 }
 
-struct Bytes<'a>(&'a [u8]);
-
-impl Bytes<'_> {
-    fn u8(&self, at: usize) -> u8 {
-        self.0.get(at).copied().unwrap_or(0)
-    }
-
-    fn u16(&self, at: usize) -> u16 {
-        u16::from_be_bytes([self.u8(at), self.u8(at + 1)])
-    }
-
-    fn u32(&self, at: usize) -> u32 {
-        u32::from_be_bytes([self.u8(at), self.u8(at + 1), self.u8(at + 2), self.u8(at + 3)])
-    }
-}
-
 fn four_cc(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect()
 }
@@ -298,14 +283,14 @@ impl Scanner {
         let mut pos = 0usize;
         while pos + 8 <= data.len() {
             let bytes = Bytes(&data[pos..]);
-            let mut length = u64::from(bytes.u32(0));
+            let mut length = u64::from(bytes.be_u32(0));
             let type_bytes = &data[pos + 4..pos + 8];
             let mut header = 8usize;
             if length == 1 {
                 if pos + 16 > data.len() {
                     break;
                 }
-                length = (u64::from(bytes.u32(8)) << 32) | u64::from(bytes.u32(12));
+                length = (u64::from(bytes.be_u32(8)) << 32) | u64::from(bytes.be_u32(12));
                 header = 16;
             } else if length == 0 {
                 length = (data.len() - pos) as u64;
@@ -337,7 +322,7 @@ impl Scanner {
                         span,
                         Jpeg2000Section::FileType(J2kFileType {
                             brand: four_cc(&body[..body.len().min(4)]),
-                            minor_version: b.u32(4),
+                            minor_version: b.be_u32(4),
                             compatibility,
                         }),
                     );
@@ -348,9 +333,9 @@ impl Scanner {
                         offset,
                         span,
                         Jpeg2000Section::ImageHeader(J2kImageHeader {
-                            height: b.u32(0),
-                            width: b.u32(4),
-                            components: b.u16(8),
+                            height: b.be_u32(0),
+                            width: b.be_u32(4),
+                            components: b.be_u16(8),
                             bits_per_component: b.u8(10),
                             compression: b.u8(11),
                             unknown_colorspace: b.u8(12),
@@ -381,7 +366,7 @@ impl Scanner {
                             method,
                             precedence: b.u8(1) as i8,
                             approximation: b.u8(2),
-                            enumerated: (method == 1).then(|| b.u32(3)),
+                            enumerated: (method == 1).then(|| b.be_u32(3)),
                             icc_length: icc.map(|icc| icc.len() as u32),
                             cicp,
                         }),
@@ -394,7 +379,7 @@ impl Scanner {
                     self.push(
                         offset,
                         span,
-                        Jpeg2000Section::Palette(J2kPaletteBox { entries: b.u16(0), columns, depths }),
+                        Jpeg2000Section::Palette(J2kPaletteBox { entries: b.be_u16(0), columns, depths }),
                     );
                 }
                 b"cmap" => {
@@ -436,8 +421,8 @@ impl Scanner {
                         span,
                         Jpeg2000Section::Resolution(J2kResolution {
                             display: type_bytes == b"resd",
-                            vertical: value(b.u16(0), b.u16(2), b.u8(8)),
-                            horizontal: value(b.u16(4), b.u16(6), b.u8(9)),
+                            vertical: value(b.be_u16(0), b.be_u16(2), b.u8(8)),
+                            horizontal: value(b.be_u16(4), b.be_u16(6), b.u8(9)),
                         }),
                     );
                 }
@@ -498,7 +483,7 @@ impl Scanner {
         let mut component_count = 0usize;
 
         while pos + 2 <= data.len() {
-            let code = bytes.u16(pos);
+            let code = bytes.be_u16(pos);
             match code {
                 0xFF4F => {
                     self.push(base + pos, Some(2), Jpeg2000Section::Marker(J2kMarkerBody::StartOfCodestream));
@@ -529,11 +514,11 @@ impl Scanner {
 
     fn walk_tile_part(&mut self, data: &[u8], base: usize, start: usize, component_count: usize) -> usize {
         let bytes = Bytes(data);
-        let tile = bytes.u16(start + 4);
-        let declared_length = bytes.u32(start + 6);
+        let tile = bytes.be_u16(start + 4);
+        let declared_length = bytes.be_u32(start + 6);
         let part = bytes.u8(start + 10);
         let parts = bytes.u8(start + 11);
-        let header_end = start + 2 + usize::from(bytes.u16(start + 2));
+        let header_end = start + 2 + usize::from(bytes.be_u16(start + 2));
 
         let declared_end = start.saturating_add(declared_length as usize);
         let truncated = declared_length != 0 && declared_end > data.len();
@@ -548,7 +533,7 @@ impl Scanner {
         let mut pos = header_end;
         let mut data_length = 0u64;
         while pos + 2 <= end {
-            let code = bytes.u16(pos);
+            let code = bytes.be_u16(pos);
             if code == 0xFF93 {
                 data_length = end.saturating_sub(pos + 2) as u64;
                 break;
@@ -617,22 +602,22 @@ fn read_coding_style(body: &[u8], at: usize, precincts: bool) -> Option<J2kCodin
 
 fn read_marker(data: &[u8], pos: usize, component_count: usize) -> (J2kMarkerBody, usize) {
     let bytes = Bytes(data);
-    let code = bytes.u16(pos);
+    let code = bytes.be_u16(pos);
     if (0xFF30..=0xFF3F).contains(&code) || code == 0xFF92 {
         return (J2kMarkerBody::Unknown(code), pos + 2);
     }
 
-    let length = usize::from(bytes.u16(pos + 2)).max(2);
+    let length = usize::from(bytes.be_u16(pos + 2)).max(2);
     let next = (pos + 2 + length).min(data.len()).max(pos + 2);
     let body = &data[(pos + 4).min(next)..next];
     let b = Bytes(body);
     let wide = component_count >= 257;
     let component_size = if wide { 2 } else { 1 };
-    let component_at = |at: usize| if wide { b.u16(at) } else { u16::from(b.u8(at)) };
+    let component_at = |at: usize| if wide { b.be_u16(at) } else { u16::from(b.u8(at)) };
 
     let marker = match code {
         0xFF51 => {
-            let declared = b.u16(34);
+            let declared = b.be_u16(34);
             let components = body
                 .get(36..)
                 .unwrap_or(&[])
@@ -641,21 +626,21 @@ fn read_marker(data: &[u8], pos: usize, component_count: usize) -> (J2kMarkerBod
                 .map(|c| J2kSizComponent { ssiz: c[0], dx: c[1], dy: c[2] })
                 .collect();
             J2kMarkerBody::ImageSize(J2kSiz {
-                rsiz: b.u16(0),
-                xsiz: b.u32(2),
-                ysiz: b.u32(6),
-                x0siz: b.u32(10),
-                y0siz: b.u32(14),
-                xtsiz: b.u32(18),
-                ytsiz: b.u32(22),
-                xt0siz: b.u32(26),
-                yt0siz: b.u32(30),
+                rsiz: b.be_u16(0),
+                xsiz: b.be_u32(2),
+                ysiz: b.be_u32(6),
+                x0siz: b.be_u32(10),
+                y0siz: b.be_u32(14),
+                xtsiz: b.be_u32(18),
+                ytsiz: b.be_u32(22),
+                xt0siz: b.be_u32(26),
+                yt0siz: b.be_u32(30),
                 declared_components: declared,
                 components,
             })
         }
         0xFF50 => J2kMarkerBody::Capabilities(
-            std::iter::once(b.u32(0))
+            std::iter::once(b.be_u32(0))
                 .chain(
                     body.get(4..).unwrap_or(&[]).chunks_exact(2).map(|c| u32::from(u16::from_be_bytes([c[0], c[1]]))),
                 )
@@ -666,7 +651,7 @@ fn read_marker(data: &[u8], pos: usize, component_count: usize) -> (J2kMarkerBod
             J2kMarkerBody::CodingStyle(J2kCod {
                 scod,
                 progression: b.u8(1),
-                layers: b.u16(2),
+                layers: b.be_u16(2),
                 mct: b.u8(4),
                 style: read_coding_style(body, 5, scod & 1 != 0),
             })
@@ -702,11 +687,11 @@ fn read_marker(data: &[u8], pos: usize, component_count: usize) -> (J2kMarkerBod
                 .chunks_exact(entry_size)
                 .map(|c| {
                     let e = Bytes(c);
-                    let comp = |at: usize| if wide { e.u16(at) } else { u16::from(e.u8(at)) };
+                    let comp = |at: usize| if wide { e.be_u16(at) } else { u16::from(e.u8(at)) };
                     J2kProgressionChange {
                         resolution_start: e.u8(0),
                         component_start: comp(1),
-                        layer_end: e.u16(1 + component_size),
+                        layer_end: e.be_u16(1 + component_size),
                         resolution_end: e.u8(3 + component_size),
                         component_end: comp(4 + component_size),
                         order: e.u8(4 + 2 * component_size),
@@ -731,7 +716,7 @@ fn read_marker(data: &[u8], pos: usize, component_count: usize) -> (J2kMarkerBod
                 .collect(),
         ),
         0xFF64 => {
-            let registration = b.u16(0);
+            let registration = b.be_u16(0);
             let payload = body.get(2..).unwrap_or(&[]);
             J2kMarkerBody::Comment(J2kComment {
                 registration,

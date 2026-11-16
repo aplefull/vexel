@@ -1,13 +1,13 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use super::decoder::JpegDecoder;
-use crate::bitreader::BitReader;
 use crate::decoders::jpeg::markers::{JpegMarker, JPEG_MARKERS};
 use crate::utils::error::VexelResult;
+use crate::utils::stream::StreamReader;
 use crate::{log_warn, Image, Limits, PixelData};
 
 pub(crate) fn scan_jpeg_thumbnails<R: Read + Seek>(
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &Limits,
 ) -> VexelResult<Vec<Image>> {
     let saved_pos = reader.stream_position().unwrap_or(0);
@@ -17,7 +17,7 @@ pub(crate) fn scan_jpeg_thumbnails<R: Read + Seek>(
 }
 
 pub(super) fn scan_thumbnail_segments<R: Read + Seek>(
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &Limits,
 ) -> VexelResult<Vec<Image>> {
     reader.seek(SeekFrom::Start(0))?;

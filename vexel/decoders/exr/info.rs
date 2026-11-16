@@ -11,8 +11,8 @@ use super::types::{
     VERSION_FLAG_TILED,
 };
 use crate::decoders::jpeg::info::subsampling_name;
+use crate::utils::float::half_to_f32;
 use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat};
-use crate::utils::tiff::color::half_to_f32;
 
 const VERSION_FLAG_LONG_NAMES: u32 = 0x400;
 const KNOWN_VERSION_FLAGS: u32 =

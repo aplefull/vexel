@@ -1,6 +1,6 @@
-use crate::decoders::jpeg_xr::bitreader::XrBitReader;
 use crate::decoders::jpeg_xr::headers::{ImageHeader, PlaneHeader};
 use crate::decoders::jpeg_xr::types::*;
+use crate::utils::bits::MsbBitReader;
 use crate::utils::error::{VexelError, VexelResult};
 
 pub const MAX_QP_SETS: usize = 16;
@@ -48,7 +48,7 @@ pub fn dquant_bits(num_qp: u8) -> u8 {
     }
 }
 
-fn read_quantizer(reader: &mut XrBitReader, indices: &mut [Quantizer; MAX_CHANNELS], channels: usize) -> u8 {
+fn read_quantizer(reader: &mut MsbBitReader, indices: &mut [Quantizer; MAX_CHANNELS], channels: usize) -> u8 {
     let mut ch_mode = 0u8;
 
     if channels > 1 {
@@ -91,7 +91,7 @@ fn format_quantizer(
     }
 }
 
-pub fn read_tile_header_dc(tile: &mut TileQuantizers, reader: &mut XrBitReader, plane: &PlaneHeader) {
+pub fn read_tile_header_dc(tile: &mut TileQuantizers, reader: &mut MsbBitReader, plane: &PlaneHeader) {
     if plane.dc_uniform() {
         return;
     }
@@ -102,14 +102,14 @@ pub fn read_tile_header_dc(tile: &mut TileQuantizers, reader: &mut XrBitReader, 
 
 pub fn read_tile_header_lp(
     tile: &mut TileQuantizers,
-    reader: &mut XrBitReader,
+    reader: &mut MsbBitReader,
     plane: &PlaneHeader,
 ) -> VexelResult<()> {
     if plane.subband == Subband::DcOnly || plane.lp_uniform() {
         return Ok(());
     }
 
-    tile.use_dc = reader.read_bool();
+    tile.use_dc = reader.read_bit();
     tile.bits_lp = 0;
     tile.num_qp_lp = 1;
 
@@ -135,14 +135,14 @@ pub fn read_tile_header_lp(
 
 pub fn read_tile_header_hp(
     tile: &mut TileQuantizers,
-    reader: &mut XrBitReader,
+    reader: &mut MsbBitReader,
     plane: &PlaneHeader,
 ) -> VexelResult<()> {
     if plane.subband == Subband::DcOnly || plane.subband == Subband::NoHighpass || plane.hp_uniform() {
         return Ok(());
     }
 
-    tile.use_lp = reader.read_bool();
+    tile.use_lp = reader.read_bit();
     tile.bits_hp = 0;
     tile.num_qp_hp = 1;
 

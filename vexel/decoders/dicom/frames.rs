@@ -14,7 +14,7 @@ use crate::decoders::dicom::types::{tags, Photometric, TransferSyntax};
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
-use crate::utils::deflate::DeflateDecoder;
+use crate::utils::codecs::deflate::DeflateDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::frames::{FramePrefetch, FrameSource};
 use crate::utils::image::{Image, ImageFrame, PixelData};

@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
-use crate::decoders::jbig2::arith::{ArithDecoder, Cx};
 use crate::decoders::jbig2::bitmap::{Bitmap, ComposeOp, WorkBudget};
 use crate::decoders::jbig2::color::{self, ColorValues, DEFAULT_PALETTE};
 use crate::decoders::jbig2::generic::{
@@ -11,7 +10,7 @@ use crate::decoders::jbig2::generic::{
 use crate::decoders::jbig2::halftone::{
     decode_halftone_region, decode_pattern_dict, HalftoneParams, PatternDict, PatternDictParams,
 };
-use crate::decoders::jbig2::huffman::{self, HuffmanReader, HuffmanTable};
+use crate::decoders::jbig2::huffman::{self, HuffmanTable};
 use crate::decoders::jbig2::info::{scan, Jbig2Info};
 use crate::decoders::jbig2::refinement::{decode_refinement_region, stats_size as refine_stats_size, RefinementParams};
 use crate::decoders::jbig2::segment::{
@@ -24,10 +23,12 @@ use crate::decoders::jbig2::text::{
     decode_symbol_id_huffman_table, decode_text_region_tracked, Placement, RefCorner, SymbolCodes, TextArithContexts,
     TextCoder, TextRegionHuffman, TextRegionParams,
 };
+use crate::utils::bits::MsbBitReader;
+use crate::utils::codecs::ccitt::{self, FaxMode};
+use crate::utils::entropy::mq::{MqContext, MqDecoder};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, PixelData};
 use crate::utils::limits::Limits;
-use crate::utils::tiff::fax;
 use crate::{log_debug, log_warn};
 
 pub(super) const JBIG2_FILE_ID: [u8; 8] = [0x97, 0x4a, 0x42, 0x32, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -253,8 +254,8 @@ fn resolve_length(header: &SegmentHeader, data: &[u8], start: usize) -> usize {
 }
 
 struct RetainedContexts {
-    generic: Vec<Cx>,
-    refinement: Vec<Cx>,
+    generic: Vec<MqContext>,
+    refinement: Vec<MqContext>,
 }
 
 struct DecodeContext {
@@ -716,7 +717,7 @@ impl DecodeContext {
         context_used: bool,
         template: u8,
         rtemplate: u8,
-    ) -> (Vec<Cx>, Vec<Cx>) {
+    ) -> (Vec<MqContext>, Vec<MqContext>) {
         let generic_size = generic_stats_size(template);
         let refinement_size = refine_stats_size(rtemplate);
 
@@ -740,7 +741,7 @@ impl DecodeContext {
             }
         }
 
-        (vec![Cx::default(); generic_size], vec![Cx::default(); refinement_size])
+        (vec![MqContext::default(); generic_size], vec![MqContext::default(); refinement_size])
     }
 
     fn handle_pattern_dict(&mut self, header: &SegmentHeader, body: &[u8]) {
@@ -763,7 +764,7 @@ impl DecodeContext {
             return;
         }
 
-        let mut gb_stats = vec![Cx::default(); generic_stats_size(params.template)];
+        let mut gb_stats = vec![MqContext::default(); generic_stats_size(params.template)];
 
         match decode_pattern_dict(&body[7..], &params, &mut gb_stats, &mut self.budget) {
             Some(dict) => {
@@ -821,7 +822,7 @@ impl DecodeContext {
         let mut bitmap = Bitmap::new(region.width, region.height);
 
         if mmr {
-            let (decoded, _) = fax::decode_mmr(&body[offset..], region.width, region.height as usize);
+            let decoded = ccitt::decode(&body[offset..], region.width, region.height as usize, FaxMode::Group4).pixels;
             let stride = (region.width as usize).div_ceil(8);
             for row in 0..region.height as usize {
                 let src = row * stride;
@@ -833,8 +834,8 @@ impl DecodeContext {
             }
         } else {
             let params = GenericParams { template, tpgdon, ext_template, at, skip: None };
-            let mut stats = vec![Cx::default(); generic_stats_size(template)];
-            let mut arith = ArithDecoder::with_truncation(&body[offset..], self.segment_truncated);
+            let mut stats = vec![MqContext::default(); generic_stats_size(template)];
+            let mut arith = MqDecoder::with_truncation(&body[offset..], self.segment_truncated);
             decode_generic_region(&mut arith, &mut stats, &mut bitmap, &params);
         }
 
@@ -960,7 +961,7 @@ impl DecodeContext {
         };
 
         let mut bitmap = Bitmap::new(region.width, region.height);
-        let mut gr_stats = vec![Cx::default(); refine_stats_size(rtemplate)];
+        let mut gr_stats = vec![MqContext::default(); refine_stats_size(rtemplate)];
 
         let mut body_end = body.len();
         let mut color_section: Option<&[u8]> = None;
@@ -997,7 +998,7 @@ impl DecodeContext {
                 return;
             };
 
-            let mut reader = HuffmanReader::new(data);
+            let mut reader = MsbBitReader::new(data);
             let Some(symcodes) = decode_symbol_id_huffman_table(&mut reader, symbols.len().max(1) as u32) else {
                 log_warn!("JBIG2 failed to decode symbol ID Huffman table");
                 return;
@@ -1015,7 +1016,7 @@ impl DecodeContext {
                 &mut self.budget,
             );
         } else {
-            let mut arith = ArithDecoder::new(data);
+            let mut arith = MqDecoder::new(data);
             let mut contexts = TextArithContexts::new(sym_code_len);
             let mut coder = TextCoder::Arith { arith: &mut arith, contexts: &mut contexts };
             decode_text_region_tracked(
@@ -1189,7 +1190,7 @@ impl DecodeContext {
         };
 
         let mut bitmap = Bitmap::new(region.width, region.height);
-        let mut gb_stats = vec![Cx::default(); generic_stats_size(params.template)];
+        let mut gb_stats = vec![MqContext::default(); generic_stats_size(params.template)];
 
         decode_halftone_region(&body[offset..], &params, &patterns, &mut bitmap, &mut gb_stats, &mut self.budget);
 
@@ -1265,8 +1266,8 @@ impl DecodeContext {
 
         let mut bitmap = Bitmap::new(region.width, region.height);
         let params = RefinementParams { template, reference: &reference, dx, dy, tpgron, at };
-        let mut stats = vec![Cx::default(); refine_stats_size(template)];
-        let mut arith = ArithDecoder::with_truncation(&body[offset.min(body.len())..], self.segment_truncated);
+        let mut stats = vec![MqContext::default(); refine_stats_size(template)];
+        let mut arith = MqDecoder::with_truncation(&body[offset.min(body.len())..], self.segment_truncated);
 
         decode_refinement_region(&mut arith, &mut stats, &mut bitmap, &params);
 

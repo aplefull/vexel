@@ -1,7 +1,7 @@
 use crate::log_warn;
-use crate::utils::lzma::dictionary::Dictionary;
-use crate::utils::lzma::lzma1::{Lzma1Decoder, Properties, Status};
-use crate::utils::lzma::range_decoder::RangeDecoder;
+use crate::utils::codecs::lzma::dictionary::Dictionary;
+use crate::utils::codecs::lzma::lzma1::{Lzma1Decoder, Properties, Status};
+use crate::utils::codecs::lzma::range_decoder::RangeDecoder;
 
 const DEFAULT_PROPERTIES: Properties = Properties { lc: 3, lp: 0, pb: 2 };
 

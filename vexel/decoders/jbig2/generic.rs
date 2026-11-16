@@ -1,6 +1,6 @@
-use crate::decoders::jbig2::arith::{ArithDecoder, Cx};
 use crate::decoders::jbig2::bitmap::Bitmap;
 use crate::log_warn;
+use crate::utils::entropy::mq::{MqContext, MqDecoder};
 
 pub struct GenericParams {
     pub template: u8,
@@ -121,7 +121,12 @@ fn build_context(bitmap: &Bitmap, params: &GenericParams, x: i64, y: i64) -> usi
     }
 }
 
-pub fn decode_generic_region(arith: &mut ArithDecoder, stats: &mut [Cx], bitmap: &mut Bitmap, params: &GenericParams) {
+pub fn decode_generic_region(
+    arith: &mut MqDecoder,
+    stats: &mut [MqContext],
+    bitmap: &mut Bitmap,
+    params: &GenericParams,
+) {
     let width = bitmap.width as i64;
     let height = bitmap.height as i64;
     let mut ltp = false;

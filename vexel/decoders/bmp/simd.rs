@@ -120,19 +120,6 @@ pub fn extract_channels_rgba_row(
     );
 }
 
-pub fn fill_bytes(dst: &mut [u8], value: u8) {
-    #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") {
-        return unsafe { fill_bytes_avx2(dst, value) };
-    }
-
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    return fill_bytes_wasm(dst, value);
-
-    #[allow(unreachable_code)]
-    dst.fill(value);
-}
-
 // ─── Scalar ───────────────────────────────────────────────────
 
 fn bgr_to_rgb_row_scalar(src: &[u8], dst: &mut [u8], width: usize) {
@@ -542,23 +529,6 @@ unsafe fn extract_channels_rgba_row_avx2(
     );
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn fill_bytes_avx2(dst: &mut [u8], value: u8) {
-    use std::arch::x86_64::*;
-
-    let v = _mm256_set1_epi8(value as i8);
-    let mut i = 0usize;
-    while i + 32 <= dst.len() {
-        _mm256_storeu_si256(dst.as_mut_ptr().add(i) as *mut __m256i, v);
-        i += 32;
-    }
-    while i < dst.len() {
-        dst[i] = value;
-        i += 1;
-    }
-}
-
 // ─── WASM SIMD128 ─────────────────────────────────────────────
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -792,20 +762,4 @@ fn extract_channels_rgba_row_wasm(
         a_shift,
         8,
     );
-}
-
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn fill_bytes_wasm(dst: &mut [u8], value: u8) {
-    use std::arch::wasm32::*;
-
-    let v = i8x16_splat(value as i8);
-    let mut i = 0usize;
-    while i + 16 <= dst.len() {
-        unsafe { v128_store(dst.as_mut_ptr().add(i) as *mut v128, v) };
-        i += 16;
-    }
-    while i < dst.len() {
-        dst[i] = value;
-        i += 1;
-    }
 }

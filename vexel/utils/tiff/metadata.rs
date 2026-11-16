@@ -1,10 +1,10 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::bitreader::BitReader;
 use crate::log_warn;
 use crate::utils::exif::{tag_name, ExifData, ExifEntry, ExifIfd, IfdType};
 use crate::utils::limits::Limits;
 use crate::utils::metadata::MetadataCollector;
+use crate::utils::stream::StreamReader;
 use crate::utils::tiff::ifd::{type_size, Ifd};
 use crate::utils::tiff::info::{IfdKind, TiffIfdSection, TiffSection, TiffStructure};
 use crate::utils::tiff::types::TiffTags;
@@ -15,7 +15,7 @@ pub fn collect_metadata<R: Read + Seek>(
     structure: &TiffStructure,
     ifd_index: u32,
     ifd: &Ifd,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &mut Limits,
     metadata: &mut MetadataCollector,
 ) {
@@ -36,7 +36,7 @@ pub fn collect_metadata<R: Read + Seek>(
 fn read_blob<R: Read + Seek>(
     ifd: &Ifd,
     tag: TiffTags,
-    reader: &mut BitReader<R>,
+    reader: &mut StreamReader<R>,
     limits: &mut Limits,
 ) -> Option<Vec<u8>> {
     let entry = ifd.entry(tag)?;
