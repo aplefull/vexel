@@ -16,6 +16,7 @@ use crate::utils::types::ByteOrder;
 const MAX_VALUE_BYTES: usize = 4096;
 const MAX_PREVIEW_VALUES: usize = 16;
 const MAX_TOTAL_ENTRIES: usize = 1 << 18;
+const MAX_IMAGE_DATA_RUNS: usize = 4096;
 const MAX_STORED_VALUE_COST: usize = 16 << 20;
 const SMALL_VALUE_BYTES: u64 = 128;
 const SMALL_VALUE_RESERVE: usize = 4 << 20;
@@ -87,10 +88,33 @@ pub struct TiffImageData {
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+pub struct TiffImageDataRun {
+    pub ifd: u32,
+    pub tiled: bool,
+    pub chunks: u32,
+    pub total_chunks: u32,
+    pub declared_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+pub struct TiffTagValue {
+    pub ifd: u32,
+    pub kind: IfdKind,
+    pub tag: u16,
+    pub field_type: u16,
+    pub count: u64,
+    pub declared_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum TiffSection {
     FileHeader(TiffFileHeaderSection),
     Ifd(TiffIfdSection),
-    ImageData(TiffImageData),
+    TagValue(TiffTagValue),
+    ImageData(TiffImageDataRun),
 }
 
 pub struct TiffImageIfd {
@@ -282,6 +306,7 @@ impl<R: Read + Seek> Walker<'_, R> {
         self.next_index += 1;
 
         let entries = ifd.entries.iter().map(|entry| self.read_entry(&ifd, entry, true)).collect();
+        self.push_tag_values(&ifd, index, kind);
         let length = self.format.ifd_length(ifd.entries.len());
         self.structure.sections.push(Section::new(
             offset,
@@ -298,12 +323,8 @@ impl<R: Read + Seek> Walker<'_, R> {
 
         let is_image = matches!(kind, IfdKind::Page | IfdKind::SubIfd);
         let image_data = if is_image { self.image_data(&ifd, index) } else { None };
-        let image_data = image_data.map(|(data, start)| {
-            self.structure.sections.push(Section::new(
-                start,
-                Some(data.declared_bytes),
-                TiffSection::ImageData(data.clone()),
-            ));
+        let image_data = image_data.map(|(data, runs)| {
+            self.structure.sections.extend(runs);
             data
         });
 
@@ -456,21 +477,106 @@ impl<R: Read + Seek> Walker<'_, R> {
         Some((tiled, offsets, counts))
     }
 
-    fn image_data(&mut self, ifd: &Ifd, index: u32) -> Option<(TiffImageData, u64)> {
+    fn push_tag_values(&mut self, ifd: &Ifd, index: u32, kind: IfdKind) {
+        for entry in &ifd.entries {
+            let Some(size) = type_size(entry.field_type) else { continue };
+            let total = entry.count.saturating_mul(size as u64);
+            if total <= ifd.format.inline_capacity() as u64 || entry.value_offset == 0 {
+                continue;
+            }
+            if entry.value_offset >= self.stream_len {
+                continue;
+            }
+            let available = total.min(self.stream_len - entry.value_offset);
+            self.structure.sections.push(Section::new(
+                entry.value_offset,
+                Some(available),
+                TiffSection::TagValue(TiffTagValue {
+                    ifd: index,
+                    kind,
+                    tag: entry.tag,
+                    field_type: entry.field_type,
+                    count: entry.count,
+                    declared_bytes: total,
+                }),
+            ));
+        }
+    }
+
+    fn image_data(&mut self, ifd: &Ifd, index: u32) -> Option<(TiffImageData, Vec<Section<TiffSection>>)> {
         let (tiled, offsets, counts) = self.chunk_arrays(ifd)?;
-        let start = offsets.iter().filter(|&&o| o != 0).min().copied().unwrap_or(0);
+        let total_chunks = offsets.len() as u32;
         let mut declared_bytes = 0u64;
         let mut available_bytes = 0u64;
+        let mut chunks = Vec::with_capacity(offsets.len());
         for (i, &offset) in offsets.iter().enumerate() {
             let count = counts.get(i).copied().unwrap_or(0);
             declared_bytes = declared_bytes.saturating_add(count);
             let end = offset.saturating_add(count).min(self.stream_len);
             available_bytes += end.saturating_sub(offset);
+            if offset != 0 && count != 0 {
+                chunks.push((offset, offset.saturating_add(count)));
+            }
         }
-        Some((
-            TiffImageData { ifd: index, tiled, chunk_count: offsets.len() as u32, declared_bytes, available_bytes },
+        chunks.sort_unstable();
+
+        let mut runs = Vec::new();
+        let mut current: Option<(u64, u64, u32, u64)> = None;
+        for (start, end) in chunks {
+            match current.as_mut() {
+                Some((_, run_end, count, declared)) if start <= *run_end => {
+                    *run_end = (*run_end).max(end);
+                    *count += 1;
+                    *declared = declared.saturating_add(end - start);
+                }
+                _ => {
+                    if let Some(run) = current.take() {
+                        self.push_run(&mut runs, run, index, tiled, total_chunks);
+                    }
+                    current = Some((start, end, 1, end - start));
+                }
+            }
+        }
+        if let Some(run) = current {
+            self.push_run(&mut runs, run, index, tiled, total_chunks);
+        }
+        if runs.len() > MAX_IMAGE_DATA_RUNS {
+            log_warn!(
+                "TIFF IFD {} image data is split into {} runs, listing the first {}",
+                index,
+                runs.len(),
+                MAX_IMAGE_DATA_RUNS
+            );
+            runs.truncate(MAX_IMAGE_DATA_RUNS);
+        }
+
+        Some((TiffImageData { ifd: index, tiled, chunk_count: total_chunks, declared_bytes, available_bytes }, runs))
+    }
+
+    fn push_run(
+        &self,
+        runs: &mut Vec<Section<TiffSection>>,
+        (start, end, chunks, declared_bytes): (u64, u64, u32, u64),
+        ifd: u32,
+        tiled: bool,
+        total_chunks: u32,
+    ) {
+        if start >= self.stream_len {
+            return;
+        }
+        let available = end.min(self.stream_len) - start;
+        runs.push(Section::new(
             start,
-        ))
+            Some(available),
+            TiffSection::ImageData(TiffImageDataRun {
+                ifd,
+                tiled,
+                chunks,
+                total_chunks,
+                declared_bytes,
+                available_bytes: available,
+            }),
+        ));
     }
 }
 
@@ -717,21 +823,23 @@ fn entry_value(entry: &TiffEntry) -> String {
 }
 
 fn entry_label(entry: &TiffEntry, kind: IfdKind) -> String {
+    tag_label(entry.tag, kind)
+}
+
+fn tag_label(tag: u16, kind: IfdKind) -> String {
     let name = match kind {
-        IfdKind::Exif => exif_tag_name(entry.tag, IfdType::ExifIfd).or_else(|| TiffTags::name(entry.tag)),
-        IfdKind::Gps => exif_tag_name(entry.tag, IfdType::GpsIfd),
-        IfdKind::Interop => exif_tag_name(entry.tag, IfdType::InteropIfd),
-        IfdKind::Page | IfdKind::SubIfd => {
-            TiffTags::name(entry.tag).or_else(|| exif_tag_name(entry.tag, IfdType::Ifd0))
-        }
+        IfdKind::Exif => exif_tag_name(tag, IfdType::ExifIfd).or_else(|| TiffTags::name(tag)),
+        IfdKind::Gps => exif_tag_name(tag, IfdType::GpsIfd),
+        IfdKind::Interop => exif_tag_name(tag, IfdType::InteropIfd),
+        IfdKind::Page | IfdKind::SubIfd => TiffTags::name(tag).or_else(|| exif_tag_name(tag, IfdType::Ifd0)),
     };
-    let name = name.or(match entry.tag {
+    let name = name.or(match tag {
         48256 => Some("ImageWidth"),
         _ => None,
     });
     match name {
         Some(name) => name.to_string(),
-        None => format!("Tag 0x{:04X} ({})", entry.tag, entry.tag),
+        None => format!("Tag 0x{:04X} ({})", tag, tag),
     }
 }
 
@@ -749,7 +857,19 @@ impl InfoSection for TiffSection {
                     IfdKind::Interop => format!("IFD {} (Interoperability IFD of IFD {})", ifd.index, parent),
                 })
             }
-            TiffSection::ImageData(data) => Cow::Owned(format!("Image Data (IFD {})", data.ifd)),
+            TiffSection::TagValue(value) => {
+                Cow::Owned(format!("{} value (IFD {})", tag_label(value.tag, value.kind), value.ifd))
+            }
+            TiffSection::ImageData(data) if data.chunks == data.total_chunks => {
+                Cow::Owned(format!("Image Data (IFD {})", data.ifd))
+            }
+            TiffSection::ImageData(data) => Cow::Owned(format!(
+                "Image Data (IFD {}, {} of {} {})",
+                data.ifd,
+                data.chunks,
+                data.total_chunks,
+                if data.tiled { "tiles" } else { "strips" }
+            )),
         }
     }
 }
@@ -784,8 +904,14 @@ impl DescribeSection for TiffSection {
                     out.field("Next IFD offset", format!("0x{:08X}", ifd.next_ifd_offset));
                 }
             }
+            TiffSection::TagValue(value) => {
+                out.field("Tag", format!("{} (0x{:04X})", tag_label(value.tag, value.kind), value.tag));
+                out.field("Type", value.field_type);
+                out.field("Count", value.count);
+                out.field("Bytes", value.declared_bytes);
+            }
             TiffSection::ImageData(data) => {
-                out.field(if data.tiled { "Tiles" } else { "Strips" }, data.chunk_count);
+                out.field(if data.tiled { "Tiles" } else { "Strips" }, data.chunks);
                 if data.available_bytes < data.declared_bytes {
                     out.field("Data", format!("{} of {} bytes (truncated)", data.available_bytes, data.declared_bytes));
                 } else {

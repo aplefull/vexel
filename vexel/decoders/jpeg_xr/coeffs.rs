@@ -67,6 +67,7 @@ pub fn read_packet_header(reader: &mut MsbBitReader) -> VexelResult<()> {
 
 pub struct IndexTable {
     pub offsets: Vec<u64>,
+    pub table_end: usize,
     pub header_size: usize,
     pub packet_starts: Vec<usize>,
 }
@@ -92,6 +93,7 @@ pub fn read_index_table(reader: &mut MsbBitReader, entries: usize, present: bool
         }
     }
 
+    let table_end = reader.byte_position();
     let (extra, _) = reader.read_vl_word_esc();
     reader.align(8);
 
@@ -101,7 +103,7 @@ pub fn read_index_table(reader: &mut MsbBitReader, entries: usize, present: bool
     packet_starts.sort_unstable();
     packet_starts.dedup();
 
-    Ok(IndexTable { offsets, header_size, packet_starts })
+    Ok(IndexTable { offsets, table_end, header_size, packet_starts })
 }
 
 struct PlaneState {

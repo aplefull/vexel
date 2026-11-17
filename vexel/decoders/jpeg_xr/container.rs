@@ -201,15 +201,20 @@ pub fn find_codestream(data: &[u8]) -> Option<usize> {
     data.windows(CODESTREAM_MAGIC.len()).position(|w| w == CODESTREAM_MAGIC)
 }
 
-const MAX_BOX_DEPTH: usize = 16;
+pub const MAX_BOX_DEPTH: usize = 16;
 
-struct JpxBox<'a> {
-    kind: &'a [u8],
-    payload_start: usize,
-    payload: &'a [u8],
+pub fn is_superbox(kind: &[u8]) -> bool {
+    matches!(kind, b"jp2h" | b"jpch" | b"jplh" | b"res " | b"asoc")
 }
 
-fn jpx_boxes(data: &[u8]) -> Vec<JpxBox<'_>> {
+pub struct JpxBox<'a> {
+    pub start: usize,
+    pub kind: &'a [u8],
+    pub payload_start: usize,
+    pub payload: &'a [u8],
+}
+
+pub fn jpx_boxes(data: &[u8]) -> Vec<JpxBox<'_>> {
     let mut boxes = Vec::new();
     let mut pos = 0usize;
 
@@ -234,7 +239,7 @@ fn jpx_boxes(data: &[u8]) -> Vec<JpxBox<'_>> {
             _ => (pos + 8, pos.saturating_add(len).min(data.len())),
         };
 
-        boxes.push(JpxBox { kind, payload_start, payload: &data[payload_start..payload_end] });
+        boxes.push(JpxBox { start: pos, kind, payload_start, payload: &data[payload_start..payload_end] });
         pos = payload_end;
     }
 

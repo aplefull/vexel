@@ -115,8 +115,8 @@ pub enum DicomSection {
     Preamble { zero_filled: bool },
     FileMeta { elements: Vec<DicomElement> },
     Element(Box<DicomElement>),
-    DeflatedDataSet { inflated_length: u64, elements: Vec<DicomElement> },
-    Parameters(Box<DicomParameters>),
+    DeflatedDataSet { inflated_length: u64, elements: Vec<DicomElement>, parameters: Box<DicomParameters> },
+    PixelData { element: Box<DicomElement>, parameters: Box<DicomParameters> },
     TrailingData,
 }
 
@@ -304,7 +304,7 @@ impl InfoSection for DicomSection {
             DicomSection::FileMeta { .. } => Cow::Borrowed("File Meta Information"),
             DicomSection::Element(element) => Cow::Owned(tag_label(element.tag)),
             DicomSection::DeflatedDataSet { .. } => Cow::Borrowed("Deflated Data Set"),
-            DicomSection::Parameters(_) => Cow::Borrowed("Image Parameters"),
+            DicomSection::PixelData { element, .. } => Cow::Owned(tag_label(element.tag)),
             DicomSection::TrailingData => Cow::Borrowed("Trailing Data"),
         }
     }
@@ -322,13 +322,17 @@ impl DescribeSection for DicomSection {
                 }
             }
             DicomSection::Element(element) => describe_element_body(element, out),
-            DicomSection::DeflatedDataSet { inflated_length, elements } => {
+            DicomSection::DeflatedDataSet { inflated_length, elements, parameters } => {
                 out.field("Inflated length", format!("{} bytes", inflated_length));
+                out.group("Image Parameters", |out| describe_parameters(parameters, out));
                 for element in elements {
                     describe_element(element, out);
                 }
             }
-            DicomSection::Parameters(parameters) => describe_parameters(parameters, out),
+            DicomSection::PixelData { element, parameters } => {
+                describe_element_body(element, out);
+                out.group("Image Parameters", |out| describe_parameters(parameters, out));
+            }
             DicomSection::TrailingData => {}
         }
     }
@@ -644,24 +648,31 @@ pub fn scan(data: &[u8], limits: &Limits) -> DicomInfo {
         info.push(first.offset as u64, Some((last.end - first.offset) as u64), DicomSection::FileMeta { elements });
     }
 
-    let parameters_offset = file.dataset_start.min(data.len()) as u64;
-    info.push(parameters_offset, None, DicomSection::Parameters(Box::new(build_parameters(&file))));
+    let mut parameters = Some(Box::new(build_parameters(&file)));
 
     let mut end = file.meta.elements.last().map_or(0, |element| element.end).max(file.dataset_start);
     if file.encoding.deflated {
         let elements = file.dataset.elements.iter().map(|element| convert_element(element, charset)).collect();
         let inflated_length = file.inflated_length.unwrap_or(0) as u64;
         let length = data.len().saturating_sub(file.dataset_start) as u64;
-        info.push(file.dataset_start as u64, Some(length), DicomSection::DeflatedDataSet { inflated_length, elements });
+        let parameters = parameters.take().unwrap_or_else(|| Box::new(build_parameters(&file)));
+        info.push(
+            file.dataset_start as u64,
+            Some(length),
+            DicomSection::DeflatedDataSet { inflated_length, elements, parameters },
+        );
         end = data.len();
     } else {
         for element in &file.dataset.elements {
-            let converted = convert_element(element, charset);
-            info.push(
-                element.offset as u64,
-                Some(converted.on_disk_length),
-                DicomSection::Element(Box::new(converted)),
-            );
+            let converted = Box::new(convert_element(element, charset));
+            let length = Some(converted.on_disk_length);
+            let is_pixel_data =
+                matches!(element.tag, tags::PIXEL_DATA | tags::FLOAT_PIXEL_DATA | tags::DOUBLE_FLOAT_PIXEL_DATA);
+            let section = match parameters.take_if(|_| is_pixel_data) {
+                Some(parameters) => DicomSection::PixelData { element: converted, parameters },
+                None => DicomSection::Element(converted),
+            };
+            info.push(element.offset as u64, length, section);
             end = end.max(element.end);
         }
     }

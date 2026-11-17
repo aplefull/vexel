@@ -40,6 +40,7 @@ pub struct BmpPixelData {
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum BmpSection {
+    VendorPrefix,
     BitmapArrayHeader(BitmapArrayHeader),
     FileHeader(BitmapFileHeader),
     DibHeader(DibHeader),
@@ -230,6 +231,7 @@ fn describe_dib(header: &DibHeader, out: &mut InfoWriter) {
 impl InfoSection for BmpSection {
     fn title(&self) -> Cow<'_, str> {
         Cow::Borrowed(match self {
+            BmpSection::VendorPrefix => "Vendor Prefix",
             BmpSection::BitmapArrayHeader(_) => "Bitmap Array Header",
             BmpSection::FileHeader(_) => "File Header",
             BmpSection::DibHeader(_) => "DIB Header",
@@ -245,6 +247,7 @@ impl InfoSection for BmpSection {
 impl DescribeSection for BmpSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
+            BmpSection::VendorPrefix => {}
             BmpSection::BitmapArrayHeader(ba) => {
                 out.field("File size", format!("{} bytes", ba.file_size));
                 out.field("Next offset", ba.next_offset);

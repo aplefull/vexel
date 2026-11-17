@@ -296,9 +296,9 @@ impl StripeOrder {
 struct Scanner {
     info: Jbig1Info,
     stripe_sections: usize,
-    more: Option<(u64, Jbig1MoreStripes)>,
+    more: Option<(u64, u64, Jbig1MoreStripes)>,
     marker_sections: usize,
-    more_markers: Option<(u64, Jbig1MoreMarkers)>,
+    more_markers: Option<(u64, u64, Jbig1MoreMarkers)>,
 }
 
 impl Scanner {
@@ -308,7 +308,8 @@ impl Scanner {
             self.info.push(offset, Some(length), Jbig1Section::Stripe(stripe));
             return;
         }
-        let (_, more) = self.more.get_or_insert((offset, Jbig1MoreStripes { count: 0, data_length: 0 }));
+        let (_, end, more) = self.more.get_or_insert((offset, offset, Jbig1MoreStripes { count: 0, data_length: 0 }));
+        *end = (*end).max(offset.saturating_add(length));
         more.count += 1;
         more.data_length += stripe.data_length;
     }
@@ -319,7 +320,8 @@ impl Scanner {
             self.info.push(offset, length, section);
             return;
         }
-        let (_, more) = self.more_markers.get_or_insert((offset, Jbig1MoreMarkers { count: 0 }));
+        let (_, end, more) = self.more_markers.get_or_insert((offset, offset, Jbig1MoreMarkers { count: 0 }));
+        *end = (*end).max(offset.saturating_add(length.unwrap_or(0)));
         more.count = more.count.saturating_add(1);
     }
 }
@@ -439,11 +441,11 @@ pub fn scan(data: &[u8]) -> Jbig1Info {
         scanner.push_stripe(sde_start as u64, data_length, stripe);
     }
 
-    if let Some((offset, more)) = scanner.more.take() {
-        scanner.info.push(offset, None, Jbig1Section::MoreStripes(more));
+    if let Some((offset, end, more)) = scanner.more.take() {
+        scanner.info.push(offset, Some(end - offset), Jbig1Section::MoreStripes(more));
     }
-    if let Some((offset, more)) = scanner.more_markers.take() {
-        scanner.info.push(offset, None, Jbig1Section::MoreMarkers(more));
+    if let Some((offset, end, more)) = scanner.more_markers.take() {
+        scanner.info.push(offset, Some(end - offset), Jbig1Section::MoreMarkers(more));
     }
     scanner.info.sections.sort_by_key(|section| section.offset);
 

@@ -135,6 +135,13 @@ pub struct Jbig2Segment {
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+pub struct Jbig2SegmentData {
+    pub number: u32,
+    pub flags: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig2MoreSegments {
     pub count: u32,
     pub data_length: u64,
@@ -145,6 +152,7 @@ pub struct Jbig2MoreSegments {
 pub enum Jbig2Section {
     FileHeader(Jbig2FileHeader),
     Segment(Box<Jbig2Segment>),
+    SegmentData(Jbig2SegmentData),
     MoreSegments(Jbig2MoreSegments),
     TrailingData,
 }
@@ -396,6 +404,12 @@ impl InfoSection for Jbig2Section {
                 }
                 known => Cow::Owned(format!("Segment {}: {}", segment.number, segment_type_name(known))),
             },
+            Jbig2Section::SegmentData(segment) => match SegmentType::from_flags(segment.flags) {
+                SegmentType::Unknown(code) => {
+                    Cow::Owned(format!("Segment {} Data: Unknown (type {})", segment.number, code))
+                }
+                known => Cow::Owned(format!("Segment {} Data: {}", segment.number, segment_type_name(known))),
+            },
             Jbig2Section::MoreSegments(_) => Cow::Borrowed("More Segments"),
             Jbig2Section::TrailingData => Cow::Borrowed("Trailing Data"),
         }
@@ -463,7 +477,7 @@ impl DescribeSection for Jbig2Section {
                 out.field("Segments", more.count);
                 out.field("Data", format!("{} bytes", more.data_length));
             }
-            Jbig2Section::TrailingData => {}
+            Jbig2Section::SegmentData(_) | Jbig2Section::TrailingData => {}
         }
     }
 }
@@ -737,7 +751,7 @@ pub fn scan(data: &[u8]) -> Jbig2Info {
         color: false,
         pages: 0,
     };
-    let mut more: Option<(u64, Jbig2MoreSegments)> = None;
+    let mut more: Option<(u64, u64, Jbig2MoreSegments)> = None;
     let mut end = info.sections.first().and_then(|section| section.length).unwrap_or(0) as usize;
 
     for (index, segment) in segments.iter().enumerate() {
@@ -754,20 +768,33 @@ pub fn scan(data: &[u8]) -> Jbig2Info {
         if index < MAX_SEGMENT_SECTIONS {
             let section = Jbig2Section::Segment(Box::new(segment_info(segment, data)));
             info.push(segment.header_offset as u64, Some(length as u64), section);
+            if !contiguous && segment.end > segment.start {
+                info.push(
+                    segment.start as u64,
+                    Some((segment.end - segment.start) as u64),
+                    Jbig2Section::SegmentData(Jbig2SegmentData {
+                        number: segment.header.number,
+                        flags: segment.header.flags,
+                    }),
+                );
+            }
         } else {
-            let (_, more) =
-                more.get_or_insert((segment.header_offset as u64, Jbig2MoreSegments { count: 0, data_length: 0 }));
+            let start = segment.header_offset as u64;
+            let (_, more_end, more) =
+                more.get_or_insert((start, start, Jbig2MoreSegments { count: 0, data_length: 0 }));
+            *more_end = (*more_end).max(segment.end as u64).max(start + length as u64);
             more.count += 1;
             more.data_length += (segment.end - segment.start) as u64;
         }
     }
 
-    if let Some((offset, more)) = more {
-        info.push(offset, None, Jbig2Section::MoreSegments(more));
+    if let Some((offset, more_end, more)) = more {
+        info.push(offset, Some(more_end - offset), Jbig2Section::MoreSegments(more));
     }
     if end < data.len() {
         info.push(end as u64, Some((data.len() - end) as u64), Jbig2Section::TrailingData);
     }
+    info.sections.sort_by_key(|section| section.offset);
 
     info.summary = tracker.summary();
     info

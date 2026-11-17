@@ -283,7 +283,7 @@ struct Scanner {
     metadata: MetadataCollector,
     detailed_tile_parts: usize,
     remainder: Option<(u64, J2kTilePartRemainder)>,
-    more_sections: Option<(u64, J2kSectionRemainder)>,
+    more_sections: Option<(u64, u64, J2kSectionRemainder)>,
 }
 
 impl Scanner {
@@ -296,8 +296,12 @@ impl Scanner {
     }
 
     fn skip(&mut self, offset: usize, length: Option<u64>) {
-        let (_, more) =
-            self.more_sections.get_or_insert((offset as u64, J2kSectionRemainder { sections: 0, bytes: 0 }));
+        let (_, end, more) = self.more_sections.get_or_insert((
+            offset as u64,
+            offset as u64,
+            J2kSectionRemainder { sections: 0, bytes: 0 },
+        ));
+        *end = (*end).max((offset as u64).saturating_add(length.unwrap_or(0)));
         more.sections = more.sections.saturating_add(1);
         more.bytes = more.bytes.saturating_add(length.unwrap_or(0));
     }
@@ -864,8 +868,8 @@ pub fn scan(data: &[u8]) -> Jpeg2000Info {
     if let Some((offset, remainder)) = scanner.remainder.take() {
         scanner.sections.push(Section::new(offset, Some(remainder.bytes), Jpeg2000Section::MoreTileParts(remainder)));
     }
-    if let Some((offset, more)) = scanner.more_sections.take() {
-        scanner.sections.push(Section::new(offset, None, Jpeg2000Section::MoreSections(more)));
+    if let Some((offset, end, more)) = scanner.more_sections.take() {
+        scanner.sections.push(Section::new(offset, Some(end - offset), Jpeg2000Section::MoreSections(more)));
     }
 
     let mut summary = build_summary(&codestream_data, container.as_ref());

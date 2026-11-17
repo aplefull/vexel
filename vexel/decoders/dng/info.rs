@@ -88,7 +88,7 @@ pub struct DngParameters {
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum DngSection {
     Tiff(TiffSection),
-    Parameters(Box<DngParameters>),
+    RawIfd { ifd: TiffSection, parameters: Box<DngParameters> },
 }
 
 struct Lookup<'a> {
@@ -372,15 +372,18 @@ pub fn build_info<R: Read + Seek>(
     if let (Some(raw), Some(summary)) = (raw, summary.as_mut()) {
         apply_metadata(&structure, raw, summary, reader, limits);
     }
-    let raw_offset = raw.map(|image| image.ifd.offset).unwrap_or(0);
+    let raw_offset = raw.map(|image| image.ifd.offset);
 
+    let mut parameters = Some(Box::new(params));
     let mut info = DngInfo { summary, sections: Vec::new() };
     for section in structure.sections {
-        info.push(section.offset, section.length, DngSection::Tiff(section.data));
+        let is_raw_ifd = matches!(section.data, TiffSection::Ifd(_)) && Some(section.offset) == raw_offset;
+        let data = match parameters.take_if(|_| is_raw_ifd) {
+            Some(parameters) => DngSection::RawIfd { ifd: section.data, parameters },
+            None => DngSection::Tiff(section.data),
+        };
+        info.push(section.offset, section.length, data);
     }
-    let position = info.sections.iter().position(|section| section.offset > raw_offset).unwrap_or(info.sections.len());
-    info.sections
-        .insert(position, crate::utils::info::Section::new(raw_offset, None, DngSection::Parameters(Box::new(params))));
     info
 }
 
@@ -603,10 +606,7 @@ impl InfoSection for DngSection {
     fn title(&self) -> Cow<'_, str> {
         match self {
             DngSection::Tiff(section) => section.title(),
-            DngSection::Parameters(params) => match params.raw_ifd {
-                Some(index) => Cow::Owned(format!("DNG Parameters (raw image IFD {})", index)),
-                None => Cow::Borrowed("DNG Parameters"),
-            },
+            DngSection::RawIfd { ifd, .. } => Cow::Owned(format!("{} (raw image)", ifd.title())),
         }
     }
 }
@@ -615,7 +615,10 @@ impl DescribeSection for DngSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             DngSection::Tiff(section) => section.describe(out),
-            DngSection::Parameters(params) => describe_parameters(params, out),
+            DngSection::RawIfd { ifd, parameters } => {
+                ifd.describe(out);
+                out.group("DNG Parameters", |out| describe_parameters(parameters, out));
+            }
         }
     }
 }

@@ -105,6 +105,9 @@ impl<R: Read + Seek> BmpDecoder<R> {
         let start_offset = self.reader.stream_position().unwrap_or(0);
         let headers = HeaderReader::read_file_header(&mut self.reader)?;
         let mut offset = start_offset + headers.vendor_prefix_len;
+        if headers.vendor_prefix_len > 0 {
+            self.collected.push(start_offset, Some(headers.vendor_prefix_len), BmpSection::VendorPrefix);
+        }
 
         if let Some(ba) = headers.array_header {
             self.collected.push(offset, Some(BA_HEADER_SIZE), BmpSection::BitmapArrayHeader(ba));
@@ -163,8 +166,46 @@ impl<R: Read + Seek> BmpDecoder<R> {
         Ok(())
     }
 
+    fn palette_room(&self, start_offset: u64, bytes_per_entry: usize) -> Option<u64> {
+        let pixel_offset = u64::from(self.file_header.pixel_offset);
+        (pixel_offset > start_offset).then(|| (pixel_offset - start_offset) / bytes_per_entry as u64)
+    }
+
+    fn record_optional_palette(&mut self) -> VexelResult<()> {
+        const MAX_OPTIONAL_PALETTE: u64 = 1 << 16;
+
+        let declared = u64::from(self.dib_header.colors_used);
+        if declared == 0 {
+            return Ok(());
+        }
+        let bytes_per_entry = if self.dib_header.kind == DibKind::Core { 3usize } else { 4usize };
+        let start_offset = self.reader.stream_position().unwrap_or(0);
+        let count = self.palette_room(start_offset, bytes_per_entry).map_or(declared, |room| declared.min(room));
+        let count = count.min(MAX_OPTIONAL_PALETTE);
+
+        let mut entries = Vec::new();
+        for _ in 0..count {
+            let Ok(entry) = self.reader.read_bytes(bytes_per_entry) else { break };
+            entries.push(ColorEntry {
+                blue: entry[0],
+                green: entry[1],
+                red: entry[2],
+                reserved: if bytes_per_entry == 3 { 0 } else { entry[3] },
+            });
+        }
+        self.reader.seek(SeekFrom::Start(start_offset))?;
+
+        if !entries.is_empty() {
+            let length = entries.len() as u64 * bytes_per_entry as u64;
+            self.collected.push(start_offset, Some(length), BmpSection::ColorTable(entries));
+        }
+        Ok(())
+    }
+
     fn read_color_table(&mut self) -> VexelResult<()> {
-        if self.dib_header.bits_per_pixel <= 8 {
+        if self.dib_header.bits_per_pixel > 8 {
+            self.record_optional_palette()?;
+        } else if self.dib_header.bits_per_pixel > 0 {
             let max_colors = 1u32 << self.dib_header.bits_per_pixel;
             let mut num_colors = if self.dib_header.colors_used > 0 { self.dib_header.colors_used } else { max_colors };
 
@@ -202,8 +243,15 @@ impl<R: Read + Seek> BmpDecoder<R> {
                 });
             }
 
-            let length = self.color_table.len() as u64 * bytes_per_entry as u64;
-            self.collected.push(start_offset, Some(length), BmpSection::ColorTable(self.color_table.clone()));
+            let listed = self
+                .palette_room(start_offset, bytes_per_entry)
+                .map_or(self.color_table.len(), |room| self.color_table.len().min(room as usize));
+            let length = listed as u64 * bytes_per_entry as u64;
+            self.collected.push(
+                start_offset,
+                Some(length),
+                BmpSection::ColorTable(self.color_table[..listed].to_vec()),
+            );
         }
 
         self.fallback_pixel_offset = self.reader.stream_position().unwrap_or(0);

@@ -3,9 +3,11 @@ use std::io::Cursor;
 
 use serde::Serialize;
 
+use super::coeffs::{num_subbands, read_index_table};
 use super::container::{self, Container, ContainerKind};
 use super::decoder::locate_codestream;
 use super::headers::{parse_image_header, parse_plane_header, ImageHeader, PlaneHeader};
+use super::tile::TileLayout;
 use super::types::*;
 use crate::decoders::jpeg_xr::bitreader::xr_bit_reader;
 use crate::log_warn;
@@ -70,8 +72,42 @@ pub struct JxrPlaneHeader {
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum JpegXrSection {
     Tiff(TiffSection),
+    Box(JxrBox),
     ImageHeader(JxrImageHeader),
     PlaneHeader(JxrPlaneHeader),
+    IndexTable(JxrIndexTable),
+    HeaderExtension(JxrHeaderExtension),
+    TileData(JxrTileData),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+pub struct JxrBox {
+    pub box_type: String,
+    pub payload_length: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+pub struct JxrIndexTable {
+    pub alpha_stream: bool,
+    pub entries: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+pub struct JxrHeaderExtension {
+    pub alpha_stream: bool,
+    pub subsequent_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+pub struct JxrTileData {
+    pub alpha_stream: bool,
+    pub tile_columns: u32,
+    pub tile_rows: u32,
+    pub frequency_order: bool,
 }
 
 fn color_format_code(format: ColorFormat) -> u32 {
@@ -190,10 +226,13 @@ struct Headers {
 fn read_headers(
     data: &[u8],
     offset: usize,
+    end: usize,
     alpha_stream: bool,
     sections: &mut Vec<Section<JpegXrSection>>,
 ) -> Option<Headers> {
-    let stream = data.get(offset..)?;
+    let stream = data.get(offset..end.clamp(offset, data.len()))?;
+    let at = |position: usize| (offset + position.min(stream.len())) as u64;
+    let span = |from: usize, to: usize| Some(to.min(stream.len()).saturating_sub(from.min(stream.len())) as u64);
     let mut reader = xr_bit_reader(stream);
     let image = match parse_image_header(&mut reader) {
         Ok(image) => image,
@@ -202,9 +241,10 @@ fn read_headers(
             return None;
         }
     };
+    let image_end = reader.byte_position();
     sections.push(Section::new(
-        offset as u64,
-        None,
+        at(0),
+        span(0, image_end),
         JpegXrSection::ImageHeader(image_header_info(&image, alpha_stream)),
     ));
 
@@ -215,20 +255,92 @@ fn read_headers(
             return None;
         }
     };
-    sections.push(Section::new(offset as u64, None, JpegXrSection::PlaneHeader(plane_header_info(&plane, false))));
+    let plane_end = reader.byte_position();
+    sections.push(Section::new(
+        at(image_end),
+        span(image_end, plane_end),
+        JpegXrSection::PlaneHeader(plane_header_info(&plane, false)),
+    ));
 
+    let mut header_end = plane_end;
     if image.alpha_channel {
         match parse_plane_header(&mut reader, &image) {
-            Ok(alpha) => sections.push(Section::new(
-                offset as u64,
-                None,
-                JpegXrSection::PlaneHeader(plane_header_info(&alpha, true)),
-            )),
+            Ok(alpha) => {
+                header_end = reader.byte_position();
+                sections.push(Section::new(
+                    at(plane_end),
+                    span(plane_end, header_end),
+                    JpegXrSection::PlaneHeader(plane_header_info(&alpha, true)),
+                ));
+            }
             Err(e) => log_warn!("JPEG XR: failed to parse alpha plane header: {}", e),
         }
     }
 
+    let layout = TileLayout::new(&image);
+    let frequency_order = image.bitstream_format != BitstreamFormat::Spatial;
+    let subbands = num_subbands(plane.subband);
+    let packets_per_row = if frequency_order { layout.cols() * subbands } else { layout.cols() };
+    let entries = packets_per_row * layout.rows();
+
+    let mut cursor = xr_bit_reader(stream);
+    cursor.seek_bytes(header_end);
+    let tiles_start = match read_index_table(&mut cursor, entries, image.index_table_present) {
+        Ok(table) => {
+            if image.index_table_present {
+                sections.push(Section::new(
+                    at(header_end),
+                    span(header_end, table.table_end),
+                    JpegXrSection::IndexTable(JxrIndexTable { alpha_stream, entries: table.offsets.len() as u64 }),
+                ));
+            }
+            sections.push(Section::new(
+                at(table.table_end),
+                span(table.table_end, table.header_size),
+                JpegXrSection::HeaderExtension(JxrHeaderExtension {
+                    alpha_stream,
+                    subsequent_bytes: table.header_size.saturating_sub(cursor.byte_position()) as u64,
+                }),
+            ));
+            table.header_size
+        }
+        Err(e) => {
+            log_warn!("JPEG XR: failed to read index table: {}", e);
+            header_end
+        }
+    };
+
+    if tiles_start < stream.len() {
+        sections.push(Section::new(
+            at(tiles_start),
+            span(tiles_start, stream.len()),
+            JpegXrSection::TileData(JxrTileData {
+                alpha_stream,
+                tile_columns: layout.cols() as u32,
+                tile_rows: layout.rows() as u32,
+                frequency_order,
+            }),
+        ));
+    }
+
     Some(Headers { image, plane })
+}
+
+fn push_boxes(data: &[u8], base: usize, depth: usize, sections: &mut Vec<Section<JpegXrSection>>) {
+    for item in container::jpx_boxes(data) {
+        let end = item.payload_start + item.payload.len();
+        sections.push(Section::new(
+            (base + item.start) as u64,
+            Some((end - item.start) as u64),
+            JpegXrSection::Box(JxrBox {
+                box_type: String::from_utf8_lossy(item.kind).into_owned(),
+                payload_length: item.payload.len() as u64,
+            }),
+        ));
+        if container::is_superbox(item.kind) && depth < container::MAX_BOX_DEPTH {
+            push_boxes(item.payload, base + item.payload_start, depth + 1, sections);
+        }
+    }
 }
 
 fn bits_and_format(depth: u32) -> (u8, SampleFormat) {
@@ -365,12 +477,16 @@ pub fn scan(data: &[u8]) -> JpegXrInfo {
 
     if container.as_ref().is_some_and(|container| container.kind == ContainerKind::Jpx) {
         container::collect_jpx_metadata(data, 0, &mut metadata);
+        push_boxes(data, 0, 0, &mut sections);
     }
 
-    let primary = read_headers(data, offset, false, &mut sections);
-    let alpha_offset =
-        container.as_ref().filter(|c| c.alpha_offset != 0 && c.alpha_byte_count != 0).map(|c| c.alpha_offset);
-    let alpha = alpha_offset.and_then(|at| read_headers(data, at, true, &mut sections));
+    let primary_end = container.as_ref().map_or(data.len(), |c| c.image_offset.saturating_add(c.image_byte_count));
+    let primary = read_headers(data, offset, primary_end, false, &mut sections);
+    let alpha_span = container
+        .as_ref()
+        .filter(|c| c.alpha_offset != 0 && c.alpha_byte_count != 0)
+        .map(|c| (c.alpha_offset, c.alpha_offset.saturating_add(c.alpha_byte_count)));
+    let alpha = alpha_span.and_then(|(at, end)| read_headers(data, at, end, true, &mut sections));
 
     let summary = primary.as_ref().map(|headers| build_summary(container.as_ref(), headers, alpha.is_some(), metadata));
     sections.sort_by_key(|section| section.offset);
@@ -399,6 +515,18 @@ impl InfoSection for JpegXrSection {
             JpegXrSection::PlaneHeader(plane) => {
                 Cow::Borrowed(if plane.alpha_plane { "Plane Header (alpha)" } else { "Plane Header" })
             }
+            JpegXrSection::Box(item) => Cow::Owned(format!("Box ('{}')", item.box_type)),
+            JpegXrSection::IndexTable(table) => {
+                Cow::Borrowed(if table.alpha_stream { "Index Table (alpha codestream)" } else { "Index Table" })
+            }
+            JpegXrSection::HeaderExtension(extension) => Cow::Borrowed(if extension.alpha_stream {
+                "Header Extension (alpha codestream)"
+            } else {
+                "Header Extension"
+            }),
+            JpegXrSection::TileData(tiles) => {
+                Cow::Borrowed(if tiles.alpha_stream { "Tile Data (alpha codestream)" } else { "Tile Data" })
+            }
         }
     }
 }
@@ -407,6 +535,20 @@ impl DescribeSection for JpegXrSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             JpegXrSection::Tiff(section) => section.describe(out),
+            JpegXrSection::Box(item) => {
+                out.field("Type", &item.box_type);
+                out.field("Payload length", format!("{} bytes", item.payload_length));
+            }
+            JpegXrSection::IndexTable(table) => {
+                out.field("Entries", table.entries);
+            }
+            JpegXrSection::HeaderExtension(extension) => {
+                out.field("Subsequent bytes", extension.subsequent_bytes);
+            }
+            JpegXrSection::TileData(tiles) => {
+                out.field("Tiles", format!("{}x{}", tiles.tile_columns, tiles.tile_rows));
+                out.field("Bitstream order", if tiles.frequency_order { "Frequency" } else { "Spatial" });
+            }
             JpegXrSection::ImageHeader(header) => {
                 out.field("Version", format!("{}.{}", header.version, header.subversion));
                 out.field("Hard tiling", yes_no(header.subversion & 0x8 != 0));
