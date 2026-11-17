@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use super::pixels::PngFormat;
 use super::types::{FctlChunk, PngFrame};
+use crate::utils::convert::{self, Channels};
 use crate::utils::error::VexelResult;
 use crate::utils::frames::{reserve_canvas, FramePrefetch, FrameSource, OutputBudget};
 use crate::{log_warn, ImageFrame, Limits, PixelData};
@@ -73,7 +74,7 @@ impl PngData {
         }
 
         let pixels = self.format.decode_frame(frame.data(&self.idat), fctl.width, fctl.height)?;
-        Some(pixels.into_rgba8_bytes())
+        Some(convert::into_layout(pixels, Channels::Rgba))
     }
 }
 
@@ -141,7 +142,7 @@ impl FrameSource for PngFrames {
         };
         let format = &self.data.format;
         let pixels = format.decode_image(idat)?;
-        Ok(Some(ImageFrame::new(format.width, format.height, pixels, 0)))
+        Ok(Some(ImageFrame::from_pixels(format.width, format.height, pixels, 0)))
     }
 
     fn frame_count_hint(&self) -> Option<usize> {
@@ -254,7 +255,7 @@ impl Animation {
             self.emitted += 1;
 
             let frame = PixelData::RGBA8(self.canvas.clone());
-            return Ok(Some(ImageFrame::new(width, height, frame, frame_delay_ms(fctl))));
+            return Ok(Some(ImageFrame::from_pixels(width, height, frame, frame_delay_ms(fctl))));
         }
 
         Ok(None)

@@ -1159,12 +1159,12 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                     let byte_idx = row * hbpl + col / 8;
                     let bit_idx = 7 - (col % 8);
                     if byte_idx < plane_data.len() {
-                        pixels[row * hx as usize + col] = 1 ^ ((plane_data[byte_idx] >> bit_idx) & 1);
+                        pixels[row * hx as usize + col] = (1 ^ ((plane_data[byte_idx] >> bit_idx) & 1)) * 255;
                     }
                 }
             }
 
-            let mut pixel_data = PixelData::L1(pixels);
+            let mut pixel_data = PixelData::L8(pixels);
             pixel_data.correct_pixels(hx, hy);
             Ok(Image::from_pixels(hx, hy, pixel_data))
         } else {
@@ -1222,12 +1222,12 @@ impl<R: Read + Seek> Jbig1Decoder<R> {
                 let byte_idx = row * hbpl + col / 8;
                 let bit_idx = 7 - (col % 8);
                 if byte_idx < plane_data.len() {
-                    pixels[row * hx as usize + col] = 1 ^ ((plane_data[byte_idx] >> bit_idx) & 1);
+                    pixels[row * hx as usize + col] = (1 ^ ((plane_data[byte_idx] >> bit_idx) & 1)) * 255;
                 }
             }
         }
 
-        let mut pixel_data = PixelData::L1(pixels);
+        let mut pixel_data = PixelData::L8(pixels);
         pixel_data.correct_pixels(hx, hy);
         Ok(Image::from_pixels(hx, hy, pixel_data))
     }

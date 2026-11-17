@@ -892,7 +892,7 @@ impl FrameSource for GifFrames {
 
         let mut output = Vec::with_capacity(self.canvas.len());
         compose_layer(&layer, &mut self.canvas, &mut output, width as usize);
-        let composed = ImageFrame::new(width, height, PixelData::RGBA8(output), frame.delay);
+        let composed = ImageFrame::from_pixels(width, height, PixelData::RGBA8(output), frame.delay);
 
         self.shared.recycle(indices);
         self.next_index += 1;

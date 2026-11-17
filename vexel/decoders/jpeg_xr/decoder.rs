@@ -427,7 +427,6 @@ fn apply_orientation(pixels: PixelData, width: usize, height: usize, orientation
     }
 
     match pixels {
-        PixelData::L1(data) => reorient!(data, 1, PixelData::L1),
         PixelData::L8(data) => reorient!(data, 1, PixelData::L8),
         PixelData::L16(data) => reorient!(data, 1, PixelData::L16),
         PixelData::L32F(data) => reorient!(data, 1, PixelData::L32F),

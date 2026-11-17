@@ -449,11 +449,11 @@ fn build_bilevel(sampler: &Sampler, params: &OutputParams) -> PixelData {
 
     for row in 0..params.height {
         for column in 0..params.width {
-            out.push(u8::from(sampler.luma(row, column) >= threshold));
+            out.push(if sampler.luma(row, column) >= threshold { 255 } else { 0 });
         }
     }
 
-    PixelData::L1(out)
+    PixelData::L8(out)
 }
 
 fn is_gray(params: &OutputParams) -> bool {

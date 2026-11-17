@@ -1375,11 +1375,11 @@ fn bitmap_to_image(bitmap: &Bitmap, color: Option<&[[u8; 3]]>) -> Image {
     let mut pixels = Vec::with_capacity(bitmap.width as usize * bitmap.height as usize);
     for y in 0..bitmap.height as i64 {
         for x in 0..bitmap.width as i64 {
-            pixels.push(1 - bitmap.get(x, y) as u8);
+            pixels.push((1 - bitmap.get(x, y) as u8) * 255);
         }
     }
 
-    let mut pixel_data = PixelData::L1(pixels);
+    let mut pixel_data = PixelData::L8(pixels);
     pixel_data.correct_pixels(bitmap.width, bitmap.height);
     Image::from_pixels(bitmap.width, bitmap.height, pixel_data)
 }

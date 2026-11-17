@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Write};
@@ -14,49 +13,22 @@ use jpegxl_sys::encoder::encode::{
     JxlEncoderSetFrameHeader, JxlEncoderSetFrameLossless, JxlEncoderStatus, JxlEncoderUseContainer,
 };
 use jpegxl_sys::metadata::codestream_header::{JxlAnimationHeader, JxlBasicInfo};
-use vexel::{Frames, Image, ImageFrame, PixelData};
+use vexel::{Frames, Image, ImageFrame, PixelFormat, SampleType};
 use webp::{AnimEncoder, AnimFrame, WebPConfig};
 
-fn scale_to_u16(value: f64) -> u16 {
-    (value.clamp(0.0, 1.0) * 65535.0) as u16
+fn be_bytes(samples: &[u16]) -> Vec<u8> {
+    samples.iter().flat_map(|v| v.to_be_bytes()).collect()
 }
 
-fn u16_be_bytes(values: &[u16], step: usize, take: usize) -> Vec<u8> {
-    let mut out = vec![0u8; values.len() / step * take * 2];
-    for (chunk, group) in out.chunks_exact_mut(take * 2).zip(values.chunks_exact(step)) {
-        for (dst, v) in chunk.chunks_exact_mut(2).zip(&group[..take]) {
-            dst.copy_from_slice(&v.to_be_bytes());
+fn netpbm_payload(image: Image) -> (u32, Vec<u8>) {
+    let format = image.format();
+    match format.sample_type() {
+        SampleType::U8 => (255, image.into_samples::<u8>().unwrap_or_default()),
+        _ => {
+            let wide = image.convert(format.with_sample_type(SampleType::U16));
+            (65535, be_bytes(&wide.into_samples::<u16>().unwrap_or_default()))
         }
     }
-    out
-}
-
-fn f32_to_u16_be_bytes(values: &[f32], step: usize, take: usize) -> Vec<u8> {
-    let mut out = vec![0u8; values.len() / step * take * 2];
-    for (chunk, group) in out.chunks_exact_mut(take * 2).zip(values.chunks_exact(step)) {
-        for (dst, &v) in chunk.chunks_exact_mut(2).zip(&group[..take]) {
-            dst.copy_from_slice(&scale_to_u16(v as f64).to_be_bytes());
-        }
-    }
-    out
-}
-
-fn f64_to_u16_be_bytes(values: &[f64], step: usize, take: usize) -> Vec<u8> {
-    let mut out = vec![0u8; values.len() / step * take * 2];
-    for (chunk, group) in out.chunks_exact_mut(take * 2).zip(values.chunks_exact(step)) {
-        for (dst, &v) in chunk.chunks_exact_mut(2).zip(&group[..take]) {
-            dst.copy_from_slice(&scale_to_u16(v).to_be_bytes());
-        }
-    }
-    out
-}
-
-fn strip_channels(values: &[u8], step: usize, take: usize) -> Vec<u8> {
-    let mut out = vec![0u8; values.len() / step * take];
-    for (chunk, group) in out.chunks_exact_mut(take).zip(values.chunks_exact(step)) {
-        chunk.copy_from_slice(&group[..take]);
-    }
-    out
 }
 
 struct PixelInfo {
@@ -70,42 +42,32 @@ struct PixelInfo {
 pub struct Writer {}
 
 impl Writer {
-    pub fn write_jxl(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
-        let frame = ImageFrame::new_still(image.width(), image.height(), image.pixels().clone());
-        Writer::encode_jxl_file(output_path, image.width(), image.height(), frame, &mut std::iter::empty(), false)
+    pub fn write_jxl(output_path: &PathBuf, image: Image) -> Result<(), Error> {
+        let (width, height) = (image.width(), image.height());
+        Writer::encode_jxl_file(output_path, width, height, ImageFrame::new(image, 0), &mut std::iter::empty(), false)
     }
 
-    pub fn write_jxl_pages(output_path: &PathBuf, pages: &[Image]) -> Result<(), Error> {
+    pub fn write_jxl_pages(output_path: &PathBuf, pages: Vec<Image>) -> Result<(), Error> {
         if pages.is_empty() {
             return Err(Error::new(ErrorKind::InvalidData, "no pages to write"));
         }
 
-        let first_format = pages[0].pixel_format();
-        let uniform = pages.iter().all(|page| page.pixel_format() == first_format);
+        let first_format = pages[0].format();
+        let uniform = pages.iter().all(|page| page.format() == first_format);
+        let target =
+            if pages.iter().any(|page| page.format().has_alpha()) { PixelFormat::RGBA8 } else { PixelFormat::RGB8 };
+        if !uniform {
+            eprintln!("Warning: pages have differing pixel formats, converting all to {:?}", target);
+        }
 
-        let frames: Vec<ImageFrame> = if uniform {
-            pages.iter().map(|page| ImageFrame::new_still(page.width(), page.height(), page.pixels().clone())).collect()
-        } else {
-            let any_alpha = pages.iter().any(|page| page.has_alpha());
-            eprintln!(
-                "Warning: pages have differing pixel formats, converting all to {}",
-                if any_alpha { "RGBA8" } else { "RGB8" }
-            );
-            pages
-                .iter()
-                .map(|page| {
-                    let pixels =
-                        if any_alpha { page.pixels().clone().into_rgba8() } else { page.pixels().clone().into_rgb8() };
-                    ImageFrame::new_still(page.width(), page.height(), pixels)
-                })
-                .collect()
-        };
+        let canvas_width = pages.iter().map(|page| page.width()).max().unwrap_or(0);
+        let canvas_height = pages.iter().map(|page| page.height()).max().unwrap_or(0);
+        let is_animated = pages.len() > 1;
 
-        let canvas_width = frames.iter().map(|frame| frame.width()).max().unwrap_or(0);
-        let canvas_height = frames.iter().map(|frame| frame.height()).max().unwrap_or(0);
-
-        let is_animated = frames.len() > 1;
-        let mut frames = frames.into_iter().map(Ok);
+        let mut frames = pages.into_iter().map(|page| {
+            let page = if uniform { page } else { page.convert(target) };
+            Ok(ImageFrame::new(page, 0))
+        });
         let first =
             frames.next().transpose()?.ok_or_else(|| Error::new(ErrorKind::InvalidData, "no pages to write"))?;
 
@@ -147,22 +109,16 @@ impl Writer {
         let first =
             frames.next().transpose()?.ok_or_else(|| Error::new(ErrorKind::InvalidData, "no frames to write"))?;
 
-        let (width, height) = (first.width(), first.height());
+        let (width, height) = (first.image().width(), first.image().height());
 
         Writer::encode_jxl_file(output_path, width, height, first, &mut frames, is_animated)
     }
 
-    pub fn write_webp(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
+    pub fn write_webp(output_path: &PathBuf, image: Image) -> Result<(), Error> {
         let width = image.width();
         let height = image.height();
-        let has_alpha = image.has_alpha();
-
-        let pixels: Cow<[u8]> = match (has_alpha, image.pixels()) {
-            (true, PixelData::RGBA8(p)) => Cow::Borrowed(p.as_slice()),
-            (true, other) => Cow::Owned(other.clone().into_rgba8_bytes()),
-            (false, PixelData::RGB8(p)) => Cow::Borrowed(p.as_slice()),
-            (false, other) => Cow::Owned(other.clone().into_rgb8_bytes()),
-        };
+        let has_alpha = image.format().has_alpha();
+        let pixels: Vec<u8> = if has_alpha { image.into_rgba() } else { image.into_rgb() };
 
         let mut config = WebPConfig::new().unwrap();
         config.lossless = 1i32;
@@ -196,7 +152,8 @@ impl Writer {
             let delay = frame.delay();
             let frame = frame.into_image();
             Writer::validate_image(&frame)?;
-            let (width, height, has_alpha) = *canvas.get_or_insert((frame.width(), frame.height(), frame.has_alpha()));
+            let (width, height, has_alpha) =
+                *canvas.get_or_insert((frame.width(), frame.height(), frame.format().has_alpha()));
             if (frame.width(), frame.height()) != (width, height) {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -207,8 +164,7 @@ impl Writer {
             let delta = if delay == 0 { 1 } else { i32::try_from(delay).unwrap_or(i32::MAX) };
             timestamp_ms = timestamp_ms.saturating_add(delta);
 
-            let pixels =
-                if has_alpha { frame.into_pixels().into_rgba8_bytes() } else { frame.into_pixels().into_rgb8_bytes() };
+            let pixels: Vec<u8> = if has_alpha { frame.into_rgba() } else { frame.into_rgb() };
 
             pixel_bufs.push((pixels, timestamp_ms));
         }
@@ -235,75 +191,39 @@ impl Writer {
         Ok(())
     }
 
-    pub fn write_pam(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
+    pub fn write_pam(output_path: &PathBuf, image: Image) -> Result<(), Error> {
         let width = image.width();
         let height = image.height();
-
-        let (meta, payload): (&str, Cow<[u8]>) = match image.pixels() {
-            PixelData::RGB8(p) => ("DEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\n", Cow::Borrowed(p.as_slice())),
-            PixelData::RGBA8(p) => ("DEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\n", Cow::Borrowed(p.as_slice())),
-            PixelData::RGB16(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
-            PixelData::RGBA16(p) => ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
-            PixelData::RGB32F(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
-            PixelData::RGBA32F(p) => {
-                ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1)))
-            }
-            PixelData::RGB64F(p) => ("DEPTH 3\nMAXVAL 65535\nTUPLTYPE RGB\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
-            PixelData::RGBA64F(p) => {
-                ("DEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1)))
-            }
-            PixelData::L1(p) => ("DEPTH 1\nMAXVAL 1\nTUPLTYPE GRAYSCALE\n", Cow::Borrowed(p.as_slice())),
-            PixelData::L8(p) => ("DEPTH 1\nMAXVAL 255\nTUPLTYPE GRAYSCALE\n", Cow::Borrowed(p.as_slice())),
-            PixelData::L16(p) => ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(u16_be_bytes(p, 1, 1))),
-            PixelData::LA8(p) => ("DEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Borrowed(p.as_slice())),
-            PixelData::LA16(p) => {
-                ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(u16_be_bytes(p, 1, 1)))
-            }
-            PixelData::L32F(p) => {
-                ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1)))
-            }
-            PixelData::LA32F(p) => {
-                ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1)))
-            }
-            PixelData::L64F(p) => {
-                ("DEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1)))
-            }
-            PixelData::LA64F(p) => {
-                ("DEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\n", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1)))
-            }
+        let format = image.format();
+        let tuple_type = match (format.is_gray(), format.has_alpha()) {
+            (true, false) => "GRAYSCALE",
+            (true, true) => "GRAYSCALE_ALPHA",
+            (false, false) => "RGB",
+            (false, true) => "RGB_ALPHA",
         };
+        let (maxval, payload) = netpbm_payload(image);
 
         let mut file = File::create(output_path)?;
-        let header = format!("P7\nWIDTH {}\nHEIGHT {}\n{}ENDHDR\n", width, height, meta);
+        let header = format!(
+            "P7\nWIDTH {}\nHEIGHT {}\nDEPTH {}\nMAXVAL {}\nTUPLTYPE {}\nENDHDR\n",
+            width,
+            height,
+            format.channels(),
+            maxval,
+            tuple_type
+        );
         file.write_all(header.as_bytes())?;
         file.write_all(&payload)?;
 
         Ok(())
     }
 
-    pub fn write_ppm(output_path: &PathBuf, image: &Image) -> Result<(), Error> {
+    pub fn write_ppm(output_path: &PathBuf, image: Image) -> Result<(), Error> {
         let width = image.width();
         let height = image.height();
-
-        let (magic, maxval, payload): (&str, &str, Cow<[u8]>) = match image.pixels() {
-            PixelData::RGB8(p) => ("P6", "255", Cow::Borrowed(p.as_slice())),
-            PixelData::RGBA8(p) => ("P6", "255", Cow::Owned(strip_channels(p, 4, 3))),
-            PixelData::RGB16(p) => ("P6", "65535", Cow::Owned(u16_be_bytes(p, 1, 1))),
-            PixelData::RGBA16(p) => ("P6", "65535", Cow::Owned(u16_be_bytes(p, 4, 3))),
-            PixelData::RGB32F(p) => ("P6", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
-            PixelData::RGBA32F(p) => ("P6", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 4, 3))),
-            PixelData::RGB64F(p) => ("P6", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
-            PixelData::RGBA64F(p) => ("P6", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 4, 3))),
-            PixelData::L1(p) => ("P5", "255", Cow::Owned(p.iter().map(|&v| if v != 0 { 255 } else { 0 }).collect())),
-            PixelData::L8(p) => ("P5", "255", Cow::Borrowed(p.as_slice())),
-            PixelData::L16(p) => ("P5", "65535", Cow::Owned(u16_be_bytes(p, 1, 1))),
-            PixelData::LA8(p) => ("P5", "255", Cow::Owned(strip_channels(p, 2, 1))),
-            PixelData::LA16(p) => ("P5", "65535", Cow::Owned(u16_be_bytes(p, 2, 1))),
-            PixelData::L32F(p) => ("P5", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 1, 1))),
-            PixelData::LA32F(p) => ("P5", "65535", Cow::Owned(f32_to_u16_be_bytes(p, 2, 1))),
-            PixelData::L64F(p) => ("P5", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 1, 1))),
-            PixelData::LA64F(p) => ("P5", "65535", Cow::Owned(f64_to_u16_be_bytes(p, 2, 1))),
-        };
+        let format = image.format();
+        let (magic, layout) = if format.is_gray() { ("P5", PixelFormat::L8) } else { ("P6", PixelFormat::RGB8) };
+        let (maxval, payload) = netpbm_payload(image.convert(layout.with_sample_type(format.sample_type())));
 
         let mut file = File::create(output_path)?;
         let header = format!("{}\n{} {}\n{}\n", magic, width, height, maxval);
@@ -313,8 +233,8 @@ impl Writer {
         Ok(())
     }
 
-    pub fn write_image(image: &Image, format: &str, output_path: &PathBuf) -> Result<(), Error> {
-        Writer::validate_image(image)?;
+    pub fn write_image(image: Image, format: &str, output_path: &PathBuf) -> Result<(), Error> {
+        Writer::validate_image(&image)?;
 
         match format {
             "pam" => Writer::write_pam(output_path, image),
@@ -340,7 +260,7 @@ impl Writer {
                     eprintln!("Warning: {} cannot store animation; writing the first frame only", format);
                 }
 
-                Writer::write_image(&first.into_image(), format, output_path)
+                Writer::write_image(first.into_image(), format, output_path)
             }
             _ => Err(Error::new(ErrorKind::InvalidInput, format!("Invalid format: {}", format))),
         }
@@ -366,23 +286,24 @@ impl Writer {
             Writer::validate_image(&frame_image)?;
 
             let output_path = output_dir.join(format!("{}_frame_{}.{}", output_file_name, i, ext));
-            Writer::write_image(&frame_image, format, &output_path)?;
+            Writer::write_image(frame_image, format, &output_path)?;
         }
 
         Ok(())
     }
 
-    pub fn write_pages(pages: &[Image], format: &str, output_path: &PathBuf) -> Result<(), Error> {
+    pub fn write_pages(pages: Vec<Image>, format: &str, output_path: &PathBuf) -> Result<(), Error> {
         if pages.is_empty() {
             return Err(Error::new(ErrorKind::InvalidData, "no pages to write"));
         }
 
-        for page in pages {
+        for page in &pages {
             Writer::validate_image(page)?;
         }
 
         if pages.len() == 1 {
-            return Writer::write_image(&pages[0], format, output_path);
+            let page = pages.into_iter().next().expect("one page");
+            return Writer::write_image(page, format, output_path);
         }
 
         match format {
@@ -400,7 +321,7 @@ impl Writer {
                     .and_then(|s| s.to_str())
                     .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid output file name"))?;
 
-                for (i, page) in pages.iter().enumerate() {
+                for (i, page) in pages.into_iter().enumerate() {
                     let page_path = output_dir.join(format!("{}_page_{}.{}", output_file_name, i, format));
                     Writer::write_image(page, format, &page_path)?;
                 }
@@ -412,8 +333,6 @@ impl Writer {
     }
 
     fn validate_image(image: &Image) -> Result<(), Error> {
-        use vexel::PixelFormat;
-
         if image.width() == 0 || image.height() == 0 {
             return Err(Error::new(
                 ErrorKind::InvalidData,
@@ -421,203 +340,24 @@ impl Writer {
             ));
         }
 
-        let width = image.width();
-        let height = image.height();
-        let expected_pixels = u64::from(width) * u64::from(height);
-
-        let (channels, bytes_per_element) = match image.pixel_format() {
-            PixelFormat::RGB8 => (3usize, 1usize),
-            PixelFormat::RGBA8 => (4, 1),
-            PixelFormat::RGB16 => (3, 2),
-            PixelFormat::RGBA16 => (4, 2),
-            PixelFormat::RGB32F => (3, 4),
-            PixelFormat::RGBA32F => (4, 4),
-            PixelFormat::RGB64F => (3, 8),
-            PixelFormat::RGBA64F => (4, 8),
-            PixelFormat::L1 => (1, 1),
-            PixelFormat::L8 => (1, 1),
-            PixelFormat::L16 => (1, 2),
-            PixelFormat::LA8 => (2, 1),
-            PixelFormat::LA16 => (2, 2),
-            PixelFormat::L32F => (1, 4),
-            PixelFormat::LA32F => (2, 4),
-            PixelFormat::L64F => (1, 8),
-            PixelFormat::LA64F => (2, 8),
-        };
-
-        let expected_bytes = expected_pixels.saturating_mul((channels * bytes_per_element) as u64);
-        let actual_bytes = image.pixels().as_bytes().len() as u64;
-
-        if actual_bytes != expected_bytes {
-            let msg = format!(
-                "Invalid pixel data size for {}x{} {:?} image: expected {} bytes, got {}",
-                width,
-                height,
-                image.pixel_format(),
-                expected_bytes,
-                actual_bytes
-            );
-
-            return Err(Error::new(ErrorKind::InvalidData, msg));
-        }
-
         Ok(())
     }
 }
 
-fn pixel_data_ptr_and_len(pixel_data: &PixelData) -> (*const c_void, usize) {
-    match pixel_data {
-        PixelData::RGB8(d) | PixelData::RGBA8(d) => (d.as_ptr() as *const c_void, d.len()),
-        PixelData::L1(d) | PixelData::L8(d) | PixelData::LA8(d) => (d.as_ptr() as *const c_void, d.len()),
-        PixelData::RGB16(d) | PixelData::RGBA16(d) => (d.as_ptr() as *const c_void, d.len() * 2),
-        PixelData::L16(d) | PixelData::LA16(d) => (d.as_ptr() as *const c_void, d.len() * 2),
-        PixelData::RGB32F(d) | PixelData::RGBA32F(d) | PixelData::L32F(d) | PixelData::LA32F(d) => {
-            (d.as_ptr() as *const c_void, d.len() * 4)
-        }
-        PixelData::RGB64F(d) | PixelData::RGBA64F(d) | PixelData::L64F(d) | PixelData::LA64F(d) => {
-            (d.as_ptr() as *const c_void, d.len() * 8)
-        }
-    }
-}
+fn pixel_info_for(format: PixelFormat) -> PixelInfo {
+    let (data_type, bits_per_sample, exponent_bits_per_sample) = match format.sample_type() {
+        SampleType::U8 => (JxlDataType::Uint8, 8, 0),
+        SampleType::U16 => (JxlDataType::Uint16, 16, 0),
+        SampleType::F32 | SampleType::F64 => (JxlDataType::Float, 32, 8),
+    };
 
-fn pixel_info_for(pixel_data: &PixelData) -> PixelInfo {
-    match pixel_data {
-        PixelData::RGB8(_) => PixelInfo {
-            data_type: JxlDataType::Uint8,
-            num_channels: 3,
-            bits_per_sample: 8,
-            exponent_bits_per_sample: 0,
-            has_alpha: false,
-            is_gray: false,
-        },
-        PixelData::RGBA8(_) => PixelInfo {
-            data_type: JxlDataType::Uint8,
-            num_channels: 4,
-            bits_per_sample: 8,
-            exponent_bits_per_sample: 0,
-            has_alpha: true,
-            is_gray: false,
-        },
-        PixelData::RGB16(_) => PixelInfo {
-            data_type: JxlDataType::Uint16,
-            num_channels: 3,
-            bits_per_sample: 16,
-            exponent_bits_per_sample: 0,
-            has_alpha: false,
-            is_gray: false,
-        },
-        PixelData::RGBA16(_) => PixelInfo {
-            data_type: JxlDataType::Uint16,
-            num_channels: 4,
-            bits_per_sample: 16,
-            exponent_bits_per_sample: 0,
-            has_alpha: true,
-            is_gray: false,
-        },
-        PixelData::RGB32F(_) => PixelInfo {
-            data_type: JxlDataType::Float,
-            num_channels: 3,
-            bits_per_sample: 32,
-            exponent_bits_per_sample: 8,
-            has_alpha: false,
-            is_gray: false,
-        },
-        PixelData::RGBA32F(_) => PixelInfo {
-            data_type: JxlDataType::Float,
-            num_channels: 4,
-            bits_per_sample: 32,
-            exponent_bits_per_sample: 8,
-            has_alpha: true,
-            is_gray: false,
-        },
-        PixelData::RGB64F(_) => PixelInfo {
-            data_type: JxlDataType::Float,
-            num_channels: 3,
-            bits_per_sample: 32,
-            exponent_bits_per_sample: 8,
-            has_alpha: false,
-            is_gray: false,
-        },
-        PixelData::RGBA64F(_) => PixelInfo {
-            data_type: JxlDataType::Float,
-            num_channels: 4,
-            bits_per_sample: 32,
-            exponent_bits_per_sample: 8,
-            has_alpha: true,
-            is_gray: false,
-        },
-        PixelData::L1(_) => PixelInfo {
-            data_type: JxlDataType::Uint8,
-            num_channels: 1,
-            bits_per_sample: 1,
-            exponent_bits_per_sample: 0,
-            has_alpha: false,
-            is_gray: true,
-        },
-        PixelData::L8(_) => PixelInfo {
-            data_type: JxlDataType::Uint8,
-            num_channels: 1,
-            bits_per_sample: 8,
-            exponent_bits_per_sample: 0,
-            has_alpha: false,
-            is_gray: true,
-        },
-        PixelData::LA8(_) => PixelInfo {
-            data_type: JxlDataType::Uint8,
-            num_channels: 2,
-            bits_per_sample: 8,
-            exponent_bits_per_sample: 0,
-            has_alpha: true,
-            is_gray: true,
-        },
-        PixelData::L16(_) => PixelInfo {
-            data_type: JxlDataType::Uint16,
-            num_channels: 1,
-            bits_per_sample: 16,
-            exponent_bits_per_sample: 0,
-            has_alpha: false,
-            is_gray: true,
-        },
-        PixelData::LA16(_) => PixelInfo {
-            data_type: JxlDataType::Uint16,
-            num_channels: 2,
-            bits_per_sample: 16,
-            exponent_bits_per_sample: 0,
-            has_alpha: true,
-            is_gray: true,
-        },
-        PixelData::L32F(_) => PixelInfo {
-            data_type: JxlDataType::Float,
-            num_channels: 1,
-            bits_per_sample: 32,
-            exponent_bits_per_sample: 8,
-            has_alpha: false,
-            is_gray: true,
-        },
-        PixelData::LA32F(_) => PixelInfo {
-            data_type: JxlDataType::Float,
-            num_channels: 2,
-            bits_per_sample: 32,
-            exponent_bits_per_sample: 8,
-            has_alpha: true,
-            is_gray: true,
-        },
-        PixelData::L64F(_) => PixelInfo {
-            data_type: JxlDataType::Float,
-            num_channels: 1,
-            bits_per_sample: 32,
-            exponent_bits_per_sample: 8,
-            has_alpha: false,
-            is_gray: true,
-        },
-        PixelData::LA64F(_) => PixelInfo {
-            data_type: JxlDataType::Float,
-            num_channels: 2,
-            bits_per_sample: 32,
-            exponent_bits_per_sample: 8,
-            has_alpha: true,
-            is_gray: true,
-        },
+    PixelInfo {
+        data_type,
+        num_channels: format.channels() as u32,
+        bits_per_sample,
+        exponent_bits_per_sample,
+        has_alpha: format.has_alpha(),
+        is_gray: format.is_gray(),
     }
 }
 
@@ -629,7 +369,7 @@ unsafe fn jxl_encode(
     rest: &mut dyn Iterator<Item = Result<ImageFrame, Error>>,
     is_animated: bool,
 ) -> Result<Vec<u8>, String> {
-    let info = pixel_info_for(first_frame.pixels());
+    let info = pixel_info_for(first_frame.image().format());
 
     if is_animated {
         if JxlEncoderUseContainer(enc, JxlBool::True) != JxlEncoderStatus::Success {
@@ -707,8 +447,10 @@ unsafe fn jxl_encode(
         align: 0,
     };
 
-    let add_frame = |frame: &ImageFrame| -> Result<(), String> {
-        let has_crop = frame.width() != canvas_width || frame.height() != canvas_height;
+    let add_frame = |frame: ImageFrame| -> Result<(), String> {
+        let delay = frame.delay();
+        let mut image = frame.into_image();
+        let has_crop = image.width() != canvas_width || image.height() != canvas_height;
 
         if is_animated || has_crop {
             let mut frame_header = MaybeUninit::<jpegxl_sys::metadata::codestream_header::JxlFrameHeader>::uninit();
@@ -716,15 +458,15 @@ unsafe fn jxl_encode(
             let mut frame_header = frame_header.assume_init();
 
             if is_animated {
-                frame_header.duration = if frame.delay() == 0 { 1 } else { frame.delay() };
+                frame_header.duration = if delay == 0 { 1 } else { delay };
             }
 
             if has_crop {
                 frame_header.layer_info.have_crop = JxlBool::True;
                 frame_header.layer_info.crop_x0 = 0;
                 frame_header.layer_info.crop_y0 = 0;
-                frame_header.layer_info.xsize = frame.width();
-                frame_header.layer_info.ysize = frame.height();
+                frame_header.layer_info.xsize = image.width();
+                frame_header.layer_info.ysize = image.height();
             }
 
             if JxlEncoderSetFrameHeader(frame_settings, &frame_header) != JxlEncoderStatus::Success {
@@ -732,16 +474,12 @@ unsafe fn jxl_encode(
             }
         }
 
-        let f32_converted: Option<Vec<f32>> = match frame.pixels() {
-            PixelData::RGB64F(d) | PixelData::RGBA64F(d) | PixelData::L64F(d) | PixelData::LA64F(d) => {
-                Some(d.iter().map(|&v| v as f32).collect())
-            }
-            _ => None,
-        };
-        let (ptr, len) = match &f32_converted {
-            Some(v) => (v.as_ptr() as *const c_void, v.len() * 4),
-            None => pixel_data_ptr_and_len(frame.pixels()),
-        };
+        let format = image.format();
+        if format.sample_type() == SampleType::F64 {
+            image = image.convert(format.with_sample_type(SampleType::F32));
+        }
+        let bytes = image.as_bytes();
+        let (ptr, len) = (bytes.as_ptr() as *const c_void, bytes.len());
 
         if JxlEncoderAddImageFrame(frame_settings, &pixel_format, ptr, len) != JxlEncoderStatus::Success {
             return Err("failed to add image frame".to_string());
@@ -750,13 +488,10 @@ unsafe fn jxl_encode(
         Ok(())
     };
 
-    add_frame(&first_frame)?;
-    drop(first_frame);
+    add_frame(first_frame)?;
 
     for frame in rest {
-        let frame = frame.map_err(|e| e.to_string())?;
-        add_frame(&frame)?;
-        drop(frame);
+        add_frame(frame.map_err(|e| e.to_string())?)?;
     }
 
     JxlEncoderCloseInput(enc);

@@ -289,12 +289,12 @@ impl PixelReader {
             let pixels = src.gather(&[0], |_, raw| {
                 let bit = raw as u8 & 1;
                 if invert {
-                    1 - bit
+                    (1 - bit) * 255
                 } else {
-                    bit
+                    bit * 255
                 }
             });
-            return Ok(PixelData::L1(pixels));
+            return Ok(PixelData::L8(pixels));
         }
 
         let channels: Vec<usize> = match alpha {

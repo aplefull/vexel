@@ -189,7 +189,6 @@ fn normalized_samples(pixels: PixelData) -> Vec<f64> {
         PixelData::RGB8(v) | PixelData::RGBA8(v) | PixelData::L8(v) | PixelData::LA8(v) => {
             v.into_iter().map(|s| s as f64 / 255.0).collect()
         }
-        PixelData::L1(v) => v.into_iter().map(|s| if s != 0 { 1.0 } else { 0.0 }).collect(),
         PixelData::RGB16(v) | PixelData::RGBA16(v) | PixelData::L16(v) | PixelData::LA16(v) => {
             v.into_iter().map(|s| s as f64 / 65535.0).collect()
         }

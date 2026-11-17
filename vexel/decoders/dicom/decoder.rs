@@ -223,7 +223,7 @@ impl<R: Read + Seek> DicomDecoder<R> {
         let mut frames = self.frame_plan()?.into_source(false);
         frames
             .next_frame()?
-            .map(Image::from_frame)
+            .map(|frame| frame.into_image())
             .ok_or_else(|| VexelError::Custom("DICOM: no frames could be decoded".to_string()))
     }
 

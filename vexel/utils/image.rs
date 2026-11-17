@@ -1,7 +1,9 @@
 use serde::Serialize;
 
 use crate::log_warn;
-use crate::utils::convert::{self, Channels, Target};
+use crate::utils::convert::{self, Channels};
+use crate::utils::error::{VexelError, VexelResult};
+use crate::utils::sample::{Alpha, Sample, SampleType};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ImageFormat {
@@ -38,7 +40,8 @@ pub enum ImageFormat {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PixelFormat {
     RGB8,
     RGBA8,
@@ -48,7 +51,6 @@ pub enum PixelFormat {
     RGBA32F,
     RGB64F,
     RGBA64F,
-    L1,
     L8,
     L16,
     LA8,
@@ -59,6 +61,85 @@ pub enum PixelFormat {
     LA64F,
 }
 
+impl PixelFormat {
+    /// Returns the number of channels per pixel.
+    ///
+    /// 1 for grayscale, 2 for grayscale with alpha, 3 for RGB and 4 for RGBA.
+    pub fn channels(self) -> usize {
+        self.layout().count()
+    }
+
+    /// Returns the type of each stored sample.
+    ///
+    /// This is the `S` that [`Image::samples`] and [`Image::into_samples`] accept
+    /// for an image in this format.
+    pub fn sample_type(self) -> SampleType {
+        match self {
+            PixelFormat::RGB8 | PixelFormat::RGBA8 | PixelFormat::L8 | PixelFormat::LA8 => SampleType::U8,
+            PixelFormat::RGB16 | PixelFormat::RGBA16 | PixelFormat::L16 | PixelFormat::LA16 => SampleType::U16,
+            PixelFormat::RGB32F | PixelFormat::RGBA32F | PixelFormat::L32F | PixelFormat::LA32F => SampleType::F32,
+            PixelFormat::RGB64F | PixelFormat::RGBA64F | PixelFormat::L64F | PixelFormat::LA64F => SampleType::F64,
+        }
+    }
+
+    /// Returns the number of bytes one pixel occupies in memory.
+    ///
+    /// Equal to the channel count times the size of one sample, so
+    /// [`PixelFormat::RGBA16`] is 8 bytes and [`PixelFormat::L32F`] is 4.
+    pub fn bytes_per_pixel(self) -> usize {
+        self.channels() * self.sample_type().size()
+    }
+
+    /// Returns `true` if the format includes an alpha channel.
+    pub fn has_alpha(self) -> bool {
+        self.layout().has_alpha()
+    }
+
+    /// Returns `true` if the format is grayscale, with or without alpha.
+    pub fn is_gray(self) -> bool {
+        matches!(self.layout(), Channels::L | Channels::LA)
+    }
+
+    /// Returns the same channel layout with a different sample type.
+    ///
+    /// For example, [`PixelFormat::LA8`] with [`SampleType::U16`] gives
+    /// [`PixelFormat::LA16`]. Pass the result to [`Image::convert`] to change only
+    /// the bit depth of an image.
+    pub fn with_sample_type(self, sample_type: SampleType) -> PixelFormat {
+        PixelFormat::from_parts(self.layout(), sample_type)
+    }
+
+    pub(crate) fn layout(self) -> Channels {
+        match self {
+            PixelFormat::L8 | PixelFormat::L16 | PixelFormat::L32F | PixelFormat::L64F => Channels::L,
+            PixelFormat::LA8 | PixelFormat::LA16 | PixelFormat::LA32F | PixelFormat::LA64F => Channels::LA,
+            PixelFormat::RGB8 | PixelFormat::RGB16 | PixelFormat::RGB32F | PixelFormat::RGB64F => Channels::Rgb,
+            PixelFormat::RGBA8 | PixelFormat::RGBA16 | PixelFormat::RGBA32F | PixelFormat::RGBA64F => Channels::Rgba,
+        }
+    }
+
+    pub(crate) fn from_parts(layout: Channels, sample_type: SampleType) -> PixelFormat {
+        match (layout, sample_type) {
+            (Channels::L, SampleType::U8) => PixelFormat::L8,
+            (Channels::L, SampleType::U16) => PixelFormat::L16,
+            (Channels::L, SampleType::F32) => PixelFormat::L32F,
+            (Channels::L, SampleType::F64) => PixelFormat::L64F,
+            (Channels::LA, SampleType::U8) => PixelFormat::LA8,
+            (Channels::LA, SampleType::U16) => PixelFormat::LA16,
+            (Channels::LA, SampleType::F32) => PixelFormat::LA32F,
+            (Channels::LA, SampleType::F64) => PixelFormat::LA64F,
+            (Channels::Rgb, SampleType::U8) => PixelFormat::RGB8,
+            (Channels::Rgb, SampleType::U16) => PixelFormat::RGB16,
+            (Channels::Rgb, SampleType::F32) => PixelFormat::RGB32F,
+            (Channels::Rgb, SampleType::F64) => PixelFormat::RGB64F,
+            (Channels::Rgba, SampleType::U8) => PixelFormat::RGBA8,
+            (Channels::Rgba, SampleType::U16) => PixelFormat::RGBA16,
+            (Channels::Rgba, SampleType::F32) => PixelFormat::RGBA32F,
+            (Channels::Rgba, SampleType::F64) => PixelFormat::RGBA64F,
+        }
+    }
+}
+
 /// A single decoded picture.
 ///
 /// An `Image` is always exactly one picture. Animated formats such as GIF and
@@ -67,9 +148,9 @@ pub enum PixelFormat {
 /// with [`Vexel::decode`](crate::Vexel::decode) yields only its first frame.
 ///
 /// The pixel format reflects what the decoder produced and may vary by format
-/// and image content. Use [`into_rgb8`](Image::into_rgb8) or
-/// [`into_rgba8`](Image::into_rgba8) to normalize it to a known format.
-#[derive(Debug)]
+/// and image content. Use [`to_rgba`](Image::to_rgba) to get a known layout and
+/// sample type, or [`samples`](Image::samples) to read the stored data as is.
+#[derive(Debug, Clone)]
 pub struct Image {
     width: u32,
     height: u32,
@@ -77,8 +158,36 @@ pub struct Image {
 }
 
 impl Image {
-    pub fn from_frame(frame: ImageFrame) -> Image {
-        Image { width: frame.width, height: frame.height, pixels: frame.pixels }
+    /// Creates an image from raw samples.
+    ///
+    /// `samples` holds the pixels row by row with channels interleaved, in the
+    /// layout given by `format`. Returns an error if `S` does not match
+    /// `format.sample_type()` or if `samples.len()` is not
+    /// `width * height * format.channels()`.
+    pub fn from_samples<S: Sample>(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        samples: Vec<S>,
+    ) -> VexelResult<Image> {
+        if format.sample_type() != S::TYPE {
+            return Err(VexelError::Custom(format!("{:?} is not stored as {:?} samples", format, S::TYPE)));
+        }
+
+        let expected =
+            u64::from(width).checked_mul(u64::from(height)).and_then(|p| p.checked_mul(format.channels() as u64));
+        if expected != Some(samples.len() as u64) {
+            return Err(VexelError::Custom(format!(
+                "{}x{} {:?} image needs {} samples, got {}",
+                width,
+                height,
+                format,
+                expected.map_or_else(|| "too many".to_string(), |n| n.to_string()),
+                samples.len()
+            )));
+        }
+
+        Ok(Image { width, height, pixels: S::wrap(format.layout(), samples) })
     }
 
     pub(crate) fn from_pixels(width: u32, height: u32, mut pixels: PixelData) -> Image {
@@ -98,82 +207,109 @@ impl Image {
 
     /// Returns the pixel format of the image.
     ///
-    /// The pixel format describes the channel layout and bit depth of the image data,
+    /// The pixel format describes the channel layout and sample type of the image data,
     /// such as [`PixelFormat::RGB8`] for 8-bit RGB or [`PixelFormat::RGBA16`] for 16-bit RGBA.
-    pub fn pixel_format(&self) -> PixelFormat {
+    pub fn format(&self) -> PixelFormat {
         self.pixels.pixel_format()
     }
 
-    /// Returns a reference to the image's pixel data.
+    /// Returns the stored pixel data as a byte slice.
     ///
-    /// Use [`into_pixels`](Self::into_pixels) to take ownership of the data
-    /// without copying.
-    pub fn pixels(&self) -> &PixelData {
+    /// For multi-byte sample types (`u16`, `f32`, `f64`) the slice reinterprets the
+    /// underlying memory directly with no endian conversion, so the byte order
+    /// matches the native platform.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.pixels.as_bytes()
+    }
+
+    /// Returns the stored samples without converting them.
+    ///
+    /// The samples are in the layout given by [`format`](Self::format). Returns
+    /// `None` if the image is not stored as `S`; check `format().sample_type()`, or
+    /// call [`convert`](Self::convert) first to get a known format.
+    pub fn samples<S: Sample>(&self) -> Option<&[S]> {
+        S::view(&self.pixels)
+    }
+
+    /// Consumes the image and returns its stored samples without copying.
+    ///
+    /// Same rules as [`samples`](Self::samples). If the image is not stored as `S`,
+    /// the image is returned unchanged in `Err`.
+    pub fn into_samples<S: Sample>(self) -> Result<Vec<S>, Image> {
+        let Image { width, height, pixels } = self;
+        S::take(pixels).map_err(|pixels| Image { width, height, pixels })
+    }
+
+    /// Returns the image's pixels converted to RGB in sample type `S`.
+    ///
+    /// Use [`into_rgb`](Self::into_rgb) to avoid the copy when the image is already RGB in `S`.
+    pub fn to_rgb<S: Sample>(&self) -> Vec<S> {
+        convert::collect(&self.pixels, Channels::Rgb)
+    }
+
+    /// Returns the image's pixels converted to RGBA in sample type `S`.
+    ///
+    /// Use [`into_rgba`](Self::into_rgba) to avoid the copy when the image is already
+    /// RGBA in `S`.
+    pub fn to_rgba<S: Sample>(&self) -> Vec<S> {
+        convert::collect(&self.pixels, Channels::Rgba)
+    }
+
+    /// Converts the image to RGB in sample type `S`, consuming it.
+    ///
+    /// If the image is already RGB
+    /// in `S`, the existing buffer is returned without copying.
+    pub fn into_rgb<S: Sample>(self) -> Vec<S> {
+        convert::into_layout(self.pixels, Channels::Rgb)
+    }
+
+    /// Converts the image to RGBA in sample type `S`, consuming it.
+    ///
+    /// If the image is already
+    /// RGBA in `S`, the existing buffer is returned without copying.
+    pub fn into_rgba<S: Sample>(self) -> Vec<S> {
+        convert::into_layout(self.pixels, Channels::Rgba)
+    }
+
+    /// Converts the image to RGBA in sample type `S` and writes it into `dst`.
+    ///
+    /// With [`Alpha::Premultiplied`] each color value is multiplied by its alpha; formats
+    /// without alpha produce the same output either way.
+    ///
+    /// Returns an error if `dst` is not exactly `width * height * 4` samples long.
+    pub fn write_rgba<S: Sample>(&self, dst: &mut [S], alpha: Alpha) -> VexelResult<()> {
+        let expected = self.pixels.pixel_count() * 4;
+        if dst.len() != expected {
+            return Err(VexelError::Custom(format!(
+                "write_rgba: {}x{} image needs a buffer of {} samples, got {}",
+                self.width,
+                self.height,
+                expected,
+                dst.len()
+            )));
+        }
+
+        convert::write(&self.pixels, Channels::Rgba, dst, alpha == Alpha::Premultiplied);
+        Ok(())
+    }
+
+    /// Converts the image to another pixel format, consuming it.
+    ///
+    pub fn convert(self, format: PixelFormat) -> Image {
+        if self.format() == format {
+            return self;
+        }
+
+        let pixels = convert::build(&self.pixels, format);
+        Image { width: self.width, height: self.height, pixels }
+    }
+
+    pub(crate) fn pixels(&self) -> &PixelData {
         &self.pixels
     }
 
-    /// Consumes the image and returns its pixel data without copying.
-    pub fn into_pixels(self) -> PixelData {
+    pub(crate) fn into_pixels(self) -> PixelData {
         self.pixels
-    }
-
-    /// Returns `true` if the image's pixel format includes an alpha channel.
-    pub fn has_alpha(&self) -> bool {
-        matches!(
-            self.pixels,
-            PixelData::RGBA8(_)
-                | PixelData::RGBA16(_)
-                | PixelData::RGBA32F(_)
-                | PixelData::RGBA64F(_)
-                | PixelData::LA8(_)
-                | PixelData::LA16(_)
-                | PixelData::LA32F(_)
-                | PixelData::LA64F(_)
-        )
-    }
-
-    /// Converts the image to RGB8 format, consuming the original image.
-    ///
-    /// This method converts the pixel data to RGB8 format, while [`to_rgb8`](Self::to_rgb8)
-    /// returns a vector of the pixels converted to RGB8 format without modifying
-    /// the original image.
-    pub fn into_rgb8(self) -> Image {
-        Image { width: self.width, height: self.height, pixels: self.pixels.into_rgb8() }
-    }
-
-    /// Converts the image to RGBA8 format, consuming the original image.
-    ///
-    /// This method converts the pixel data to RGBA8 format, while [`to_rgba8`](Self::to_rgba8)
-    /// returns a vector of the pixels converted to RGBA8 format without modifying
-    /// the original image.
-    pub fn into_rgba8(self) -> Image {
-        Image { width: self.width, height: self.height, pixels: self.pixels.into_rgba8() }
-    }
-
-    /// Returns the image's pixels as a vector of RGB8 bytes.
-    ///
-    /// All pixel formats are converted to 8-bit RGB. Higher bit depths are scaled
-    /// down, alpha channels are dropped, and grayscale values are expanded to
-    /// three equal channels. Use [`into_rgb8`](Self::into_rgb8) to convert the
-    /// image in place.
-    pub fn to_rgb8(&self) -> Vec<u8> {
-        match &self.pixels {
-            PixelData::RGB8(pixels) => pixels.to_vec(),
-            other => other.to_rgb8_bytes(),
-        }
-    }
-
-    /// Returns the image's pixels as a vector of RGBA8 bytes.
-    ///
-    /// All pixel formats are converted to 8-bit RGBA. Higher bit depths are scaled
-    /// down, opaque images without an alpha channel have 255 added, and grayscale
-    /// values are expanded to three equal channels with the appropriate alpha.
-    /// Use [`into_rgba8`](Self::into_rgba8) to convert the image in place.
-    pub fn to_rgba8(&self) -> Vec<u8> {
-        match &self.pixels {
-            PixelData::RGBA8(pixels) => pixels.to_vec(),
-            other => other.to_rgba8_bytes(),
-        }
     }
 }
 
@@ -182,49 +318,30 @@ impl Image {
 /// Yielded by [`Vexel::decode_frames`](crate::Vexel::decode_frames). Each frame
 /// is owned by the caller and its memory is released as soon as it is dropped,
 /// so an animation of any length can be processed in constant memory.
-///
-/// Pixel data may be in any [`PixelData`] variant; use
-/// [`into_rgb8`](ImageFrame::into_rgb8) or [`into_rgba8`](ImageFrame::into_rgba8)
-/// to convert to a known format.
 #[derive(Debug, Clone)]
 pub struct ImageFrame {
-    width: u32,
-    height: u32,
-    pixels: PixelData,
+    image: Image,
     delay: u32,
 }
 
 impl ImageFrame {
-    pub(crate) fn new(width: u32, height: u32, pixels: PixelData, delay: u32) -> ImageFrame {
-        ImageFrame { width, height, pixels, delay }
+    /// Creates a frame from an image and a display delay in milliseconds.
+    pub fn new(image: Image, delay: u32) -> ImageFrame {
+        ImageFrame { image, delay }
     }
 
-    pub fn new_still(width: u32, height: u32, pixels: PixelData) -> ImageFrame {
-        ImageFrame { width, height, pixels, delay: 0 }
+    pub(crate) fn from_pixels(width: u32, height: u32, pixels: PixelData, delay: u32) -> ImageFrame {
+        ImageFrame { image: Image::from_pixels(width, height, pixels), delay }
     }
 
+    /// Returns a reference to the frame's picture.
+    pub fn image(&self) -> &Image {
+        &self.image
+    }
+
+    /// Consumes the frame and returns its picture, dropping the delay.
     pub fn into_image(self) -> Image {
-        Image::from_frame(self)
-    }
-
-    /// Returns the width of the frame in pixels.
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    /// Returns the height of the frame in pixels.
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// Returns a reference to the frame's raw pixel data.
-    pub fn pixels(&self) -> &PixelData {
-        &self.pixels
-    }
-
-    /// Consumes the frame and returns its pixel data without copying.
-    pub fn into_pixels(self) -> PixelData {
-        self.pixels
+        self.image
     }
 
     /// Returns the display delay for this frame in milliseconds.
@@ -235,78 +352,10 @@ impl ImageFrame {
     pub fn delay(&self) -> u32 {
         self.delay
     }
-
-    /// Returns the pixel format of this frame.
-    ///
-    /// The pixel format describes the channel layout and bit depth of the frame
-    /// data, such as [`PixelFormat::RGB8`] for 8-bit RGB or [`PixelFormat::RGBA16`]
-    /// for 16-bit RGBA.
-    pub fn pixel_format(&self) -> PixelFormat {
-        self.pixels.pixel_format()
-    }
-
-    /// Returns `true` if this frame's pixel format includes an alpha channel.
-    pub fn has_alpha(&self) -> bool {
-        matches!(
-            self.pixels,
-            PixelData::RGBA8(_)
-                | PixelData::RGBA16(_)
-                | PixelData::RGBA32F(_)
-                | PixelData::RGBA64F(_)
-                | PixelData::LA8(_)
-                | PixelData::LA16(_)
-                | PixelData::LA32F(_)
-                | PixelData::LA64F(_)
-        )
-    }
-
-    /// Converts this frame to RGB8 format, consuming the original frame.
-    ///
-    /// This method converts the frame's pixel data to RGB8 format, while
-    /// [`to_rgb8`](Self::to_rgb8) returns a vector of the frame's pixels
-    /// converted to RGB8 without consuming the frame.
-    pub fn into_rgb8(self) -> ImageFrame {
-        ImageFrame { width: self.width, height: self.height, pixels: self.pixels.into_rgb8(), delay: self.delay }
-    }
-
-    /// Returns this frame's pixels as a vector of RGB8 bytes.
-    ///
-    /// All pixel formats are converted to 8-bit RGB. Higher bit depths are scaled
-    /// down, alpha channels are dropped, and grayscale values are expanded to
-    /// three equal channels. Use [`into_rgb8`](Self::into_rgb8) to convert the
-    /// frame in place.
-    pub fn to_rgb8(&self) -> Vec<u8> {
-        match &self.pixels {
-            PixelData::RGB8(pixels) => pixels.to_vec(),
-            other => other.to_rgb8_bytes(),
-        }
-    }
-
-    /// Converts this frame to RGBA8 format, consuming the original frame.
-    ///
-    /// This method converts the frame's pixel data to RGBA8 format, while
-    /// [`to_rgba8`](Self::to_rgba8) returns a vector of the frame's pixels
-    /// converted to RGBA8 without consuming the frame.
-    pub fn into_rgba8(self) -> ImageFrame {
-        ImageFrame { width: self.width, height: self.height, pixels: self.pixels.into_rgba8(), delay: self.delay }
-    }
-
-    /// Returns this frame's pixels as a vector of RGBA8 bytes.
-    ///
-    /// All pixel formats are converted to 8-bit RGBA. Higher bit depths are scaled
-    /// down, opaque images without an alpha channel have 255 added, and grayscale
-    /// values are expanded to three equal channels with the appropriate alpha.
-    /// Use [`into_rgba8`](Self::into_rgba8) to convert the frame in place.
-    pub fn to_rgba8(&self) -> Vec<u8> {
-        match &self.pixels {
-            PixelData::RGBA8(pixels) => pixels.to_vec(),
-            other => other.to_rgba8_bytes(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
-pub enum PixelData {
+pub(crate) enum PixelData {
     RGB8(Vec<u8>),
     RGBA8(Vec<u8>),
     RGB16(Vec<u16>),
@@ -315,7 +364,6 @@ pub enum PixelData {
     RGBA32F(Vec<f32>),
     RGB64F(Vec<f64>),
     RGBA64F(Vec<f64>),
-    L1(Vec<u8>),
     L8(Vec<u8>),
     L16(Vec<u16>),
     LA8(Vec<u8>),
@@ -338,7 +386,6 @@ impl PixelData {
             PixelData::RGBA32F(_) => PixelFormat::RGBA32F,
             PixelData::RGB64F(_) => PixelFormat::RGB64F,
             PixelData::RGBA64F(_) => PixelFormat::RGBA64F,
-            PixelData::L1(_) => PixelFormat::L1,
             PixelData::L8(_) => PixelFormat::L8,
             PixelData::L16(_) => PixelFormat::L16,
             PixelData::LA8(_) => PixelFormat::LA8,
@@ -350,115 +397,6 @@ impl PixelData {
         }
     }
 
-    /// Converts this pixel data to [`PixelData::RGB8`], consuming the original.
-    ///
-    /// Conversion rules by source format:
-    /// - `RGB8` — returned as-is
-    /// - `RGBA8` — alpha channel is dropped
-    /// - `RGB16` / `RGBA16` — values are scaled from `u16` to `u8`; alpha is dropped for RGBA
-    /// - `RGB32F` / `RGBA32F` — float values in `[0.0, 1.0]` are scaled to `[0, 255]`; alpha is dropped for RGBA
-    /// - `RGB64F` / `RGBA64F` — same as 32F variants
-    /// - `L1` — bit values `0`/`1` are expanded to `[0, 0, 0]` / `[255, 255, 255]`
-    /// - `L8` / `LA8` — gray value is replicated to all three channels; alpha is dropped
-    /// - `L16` / `LA16` — gray value is scaled to `u8`, then replicated; alpha is dropped
-    /// - `L32F` / `LA32F` / `L64F` / `LA64F` — float gray is scaled to `u8`, then replicated; alpha is dropped
-    pub fn into_rgb8(self) -> PixelData {
-        PixelData::RGB8(self.into_rgb8_bytes())
-    }
-
-    /// Converts this pixel data to raw RGB8 bytes, consuming the original.
-    ///
-    /// Same conversion rules as [`into_rgb8`](Self::into_rgb8), but returns the
-    /// byte vector directly without wrapping it in a [`PixelData`].
-    pub fn into_rgb8_bytes(self) -> Vec<u8> {
-        match self {
-            PixelData::RGB8(p) => p,
-            other => other.to_rgb8_bytes(),
-        }
-    }
-
-    /// Converts this pixel data to [`PixelData::RGBA8`], consuming the original.
-    ///
-    /// Conversion rules by source format:
-    /// - `RGBA8` — returned as-is
-    /// - `RGB8` — alpha channel is added with value `255`
-    /// - `RGB16` / `RGBA16` — values are scaled from `u16` to `u8`; alpha is added as `255` for RGB16
-    /// - `RGB32F` / `RGBA32F` — float values in `[0.0, 1.0]` are scaled to `[0, 255]`; alpha is added as `255` for RGB32F
-    /// - `RGB64F` / `RGBA64F` — same as 32F variants
-    /// - `L1` — bit values `0`/`1` are expanded to `[0, 0, 0, 255]` / `[255, 255, 255, 255]`
-    /// - `L8` / `LA8` — gray value is replicated to all three channels; alpha is `255` for L8, preserved for LA8
-    /// - `L16` / `LA16` — gray value is scaled to `u8`, then replicated; alpha is scaled and preserved for LA16
-    /// - `L32F` / `LA32F` / `L64F` / `LA64F` — float gray is scaled to `u8`, then replicated; alpha is scaled and preserved
-    pub fn into_rgba8(self) -> PixelData {
-        PixelData::RGBA8(self.into_rgba8_bytes())
-    }
-
-    /// Converts this pixel data to raw RGBA8 bytes, consuming the original.
-    ///
-    /// Same conversion rules as [`into_rgba8`](Self::into_rgba8), but returns the
-    /// byte vector directly without wrapping it in a [`PixelData`].
-    pub fn into_rgba8_bytes(self) -> Vec<u8> {
-        match self {
-            PixelData::RGBA8(p) => p,
-            other => other.to_rgba8_bytes(),
-        }
-    }
-
-    /// Returns this pixel data converted to RGB8 bytes, without consuming it.
-    ///
-    /// Same conversion rules as [`into_rgb8`](Self::into_rgb8). Unlike
-    /// [`into_rgb8_bytes`](Self::into_rgb8_bytes), the source is left intact, so
-    /// `RGB8` input is copied rather than moved.
-    pub fn to_rgb8_bytes(&self) -> Vec<u8> {
-        let mut out = vec![0u8; self.pixel_count() * 3];
-        self.write_rgb8(&mut out);
-        out
-    }
-
-    /// Returns this pixel data converted to RGBA8 bytes, without consuming it.
-    ///
-    /// Same conversion rules as [`into_rgba8`](Self::into_rgba8). Unlike
-    /// [`into_rgba8_bytes`](Self::into_rgba8_bytes), the source is left intact, so
-    /// `RGBA8` input is copied rather than moved.
-    pub fn to_rgba8_bytes(&self) -> Vec<u8> {
-        let mut out = vec![0u8; self.pixel_count() * 4];
-        self.write_rgba8(&mut out);
-        out
-    }
-
-    /// Converts this pixel data to RGB8 and writes it into `dst`.
-    ///
-    /// Same conversion rules as [`into_rgb8`](Self::into_rgb8).
-    ///
-    /// `dst` should be `3 * pixel_count()` bytes long. If it is shorter, only the
-    /// pixels that fit completely are written. If it is longer, the bytes past the
-    /// last pixel are left untouched.
-    pub fn write_rgb8(&self, dst: &mut [u8]) {
-        convert::write_8bit(self, dst, Target { channels: Channels::Rgb, premultiply: false });
-    }
-
-    /// Converts this pixel data to RGBA8 and writes it into `dst`.
-    ///
-    /// Same conversion rules as [`into_rgba8`](Self::into_rgba8).
-    ///
-    /// `dst` should be `4 * pixel_count()` bytes long. If it is shorter, only the
-    /// pixels that fit completely are written; if it is longer, the bytes past the
-    /// last pixel are left untouched.
-    pub fn write_rgba8(&self, dst: &mut [u8]) {
-        convert::write_8bit(self, dst, Target { channels: Channels::Rgba, premultiply: false });
-    }
-
-    /// Converts this pixel data to RGBA8 with premultiplied alpha and writes it into `dst`.
-    ///
-    /// Same as [`write_rgba8`](Self::write_rgba8), except that for formats with an
-    /// alpha channel each color value is multiplied by its alpha.
-    /// Formats without alpha produce the same output as [`write_rgba8`](Self::write_rgba8).
-    ///
-    /// The length rules for `dst` are the same as for [`write_rgba8`](Self::write_rgba8).
-    pub fn write_rgba8_premultiplied(&self, dst: &mut [u8]) {
-        convert::write_8bit(self, dst, Target { channels: Channels::Rgba, premultiply: true });
-    }
-
     /// Returns the number of whole pixels in this pixel data.
     pub fn pixel_count(&self) -> usize {
         self.sample_count() / self.components_per_pixel()
@@ -466,9 +404,7 @@ impl PixelData {
 
     fn sample_count(&self) -> usize {
         match self {
-            PixelData::RGB8(p) | PixelData::RGBA8(p) | PixelData::L1(p) | PixelData::L8(p) | PixelData::LA8(p) => {
-                p.len()
-            }
+            PixelData::RGB8(p) | PixelData::RGBA8(p) | PixelData::L8(p) | PixelData::LA8(p) => p.len(),
             PixelData::RGB16(p) | PixelData::RGBA16(p) | PixelData::L16(p) | PixelData::LA16(p) => p.len(),
             PixelData::RGB32F(p) | PixelData::RGBA32F(p) | PixelData::L32F(p) | PixelData::LA32F(p) => p.len(),
             PixelData::RGB64F(p) | PixelData::RGBA64F(p) | PixelData::L64F(p) | PixelData::LA64F(p) => p.len(),
@@ -479,7 +415,7 @@ impl PixelData {
         match self {
             PixelData::RGB8(_) | PixelData::RGB16(_) | PixelData::RGB32F(_) | PixelData::RGB64F(_) => 3,
             PixelData::RGBA8(_) | PixelData::RGBA16(_) | PixelData::RGBA32F(_) | PixelData::RGBA64F(_) => 4,
-            PixelData::L1(_) | PixelData::L8(_) | PixelData::L16(_) | PixelData::L32F(_) | PixelData::L64F(_) => 1,
+            PixelData::L8(_) | PixelData::L16(_) | PixelData::L32F(_) | PixelData::L64F(_) => 1,
             PixelData::LA8(_) | PixelData::LA16(_) | PixelData::LA32F(_) | PixelData::LA64F(_) => 2,
         }
     }
@@ -511,7 +447,6 @@ impl PixelData {
             PixelData::RGBA64F(pixels) => unsafe {
                 std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 8)
             },
-            PixelData::L1(pixels) => pixels,
             PixelData::L8(pixels) => pixels,
             PixelData::L16(pixels) => unsafe {
                 std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 2)
@@ -531,55 +466,6 @@ impl PixelData {
             },
             PixelData::LA64F(pixels) => unsafe {
                 std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 8)
-            },
-        }
-    }
-
-    /// Returns the raw pixel data as a mutable byte slice.
-    ///
-    /// Same layout and endian rules as [`as_bytes`](Self::as_bytes).
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        match self {
-            PixelData::RGB8(pixels) => pixels,
-            PixelData::RGBA8(pixels) => pixels,
-            PixelData::RGB16(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
-            },
-            PixelData::RGBA16(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
-            },
-            PixelData::RGB32F(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
-            },
-            PixelData::RGBA32F(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
-            },
-            PixelData::RGB64F(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 8)
-            },
-            PixelData::RGBA64F(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 8)
-            },
-            PixelData::L1(pixels) => pixels,
-            PixelData::L8(pixels) => pixels,
-            PixelData::L16(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
-            },
-            PixelData::LA8(pixels) => pixels,
-            PixelData::LA16(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 2)
-            },
-            PixelData::L32F(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
-            },
-            PixelData::LA32F(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
-            },
-            PixelData::L64F(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 8)
-            },
-            PixelData::LA64F(pixels) => unsafe {
-                std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 8)
             },
         }
     }
@@ -607,7 +493,6 @@ impl PixelData {
             PixelData::RGBA32F(pixels) => correct_vec(pixels, expected_len, 4),
             PixelData::RGB64F(pixels) => correct_vec(pixels, expected_len, 3),
             PixelData::RGBA64F(pixels) => correct_vec(pixels, expected_len, 4),
-            PixelData::L1(pixels) => correct_vec(pixels, expected_len, 1),
             PixelData::L8(pixels) => correct_vec(pixels, expected_len, 1),
             PixelData::L16(pixels) => correct_vec(pixels, expected_len, 1),
             PixelData::L32F(pixels) => correct_vec(pixels, expected_len, 1),

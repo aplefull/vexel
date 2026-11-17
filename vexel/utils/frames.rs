@@ -35,7 +35,7 @@ impl SingleFrame {
     pub(crate) fn new(image: Image) -> SingleFrame {
         let width = image.width();
         let height = image.height();
-        SingleFrame { frame: Some(ImageFrame::new(width, height, image.into_pixels(), 0)) }
+        SingleFrame { frame: Some(ImageFrame::from_pixels(width, height, image.into_pixels(), 0)) }
     }
 }
 
@@ -195,7 +195,7 @@ pub(crate) fn reserve_canvas(limits: &mut Limits, width: u32, height: u32) -> Ve
 /// let mut frames = decoder.decode_frames()?;
 ///
 /// while let Some(frame) = frames.next_frame()? {
-///     println!("{}x{} for {}ms", frame.width(), frame.height(), frame.delay());
+///     println!("{}x{} for {}ms", frame.image().width(), frame.image().height(), frame.delay());
 /// }
 /// # Ok::<(), vexel::VexelError>(())
 /// ```

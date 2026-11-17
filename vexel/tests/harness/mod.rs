@@ -14,7 +14,7 @@ use jpegxl_sys::threads::thread_parallel_runner::{
     JxlThreadParallelRunner, JxlThreadParallelRunnerCreate, JxlThreadParallelRunnerDefaultNumWorkerThreads,
     JxlThreadParallelRunnerDestroy,
 };
-use vexel::{Image, ImageFrame, PixelData, Vexel};
+use vexel::{Image, ImageFrame, SampleType, Vexel};
 
 pub const BASE_PATH: &str = "./tests/images/";
 pub const REFERENCES_PATH: &str = "./tests/references/";
@@ -113,49 +113,20 @@ pub fn get_ref_path(reference_path: &str) -> PathBuf {
 }
 
 pub fn image_to_reference_native(image: &Image) -> ReferenceImage {
-    let width = image.width();
-    let height = image.height();
-
-    let pixels = match image.pixels() {
-        PixelData::L1(p) => ReferencePixels::U8(p.iter().map(|&v| (v != 0) as u8).collect()),
-        PixelData::RGB8(p) | PixelData::RGBA8(p) | PixelData::L8(p) | PixelData::LA8(p) => {
-            ReferencePixels::U8(p.clone())
-        }
-        PixelData::RGB16(p) | PixelData::RGBA16(p) | PixelData::L16(p) | PixelData::LA16(p) => {
-            ReferencePixels::U16(p.clone())
-        }
-        PixelData::RGB32F(p) | PixelData::RGBA32F(p) | PixelData::L32F(p) | PixelData::LA32F(p) => {
-            ReferencePixels::F32(p.clone())
-        }
-        PixelData::RGB64F(p) | PixelData::RGBA64F(p) | PixelData::L64F(p) | PixelData::LA64F(p) => {
-            ReferencePixels::F32(p.iter().map(|&v| v as f32).collect())
+    let pixels = match image.format().sample_type() {
+        SampleType::U8 => ReferencePixels::U8(image.samples::<u8>().unwrap_or_default().to_vec()),
+        SampleType::U16 => ReferencePixels::U16(image.samples::<u16>().unwrap_or_default().to_vec()),
+        SampleType::F32 => ReferencePixels::F32(image.samples::<f32>().unwrap_or_default().to_vec()),
+        SampleType::F64 => {
+            ReferencePixels::F32(image.samples::<f64>().unwrap_or_default().iter().map(|&v| v as f32).collect())
         }
     };
 
-    ReferenceImage { width, height, pixels }
+    ReferenceImage { width: image.width(), height: image.height(), pixels }
 }
 
 pub fn frame_to_reference_native(frame: &ImageFrame) -> ReferenceImage {
-    let width = frame.width();
-    let height = frame.height();
-
-    let pixels = match frame.pixels() {
-        PixelData::L1(p) => ReferencePixels::U8(p.iter().map(|&v| (v != 0) as u8).collect()),
-        PixelData::RGB8(p) | PixelData::RGBA8(p) | PixelData::L8(p) | PixelData::LA8(p) => {
-            ReferencePixels::U8(p.clone())
-        }
-        PixelData::RGB16(p) | PixelData::RGBA16(p) | PixelData::L16(p) | PixelData::LA16(p) => {
-            ReferencePixels::U16(p.clone())
-        }
-        PixelData::RGB32F(p) | PixelData::RGBA32F(p) | PixelData::L32F(p) | PixelData::LA32F(p) => {
-            ReferencePixels::F32(p.clone())
-        }
-        PixelData::RGB64F(p) | PixelData::RGBA64F(p) | PixelData::L64F(p) | PixelData::LA64F(p) => {
-            ReferencePixels::F32(p.iter().map(|&v| v as f32).collect())
-        }
-    };
-
-    ReferenceImage { width, height, pixels }
+    image_to_reference_native(frame.image())
 }
 
 fn pixel_format_for_jxl(info: &JxlBasicInfo) -> (JxlPixelFormat, JxlBitDepth, bool) {
@@ -164,6 +135,8 @@ fn pixel_format_for_jxl(info: &JxlBasicInfo) -> (JxlPixelFormat, JxlBitDepth, bo
 
     let (data_type, bit_depth_type) = if is_float {
         (JxlDataType::Float, JxlBitDepthType::FromPixelFormat)
+    } else if info.bits_per_sample == 1 {
+        (JxlDataType::Uint8, JxlBitDepthType::FromPixelFormat)
     } else if info.bits_per_sample <= 8 {
         (JxlDataType::Uint8, JxlBitDepthType::FromCodestream)
     } else {

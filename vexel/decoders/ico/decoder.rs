@@ -9,6 +9,7 @@ use crate::decoders::ico::info::{
 };
 use crate::decoders::ico::types::{IcoImageFormat, IcoType, IconDirEntry};
 use crate::decoders::png::decoder::PngDecoder;
+use crate::utils::convert::{self, Channels};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::image::{Image, ImageFrame, PixelData};
 use crate::utils::info::{ColorModel, ImageSummary};
@@ -393,7 +394,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
         png_decoder.set_limits(self.limits.clone());
         let image = png_decoder.decode()?;
 
-        Ok(ImageFrame::new(image.width(), image.height(), image.into_pixels(), 0))
+        Ok(ImageFrame::from_pixels(image.width(), image.height(), image.into_pixels(), 0))
     }
 
     fn decode_bmp_frame(&mut self, entry: &IconDirEntry) -> VexelResult<ImageFrame> {
@@ -405,7 +406,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
         let mut pixels = apply_and_mask(image.into_pixels(), &and_mask, entry.width, entry.height, actual_bpp);
         pixels.correct_pixels(entry.width, entry.height);
 
-        Ok(ImageFrame::new(entry.width, entry.height, pixels, 0))
+        Ok(ImageFrame::from_pixels(entry.width, entry.height, pixels, 0))
     }
 
     fn read_directory(&mut self) -> VexelResult<()> {
@@ -484,9 +485,9 @@ impl<R: Read + Seek> IcoDecoder<R> {
         };
 
         let reserved = u64::from(entry.width) * u64::from(entry.height) * 4;
-        let actual = frame.pixels().as_bytes().len() as u64;
+        let actual = frame.image().as_bytes().len() as u64;
         if let Err(e) = self.limits.reserve(actual.saturating_sub(reserved)) {
-            log_warn!("ICO entry {}x{} exceeds limits, skipping: {}", frame.width(), frame.height(), e);
+            log_warn!("ICO entry {}x{} exceeds limits, skipping: {}", frame.image().width(), frame.image().height(), e);
             return None;
         }
 
@@ -505,9 +506,9 @@ impl<R: Read + Seek> IcoDecoder<R> {
                 continue;
             }
             if let Some(frame) = self.decode_entry(entry) {
-                self.width = frame.width();
-                self.height = frame.height();
-                return Ok(Image::from_frame(frame));
+                self.width = frame.image().width();
+                self.height = frame.image().height();
+                return Ok(frame.into_image());
             }
         }
 
@@ -527,7 +528,7 @@ impl<R: Read + Seek> IcoDecoder<R> {
                 continue;
             }
             match self.decode_entry(entry) {
-                Some(frame) => pages.push(Image::from_frame(frame)),
+                Some(frame) => pages.push(frame.into_image()),
                 None => {
                     failed.insert(key);
                 }
@@ -555,11 +556,7 @@ fn apply_and_mask(pixels: PixelData, and_mask: &[u8], width: u32, height: u32, b
     }
 
     let and_row_size = width.div_ceil(32) * 4;
-    let rgba = pixels.into_rgba8();
-    let mut data = match rgba {
-        PixelData::RGBA8(v) => v,
-        other => return other,
-    };
+    let mut data: Vec<u8> = convert::into_layout(pixels, Channels::Rgba);
 
     for y in 0..height as usize {
         let src_row = height as usize - 1 - y;

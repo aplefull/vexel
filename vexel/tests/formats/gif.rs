@@ -91,11 +91,11 @@ pub fn test_cases() -> Vec<TestCase> {
                     return Err(format!("expected 7 frames, got {}", count));
                 }
 
-                let w = frames[0].width() as usize;
-                let h = frames[0].height() as usize;
+                let w = frames[0].image().width() as usize;
+                let h = frames[0].image().height() as usize;
                 let (mx, my) = (w / 2, h / 2);
 
-                let [r, g, b, a] = get_pixel(&frames[1].to_rgba8(), w, mx, my);
+                let [r, g, b, a] = get_pixel(&frames[1].image().to_rgba::<u8>(), w, mx, my);
                 if [r, g, b] != [0xE0, 0xE0, 0xB4] {
                     return Err(format!("frame 1 middle pixel RGB should be E0E0B4, got {:02X}{:02X}{:02X}", r, g, b));
                 }
@@ -104,7 +104,7 @@ pub fn test_cases() -> Vec<TestCase> {
                     return Err(format!("frame 1 middle pixel should be opaque, got alpha {}", a));
                 }
 
-                let [_, _, _, a_last] = get_pixel(&frames[5].to_rgba8(), w, mx, my);
+                let [_, _, _, a_last] = get_pixel(&frames[5].image().to_rgba::<u8>(), w, mx, my);
                 if a_last != 0x00 {
                     return Err(format!("frame 6 middle pixel should be transparent, got alpha {}", a_last));
                 }

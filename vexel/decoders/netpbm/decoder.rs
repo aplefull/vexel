@@ -6,7 +6,6 @@ use super::raster::{self, Samples};
 use super::types::{NetpbmFormat, TupleType};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::format_detect::is_netpbm_space;
-use crate::utils::image::ImageFrame;
 use crate::utils::info::{ColorModel, DataExtent, ImageSummary, SampleFormat};
 use crate::{log_warn, Image, Limits, PixelData};
 
@@ -863,7 +862,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                 let byte = buf[i];
                 match BYTE_CLASS[byte as usize] {
                     DIGIT => {
-                        out[n] = u8::from(byte == b'0');
+                        out[n] = if byte == b'0' { 255 } else { 0 };
                         n += 1;
                     }
                     HASH => {
@@ -876,7 +875,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
                             log_warn!("Unexpected byte {} in plain PBM data", byte);
                             warned = true;
                         }
-                        out[n] = 1;
+                        out[n] = 255;
                         n += 1;
                     }
                 }
@@ -899,10 +898,10 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
     }
 
     fn decode_plain_bitmap(&mut self, pixels: usize) -> PixelData {
-        let mut data = vec![1u8; pixels];
+        let mut data = vec![255u8; pixels];
         let parsed = self.parse_plain_bits(&mut data);
         Self::warn_plain_truncated(pixels, parsed);
-        PixelData::L1(data)
+        PixelData::L8(data)
     }
 
     fn decode_plain(&mut self, count: usize, channels: usize) -> PixelData {
@@ -941,7 +940,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
 
         let mut data = vec![0u8; pixels];
         raster::unpack_bits(&packed[..got], &mut data, width);
-        PixelData::L1(data)
+        PixelData::L8(data)
     }
 
     fn decode_pfm(&mut self, pixels: usize, channels: usize) -> PixelData {
@@ -979,10 +978,14 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             (Some(TupleType::BlackAndWhite), 1) => {
                 let threshold = max_value / 2;
                 let data = match self.read_raw_samples(pixels, wide) {
-                    Samples::U8(data) => data.into_iter().map(|v| u8::from(u32::from(v) > threshold)).collect(),
-                    Samples::U16(data) => data.into_iter().map(|v| u8::from(u32::from(v) > threshold)).collect(),
+                    Samples::U8(data) => {
+                        data.into_iter().map(|v| if u32::from(v) > threshold { 255 } else { 0 }).collect()
+                    }
+                    Samples::U16(data) => {
+                        data.into_iter().map(|v| if u32::from(v) > threshold { 255 } else { 0 }).collect()
+                    }
                 };
-                PixelData::L1(data)
+                PixelData::L8(data)
             }
 
             (Some(TupleType::BlackAndWhiteAlpha), 2) => {
@@ -1124,7 +1127,7 @@ impl<R: Read + Seek> NetPbmDecoder<R> {
             match result {
                 Ok(Some(mut pixel_data)) => {
                     pixel_data.correct_pixels(self.width, self.height);
-                    pages.push(Image::from_frame(ImageFrame::new(self.width, self.height, pixel_data, 0)));
+                    pages.push(Image::from_pixels(self.width, self.height, pixel_data));
                 }
                 Ok(None) => {}
                 Err(e) => {

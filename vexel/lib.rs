@@ -11,11 +11,13 @@ use tsify::{Ts, Tsify};
 pub use utils::error::{VexelError, VexelResult};
 pub use utils::frames::Frames;
 pub use utils::icc::ICCProfile;
-pub use utils::image::{Image, ImageFormat, ImageFrame, PixelData, PixelFormat};
+pub(crate) use utils::image::PixelData;
+pub use utils::image::{Image, ImageFormat, ImageFrame, PixelFormat};
 pub use utils::info::ImageInfo;
 pub use utils::limits::Limits;
 pub(crate) use utils::logger::{log_debug, log_error, log_warn};
 pub use utils::logger::{set_log_level, LogLevel};
+pub use utils::sample::{Alpha, Sample, SampleType};
 pub use utils::{exif, icc, info, metadata};
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast, JsValue};
@@ -79,7 +81,7 @@ fn catch_decoder_panic<T>(decode: impl FnOnce() -> VexelResult<T>) -> VexelResul
 ///
 /// let mut decoder = Vexel::open("image.png")?;
 /// let image = decoder.decode()?;
-/// let pixels = image.to_rgba8();
+/// let pixels: Vec<u8> = image.into_rgba();
 /// # Ok::<(), vexel::VexelError>(())
 /// ```
 pub struct Vexel<R: Read + Seek> {
@@ -579,8 +581,8 @@ fn bigints_to_numbers(value: &JsValue) -> JsValue {
     value.clone()
 }
 
-fn pixels_to_js(pixels: PixelData) -> Uint8ClampedArray {
-    let bytes = pixels.into_rgba8_bytes();
+fn pixels_to_js(image: Image) -> Uint8ClampedArray {
+    let bytes: Vec<u8> = image.into_rgba();
     let array = Uint8ClampedArray::new_with_length(bytes.len() as u32);
     array.copy_from(&bytes);
     array
@@ -636,7 +638,7 @@ impl WasmDecoder {
             width: image.width(),
             height: image.height(),
             image_format: self.decoder.get_format(),
-            pixels: pixels_to_js(image.into_pixels()),
+            pixels: pixels_to_js(image),
         }
         .into_ts()
         .map_err(|e| e.to_string());
@@ -666,8 +668,10 @@ impl WasmDecoder {
 
         let result = frame
             .map(|frame| {
-                let (width, height, delay) = (frame.width(), frame.height(), frame.delay());
-                JsImageFrame { width, height, pixels: pixels_to_js(frame.into_pixels()), delay }.into_ts()
+                let delay = frame.delay();
+                let image = frame.into_image();
+                let (width, height) = (image.width(), image.height());
+                JsImageFrame { width, height, pixels: pixels_to_js(image), delay }.into_ts()
             })
             .transpose()
             .map_err(|e| e.to_string());
@@ -745,7 +749,7 @@ impl WasmDecoder {
                 width: image.width(),
                 height: image.height(),
                 image_format: format.clone(),
-                pixels: pixels_to_js(image.into_pixels()),
+                pixels: pixels_to_js(image),
             })
             .collect()
     }

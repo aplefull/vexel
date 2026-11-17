@@ -15,6 +15,7 @@ use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::decoders::jpeg2000::Jpeg2000Decoder;
 use crate::decoders::jpeg_ls::JpegLsDecoder;
 use crate::utils::codecs::deflate::DeflateDecoder;
+use crate::utils::convert::{self, Channels};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::frames::{FramePrefetch, FrameSource};
 use crate::utils::image::{Image, ImageFrame, PixelData};
@@ -388,7 +389,7 @@ impl DicomFrames {
     pub(super) fn collect_images(mut self) -> VexelResult<Vec<Image>> {
         let mut images = Vec::new();
         while let Some(frame) = self.next_frame()? {
-            images.push(Image::from_frame(frame));
+            images.push(frame.into_image());
         }
         Ok(images)
     }
@@ -419,7 +420,7 @@ impl FrameSource for DicomFrames {
                 Ok(pixels) => {
                     self.emitted += 1;
                     let params = &self.plan.params;
-                    return Ok(Some(ImageFrame::new(params.cols, params.rows, pixels, self.plan.delay)));
+                    return Ok(Some(ImageFrame::from_pixels(params.cols, params.rows, pixels, self.plan.delay)));
                 }
                 Err(e) => {
                     log_warn!("DICOM: failed to decode frame {}: {}", index, e);
@@ -599,7 +600,7 @@ fn absorb_codec_frame(
             PixelData::RGB16(v) => StoredFrame::U16(v.chunks_exact(3).map(|c| c[0]).collect()),
             other => {
                 log_warn!("DICOM: unexpected codec output {:?} for monochrome frame", other.pixel_format());
-                StoredFrame::U8(other.into_rgb8_bytes().chunks_exact(3).map(|c| c[0]).collect())
+                StoredFrame::U8(convert::collect::<u8>(&other, Channels::Rgb).chunks_exact(3).map(|c| c[0]).collect())
             }
         };
         return Ok(Decoded::Stored(stored));

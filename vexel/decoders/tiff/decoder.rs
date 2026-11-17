@@ -416,7 +416,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 Ok(_) => match self.decode_current_ifd() {
                     Ok(frames) => {
                         if let Some(frame) = frames.into_iter().next() {
-                            thumbnails.push(Image::from_frame(frame));
+                            thumbnails.push(frame.into_image());
                         }
                     }
                     Err(e) => {
@@ -820,7 +820,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
         let mut jpeg_decoder = JpegDecoder::new(cursor);
         jpeg_decoder.set_limits(self.limits.clone());
         match jpeg_decoder.decode() {
-            Ok(image) => Some(jpeg_rgb_bytes(image.into_pixels(), wide, self.byte_order)),
+            Ok(image) => Some(jpeg_rgb_bytes(image, wide, self.byte_order)),
             Err(e) => {
                 log_warn!("Failed to decode JPEG-compressed TIFF chunk: {}", e);
                 None
@@ -1147,7 +1147,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             let mut pixel_data = self.read_image_jpeg()?;
             pixel_data.correct_pixels(self.width, self.height);
 
-            return Ok(vec![ImageFrame::new(self.width, self.height, pixel_data, 0)]);
+            return Ok(vec![ImageFrame::from_pixels(self.width, self.height, pixel_data, 0)]);
         }
 
         let slices = self.read_image_chunks()?;
@@ -1172,7 +1172,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
             match converted {
                 Ok(mut pixel_data) => {
                     pixel_data.correct_pixels(self.width, self.height);
-                    frames.push(ImageFrame::new(self.width, self.height, pixel_data, 0));
+                    frames.push(ImageFrame::from_pixels(self.width, self.height, pixel_data, 0));
                 }
                 Err(e) if index == 0 => return Err(e),
                 Err(e) => {
@@ -1255,7 +1255,7 @@ impl<R: Read + Seek> TiffDecoder<R> {
                 // TODO: an IFD with ImageDepth > 1 produces several slices, which are
                 // flattened into separate pages here.
                 Ok(ifd_frames) => {
-                    pages.extend(ifd_frames.into_iter().map(Image::from_frame));
+                    pages.extend(ifd_frames.into_iter().map(ImageFrame::into_image));
                 }
                 Err(e) => {
                     log_warn!("Failed to decode TIFF page: {}", e);

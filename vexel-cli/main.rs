@@ -185,7 +185,7 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     println!("Writing to: {}", output_path.display());
     if cli.pages {
         let pages = decoder.decode_pages()?;
-        Writer::write_pages(&pages, format, &output_path)?;
+        Writer::write_pages(pages, format, &output_path)?;
     } else if cli.frames {
         Writer::write_frames(&output_path, format, decoder.decode_frames()?)?;
     } else {

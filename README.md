@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{}x{}", image.width(), image.height());
 
-    let pixels: Vec<u8> = image.to_rgba8();
+    let pixels: Vec<u8> = image.into_rgba();
 
     Ok(())
 }
@@ -162,7 +162,6 @@ Decoders produce one of the following pixel formats:
 | `RGBA32F`  | 32-bit float RGBA |
 | `RGB64F`   | 64-bit float RGB |
 | `RGBA64F`  | 64-bit float RGBA |
-| `L1`       | 1-bit grayscale |
 | `L8`       | 8-bit grayscale |
 | `L16`      | 16-bit grayscale |
 | `LA8`      | 8-bit grayscale + alpha |
@@ -172,35 +171,41 @@ Decoders produce one of the following pixel formats:
 | `L64F`     | 64-bit float grayscale |
 | `LA64F`    | 64-bit float grayscale + alpha |
 
-`image.to_rgb8()` and `image.to_rgba8()` convert any format to 8-bit and return the pixels as a `Vec<u8>`.
+`image.format()` returns the `PixelFormat`, which answers layout questions: `channels()`, `sample_type()`, `bytes_per_pixel()`, `has_alpha()` and `is_gray()`.
 
-To work with the native data without converting, match on `image.pixels()`:
+### Getting pixels
+
+There are two ways to get pixels out of an `Image`.
+
+**Converted.** This is probably what you want. `to_rgb`, `to_rgba`, `into_rgb` and `into_rgba` always return interleaved RGB or RGBA in the sample type you ask for: `u8`, `u16`, `f32` or `f64`. Integer values are scaled to the full range of the target type, and floats map 0..1 to it. Gray is copied into R, G and B, and a missing alpha channel is added as opaque.
 
 ```rust
-use vexel::{Vexel, PixelData};
+let rgba: Vec<u8> = image.to_rgba();
+let hdr: Vec<f32> = image.to_rgba();
+let owned: Vec<u8> = image.into_rgba();
+```
 
-let mut decoder = Vexel::open("image.tiff")?;
-let image = decoder.decode()?;
+**Exact.** `samples` and `into_samples` return the stored data untouched, in the layout given by `image.format()`. If the image is not stored as the sample type you ask for, they return `None` (or `Err(image)`), because they never convert.
 
-match image.pixels() {
-    PixelData::RGB16(samples) => {
-        // samples is &Vec<u16>, one u16 per channel, interleaved R G B R G B ...
-        for pixel in samples.chunks_exact(3) {
-            let (r, g, b) = (pixel[0], pixel[1], pixel[2]);
-            println!("{r} {g} {b}");
-        }
-    }
-    PixelData::RGB32F(samples) => {
-        // samples is &Vec<f32>
-    }
-    PixelData::L16(samples) => {
-        // samples is &Vec<u16>, one value per pixel
-    }
-    other => {
-        let rgb8 = image.to_rgb8();
+```rust
+let format = image.format();
+if let Some(samples) = image.samples::<u16>() {
+    for pixel in samples.chunks_exact(format.channels()) {
+        println!("{:?}", pixel);
     }
 }
 ```
+
+To change only the depth or layout (keep gray as gray, go to 16-bit), `convert` the image first. After that, asking for the matching sample type always succeeds:
+
+```rust
+use vexel::PixelFormat;
+
+let gray16 = image.convert(PixelFormat::L16);
+let samples: &[u16] = gray16.samples().unwrap();
+```
+
+`write_rgba(&mut buffer, Alpha::Premultiplied)` fills a buffer you own, such as a canvas or a texture, and returns an error if its length is not `width * height * 4`. `as_bytes()` gives the stored bytes in native byte order. `Image::from_samples(width, height, format, samples)` builds an image from your own data.
 
 ### Animated images
 
@@ -213,7 +218,7 @@ let mut decoder = Vexel::open("animation.gif")?;
 let mut frames = decoder.decode_frames()?;
 
 while let Some(frame) = frames.next_frame()? {
-    encoder.add_frame(frame.pixels().as_bytes(), frame.delay())?;
+    encoder.add_frame(frame.image().as_bytes(), frame.delay())?;
 }
 ```
 

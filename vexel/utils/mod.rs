@@ -18,6 +18,7 @@ pub mod marker;
 pub mod metadata;
 pub mod raster;
 pub(crate) mod read;
+pub mod sample;
 pub mod stream;
 pub mod tiff;
 pub mod types;

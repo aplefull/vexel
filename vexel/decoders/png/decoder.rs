@@ -598,13 +598,13 @@ impl<R: Read + Seek> PngDecoder<R> {
             let mut frames = self.frame_source(false, limits.max_alloc);
 
             if let Some(frame) = frames.next_animation_frame() {
-                return Ok(Image::from_frame(frame));
+                return Ok(frame.into_image());
             }
 
             if complete {
                 return frames
                     .next_frame()?
-                    .map(Image::from_frame)
+                    .map(|frame| frame.into_image())
                     .ok_or_else(|| VexelError::Custom("PNG: image contains no frames".to_string()));
             }
 

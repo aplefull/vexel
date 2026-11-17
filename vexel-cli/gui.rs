@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use egui::ViewportBuilder;
 use rayon::prelude::*;
-use vexel::{Frames, Image, ImageFrame, PixelData, Vexel};
+use vexel::{Alpha, Frames, Image, Sample, SampleType, Vexel};
 
 struct Page {
     frames: Vec<Arc<egui::ColorImage>>,
@@ -143,7 +143,7 @@ pub fn collect_gui_files(input: &Path) -> (Vec<PathBuf>, usize) {
     }
 }
 
-fn normalize_pixels(pixels: PixelData) -> PixelData {
+fn normalize_image(image: Image) -> Image {
     fn color_channels(step: usize) -> usize {
         if step == 4 || step == 2 {
             step - 1
@@ -240,24 +240,20 @@ fn normalize_pixels(pixels: PixelData) -> PixelData {
         p
     }
 
-    match pixels {
-        PixelData::RGB8(p) => PixelData::RGB8(norm_u8(p, 3)),
-        PixelData::RGBA8(p) => PixelData::RGBA8(norm_u8(p, 4)),
-        PixelData::RGB16(p) => PixelData::RGB16(norm_u16(p, 3)),
-        PixelData::RGBA16(p) => PixelData::RGBA16(norm_u16(p, 4)),
-        PixelData::RGB32F(p) => PixelData::RGB32F(norm_f32(p, 3)),
-        PixelData::RGBA32F(p) => PixelData::RGBA32F(norm_f32(p, 4)),
-        PixelData::RGB64F(p) => PixelData::RGB64F(norm_f64(p, 3)),
-        PixelData::RGBA64F(p) => PixelData::RGBA64F(norm_f64(p, 4)),
-        PixelData::L8(p) => PixelData::L8(norm_u8(p, 1)),
-        PixelData::LA8(p) => PixelData::LA8(norm_u8(p, 2)),
-        PixelData::L16(p) => PixelData::L16(norm_u16(p, 1)),
-        PixelData::LA16(p) => PixelData::LA16(norm_u16(p, 2)),
-        PixelData::L32F(p) => PixelData::L32F(norm_f32(p, 1)),
-        PixelData::LA32F(p) => PixelData::LA32F(norm_f32(p, 2)),
-        PixelData::L64F(p) => PixelData::L64F(norm_f64(p, 1)),
-        PixelData::LA64F(p) => PixelData::LA64F(norm_f64(p, 2)),
-        other => other,
+    fn rebuild<S: Sample>(image: Image, normalize: fn(Vec<S>, usize) -> Vec<S>) -> Image {
+        let (width, height, format) = (image.width(), image.height(), image.format());
+        match image.into_samples::<S>() {
+            Ok(samples) => Image::from_samples(width, height, format, normalize(samples, format.channels()))
+                .expect("normalizing keeps the format and sample count"),
+            Err(image) => image,
+        }
+    }
+
+    match image.format().sample_type() {
+        SampleType::U8 => rebuild(image, norm_u8),
+        SampleType::U16 => rebuild(image, norm_u16),
+        SampleType::F32 => rebuild(image, norm_f32),
+        SampleType::F64 => rebuild(image, norm_f64),
     }
 }
 
@@ -296,22 +292,21 @@ struct App {
 }
 
 impl App {
-    fn frame_to_texture(frame: ImageFrame, normalize: bool, max_side: usize) -> Arc<egui::ColorImage> {
-        let src_width = frame.width() as usize;
-        let src_height = frame.height() as usize;
-
-        let mut pixels = frame.into_pixels();
-        if normalize {
-            pixels = normalize_pixels(pixels);
-        }
+    fn image_to_texture(image: Image, normalize: bool, max_side: usize) -> Arc<egui::ColorImage> {
+        let src_width = image.width() as usize;
+        let src_height = image.height() as usize;
+        let empty = || Arc::new(egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT));
 
         if src_width == 0 || src_height == 0 {
-            return Arc::new(egui::ColorImage::filled([1, 1], egui::Color32::TRANSPARENT));
+            return empty();
         }
 
+        let image = if normalize { normalize_image(image) } else { image };
         let mut colors: Vec<egui::Color32> = bytemuck::zeroed_vec(src_width * src_height);
-        pixels.write_rgba8_premultiplied(bytemuck::cast_slice_mut(&mut colors));
-        drop(pixels);
+        if image.write_rgba::<u8>(bytemuck::cast_slice_mut(&mut colors), Alpha::Premultiplied).is_err() {
+            return empty();
+        }
+        drop(image);
 
         let scale = (max_side as f64 / src_width as f64).min(max_side as f64 / src_height as f64).min(1.0);
         if scale >= 1.0 {
@@ -341,10 +336,9 @@ impl App {
 
     fn image_to_page(image: Image, normalize: bool, max_side: usize) -> Page {
         let original_size = [image.width() as usize, image.height() as usize];
-        let frame = ImageFrame::new_still(image.width(), image.height(), image.into_pixels());
 
         Page {
-            frames: vec![Self::frame_to_texture(frame, normalize, max_side)],
+            frames: vec![Self::image_to_texture(image, normalize, max_side)],
             delays: vec![Self::frame_delay(0)],
             size: original_size,
         }
@@ -362,12 +356,13 @@ impl App {
 
             let Some(Ok(frame)) = next else { break };
 
+            delays.push(Self::frame_delay(frame.delay()));
+            let image = frame.into_image();
             if textures.is_empty() {
-                size = [frame.width() as usize, frame.height() as usize];
+                size = [image.width() as usize, image.height() as usize];
             }
 
-            delays.push(Self::frame_delay(frame.delay()));
-            textures.push(Self::frame_to_texture(frame, normalize, max_side));
+            textures.push(Self::image_to_texture(image, normalize, max_side));
         }
 
         Page { frames: textures, delays, size }

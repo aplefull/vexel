@@ -4,7 +4,7 @@ use super::info::{build_info, DngInfo};
 use crate::decoders::jpeg::decoder::JpegDecoder;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::float::half_to_f32;
-use crate::utils::image::PixelData;
+use crate::utils::image::{PixelData, PixelFormat};
 use crate::utils::raster::RasterWindow;
 use crate::utils::stream::StreamReader;
 use crate::utils::tiff::color::{f32_from_bytes, float24_to_f32, u16_from_bytes};
@@ -299,7 +299,7 @@ impl<R: Read + Seek> DngDecoder<R> {
             let mut decoder = JpegDecoder::new(Cursor::new(jpeg_data));
             decoder.set_limits(self.limits.clone());
             match decoder.decode() {
-                Ok(image) => data.extend(image.into_pixels().into_rgb8_bytes()),
+                Ok(image) => data.extend(image.into_rgb::<u8>()),
                 Err(e) => log_warn!("Failed to decode DNG preview JPEG chunk: {}", e),
             }
         }
@@ -2234,14 +2234,9 @@ impl StripContext<'_> {
             }
         };
 
-        let bytes: Vec<u8> = match image.into_pixels() {
-            crate::utils::image::PixelData::RGB8(v) => v,
-            crate::utils::image::PixelData::L8(v) => v,
-            crate::utils::image::PixelData::RGBA8(v) => v,
-            other => match other.into_rgb8() {
-                crate::utils::image::PixelData::RGB8(v) => v,
-                _ => return Ok(vec![0u16; sample_count]),
-            },
+        let bytes: Vec<u8> = match image.format() {
+            PixelFormat::RGB8 | PixelFormat::L8 | PixelFormat::RGBA8 => image.into_samples().unwrap_or_default(),
+            _ => image.into_rgb(),
         };
 
         let built;

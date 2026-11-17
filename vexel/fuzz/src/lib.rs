@@ -43,17 +43,17 @@ fn init_thread_pool(threads: usize) {
 }
 
 fn touch_image(image: &Image) {
-    let _ = (image.width(), image.height(), image.pixel_format(), image.has_alpha());
-    if image.pixels().as_bytes().len() <= MAX_CONVERTED_BYTES {
-        let _ = image.to_rgba8();
+    let format = image.format();
+    let _ = (image.width(), image.height(), format.channels(), format.has_alpha());
+    if image.as_bytes().len() <= MAX_CONVERTED_BYTES {
+        let _ = image.to_rgba::<u8>();
+        let _ = image.to_rgba::<u16>();
     }
 }
 
 fn touch_frame(frame: &ImageFrame) {
-    let _ = (frame.width(), frame.height(), frame.delay(), frame.pixel_format(), frame.has_alpha());
-    if frame.pixels().as_bytes().len() <= MAX_CONVERTED_BYTES {
-        let _ = frame.to_rgba8();
-    }
+    let _ = frame.delay();
+    touch_image(frame.image());
 }
 
 fn run(mut decoder: Vexel<Cursor<&[u8]>>, profile: &Profile, operation: Operation) {

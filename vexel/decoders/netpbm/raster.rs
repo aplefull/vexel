@@ -139,7 +139,7 @@ fn expand_table() -> [[u8; 8]; 256] {
     let mut table = [[0u8; 8]; 256];
     for (byte, entry) in table.iter_mut().enumerate() {
         for (bit, out) in entry.iter_mut().enumerate() {
-            *out = u8::from(byte & (0x80 >> bit) == 0);
+            *out = if byte & (0x80 >> bit) == 0 { 255 } else { 0 };
         }
     }
     table
