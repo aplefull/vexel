@@ -9,6 +9,7 @@ use crate::utils::metadata::{Cicp, ContentLightLevel, IptcData, MasteringDisplay
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[non_exhaustive]
 pub enum ColorModel {
     Bilevel,
     Gray,
@@ -52,6 +53,7 @@ impl fmt::Display for ColorModel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[non_exhaustive]
 pub enum SampleFormat {
     Unsigned,
     Signed,
@@ -71,6 +73,7 @@ impl fmt::Display for SampleFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[non_exhaustive]
 pub struct DataExtent {
     pub expected: u64,
     pub actual: u64,
@@ -85,6 +88,7 @@ impl DataExtent {
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[cfg_attr(feature = "tsify", tsify(missing_as_null))]
+#[non_exhaustive]
 pub struct ImageSummary {
     pub width: u32,
     pub height: u32,
@@ -111,7 +115,7 @@ pub struct ImageSummary {
 }
 
 impl ImageSummary {
-    pub fn new(width: u32, height: u32, color_model: ColorModel, channels: u16, bits_per_sample: u8) -> Self {
+    pub(crate) fn new(width: u32, height: u32, color_model: ColorModel, channels: u16, bits_per_sample: u8) -> Self {
         ImageSummary {
             width,
             height,
@@ -138,7 +142,7 @@ impl ImageSummary {
         }
     }
 
-    pub fn describe(&self, out: &mut InfoWriter) {
+    pub(crate) fn describe(&self, out: &mut InfoWriter) {
         out.field("Dimensions", format!("{}x{}", self.width, self.height));
         out.field("Color model", self.color_model);
         out.field("Channels", self.channels);

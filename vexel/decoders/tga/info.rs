@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use serde::Serialize;
 
 use super::types::{TgaExtensionAreaData, TgaFooterData, TgaHeader, IMAGE_TYPE_FLAG_RLE};
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter};
 
 #[cfg_attr(feature = "tsify", tsify::declare)]
 pub type TgaInfo = FormatInfo<TgaSection>;
@@ -191,7 +191,9 @@ impl InfoSection for TgaSection {
             TgaSection::Footer(_) => "Footer",
         })
     }
+}
 
+impl DescribeSection for TgaSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             TgaSection::Header(header) => describe_header(header, out),

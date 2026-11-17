@@ -23,10 +23,10 @@ use crate::decoders::rpgmvp::RpgmvpDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
 use crate::decoders::traits::ImageDecoder;
+use crate::decoders::InfoKind;
 use crate::utils::error::VexelResult;
 use crate::utils::frames::Frames;
 use crate::utils::image::Image;
-use crate::utils::info::ImageInfo;
 use crate::utils::limits::Limits;
 
 macro_rules! impl_decoder {
@@ -37,7 +37,7 @@ macro_rules! impl_decoder {
         $(, frames = $frames:literal)?
         $(,)?
     ) => {
-        impl<R: Read + Seek + Sync> ImageDecoder<R> for $decoder<R> {
+        impl<R: Read + Seek> ImageDecoder<R> for $decoder<R> {
             fn set_limits(&mut self, limits: Limits) {
                 $decoder::set_limits(self, limits);
             }
@@ -46,8 +46,8 @@ macro_rules! impl_decoder {
                 $decoder::decode(self)
             }
 
-            fn get_info(&mut self) -> ImageInfo {
-                ImageInfo::$info($decoder::get_info(self))
+            fn get_info(&mut self) -> InfoKind {
+                InfoKind::$info($decoder::get_info(self))
             }
 
             $(
@@ -104,7 +104,7 @@ impl_decoder!(JpegXsDecoder, JpegXs);
 impl_decoder!(JpegXrDecoder, JpegXr);
 impl_decoder!(LercDecoder, Lerc);
 
-impl<R: Read + Seek + Sync> ImageDecoder<R> for RpgmvpDecoder<R> {
+impl<R: Read + Seek> ImageDecoder<R> for RpgmvpDecoder<R> {
     fn set_limits(&mut self, limits: Limits) {
         RpgmvpDecoder::set_limits(self, limits);
     }
@@ -113,10 +113,10 @@ impl<R: Read + Seek + Sync> ImageDecoder<R> for RpgmvpDecoder<R> {
         RpgmvpDecoder::decode(self)
     }
 
-    fn get_info(&mut self) -> ImageInfo {
+    fn get_info(&mut self) -> InfoKind {
         match RpgmvpDecoder::get_info(self) {
-            Ok(info) => ImageInfo::Rpgmvp(info),
-            Err(_) => ImageInfo::Unknown,
+            Ok(info) => InfoKind::Rpgmvp(info),
+            Err(_) => InfoKind::Unknown,
         }
     }
 

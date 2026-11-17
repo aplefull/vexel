@@ -7,7 +7,9 @@ use super::reader::ByteReader;
 use super::types::{ImageEncodeMode, LercDataType, LERC1_MAGIC, LERC2_MAGIC};
 use super::values::read_value;
 use crate::utils::error::VexelResult;
-use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat};
+use crate::utils::info::{
+    ColorModel, DataExtent, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat,
+};
 
 const LERC1_HEADER_SIZE: usize = 34;
 const LERC1_PART_HEADER_SIZE: usize = 16;
@@ -153,7 +155,9 @@ impl InfoSection for LercSection {
             LercSection::TrailingData => Cow::Borrowed("Trailing Data"),
         }
     }
+}
 
+impl DescribeSection for LercSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             LercSection::Lerc2Blob(blob) => describe_lerc2(blob, out),

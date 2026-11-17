@@ -11,6 +11,7 @@ use crate::utils::types::ByteOrder;
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[non_exhaustive]
 pub enum ExifValue {
     Byte(Vec<u8>),
     Ascii(Vec<String>),
@@ -69,7 +70,7 @@ const GPS_IFD_POINTER: u16 = 0x8825;
 const INTEROP_IFD_POINTER: u16 = 0xA005;
 const MAX_IFDS: usize = 8;
 
-pub struct ExifReader;
+pub(crate) struct ExifReader;
 
 impl ExifReader {
     pub fn parse(tiff_data: &[u8]) -> Option<ExifData> {
@@ -591,7 +592,7 @@ fn describe_ifd(name: &str, ifd: &ExifIfd, out: &mut InfoWriter) {
 }
 
 impl ExifData {
-    pub fn describe(&self, out: &mut InfoWriter) {
+    pub(crate) fn describe(&self, out: &mut InfoWriter) {
         let byte_order = match self.byte_order {
             ByteOrder::LittleEndian => "Little-endian (II)",
             ByteOrder::BigEndian => "Big-endian (MM)",

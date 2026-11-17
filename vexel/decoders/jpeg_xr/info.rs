@@ -10,7 +10,9 @@ use super::types::*;
 use crate::decoders::jpeg_xr::bitreader::xr_bit_reader;
 use crate::log_warn;
 use crate::utils::icc::ICCProfile;
-use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat, Section};
+use crate::utils::info::{
+    ColorModel, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat, Section,
+};
 use crate::utils::limits::Limits;
 use crate::utils::metadata::MetadataCollector;
 use crate::utils::stream::StreamReader;
@@ -399,7 +401,9 @@ impl InfoSection for JpegXrSection {
             }
         }
     }
+}
 
+impl DescribeSection for JpegXrSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             JpegXrSection::Tiff(section) => section.describe(out),

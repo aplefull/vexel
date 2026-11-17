@@ -1,10 +1,10 @@
-pub mod color;
-pub mod iptc;
-pub mod jp2;
-pub mod orientation;
-pub mod photoshop;
-pub mod xml;
-pub mod xmp;
+mod color;
+mod iptc;
+pub(crate) mod jp2;
+mod orientation;
+pub(crate) mod photoshop;
+pub(crate) mod xml;
+pub(crate) mod xmp;
 
 pub use color::{Cicp, ContentLightLevel, MasteringDisplay};
 pub use iptc::{IptcData, IptcDataset, IptcValue};
@@ -20,7 +20,7 @@ use crate::utils::info::ImageSummary;
 const EXIF_ORIENTATION: u16 = 0x0112;
 
 #[derive(Debug, Clone, Default)]
-pub struct MetadataCollector {
+pub(crate) struct MetadataCollector {
     exif: Option<ExifData>,
     xmp: Option<String>,
     fallback_xmp: Option<String>,
@@ -33,7 +33,7 @@ pub struct MetadataCollector {
     orientation: Option<Orientation>,
 }
 
-pub fn strip_exif_header(data: &[u8]) -> &[u8] {
+pub(crate) fn strip_exif_header(data: &[u8]) -> &[u8] {
     match data {
         [b'E', b'x', b'i', b'f', 0, 0, rest @ ..] => rest,
         [b'E', b'x', b'i', b'f', 0, rest @ ..] => rest,

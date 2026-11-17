@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use serde::Serialize;
 
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter};
 
 #[cfg_attr(feature = "tsify", tsify::declare)]
 pub type FarbfeldInfo = FormatInfo<FarbfeldSection>;
@@ -35,7 +35,9 @@ impl InfoSection for FarbfeldSection {
             FarbfeldSection::PixelData(_) => Cow::Borrowed("Pixel Data"),
         }
     }
+}
 
+impl DescribeSection for FarbfeldSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             FarbfeldSection::Header(header) => {

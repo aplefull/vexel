@@ -30,7 +30,7 @@ macro_rules! define_decoders {
             Unknown,
         }
 
-        impl<R: std::io::Read + std::io::Seek + Sync> Decoders<R> {
+        impl<R: std::io::Read + std::io::Seek> Decoders<R> {
             pub(crate) fn as_dyn(&mut self) -> Option<&mut dyn $crate::decoders::traits::ImageDecoder<R>> {
                 match self {
                     $(Decoders::$variant(decoder) => Some(decoder),)+
@@ -62,17 +62,17 @@ macro_rules! define_decoders {
 
         #[derive(Debug, serde::Serialize)]
         #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
-        #[cfg_attr(feature = "tsify", tsify(missing_as_null, hashmap_as_object))]
-        pub enum ImageInfo {
+        #[cfg_attr(feature = "tsify", tsify(rename = "ImageInfo", missing_as_null, hashmap_as_object))]
+        pub enum InfoKind {
             $($variant($info),)+
             Unknown,
         }
 
-        impl ImageInfo {
+        impl InfoKind {
             pub(crate) fn format_info(&self) -> Option<(&dyn $crate::utils::info::AnyFormatInfo, &'static str)> {
                 match self {
-                    $(ImageInfo::$variant(info) => Some((info, $title)),)+
-                    ImageInfo::Unknown => None,
+                    $(InfoKind::$variant(info) => Some((info, $title)),)+
+                    InfoKind::Unknown => None,
                 }
             }
         }

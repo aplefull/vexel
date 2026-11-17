@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use serde::Serialize;
 
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter};
 
 #[cfg_attr(feature = "tsify", tsify::declare)]
 pub type GifInfo = FormatInfo<GifSection>;
@@ -180,7 +180,9 @@ impl InfoSection for GifSection {
             GifSection::TrailingData => Cow::Borrowed("Trailing Data"),
         }
     }
+}
 
+impl DescribeSection for GifSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             GifSection::Header(h) => {

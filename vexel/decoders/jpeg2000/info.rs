@@ -9,7 +9,9 @@ use crate::log_warn;
 use crate::utils::bytes::Bytes;
 use crate::utils::exif::{ExifData, ExifReader};
 use crate::utils::icc::ICCProfile;
-use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat, Section};
+use crate::utils::info::{
+    ColorModel, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat, Section,
+};
 use crate::utils::metadata::jp2::{self, UuidKind};
 use crate::utils::metadata::{strip_exif_header, Cicp, MetadataCollector};
 
@@ -1147,7 +1149,9 @@ impl InfoSection for J2kMarkerBody {
     fn title(&self) -> Cow<'_, str> {
         marker_title(self)
     }
+}
 
+impl DescribeSection for J2kMarkerBody {
     fn describe(&self, out: &mut InfoWriter) {
         describe_marker(self, out)
     }
@@ -1189,7 +1193,9 @@ impl InfoSection for Jpeg2000Section {
             Jpeg2000Section::MoreSections(_) => Cow::Borrowed("Further Boxes and Markers"),
         }
     }
+}
 
+impl DescribeSection for Jpeg2000Section {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             Jpeg2000Section::Box(b) => {

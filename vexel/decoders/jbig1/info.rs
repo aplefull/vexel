@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use super::types::*;
 use crate::utils::bytes::Bytes;
-use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter};
+use crate::utils::info::{ColorModel, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter};
 
 const BIH_SIZE: usize = 20;
 const DPTABLE_SIZE: usize = 1728;
@@ -137,7 +137,9 @@ impl InfoSection for Jbig1Section {
             Jbig1Section::Unknown(marker) => Cow::Owned(format!("Unknown Marker (0xFF {:02X})", marker)),
         }
     }
+}
 
+impl DescribeSection for Jbig1Section {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             Jbig1Section::Bih(bih) => {

@@ -102,6 +102,7 @@ pub struct TagEntry {
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(tag = "type", content = "data")]
+#[non_exhaustive]
 pub enum ICCTagData {
     Text(String),
     Utf8(String),
@@ -381,6 +382,7 @@ pub struct MultiProcessElementsData {
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(tag = "kind", content = "value")]
+#[non_exhaustive]
 pub enum ProcessingElement {
     CurveSet(CurveSetElement),
     Matrix(MatrixElement),

@@ -5,7 +5,7 @@ use serde::Serialize;
 use super::decoder::{parse_segments, ParsedSegment, JBIG2_FILE_ID};
 use super::segment::SegmentType;
 use crate::utils::bytes::{be_u16, be_u32};
-use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter};
+use crate::utils::info::{ColorModel, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter};
 
 const MAX_SEGMENT_SECTIONS: usize = 1024;
 const MAX_LISTED_REFERENCES: usize = 256;
@@ -400,7 +400,9 @@ impl InfoSection for Jbig2Section {
             Jbig2Section::TrailingData => Cow::Borrowed("Trailing Data"),
         }
     }
+}
 
+impl DescribeSection for Jbig2Section {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             Jbig2Section::FileHeader(header) => {

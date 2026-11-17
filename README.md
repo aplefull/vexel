@@ -146,7 +146,13 @@ if let Some(summary) = info.summary() {
 println!("{}", info);
 ```
 
-`Display` prints the full tree as text, and `to_tree()` returns it as data. In WASM, `getInfo()` returns the same structure as a typed JS object.
+`ImageInfo` gives three views of the same data:
+
+- `summary()` returns an `ImageSummary`: typed fields with the same shape for every format
+- `to_tree()` returns the full section tree (`InfoGroup`) with labeled values and offsets; `Display` prints it as text
+- `ImageInfo` implements `serde::Serialize`, which emits everything as raw values, sections included. In WASM, `getInfo()` returns this structure as a typed JS object
+
+`format()` returns the detected `ImageFormat`.
 
 ### Pixel formats
 

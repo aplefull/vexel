@@ -4,6 +4,7 @@ use std::io;
 use std::num::ParseIntError;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum VexelError {
     IoError(io::Error),
     UnsupportedFormat(String),

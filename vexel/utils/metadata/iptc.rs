@@ -10,6 +10,7 @@ const UTF8_ESCAPE: &[u8] = b"\x1b%G";
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[non_exhaustive]
 pub enum IptcValue {
     Text(String),
     Number(u32),
@@ -52,7 +53,7 @@ pub struct IptcData {
 }
 
 impl IptcData {
-    pub fn parse(data: &[u8]) -> Option<IptcData> {
+    pub(crate) fn parse(data: &[u8]) -> Option<IptcData> {
         let mut datasets = Vec::new();
         let mut pos = 0usize;
 

@@ -8,7 +8,9 @@ use super::types::*;
 use crate::log_warn;
 use crate::utils::bits::MsbBitReader;
 use crate::utils::bytes::Bytes;
-use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoSection, InfoWriter, Section};
+use crate::utils::info::{
+    ColorModel, DataExtent, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter, Section,
+};
 
 const MAX_SLICE_SECTIONS: usize = 256;
 const MAX_TEXT_BYTES: usize = 4096;
@@ -491,7 +493,9 @@ impl InfoSection for JpegXsSection {
             JpegXsSection::EndOfCodestream => "EOC (End of Codestream)",
         })
     }
+}
 
+impl DescribeSection for JpegXsSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             JpegXsSection::Capabilities(bits) => {

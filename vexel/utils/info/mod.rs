@@ -4,42 +4,47 @@ mod writer;
 
 use std::fmt;
 
-pub(crate) use format::AnyFormatInfo;
-pub use format::{FormatInfo, InfoSection, Section};
+pub(crate) use format::sealed::DescribeSection;
+pub(crate) use format::{AnyFormatInfo, FormatInfo, InfoSection, Section};
+use serde::Serialize;
 pub use summary::{ColorModel, DataExtent, ImageSummary, SampleFormat};
-pub use writer::{InfoGroup, InfoNode, InfoValue, InfoWriter};
+pub(crate) use writer::InfoWriter;
+pub use writer::{InfoGroup, InfoNode, InfoValue};
 
-pub use crate::decoders::bmp::BmpInfo;
-pub use crate::decoders::dicom::DicomInfo;
-pub use crate::decoders::dng::DngInfo;
-pub use crate::decoders::exr::ExrInfo;
-pub use crate::decoders::farbfeld::FarbfeldInfo;
-pub use crate::decoders::gif::GifInfo;
-pub use crate::decoders::hdr::HdrInfo;
-pub use crate::decoders::ico::IcoInfo;
-pub use crate::decoders::jbig1::Jbig1Info;
-pub use crate::decoders::jbig2::Jbig2Info;
-pub use crate::decoders::jpeg::JpegInfo;
-pub use crate::decoders::jpeg2000::Jpeg2000Info;
-pub use crate::decoders::jpeg_ls::JpegLsInfo;
-pub use crate::decoders::jpeg_xr::JpegXrInfo;
-pub use crate::decoders::jpeg_xs::JpegXsInfo;
-pub use crate::decoders::lerc::LercInfo;
-pub use crate::decoders::netpbm::NetpbmInfo;
-pub use crate::decoders::pgx::PgxInfo;
-pub use crate::decoders::png::PngInfo;
-pub use crate::decoders::tga::TgaInfo;
-pub use crate::decoders::ImageInfo;
-pub use crate::utils::tiff::info::TiffInfo;
+use crate::decoders::InfoKind;
+use crate::utils::image::ImageFormat;
+
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct ImageInfo {
+    #[serde(skip)]
+    format: ImageFormat,
+    kind: InfoKind,
+}
 
 impl ImageInfo {
+    pub(crate) fn new(format: ImageFormat, kind: InfoKind) -> Self {
+        ImageInfo { format, kind }
+    }
+
+    pub fn format(&self) -> ImageFormat {
+        self.format.clone()
+    }
+
     pub fn summary(&self) -> Option<&ImageSummary> {
-        self.format_info().and_then(|(info, _)| info.summary())
+        self.kind.format_info().and_then(|(info, _)| info.summary())
     }
 
     pub fn to_tree(&self) -> Option<InfoGroup> {
-        self.format_info().map(|(info, title)| info.to_tree(title))
+        self.kind.format_info().map(|(info, title)| info.to_tree(title))
     }
+}
+
+#[cfg(feature = "tsify")]
+impl tsify::Tsify for ImageInfo {
+    type JsType = <InfoKind as tsify::Tsify>::JsType;
+    const DECL: &'static str = "";
+    const SERIALIZATION_CONFIG: tsify::SerializationConfig = <InfoKind as tsify::Tsify>::SERIALIZATION_CONFIG;
 }
 
 impl fmt::Display for ImageInfo {

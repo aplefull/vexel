@@ -7,7 +7,7 @@ use super::types::{
     TransparencyData,
 };
 use crate::utils::exif::ExifData;
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter};
 use crate::utils::metadata::{Cicp, ContentLightLevel, MasteringDisplay};
 
 #[cfg_attr(feature = "tsify", tsify::declare)]
@@ -36,12 +36,6 @@ pub struct PngChunk {
     pub crc: Option<u32>,
     pub crc_valid: Option<bool>,
     pub body: PngChunkBody,
-}
-
-impl PngChunk {
-    pub fn is_truncated(&self) -> bool {
-        self.data_read < u64::from(self.data_length) || self.crc.is_none()
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -403,7 +397,9 @@ impl InfoSection for PngSection {
             PngSection::Chunk(chunk) => Cow::Borrowed(chunk.chunk_type.as_str()),
         }
     }
+}
 
+impl DescribeSection for PngSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             PngSection::Signature(signature) => {

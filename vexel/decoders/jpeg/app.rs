@@ -564,7 +564,7 @@ impl AppSegment {
         }
     }
 
-    pub fn describe(&self, out: &mut InfoWriter) {
+    pub(crate) fn describe(&self, out: &mut InfoWriter) {
         match self {
             AppSegment::Jfif(jfif) => {
                 out.field("Version", format!("{}.{:02}", jfif.version_major, jfif.version_minor));
@@ -711,7 +711,7 @@ impl AppSegment {
 }
 
 impl CommentSegment {
-    pub fn describe(&self, out: &mut InfoWriter) {
+    pub(crate) fn describe(&self, out: &mut InfoWriter) {
         out.text("Text", &self.text);
     }
 }

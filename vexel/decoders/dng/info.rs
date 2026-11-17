@@ -3,7 +3,9 @@ use std::io::{Read, Seek, SeekFrom};
 
 use serde::Serialize;
 
-use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat};
+use crate::utils::info::{
+    ColorModel, DataExtent, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat,
+};
 use crate::utils::limits::Limits;
 use crate::utils::metadata::MetadataCollector;
 use crate::utils::stream::StreamReader;
@@ -607,7 +609,9 @@ impl InfoSection for DngSection {
             },
         }
     }
+}
 
+impl DescribeSection for DngSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             DngSection::Tiff(section) => section.describe(out),

@@ -11,7 +11,9 @@ use super::types::{
 };
 use crate::decoders::jpeg::info::subsampling_name;
 use crate::utils::float::half_to_f32;
-use crate::utils::info::{ColorModel, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat};
+use crate::utils::info::{
+    ColorModel, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat,
+};
 
 const VERSION_FLAG_LONG_NAMES: u32 = 0x400;
 const KNOWN_VERSION_FLAGS: u32 =
@@ -285,7 +287,9 @@ impl InfoSection for ExrSection {
             ExrSection::ChunkData(chunks) => Cow::Owned(format!("Part {} Chunk Data", chunks.part)),
         }
     }
+}
 
+impl DescribeSection for ExrSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             ExrSection::Version(version) => {

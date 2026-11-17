@@ -39,7 +39,7 @@ use crate::decoders::png::PngDecoder;
 use crate::decoders::rpgmvp::RpgmvpDecoder;
 use crate::decoders::tga::TgaDecoder;
 use crate::decoders::tiff::TiffDecoder;
-pub(crate) use crate::decoders::Decoders;
+pub(crate) use crate::decoders::{Decoders, InfoKind};
 use crate::utils::format_detect;
 
 fn catch_decoder_panic<T>(decode: impl FnOnce() -> VexelResult<T>) -> VexelResult<T> {
@@ -95,7 +95,7 @@ impl Vexel<File> {
     }
 }
 
-impl<R: Read + Seek + Sync> Vexel<R> {
+impl<R: Read + Seek> Vexel<R> {
     /// Creates a new decoder from any [`Read`] + [`Seek`] source.
     ///
     /// The image format is detected automatically from the first bytes of the
@@ -272,24 +272,26 @@ impl<R: Read + Seek + Sync> Vexel<R> {
     /// Returns format-specific metadata for the image.
     ///
     /// Metadata comes from a header walk and does not require a [`decode`](Self::decode).
-    /// The result is cached by the decoder. The returned [`ImageInfo`] variant matches the
-    /// detected format.
+    /// The result is cached by the decoder. If the format was not detected or the header
+    /// could not be read, the returned [`ImageInfo`] has no summary and no tree.
     pub fn get_info(&mut self) -> ImageInfo {
         let decoder = &mut self.decoder;
         let result = catch_decoder_panic(move || {
             Ok(match decoder.as_dyn() {
                 Some(decoder) => decoder.get_info(),
-                None => ImageInfo::Unknown,
+                None => InfoKind::Unknown,
             })
         });
 
-        result.unwrap_or_else(|e| {
+        let kind = result.unwrap_or_else(|e| {
             log_warn!("Failed to collect image info: {}", e);
             if let Some(decoder) = self.decoder.as_dyn() {
                 decoder.set_limits(self.limits.clone());
             }
-            ImageInfo::Unknown
-        })
+            InfoKind::Unknown
+        });
+
+        ImageInfo::new(self.format.clone(), kind)
     }
 
     /// Returns `true` if the detected format can contain multiple pages and the

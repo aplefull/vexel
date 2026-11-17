@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use serde::Serialize;
 
 use super::types::{NetpbmFormat, TupleType};
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter};
 
 #[cfg_attr(feature = "tsify", tsify::declare)]
 pub type NetpbmInfo = FormatInfo<NetpbmSection>;
@@ -106,7 +106,9 @@ impl InfoSection for NetpbmSection {
             image => Cow::Owned(format!("{} (image {})", name, image + 1)),
         }
     }
+}
 
+impl DescribeSection for NetpbmSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             NetpbmSection::Header(header) => {

@@ -152,7 +152,7 @@ const HEADER_SIZE: usize = 128;
 const MAX_TAG_COUNT: u32 = 1024;
 
 impl ICCProfile {
-    pub fn new(data: &[u8]) -> VexelResult<ICCProfile> {
+    pub(crate) fn new(data: &[u8]) -> VexelResult<ICCProfile> {
         let mut budget = tags::TagBudget::for_profile(data.len());
         Self::parse_with_depth(data, 0, &mut budget)
     }
@@ -376,27 +376,6 @@ impl ICCProfile {
             None
         } else {
             Some(text)
-        }
-    }
-
-    pub fn log_info(&self) {
-        println!("ICC Profile Information:");
-        println!("----------------------");
-        println!("Profile Size: {} bytes", self.header.size);
-        println!("Version: {}", self.header.version);
-        println!("Profile Class: {}", self.header.profile_class);
-        println!("Color Space: {}", self.header.color_space);
-        println!("PCS: {}", self.header.pcs);
-        println!("Platform: {}", self.header.platform);
-        println!("Manufacturer: {}", self.header.manufacturer);
-        println!("Model: {}", self.header.model);
-        if let Some(spectral_pcs) = &self.header.spectral_pcs {
-            println!("Spectral PCS: {}", spectral_pcs);
-        }
-        println!("\nTag Table:");
-        println!("Number of Tags: {}", self.tag_table.tag_count);
-        for entry in &self.tag_table.entries {
-            println!("  {} - Offset: {}, Size: {} bytes", entry.signature, entry.offset, entry.size);
         }
     }
 }

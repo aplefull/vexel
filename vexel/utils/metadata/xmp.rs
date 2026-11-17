@@ -36,6 +36,7 @@ pub enum XmpArrayKind {
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[non_exhaustive]
 pub enum XmpValue {
     Text {
         value: String,
@@ -125,7 +126,7 @@ fn describe_value(out: &mut InfoWriter, label: &str, value: &XmpValue) {
 }
 
 impl XmpData {
-    pub fn new(packet: String, extended: Option<String>) -> Self {
+    pub(crate) fn new(packet: String, extended: Option<String>) -> Self {
         let mut properties = parse_properties(&packet);
         if let Some(extended) = &extended {
             properties.extend(parse_properties(extended));
@@ -140,7 +141,7 @@ impl XmpData {
             .map(|property| &property.value)
     }
 
-    pub fn describe_properties(&self, out: &mut InfoWriter) {
+    pub(crate) fn describe_properties(&self, out: &mut InfoWriter) {
         for property in &self.properties {
             describe_value(out, &property.name, &property.value);
         }

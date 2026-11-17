@@ -5,7 +5,7 @@ use serde::Serialize;
 use super::types::{
     BitmapArrayHeader, BitmapCompression, BitmapFileHeader, ColorEntry, ColorMasks, DibHeader, DibKind,
 };
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter};
 
 #[cfg_attr(feature = "tsify", tsify::declare)]
 pub type BmpInfo = FormatInfo<BmpSection>;
@@ -240,7 +240,9 @@ impl InfoSection for BmpSection {
             BmpSection::PixelData(_) => "Pixel Data",
         })
     }
+}
 
+impl DescribeSection for BmpSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             BmpSection::BitmapArrayHeader(ba) => {

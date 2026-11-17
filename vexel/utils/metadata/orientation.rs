@@ -10,7 +10,7 @@ pub struct Orientation {
 }
 
 impl Orientation {
-    pub fn new(value: u32, applied: bool) -> Option<Self> {
+    pub(crate) fn new(value: u32, applied: bool) -> Option<Self> {
         match u8::try_from(value) {
             Ok(value @ 1..=8) => Some(Orientation { value, applied }),
             _ => None,

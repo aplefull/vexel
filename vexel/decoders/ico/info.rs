@@ -5,7 +5,7 @@ use serde::Serialize;
 use super::types::{IcoImageFormat, IcoType};
 use crate::decoders::bmp::types::DibHeader;
 use crate::decoders::png::PngInfo;
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter};
 
 #[cfg_attr(feature = "tsify", tsify::declare)]
 pub type IcoInfo = FormatInfo<IcoSection>;
@@ -114,7 +114,9 @@ impl InfoSection for IcoSection {
             IcoSection::ImageData(data) => Cow::Owned(format!("Image {}", data.index + 1)),
         }
     }
+}
 
+impl DescribeSection for IcoSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             IcoSection::Directory(dir) => {

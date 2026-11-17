@@ -7,6 +7,7 @@ use crate::utils::sample::{Alpha, Sample, SampleType};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[non_exhaustive]
 pub enum ImageFormat {
     Jpeg,
     JpegLs,

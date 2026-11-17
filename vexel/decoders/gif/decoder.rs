@@ -16,7 +16,7 @@ use crate::utils::info::{ColorModel, ImageSummary};
 use crate::utils::metadata::MetadataCollector;
 use crate::{log_debug, log_warn, Image, ImageFrame, Limits, PixelData};
 
-impl<R: Read + Seek + Sync> GifDecoder<R> {
+impl<R: Read + Seek> GifDecoder<R> {
     pub fn new(reader: R) -> Self {
         Self {
             width: 0,

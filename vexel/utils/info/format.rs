@@ -5,10 +5,17 @@ use serde::Serialize;
 use super::summary::ImageSummary;
 use super::writer::{InfoGroup, InfoWriter};
 
-pub trait InfoSection {
+pub trait InfoSection: sealed::DescribeSection {
     fn title(&self) -> Cow<'_, str>;
+}
 
-    fn describe(&self, out: &mut InfoWriter);
+#[allow(private_interfaces)]
+pub(crate) mod sealed {
+    use super::InfoWriter;
+
+    pub trait DescribeSection {
+        fn describe(&self, out: &mut InfoWriter);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -21,7 +28,7 @@ pub struct Section<S> {
 }
 
 impl<S> Section<S> {
-    pub fn new(offset: u64, length: Option<u64>, data: S) -> Self {
+    pub(crate) fn new(offset: u64, length: Option<u64>, data: S) -> Self {
         Section { offset, length, data }
     }
 }
@@ -41,13 +48,13 @@ impl<S> Default for FormatInfo<S> {
 }
 
 impl<S> FormatInfo<S> {
-    pub fn push(&mut self, offset: u64, length: Option<u64>, data: S) {
+    pub(crate) fn push(&mut self, offset: u64, length: Option<u64>, data: S) {
         self.sections.push(Section::new(offset, length, data));
     }
 }
 
 impl<S: InfoSection> FormatInfo<S> {
-    pub fn to_tree(&self, title: &str) -> InfoGroup {
+    pub(crate) fn to_tree(&self, title: &str) -> InfoGroup {
         let mut out = InfoWriter::new(title);
 
         if let Some(summary) = &self.summary {
@@ -60,13 +67,13 @@ impl<S: InfoSection> FormatInfo<S> {
         out.finish()
     }
 
-    pub fn describe_sections(&self, out: &mut InfoWriter) {
+    pub(crate) fn describe_sections(&self, out: &mut InfoWriter) {
         for section in &self.sections {
             out.section(section.data.title(), section.offset, section.length, |out| section.data.describe(out));
         }
     }
 
-    pub fn shift_offsets(&mut self, base: u64) {
+    pub(crate) fn shift_offsets(&mut self, base: u64) {
         for section in &mut self.sections {
             section.offset = section.offset.saturating_add(base);
         }

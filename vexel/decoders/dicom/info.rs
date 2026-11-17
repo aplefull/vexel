@@ -7,7 +7,9 @@ use super::parser::{looks_like_text, DataSet, Element, ElementValue, UNDEFINED_L
 use super::types::{dictionary, tag_element, tag_group, tags, uid_name, Photometric, Vr};
 use crate::decoders::jpeg::info::subsampling_name;
 use crate::utils::icc::ICCProfile;
-use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat};
+use crate::utils::info::{
+    ColorModel, DataExtent, DescribeSection, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat,
+};
 use crate::Limits;
 
 const PREAMBLE_LENGTH: usize = 128;
@@ -306,7 +308,9 @@ impl InfoSection for DicomSection {
             DicomSection::TrailingData => Cow::Borrowed("Trailing Data"),
         }
     }
+}
 
+impl DescribeSection for DicomSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             DicomSection::Preamble { zero_filled } => {

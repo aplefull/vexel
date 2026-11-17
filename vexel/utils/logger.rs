@@ -88,6 +88,7 @@ pub(crate) use log_warn;
 
 #[repr(u8)]
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
+#[non_exhaustive]
 pub enum LogLevel {
     Debug = 0,
     Warning = 1,

@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::exif::{parse_value, tag_name as exif_tag_name, ExifValue, IfdType};
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter, Section};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter, Section};
 use crate::utils::limits::Limits;
 use crate::utils::stream::StreamReader;
 use crate::utils::tiff::ifd::{type_size, Ifd, IfdCycleGuard, IfdEntry, IfdFormat, BIGTIFF_MAGIC, TIFF_MAGIC};
@@ -752,7 +752,9 @@ impl InfoSection for TiffSection {
             TiffSection::ImageData(data) => Cow::Owned(format!("Image Data (IFD {})", data.ifd)),
         }
     }
+}
 
+impl DescribeSection for TiffSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             TiffSection::FileHeader(header) => {

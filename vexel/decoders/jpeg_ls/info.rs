@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use serde::Serialize;
 
 use crate::decoders::jpeg::app::{AppSection, CommentSegment};
-use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
+use crate::utils::info::{DescribeSection, FormatInfo, InfoSection, InfoWriter};
 
 #[cfg_attr(feature = "tsify", tsify::declare)]
 pub type JpegLsInfo = FormatInfo<JpegLsSection>;
@@ -139,7 +139,9 @@ impl InfoSection for JpegLsSection {
             JpegLsSection::TrailingData => Cow::Borrowed("Trailing Data"),
         }
     }
+}
 
+impl DescribeSection for JpegLsSection {
     fn describe(&self, out: &mut InfoWriter) {
         match self {
             JpegLsSection::Frame(frame) => {

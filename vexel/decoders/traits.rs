@@ -1,17 +1,17 @@
 use std::io::{Read, Seek};
 
+use crate::decoders::InfoKind;
 use crate::utils::error::VexelResult;
 use crate::utils::frames::Frames;
 use crate::utils::image::Image;
-use crate::utils::info::ImageInfo;
 use crate::utils::limits::Limits;
 
-pub(crate) trait ImageDecoder<R: Read + Seek + Sync> {
+pub(crate) trait ImageDecoder<R: Read + Seek> {
     fn set_limits(&mut self, limits: Limits);
 
     fn decode(&mut self) -> VexelResult<Image>;
 
-    fn get_info(&mut self) -> ImageInfo;
+    fn get_info(&mut self) -> InfoKind;
 
     fn supports_pages() -> bool
     where
