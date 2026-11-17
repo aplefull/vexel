@@ -1,5 +1,4 @@
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::xml::{self, Element};
 use crate::log_warn;
@@ -27,18 +26,20 @@ const WELL_KNOWN_PREFIXES: [(&str, &str); 10] = [
     ("photoshop", "http://ns.adobe.com/photoshop/1.0/"),
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum XmpArrayKind {
     Bag,
     Seq,
     Alt,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum XmpValue {
     Text {
         value: String,
-        #[tsify(optional)]
+        #[serde(skip_serializing_if = "Option::is_none")]
         lang: Option<String>,
     },
     Array {
@@ -48,15 +49,17 @@ pub enum XmpValue {
     Struct(Vec<XmpProperty>),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct XmpProperty {
     pub namespace: String,
     pub name: String,
     pub value: XmpValue,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct XmpData {
     pub packet: String,
     pub extended: Option<String>,

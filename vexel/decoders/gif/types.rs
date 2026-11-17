@@ -2,7 +2,6 @@ use std::io::{Read, Seek};
 use std::ops::Range;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::info::GifInfo;
 use super::source::GifSource;
@@ -60,7 +59,7 @@ pub struct GraphicsControlExtension {
     pub transparent_color_index: u8,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Tsify)]
+#[derive(Debug, Copy, Clone, Serialize)]
 pub enum DisposalMethod {
     None,
     Background,

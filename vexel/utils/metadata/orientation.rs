@@ -1,9 +1,9 @@
 use std::fmt;
 
 use serde::Serialize;
-use tsify::Tsify;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Orientation {
     pub value: u8,
     pub applied: bool,

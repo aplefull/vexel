@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoSection, InfoWriter, SampleFormat};
 use crate::utils::limits::Limits;
@@ -20,10 +19,11 @@ const MAX_OPCODES: u32 = 256;
 const PHOTOMETRIC_CFA: u32 = 32803;
 const PHOTOMETRIC_LINEAR_RAW: u32 = 34892;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type DngInfo = FormatInfo<DngSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DngOpcode {
     pub id: u32,
     pub version: u32,
@@ -31,7 +31,8 @@ pub struct DngOpcode {
     pub parameter_bytes: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DngOpcodeList {
     pub list: u8,
     pub declared_count: u32,
@@ -39,8 +40,9 @@ pub struct DngOpcodeList {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct DngParameters {
     pub raw_ifd: Option<u32>,
     pub preview_ifds: Vec<u32>,
@@ -80,7 +82,8 @@ pub struct DngParameters {
     pub opcode_lists: Vec<DngOpcodeList>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum DngSection {
     Tiff(TiffSection),
     Parameters(Box<DngParameters>),

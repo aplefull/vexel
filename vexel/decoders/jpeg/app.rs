@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::log_warn;
 use crate::utils::bytes::Bytes;
@@ -18,7 +17,8 @@ const ICC_IDENTIFIER: &[u8] = b"ICC_PROFILE\0";
 const PHOTOSHOP_IDENTIFIER: &[u8] = b"Photoshop 3.0\0";
 const MAX_IDENTIFIER_LENGTH: usize = 32;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JfifSegment {
     pub version_major: u8,
     pub version_minor: u8,
@@ -30,25 +30,29 @@ pub struct JfifSegment {
     pub thumbnail_length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JfxxSegment {
     pub extension_code: u8,
     pub thumbnail_length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ExifSegment {
     pub tiff_length: u32,
     pub exif: Option<ExifData>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct XmpSegment {
     pub packet: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ExtendedXmpSegment {
     pub guid: String,
     pub full_length: u32,
@@ -56,15 +60,17 @@ pub struct ExtendedXmpSegment {
     pub chunk_length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct IccChunk {
     pub sequence: u8,
     pub total: u8,
     pub data_length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct MpfEntry {
     pub attribute: u32,
     pub size: u32,
@@ -73,8 +79,9 @@ pub struct MpfEntry {
     pub dependent_images: [u16; 2],
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct MpfSegment {
     pub byte_order: Option<ByteOrder>,
     pub version: Option<String>,
@@ -82,7 +89,8 @@ pub struct MpfSegment {
     pub entries: Vec<MpfEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct AdobeSegment {
     pub version: u16,
     pub flags0: u16,
@@ -91,12 +99,14 @@ pub struct AdobeSegment {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct PhotoshopSegment {
     pub resources: Vec<PhotoshopResource>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SpiffSegment {
     pub version_major: u8,
     pub version_minor: u8,
@@ -113,12 +123,14 @@ pub struct SpiffSegment {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct HpTransformSegment {
     pub transform: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegXtSegment {
     pub instance: u16,
     pub sequence: u32,
@@ -126,13 +138,15 @@ pub struct JpegXtSegment {
     pub box_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct GenericAppSegment {
     pub identifier: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum AppSegment {
     Jfif(JfifSegment),
     Jfxx(JfxxSegment),
@@ -149,13 +163,15 @@ pub enum AppSegment {
     Generic(GenericAppSegment),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct AppSection {
     pub index: u8,
     pub segment: AppSegment,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct CommentSegment {
     pub text: String,
 }

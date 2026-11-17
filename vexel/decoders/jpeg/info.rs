@@ -1,15 +1,15 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::app::{AppSection, CommentSegment};
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type JpegInfo = FormatInfo<JpegSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegFrameComponent {
     pub id: u8,
     pub horizontal_sampling: u8,
@@ -17,7 +17,8 @@ pub struct JpegFrameComponent {
     pub quantization_table: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegFrame {
     pub marker: u8,
     pub precision: u8,
@@ -27,7 +28,8 @@ pub struct JpegFrame {
     pub components: Vec<JpegFrameComponent>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegHuffmanTable {
     pub class: u8,
     pub id: u8,
@@ -35,46 +37,53 @@ pub struct JpegHuffmanTable {
     pub symbols: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegHuffmanTables {
     pub tables: Vec<JpegHuffmanTable>,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegQuantizationTable {
     pub id: u8,
     pub precision: u8,
     pub values: Vec<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegQuantizationTables {
     pub tables: Vec<JpegQuantizationTable>,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegArithmeticConditioning {
     pub class: u8,
     pub id: u8,
     pub value: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegExpand {
     pub horizontal: bool,
     pub vertical: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegScanComponent {
     pub id: u8,
     pub dc_table: u8,
     pub ac_table: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegScan {
     pub header_length: u16,
     pub components: Vec<JpegScanComponent>,
@@ -88,7 +97,8 @@ pub struct JpegScan {
     pub restart_markers: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum JpegSection {
     StartOfImage,
     App(AppSection),

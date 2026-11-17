@@ -1,22 +1,23 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::types::{NetpbmFormat, TupleType};
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type NetpbmInfo = FormatInfo<NetpbmSection>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum NetpbmEncoding {
     Plain,
     Raw,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct NetpbmHeader {
     pub image: u32,
     pub format: NetpbmFormat,
@@ -30,8 +31,9 @@ pub struct NetpbmHeader {
     pub scale: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct NetpbmPixelData {
     pub image: u32,
     pub encoding: NetpbmEncoding,
@@ -40,13 +42,15 @@ pub struct NetpbmPixelData {
     pub expected_length: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct NetpbmComment {
     pub image: u32,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum NetpbmSection {
     Header(NetpbmHeader),
     Comment(NetpbmComment),

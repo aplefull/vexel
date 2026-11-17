@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::types::{
     ActlChunk, BackgroundData, Chromaticities, ColorType, FctlChunk, ImageTime, SignificantBits, SuggestedPalette,
@@ -11,22 +10,25 @@ use crate::utils::exif::ExifData;
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 use crate::utils::metadata::{Cicp, ContentLightLevel, MasteringDisplay};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type PngInfo = FormatInfo<PngSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum PngSection {
     Signature(PngSignature),
     Chunk(PngChunk),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct PngSignature {
     pub valid: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct PngChunk {
     pub chunk_type: String,
     pub data_length: u32,
@@ -42,7 +44,8 @@ impl PngChunk {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct IhdrChunk {
     pub width: u32,
     pub height: u32,
@@ -66,14 +69,16 @@ impl IhdrChunk {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct GamaChunk {
     pub gamma_raw: u32,
     pub gamma: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct IccpChunk {
     pub profile_name: String,
     pub compression_method: u8,
@@ -82,32 +87,37 @@ pub struct IccpChunk {
     pub profile_parsed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SrgbChunk {
     pub rendering_intent: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct PhysChunk {
     pub pixels_per_unit_x: u32,
     pub pixels_per_unit_y: u32,
     pub unit: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TextChunk {
     pub keyword: String,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct CompressedTextChunk {
     pub keyword: String,
     pub compression_method: u8,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct InternationalTextChunk {
     pub keyword: String,
     pub compressed: bool,
@@ -117,19 +127,22 @@ pub struct InternationalTextChunk {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ExifChunk {
     pub exif: Option<ExifData>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct FdatChunk {
     pub sequence_number: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub enum PngChunkBody {
     Ihdr(IhdrChunk),
     Plte(Vec<[u8; 3]>),

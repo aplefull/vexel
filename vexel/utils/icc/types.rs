@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
-use tsify::Tsify;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null, hashmap_as_object)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null, hashmap_as_object))]
 pub struct ICCProfile {
     pub header: ProfileHeader,
     pub tag_table: TagTable,
     pub tags: HashMap<String, ICCTagData>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ProfileHeader {
     pub size: u32,
     pub preferred_cmm_type: String,
@@ -38,14 +39,16 @@ pub struct ProfileHeader {
     pub device_sub_class: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SpectralRange {
     pub start: f32,
     pub end: f32,
     pub steps: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DateTimeNumber {
     pub year: u16,
     pub month: u16,
@@ -55,14 +58,16 @@ pub struct DateTimeNumber {
     pub seconds: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ProfileFlags {
     pub raw: u32,
     pub embedded_profile: bool,
     pub use_with_embedded_data_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DeviceAttributes {
     pub raw: [u8; 8],
     pub reflective: bool,
@@ -71,27 +76,31 @@ pub struct DeviceAttributes {
     pub color: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct XYZNumber {
     pub x: f64,
     pub y: f64,
     pub z: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TagTable {
     pub tag_count: u32,
     pub entries: Vec<TagEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TagEntry {
     pub signature: String,
     pub offset: u32,
     pub size: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(tag = "type", content = "data")]
 pub enum ICCTagData {
     Text(String),
@@ -147,7 +156,8 @@ pub enum ICCTagData {
     Unknown(UnknownTagData),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct GamutBoundaryData {
     pub pcs_channels: u16,
     pub device_channels: u16,
@@ -156,14 +166,16 @@ pub struct GamutBoundaryData {
     pub device_values: Vec<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SparseMatrixArrayData {
     pub channels: u16,
     pub matrix_type: u16,
     pub matrices: Vec<SparseMatrix>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SparseMatrix {
     pub rows: u16,
     pub cols: u16,
@@ -172,8 +184,9 @@ pub struct SparseMatrix {
     pub values: Vec<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct EmbeddedImageData {
     pub is_height_map: bool,
     pub seamless: bool,
@@ -182,20 +195,23 @@ pub struct EmbeddedImageData {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct UnknownTagData {
     pub type_signature: String,
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct LocalizedString {
     pub language: String,
     pub country: String,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(tag = "kind", content = "value")]
 pub enum CurveData {
     Identity,
@@ -203,19 +219,22 @@ pub enum CurveData {
     Table(Vec<u16>),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ParametricCurveData {
     pub function_type: u16,
     pub params: Vec<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SegmentedCurveData {
     pub break_points: Vec<f32>,
     pub segments: Vec<CurveSegment>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(tag = "kind", content = "value")]
 pub enum CurveSegment {
     Formula(FormulaSegment),
@@ -223,13 +242,15 @@ pub enum CurveSegment {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct FormulaSegment {
     pub function_type: u16,
     pub params: Vec<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Lut8Data {
     pub input_channels: u8,
     pub output_channels: u8,
@@ -240,7 +261,8 @@ pub struct Lut8Data {
     pub output_tables: Vec<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Lut16Data {
     pub input_channels: u8,
     pub output_channels: u8,
@@ -251,8 +273,9 @@ pub struct Lut16Data {
     pub output_tables: Vec<Vec<u16>>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct LutABData {
     pub input_channels: u8,
     pub output_channels: u8,
@@ -263,7 +286,8 @@ pub struct LutABData {
     pub clut: Option<ClutData>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(tag = "kind", content = "value")]
 pub enum EmbeddedCurve {
     Curve(CurveData),
@@ -271,14 +295,16 @@ pub enum EmbeddedCurve {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ClutData {
     pub grid_points: Vec<u8>,
     pub precision: u8,
     pub values: Vec<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct NamedColorsData {
     pub vendor_flag: u32,
     pub prefix: String,
@@ -287,14 +313,16 @@ pub struct NamedColorsData {
     pub colors: Vec<NamedColorEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct NamedColorEntry {
     pub name: String,
     pub pcs: [u16; 3],
     pub device: Vec<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ProfileDescription {
     pub device_manufacturer: String,
     pub device_model: String,
@@ -304,32 +332,37 @@ pub struct ProfileDescription {
     pub model_description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ProfileIdDescription {
     pub profile_id: Vec<u8>,
     pub description: Vec<LocalizedString>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ResponseCurveSetData {
     pub channels: u16,
     pub measurements: Vec<ResponseCurveMeasurement>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ResponseCurveMeasurement {
     pub unit: String,
     pub max_colorants: Vec<XYZNumber>,
     pub channel_responses: Vec<Vec<ResponseNumber>>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ResponseNumber {
     pub device_code: u16,
     pub value: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DictEntry {
     pub name: String,
     pub value: String,
@@ -337,14 +370,16 @@ pub struct DictEntry {
     pub display_value: Vec<LocalizedString>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct MultiProcessElementsData {
     pub input_channels: u16,
     pub output_channels: u16,
     pub elements: Vec<ProcessingElement>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[serde(tag = "kind", content = "value")]
 pub enum ProcessingElement {
     CurveSet(CurveSetElement),
@@ -353,14 +388,16 @@ pub enum ProcessingElement {
     Unknown(UnknownElement),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct CurveSetElement {
     pub input_channels: u16,
     pub output_channels: u16,
     pub curves: Vec<SegmentedCurveData>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct MatrixElement {
     pub input_channels: u16,
     pub output_channels: u16,
@@ -368,7 +405,8 @@ pub struct MatrixElement {
     pub constants: Vec<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ClutElement {
     pub input_channels: u16,
     pub output_channels: u16,
@@ -376,7 +414,8 @@ pub struct ClutElement {
     pub values: Vec<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct UnknownElement {
     pub signature: String,
     pub input_channels: u16,
@@ -384,7 +423,8 @@ pub struct UnknownElement {
     pub size: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SpectralViewingConditionsData {
     pub standard_observer: String,
     pub observer_range: SpectralRange,
@@ -397,32 +437,37 @@ pub struct SpectralViewingConditionsData {
     pub surround_xyz: XYZNumber,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SpectralDataInfoData {
     pub color_signature: String,
     pub spectral_range: SpectralRange,
     pub bi_spectral_range: SpectralRange,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TagStructData {
     pub struct_type: String,
     pub members: Vec<TagStructMember>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TagStructMember {
     pub signature: String,
     pub data: ICCTagData,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TagArrayData {
     pub array_type: String,
     pub elements: Vec<ICCTagData>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct MeasurementData {
     pub standard_observer: String,
     pub backing_xyz: XYZNumber,
@@ -431,58 +476,67 @@ pub struct MeasurementData {
     pub illuminant: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DataTagData {
     pub flag: u32,
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ChromaticityData {
     pub colorant_type: String,
     pub channels: Vec<[f64; 2]>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ColorantEntry {
     pub name: String,
     pub pcs: [u16; 3],
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ViewingConditionsData {
     pub illuminant_xyz: XYZNumber,
     pub surround_xyz: XYZNumber,
     pub illuminant_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ScreeningData {
     pub flag: u32,
     pub channels: Vec<ScreeningChannel>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ScreeningChannel {
     pub frequency: f64,
     pub angle: f64,
     pub spot_shape: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct UcrBgData {
     pub ucr: Vec<u16>,
     pub bg: Vec<u16>,
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct CrdInfoData {
     pub postscript_product_name: String,
     pub crd_names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct CicpData {
     pub color_primaries: u8,
     pub transfer_characteristics: u8,
@@ -490,7 +544,8 @@ pub struct CicpData {
     pub video_full_range_flag: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TextDescriptionData {
     pub ascii: String,
     pub unicode_language_code: u32,

@@ -1,5 +1,4 @@
 use serde::Serialize;
-use tsify::Tsify;
 
 pub const MAX_NDECOMP_H: usize = 5;
 pub const MAX_NDECOMP_V: usize = 2;
@@ -37,7 +36,7 @@ pub const PKT_HDR_SIGN_SIZE_LONG: u32 = 15;
 pub const PKT_HDR_ALIGNMENT: u32 = 8;
 pub const SUBPKT_ALIGNMENT: u32 = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ColorTransform {
     None,
     Rct,
@@ -54,14 +53,14 @@ impl ColorTransform {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum NltType {
     None,
     Quadratic,
     Extended,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CfaPattern {
     Rggb,
     Bggr,
@@ -69,26 +68,26 @@ pub enum CfaPattern {
     Gbrg,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TetrixMode {
     Full,
     Inline,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct QuadraticNlt {
     pub sigma: u16,
     pub alpha: u16,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct ExtendedNlt {
     pub t1: u32,
     pub t2: u32,
     pub e: u8,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct TetrixParams {
     pub cf: TetrixMode,
     pub e1: u8,

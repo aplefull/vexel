@@ -1,5 +1,4 @@
 use serde::Serialize;
-use tsify::Tsify;
 
 pub const FLAG_ORIGIN_RIGHT: u8 = 1 << 4;
 pub const FLAG_ORIGIN_TOP: u8 = 1 << 5;
@@ -16,7 +15,8 @@ pub const ATTR_TYPE_PREMULTIPLIED_ALPHA: u8 = 4;
 pub const TGA_FOOTER_SIZE: i64 = 26;
 pub const TGA_SIGNATURE: &[u8] = b"TRUEVISION-XFILE.\x00";
 
-#[derive(Debug, Clone, Default, Serialize, Tsify)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaHeader {
     pub id_length: u8,
     pub palette_type: u8,
@@ -32,13 +32,15 @@ pub struct TgaHeader {
     pub flags: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaFooterData {
     pub extension_area_offset: u32,
     pub developer_dir_offset: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaExtensionAreaData {
     pub extension_size: u16,
     pub author_name: String,

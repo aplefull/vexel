@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::codestream::{self, Jp2Container};
 use super::decoder::resolve_colorspace;
@@ -20,23 +19,26 @@ const MAX_TILE_HEADER_MARKERS: usize = 256;
 const MAX_BOX_DEPTH: u32 = 8;
 const MAX_TEXT_BYTES: usize = 4096;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type Jpeg2000Info = FormatInfo<Jpeg2000Section>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kBox {
     pub box_type: String,
     pub superbox: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kFileType {
     pub brand: String,
     pub minor_version: u32,
     pub compatibility: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kImageHeader {
     pub height: u32,
     pub width: u32,
@@ -47,8 +49,9 @@ pub struct J2kImageHeader {
     pub intellectual_property: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct J2kColorSpecification {
     pub method: u8,
     pub precedence: i8,
@@ -58,50 +61,57 @@ pub struct J2kColorSpecification {
     pub cicp: Option<Cicp>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct J2kUuid {
     pub uuid: String,
     pub name: Option<String>,
     pub exif: Option<ExifData>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kPaletteBox {
     pub entries: u16,
     pub columns: u8,
     pub depths: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kComponentMapping {
     pub component: u16,
     pub mapping_type: u8,
     pub palette_column: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kChannelDefinition {
     pub channel: u16,
     pub channel_type: u16,
     pub association: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kResolution {
     pub display: bool,
     pub vertical: f64,
     pub horizontal: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kSizComponent {
     pub ssiz: u8,
     pub dx: u8,
     pub dy: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kSiz {
     pub rsiz: u16,
     pub xsiz: u32,
@@ -116,7 +126,8 @@ pub struct J2kSiz {
     pub components: Vec<J2kSizComponent>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kCodingStyle {
     pub decomposition_levels: u8,
     pub code_block_width: u8,
@@ -126,7 +137,9 @@ pub struct J2kCodingStyle {
     pub precincts: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct J2kCod {
     pub scod: u8,
     pub progression: u8,
@@ -135,29 +148,34 @@ pub struct J2kCod {
     pub style: Option<J2kCodingStyle>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct J2kCoc {
     pub component: u16,
     pub scoc: u8,
     pub style: Option<J2kCodingStyle>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct J2kQuantization {
     pub component: Option<u16>,
     pub sqcd: u8,
     pub step_sizes: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kRegion {
     pub component: u16,
     pub style: u8,
     pub shift: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kProgressionChange {
     pub resolution_start: u8,
     pub component_start: u16,
@@ -167,21 +185,24 @@ pub struct J2kProgressionChange {
     pub order: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct J2kComment {
     pub registration: u16,
     pub text: Option<String>,
     pub data_length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kPacketMarker {
     pub index: u8,
     pub data_length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum J2kMarkerBody {
     StartOfCodestream,
     ImageSize(J2kSiz),
@@ -203,7 +224,8 @@ pub enum J2kMarkerBody {
     Unknown(u16),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kTilePart {
     pub tile: u16,
     pub part: u8,
@@ -215,19 +237,22 @@ pub struct J2kTilePart {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kTilePartRemainder {
     pub tile_parts: u32,
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct J2kSectionRemainder {
     pub sections: u32,
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum Jpeg2000Section {
     Box(J2kBox),
     FileType(J2kFileType),

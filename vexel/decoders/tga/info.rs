@@ -1,20 +1,21 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::types::{TgaExtensionAreaData, TgaFooterData, TgaHeader, IMAGE_TYPE_FLAG_RLE};
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type TgaInfo = FormatInfo<TgaSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaImageId {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaColorMap {
     pub first_entry_index: u16,
     pub entry_count: u16,
@@ -22,38 +23,44 @@ pub struct TgaColorMap {
     pub used: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct TgaPixelData {
     pub rle: bool,
     pub expected_length: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaPostageStamp {
     pub width: u8,
     pub height: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaScanLineTable {
     pub entries: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaDeveloperTag {
     pub tag: u16,
     pub offset: u32,
     pub size: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TgaDeveloperDirectory {
     pub declared_count: u16,
     pub entries: Vec<TgaDeveloperTag>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum TgaSection {
     Header(TgaHeader),
     ImageId(TgaImageId),

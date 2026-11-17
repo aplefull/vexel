@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom};
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::log_warn;
 use crate::utils::error::{VexelError, VexelResult};
@@ -31,17 +30,19 @@ const EXIF_IFD: u16 = 34665;
 const GPS_IFD: u16 = 34853;
 const INTEROP_IFD: u16 = 40965;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type TiffInfo = FormatInfo<TiffSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TiffFileHeaderSection {
     pub byte_order: ByteOrder,
     pub magic: u16,
     pub first_ifd_offset: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum IfdKind {
     Page,
     SubIfd,
@@ -50,8 +51,9 @@ pub enum IfdKind {
     Interop,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct TiffEntry {
     pub tag: u16,
     pub field_type: u16,
@@ -61,8 +63,9 @@ pub struct TiffEntry {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct TiffIfdSection {
     pub kind: IfdKind,
     pub index: u32,
@@ -72,7 +75,8 @@ pub struct TiffIfdSection {
     pub entries: Vec<TiffEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct TiffImageData {
     pub ifd: u32,
     pub tiled: bool,
@@ -81,7 +85,8 @@ pub struct TiffImageData {
     pub available_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum TiffSection {
     FileHeader(TiffFileHeaderSection),
     Ifd(TiffIfdSection),

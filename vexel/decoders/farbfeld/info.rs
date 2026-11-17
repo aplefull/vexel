@@ -1,26 +1,28 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type FarbfeldInfo = FormatInfo<FarbfeldSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct FarbfeldHeader {
     pub magic_valid: bool,
     pub width: u32,
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct FarbfeldPixelData {
     pub expected_length: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum FarbfeldSection {
     Header(FarbfeldHeader),
     PixelData(FarbfeldPixelData),

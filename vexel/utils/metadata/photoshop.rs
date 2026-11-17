@@ -1,5 +1,4 @@
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::utils::bytes::Bytes;
 
@@ -8,7 +7,8 @@ pub const ICC_RESOURCE: u16 = 0x040F;
 pub const EXIF_RESOURCE: u16 = 0x0422;
 pub const XMP_RESOURCE: u16 = 0x0424;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct PhotoshopResource {
     pub signature: String,
     pub id: u16,

@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::decoder::{parse_segments, ParsedSegment, JBIG2_FILE_ID};
 use super::segment::SegmentType;
@@ -17,17 +16,19 @@ const FILE_UNKNOWN_PAGES: u8 = 0x02;
 const FILE_TEMPLATE_12AT: u8 = 0x04;
 const FILE_COLOR: u8 = 0x08;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type Jbig2Info = FormatInfo<Jbig2Section>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct Jbig2FileHeader {
     pub flags: u8,
     pub page_count: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig2Region {
     pub width: u32,
     pub height: u32,
@@ -36,14 +37,16 @@ pub struct Jbig2Region {
     pub flags: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig2AtPixel {
     pub x: i8,
     pub y: i8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub enum Jbig2SegmentBody {
     PageInfo {
         width: u32,
@@ -113,8 +116,9 @@ pub enum Jbig2SegmentBody {
     Truncated,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct Jbig2Segment {
     pub number: u32,
     pub flags: u8,
@@ -129,13 +133,15 @@ pub struct Jbig2Segment {
     pub body: Jbig2SegmentBody,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig2MoreSegments {
     pub count: u32,
     pub data_length: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum Jbig2Section {
     FileHeader(Jbig2FileHeader),
     Segment(Box<Jbig2Segment>),

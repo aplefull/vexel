@@ -1,5 +1,4 @@
 use serde::Serialize;
-use tsify::Tsify;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ChunkKind {
@@ -61,7 +60,7 @@ pub fn chunk_kind(chunk_type: &[u8; 4]) -> Option<ChunkKind> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum ColorType {
     Grayscale = 0,
     RGB = 2,
@@ -70,13 +69,13 @@ pub enum ColorType {
     RGBA = 6,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum CompressionMethod {
     Deflate = 0,
     None = 1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum FilterType {
     None = 0,
     Sub = 1,
@@ -85,21 +84,24 @@ pub enum FilterType {
     Paeth = 4,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum TransparencyData {
     Grayscale(u16),
     RGB(u16, u16, u16),
     Palette(Vec<u8>),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum BackgroundData {
     Grayscale(u16),
     RGB(u16, u16, u16),
     PaletteIndex(u8),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Chromaticities {
     pub white_point_x: f32,
     pub white_point_y: f32,
@@ -111,13 +113,15 @@ pub struct Chromaticities {
     pub blue_y: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ActlChunk {
     pub num_frames: u32,
     pub num_plays: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct FctlChunk {
     pub sequence_number: u32,
     pub width: u32,
@@ -137,7 +141,8 @@ pub struct PngFrame {
     pub idat: Option<std::ops::Range<usize>>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SuggestedPaletteSample {
     pub red: u16,
     pub green: u16,
@@ -146,14 +151,16 @@ pub struct SuggestedPaletteSample {
     pub frequency: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct SuggestedPalette {
     pub name: String,
     pub sample_depth: u8,
     pub samples: Vec<SuggestedPaletteSample>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum SignificantBits {
     Grayscale { gray: u8 },
     RGB { red: u8, green: u8, blue: u8 },
@@ -162,7 +169,8 @@ pub enum SignificantBits {
     RGBA { red: u8, green: u8, blue: u8, alpha: u8 },
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ImageTime {
     pub year: u16,
     pub month: u8,

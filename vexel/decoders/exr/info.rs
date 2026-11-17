@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::fmt;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::decoder::select_channels;
 use super::parser::{self, fixed_attr_size, scan_chlist_size, ByteCursor, ExrFile};
@@ -23,16 +22,18 @@ const MAX_STRING_VECTOR: usize = 256;
 const MAX_FLOAT_VECTOR: usize = 256;
 const MAX_PARTS: usize = 512;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type ExrInfo = FormatInfo<ExrSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ExrVersion {
     pub version: u8,
     pub flags: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ExrChannelEntry {
     pub name: String,
     pub pixel_type: i32,
@@ -42,7 +43,8 @@ pub struct ExrChannelEntry {
     pub y_sampling: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum ExrAttributeValue {
     Int(i32),
     Float(f32),
@@ -71,8 +73,9 @@ pub enum ExrAttributeValue {
     Invalid,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ExrAttribute {
     pub offset: u64,
     pub name: String,
@@ -82,15 +85,17 @@ pub struct ExrAttribute {
     pub value: ExrAttributeValue,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ExrPartHeader {
     pub part: u32,
     pub attributes: Vec<ExrAttribute>,
     pub complete: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ExrOffsetTable {
     pub part: u32,
     pub entries: u32,
@@ -99,14 +104,16 @@ pub struct ExrOffsetTable {
     pub invalid_entries: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ExrChunkData {
     pub part: u32,
     pub chunks: u32,
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum ExrSection {
     Version(ExrVersion),
     PartHeader(Box<ExrPartHeader>),

@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::lerc2::compute_checksum_fletcher32;
 use super::reader::ByteReader;
@@ -14,16 +13,18 @@ const LERC1_HEADER_SIZE: usize = 34;
 const LERC1_PART_HEADER_SIZE: usize = 16;
 const MAX_DEPTH_RANGES: usize = 64;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type LercInfo = FormatInfo<LercSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct LercDepthRange {
     pub min: f64,
     pub max: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum Lerc2Encoding {
     NoValidPixels,
     Constant,
@@ -35,8 +36,9 @@ pub enum Lerc2Encoding {
     DeltaDeltaHuffman,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct Lerc2Blob {
     pub band: u32,
     pub version: i32,
@@ -65,7 +67,8 @@ pub struct Lerc2Blob {
     pub encoding_flag: Option<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Lerc1Header {
     pub band: u32,
     pub version: i32,
@@ -75,13 +78,15 @@ pub struct Lerc1Header {
     pub max_z_error: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum Lerc1PartKind {
     Count,
     Z,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Lerc1Part {
     pub band: u32,
     pub kind: Lerc1PartKind,
@@ -91,7 +96,8 @@ pub struct Lerc1Part {
     pub max_value: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum LercSection {
     Lerc2Blob(Box<Lerc2Blob>),
     Lerc1Header(Lerc1Header),

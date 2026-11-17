@@ -1,9 +1,9 @@
 use std::fmt;
 
 use serde::Serialize;
-use tsify::Tsify;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Cicp {
     pub color_primaries: u16,
     pub transfer_characteristics: u16,
@@ -101,7 +101,8 @@ impl fmt::Display for Cicp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct MasteringDisplay {
     pub red: [f64; 2],
     pub green: [f64; 2],
@@ -137,7 +138,8 @@ impl fmt::Display for MasteringDisplay {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ContentLightLevel {
     pub max_content_light_level: f64,
     pub max_frame_average_light_level: f64,

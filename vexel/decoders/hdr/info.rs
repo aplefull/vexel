@@ -1,27 +1,28 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type HdrInfo = FormatInfo<HdrSection>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum HdrFormat {
     RGBE,
     XYZE,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum HdrScanlineEncoding {
     Rle,
     Flat,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct HdrHeader {
     pub program: Option<String>,
     pub format: Option<String>,
@@ -36,7 +37,8 @@ pub struct HdrHeader {
     pub other_lines: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct HdrResolution {
     pub line: String,
     pub width: u32,
@@ -68,14 +70,16 @@ impl HdrResolution {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct HdrPixelData {
     pub encoding: Option<HdrScanlineEncoding>,
     pub decoded_length: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum HdrSection {
     Header(HdrHeader),
     Resolution(HdrResolution),

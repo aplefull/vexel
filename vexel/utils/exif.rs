@@ -1,7 +1,6 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::utils::bytes::u64_at;
 use crate::utils::info::InfoWriter;
@@ -10,7 +9,8 @@ use crate::utils::stream::StreamReader;
 use crate::utils::tiff::ifd::{read_file_header, type_size, Ifd, IfdCycleGuard, IfdEntry, IfdFormat};
 use crate::utils::types::ByteOrder;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum ExifValue {
     Byte(Vec<u8>),
     Ascii(Vec<String>),
@@ -28,21 +28,24 @@ pub enum ExifValue {
     Double(Vec<f64>),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ExifEntry {
     pub tag: u16,
     pub tag_name: Option<String>,
     pub value: ExifValue,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ExifIfd {
     pub entries: Vec<ExifEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ExifData {
     pub byte_order: ByteOrder,
     pub ifd0: ExifIfd,

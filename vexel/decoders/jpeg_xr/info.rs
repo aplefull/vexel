@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::io::Cursor;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::container::{self, Container, ContainerKind};
 use super::decoder::locate_codestream;
@@ -18,10 +17,11 @@ use crate::utils::stream::StreamReader;
 use crate::utils::tiff::info::{walk_structure, IfdKind, TiffSection};
 use crate::utils::tiff::metadata::collect_metadata;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type JpegXrInfo = FormatInfo<JpegXrSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxrImageHeader {
     pub alpha_stream: bool,
     pub version: u32,
@@ -48,7 +48,8 @@ pub struct JxrImageHeader {
     pub window: [u32; 4],
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxrPlaneHeader {
     pub alpha_plane: bool,
     pub internal_color_format: u32,
@@ -63,7 +64,8 @@ pub struct JxrPlaneHeader {
     pub hp_qp: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum JpegXrSection {
     Tiff(TiffSection),
     ImageHeader(JxrImageHeader),

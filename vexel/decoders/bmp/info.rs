@@ -1,14 +1,13 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::types::{
     BitmapArrayHeader, BitmapCompression, BitmapFileHeader, ColorEntry, ColorMasks, DibHeader, DibKind,
 };
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type BmpInfo = FormatInfo<BmpSection>;
 
 pub const CS_TYPE_CALIBRATED_RGB: u32 = 0;
@@ -17,25 +16,29 @@ pub const CS_TYPE_WINDOWS: u32 = 0x5769_6E20;
 pub const CS_TYPE_LINKED: u32 = 0x4C49_4E4B;
 pub const CS_TYPE_EMBEDDED: u32 = 0x4D42_4544;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct BmpIccProfile {
     pub declared_size: u32,
     pub parsed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct BmpLinkedProfile {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct BmpPixelData {
     pub compression: BitmapCompression,
     pub expected_length: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum BmpSection {
     BitmapArrayHeader(BitmapArrayHeader),
     FileHeader(BitmapFileHeader),

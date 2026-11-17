@@ -4,7 +4,7 @@ pgo_profile := justfile_directory() + "/pgo/vexel.profdata"
 
 # Build the workspace; pass "release" for the PGO-optimized distribution binary or "wasm" for the WASM package with rayon thread pool support
 build profile="dev":
-    {{ if profile == "release" { "RUSTFLAGS='-Cprofile-use=" + pgo_profile + "' cargo build --release" } else if profile == "wasm" { "wasm-pack build vexel --target web --release --out-dir ../target/wasm-pkg -- -Z build-std=panic_abort,std" } else if profile == "dev" { "cargo build" } else { error("unknown profile '" + profile + "', expected dev, release or wasm") } }}
+    {{ if profile == "release" { "RUSTFLAGS='-Cprofile-use=" + pgo_profile + "' cargo build --release" } else if profile == "wasm" { "wasm-pack build vexel-wasm --target web --release --out-dir ../target/wasm-pkg --out-name vexel -- -Z build-std=panic_abort,std" } else if profile == "dev" { "cargo build" } else { error("unknown profile '" + profile + "', expected dev, release or wasm") } }}
 
 # Regenerate PGO profile data by decoding the whole test image corpus
 pgo-train:
@@ -88,6 +88,8 @@ check-all:
     cargo clippy --package vexel --all-targets --no-default-features -- -D warnings
     cargo clippy --package vexel --lib --target wasm32-unknown-unknown -Z build-std=panic_abort,std -- -D warnings
     cargo clippy --package vexel --lib --target wasm32-unknown-unknown -Z build-std=panic_abort,std --no-default-features -- -D warnings
+    cargo clippy --package vexel-wasm --target wasm32-unknown-unknown -Z build-std=panic_abort,std -- -D warnings
+    cargo clippy --package vexel-wasm --target wasm32-unknown-unknown -Z build-std=panic_abort,std --no-default-features -- -D warnings
     cargo clippy --package vexel --lib --target aarch64-unknown-linux-gnu -Z build-std=std -- -D warnings
     cargo clippy --package vexel --lib --target aarch64-unknown-linux-gnu -Z build-std=std --no-default-features -- -D warnings
 

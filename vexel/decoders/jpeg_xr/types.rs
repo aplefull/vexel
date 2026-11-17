@@ -1,5 +1,4 @@
 use serde::Serialize;
-use tsify::Tsify;
 
 pub const MB_SIZE: usize = 16;
 pub const MB_BLOCKS: usize = 16;
@@ -32,7 +31,7 @@ pub const TAG_ALPHA_OFFSET: u16 = 0xbcc2;
 pub const TAG_ALPHA_BYTE_COUNT: u16 = 0xbcc3;
 pub const TAG_ICC_PROFILE: u16 = 0x8773;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ColorFormat {
     YOnly,
     Yuv420,
@@ -66,7 +65,7 @@ impl ColorFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum BitDepth {
     Bd1White,
     Bd8,
@@ -255,7 +254,7 @@ impl Quantizer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PixelFormatKind {
     BlackWhite,
     Gray8,

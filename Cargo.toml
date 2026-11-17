@@ -3,6 +3,11 @@ resolver = "2"
 members = [
     "vexel",
     "vexel-cli",
+    "vexel-wasm",
+]
+default-members = [
+    "vexel",
+    "vexel-cli",
 ]
 
 [workspace.lints.rust]

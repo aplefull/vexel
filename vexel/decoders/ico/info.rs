@@ -1,18 +1,18 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::types::{IcoImageFormat, IcoType};
 use crate::decoders::bmp::types::DibHeader;
 use crate::decoders::png::PngInfo;
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type IcoInfo = FormatInfo<IcoSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct IcoDirectory {
     pub reserved: u16,
     pub type_raw: u16,
@@ -20,8 +20,9 @@ pub struct IcoDirectory {
     pub image_count: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct IcoDirectoryEntry {
     pub index: u32,
     pub width: u32,
@@ -35,8 +36,9 @@ pub struct IcoDirectoryEntry {
     pub image_offset: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct EmbeddedBmp {
     pub dib: Option<DibHeader>,
     pub color_table_entries: u32,
@@ -45,14 +47,16 @@ pub struct EmbeddedBmp {
     pub and_mask_present: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum EmbeddedImage {
     Bmp(EmbeddedBmp),
     Png(PngInfo),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct IcoImageData {
     pub index: u32,
     pub image_format: IcoImageFormat,
@@ -62,7 +66,8 @@ pub struct IcoImageData {
     pub same_data_as: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum IcoSection {
     Directory(IcoDirectory),
     DirectoryEntry(IcoDirectoryEntry),

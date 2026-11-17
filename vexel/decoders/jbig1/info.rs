@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::types::*;
 use crate::utils::bytes::Bytes;
@@ -13,10 +12,11 @@ const MAX_STRIPE_SECTIONS: usize = 256;
 const MAX_MARKER_SECTIONS: usize = 1024;
 const UNKNOWN_HEIGHT: u32 = 0xFFFF_FFFF;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type Jbig1Info = FormatInfo<Jbig1Section>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig1Bih {
     pub dl: u8,
     pub d: u8,
@@ -31,14 +31,16 @@ pub struct Jbig1Bih {
     pub options: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum Jbig1StripeEnd {
     Normal,
     Reset,
     Unterminated,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig1Stripe {
     pub plane: u8,
     pub layer: u8,
@@ -47,37 +49,43 @@ pub struct Jbig1Stripe {
     pub end: Jbig1StripeEnd,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig1MoreStripes {
     pub count: u32,
     pub data_length: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig1MoreMarkers {
     pub count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig1AtMove {
     pub line: u32,
     pub tx: i8,
     pub ty: i8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig1Newlen {
     pub new_height: u32,
     pub applied: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Jbig1Comment {
     pub declared_length: u32,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum Jbig1Section {
     Bih(Jbig1Bih),
     Dptable,

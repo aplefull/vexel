@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::decoder::{frame_delay_ms, parse_file, read_pixel_params, ParsedFile};
 use super::parser::{looks_like_text, DataSet, Element, ElementValue, UNDEFINED_LENGTH};
@@ -20,30 +19,36 @@ const RESCALE_TYPE: u32 = 0x0028_1054;
 const PIXEL_SPACING: u32 = 0x0028_0030;
 const ICC_PROFILE: u32 = 0x0028_2000;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type DicomInfo = FormatInfo<DicomSection>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum DicomVrSource {
     Explicit,
     Dictionary,
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct DicomItem {
     pub offset: u64,
     pub length: Option<u32>,
     pub elements: Vec<DicomElement>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DicomFragment {
     pub offset: u64,
     pub length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub enum DicomValue {
     Empty,
     Text { values: Vec<String>, truncated: bool },
@@ -57,8 +62,9 @@ pub enum DicomValue {
     Encapsulated { offset_table: Vec<u32>, fragments: Vec<DicomFragment>, total_fragments: u32, total_bytes: u64 },
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct DicomElement {
     pub offset: u64,
     pub tag: u32,
@@ -69,8 +75,9 @@ pub struct DicomElement {
     pub value: DicomValue,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct DicomParameters {
     pub transfer_syntax_uid: Option<String>,
     pub transfer_syntax: String,
@@ -100,7 +107,8 @@ pub struct DicomParameters {
     pub icon_image: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum DicomSection {
     Preamble { zero_filled: bool },
     FileMeta { elements: Vec<DicomElement> },

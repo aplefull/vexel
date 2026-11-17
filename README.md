@@ -8,7 +8,7 @@ An image decoder library written in Rust. The primary goals are broad format sup
 
 The library does not aim to be the fastest decoder for any particular format. It prioritizes recovering something useful from broken input over failing.
 
-Every decoder is written from scratch. The core library has no algorithmic dependencies - all format parsing, decompression, and pixel handling is written from scratch. Runtime dependencies are limited to `rayon` for optional parallelism and the WASM binding crates (`wasm-bindgen`, `serde`, `tsify`), which only handle JS interop and carry no decoding logic.
+Every decoder is written from scratch. The core library has no algorithmic dependencies - all format parsing, decompression, and pixel handling is written from scratch. Runtime dependencies are limited to `rayon` for optional parallelism and `serde` for serializing metadata. The JS bindings live in the separate `vexel-wasm` crate, so `wasm-bindgen` and `tsify` are only pulled in when building the WASM package (or with the opt-in `tsify` feature).
 
 ## Supported formats
 
@@ -235,26 +235,28 @@ Formats without animation support yield exactly one frame, so the same loop work
 
 ## WebAssembly
 
-The library builds to WASM, exposing a `Decoder` class:
+The `vexel-wasm` crate builds the npm package (`just build wasm`, output in `target/wasm-pkg/`), exposing a `Decoder` class:
 
-- `new Decoder(data: Uint8Array)` - constructs a decoder, detecting the format from magic bytes
-- `decoder.decode()` / `decodePages()` / `decodeThumbnails()` - decode the image, all pages, or embedded thumbnails
-- `decoder.nextFrame()` - returns the next animation frame as RGBA8, or `null` when exhausted
-- `decoder.getInfo()` - returns format-specific metadata
-- `decoder.lastTimings()` - returns timings for the last decode call
-- `decoder.setLimits(...)` - overrides the default resource limits
+- `new Decoder(data: Uint8Array)` - constructs a decoder, detecting the format from the content
+- `decoder.decode()` - decodes the image (or the first frame of an animation) as RGBA8
+- `decoder.decodePages()` / `decodeThumbnails()` - returns an array of images: every page, or the embedded thumbnails from smallest to largest
+- `decoder.nextFrame()` - returns the next animation frame as RGBA8, or `undefined` when exhausted
+- `decoder.getInfo()` - returns format-specific metadata as a typed object
+- `decoder.setLimits({ max_image_width, max_image_height, max_alloc, max_pixel_count })` - overrides resource limits. Omitted fields keep their defaults, `null` removes a limit
+- `decoder.lastTimings()` - returns decode and conversion timings of the last decoding call
+- `Decoder.tryGuessFormat(data)` - detects the format without decoding, returning an `ImageFormat` such as `"Png"` or `"Unknown"`
 
-`decode()` returns a single picture (the first frame of an animation); `nextFrame()` walks the frames one at a time:
+Errors are thrown as `Error` objects. `decode()` returns a single picture; `nextFrame()` walks the frames one at a time:
 
 ```js
 let frame;
-while ((frame = decoder.nextFrame()) !== null) {
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.pixels), frame.width, frame.height), 0, 0);
+while ((frame = decoder.nextFrame())) {
+    ctx.putImageData(new ImageData(frame.pixels, frame.width, frame.height), 0, 0);
     await sleep(frame.delay);
 }
 ```
 
-Standalone exports: `tryGuessFormat(data)`, `parseIcc(data)`, `setLogLevel(level)` (accepts `"Debug"`, `"Warning"`, `"Error"`, or `"None"`).
+Standalone exports: `parseIcc(data)` returns a parsed ICC profile, and `setLogLevel(level)` accepts `"Debug"`, `"Warning"`, `"Error"` or `"None"`. The default build uses a rayon thread pool: call `await initThreadPool(navigator.hardwareConcurrency)` once before decoding. This needs a cross-origin isolated page, because the threads share memory through `SharedArrayBuffer`.
 
 ## Performance
 

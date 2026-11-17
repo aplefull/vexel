@@ -1,9 +1,7 @@
 use serde::Serialize;
-use tsify::Tsify;
-use wasm_bindgen::prelude::wasm_bindgen;
 
-#[wasm_bindgen]
-#[derive(Debug, Clone, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum NetpbmFormat {
     P1,
     P2,
@@ -22,8 +20,8 @@ impl NetpbmFormat {
     }
 }
 
-#[wasm_bindgen]
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum TupleType {
     BlackAndWhite,
     Grayscale,

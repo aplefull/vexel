@@ -1,14 +1,14 @@
 use std::fmt;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::writer::InfoWriter;
 use crate::utils::exif::ExifData;
 use crate::utils::icc::ICCProfile;
 use crate::utils::metadata::{Cicp, ContentLightLevel, IptcData, MasteringDisplay, Orientation, XmpData};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum ColorModel {
     Bilevel,
     Gray,
@@ -50,7 +50,8 @@ impl fmt::Display for ColorModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum SampleFormat {
     Unsigned,
     Signed,
@@ -68,7 +69,8 @@ impl fmt::Display for SampleFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DataExtent {
     pub expected: u64,
     pub actual: u64,
@@ -80,8 +82,9 @@ impl DataExtent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ImageSummary {
     pub width: u32,
     pub height: u32,

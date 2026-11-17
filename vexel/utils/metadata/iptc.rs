@@ -1,7 +1,6 @@
 use std::fmt;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::log_warn;
 
@@ -9,7 +8,8 @@ const TAG_MARKER: u8 = 0x1C;
 const MAX_DATASETS: usize = 4096;
 const UTF8_ESCAPE: &[u8] = b"\x1b%G";
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum IptcValue {
     Text(String),
     Number(u32),
@@ -26,8 +26,9 @@ impl fmt::Display for IptcValue {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct IptcDataset {
     pub record: u8,
     pub dataset: u8,
@@ -44,7 +45,8 @@ impl IptcDataset {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct IptcData {
     pub datasets: Vec<IptcDataset>,
 }

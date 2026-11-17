@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::ids::Ids;
 use super::markers::parse_header;
@@ -14,10 +13,11 @@ use crate::utils::info::{ColorModel, DataExtent, FormatInfo, ImageSummary, InfoS
 const MAX_SLICE_SECTIONS: usize = 256;
 const MAX_TEXT_BYTES: usize = 4096;
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type JpegXsInfo = FormatInfo<JpegXsSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxsPictureHeader {
     pub codestream_length: u32,
     pub profile: u16,
@@ -45,54 +45,62 @@ pub struct JxsPictureHeader {
     pub run_mode: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxsComponent {
     pub bit_depth: u8,
     pub sx: u8,
     pub sy: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxsWeight {
     pub gain: u8,
     pub priority: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxsComment {
     pub comment_type: u16,
     pub text: String,
     pub data_length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum JxsNonlinearity {
     Quadratic { sigma: u8, alpha: u16 },
     Extended { t1: u32, t2: u32, e: u8 },
     Unknown(u8),
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxsColorTransformSpec {
     pub mode: u8,
     pub e1: u8,
     pub e2: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxsSlice {
     pub index: u16,
     pub precincts: u32,
     pub data_length: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JxsSliceRemainder {
     pub slices: u32,
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum JpegXsSection {
     StartOfCodestream,
     Capabilities(Vec<u8>),

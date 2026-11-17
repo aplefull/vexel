@@ -60,8 +60,9 @@ macro_rules! define_decoders {
             }
         }
 
-        #[derive(Debug, serde::Serialize, tsify::Tsify)]
-        #[tsify(missing_as_null)]
+        #[derive(Debug, serde::Serialize)]
+        #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+        #[cfg_attr(feature = "tsify", tsify(missing_as_null, hashmap_as_object))]
         pub enum ImageInfo {
             $($variant($info),)+
             Unknown,

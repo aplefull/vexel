@@ -1,9 +1,9 @@
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::log_warn;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum BitmapCompression {
     BiRgb = 0,
     BiRle8 = 1,
@@ -54,7 +54,8 @@ impl BitmapCompression {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct BitmapArrayHeader {
     pub file_size: u32,
     pub next_offset: u32,
@@ -62,7 +63,8 @@ pub struct BitmapArrayHeader {
     pub screen_height: u16,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Tsify)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct BitmapFileHeader {
     pub signature: u16,
     pub file_size: u32,
@@ -71,7 +73,8 @@ pub struct BitmapFileHeader {
     pub pixel_offset: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum DibKind {
     Core,
     Os2V2Short,
@@ -83,8 +86,9 @@ pub enum DibKind {
     V5,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct ColorMasks {
     pub red: u32,
     pub green: u32,
@@ -92,7 +96,8 @@ pub struct ColorMasks {
     pub alpha: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DibColorSpace {
     pub cs_type: u32,
     pub endpoints: ColorSpace,
@@ -101,7 +106,8 @@ pub struct DibColorSpace {
     pub gamma_blue: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct DibV5Fields {
     pub intent: u32,
     pub profile_data: u32,
@@ -109,7 +115,8 @@ pub struct DibV5Fields {
     pub reserved: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct Os2Fields {
     pub units: u16,
     pub reserved: u16,
@@ -121,8 +128,9 @@ pub struct Os2Fields {
     pub identifier: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct DibHeader {
     pub kind: DibKind,
     pub header_size: u32,
@@ -171,21 +179,24 @@ impl DibHeader {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ColorSpace {
     pub ciexyz_red: CIEXYZ,
     pub ciexyz_green: CIEXYZ,
     pub ciexyz_blue: CIEXYZ,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct CIEXYZ {
     pub x: i32,
     pub y: i32,
     pub z: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct ColorEntry {
     pub blue: u8,
     pub green: u8,

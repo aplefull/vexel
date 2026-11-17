@@ -1,14 +1,14 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type GifInfo = FormatInfo<GifSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct GifHeader {
     pub signature_offset: u32,
     pub signature: String,
@@ -22,15 +22,18 @@ pub struct GifHeader {
     pub pixel_aspect_ratio: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct GifColorTable {
     pub frame: Option<u32>,
     pub declared_entries: u32,
     pub entries: Vec<[u8; 3]>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct GifGraphicsControl {
     pub block_size: u8,
     pub disposal_method: u8,
@@ -39,7 +42,8 @@ pub struct GifGraphicsControl {
     pub delay_cs: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct GifImageDescriptor {
     pub frame: u32,
     pub left: u32,
@@ -52,7 +56,8 @@ pub struct GifImageDescriptor {
     pub local_color_table_size: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct GifImageData {
     pub frame: u32,
     pub lzw_minimum_code_size: u8,
@@ -60,12 +65,14 @@ pub struct GifImageData {
     pub data_length: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct GifComment {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum GifApplicationKind {
     Netscape,
     AnimExts,
@@ -74,8 +81,9 @@ pub enum GifApplicationKind {
     Other,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct GifApplicationExtension {
     pub identifier: String,
     pub auth_code: String,
@@ -87,7 +95,8 @@ pub struct GifApplicationExtension {
     pub icc_parsed: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct GifPlainText {
     pub left: u16,
     pub top: u16,
@@ -100,12 +109,14 @@ pub struct GifPlainText {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct GifUnknownExtension {
     pub label: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum GifSection {
     Header(GifHeader),
     GlobalColorTable(GifColorTable),

@@ -1,15 +1,15 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::decoders::jpeg::app::{AppSection, CommentSegment};
 use crate::utils::info::{FormatInfo, InfoSection, InfoWriter};
 
-#[tsify::declare]
+#[cfg_attr(feature = "tsify", tsify::declare)]
 pub type JpegLsInfo = FormatInfo<JpegLsSection>;
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegLsFrameComponent {
     pub id: u8,
     pub horizontal_sampling: u8,
@@ -17,7 +17,8 @@ pub struct JpegLsFrameComponent {
     pub reserved: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegLsFrame {
     pub precision: u8,
     pub height: u16,
@@ -26,13 +27,15 @@ pub struct JpegLsFrame {
     pub components: Vec<JpegLsFrameComponent>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegLsScanComponent {
     pub id: u8,
     pub mapping_table: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegLsScan {
     pub header_length: u16,
     pub components: Vec<JpegLsScanComponent>,
@@ -46,7 +49,8 @@ pub struct JpegLsScan {
     pub entropy_coded_length: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegLsPresetParameters {
     pub maxval: u16,
     pub t1: u16,
@@ -55,7 +59,8 @@ pub struct JpegLsPresetParameters {
     pub reset: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegLsMappingTable {
     pub table_id: u8,
     pub entry_width: u8,
@@ -64,20 +69,23 @@ pub struct JpegLsMappingTable {
     pub entries: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegLsOversizeDimensions {
     pub size: u8,
     pub height: u32,
     pub width: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub struct JpegLsExtension {
     pub id: u8,
     pub data_length: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 pub enum JpegLsSection {
     StartOfImage,
     Frame(JpegLsFrame),

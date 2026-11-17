@@ -1,5 +1,4 @@
 use serde::Serialize;
-use tsify::Tsify;
 
 use crate::utils::error::VexelError;
 
@@ -379,7 +378,7 @@ tiff_tags! {
     DefaultUserCrop = 51125,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum Compression {
     None = 1,
     CCITTRLE = 2,
@@ -461,7 +460,7 @@ impl TryFrom<u16> for Compression {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Default)]
 pub enum SampleFormat {
     #[default]
     UnsignedInt = 1,
@@ -492,7 +491,7 @@ pub enum ExtraSampleType {
     UnassociatedAlpha = 2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum PhotometricInterpretation {
     WhiteIsZero = 0,
     BlackIsZero = 1,
@@ -530,7 +529,7 @@ impl TryFrom<u64> for PhotometricInterpretation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum ResolutionUnit {
     NoUnit = 1,
     Inch = 2,
@@ -564,7 +563,7 @@ pub enum Orientation {
     LeftBottom = 8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum PlanarConfiguration {
     Chunky = 1, // RGB RGB RGB ...
     Planar = 2, // RRR... GGG... BBB...
@@ -582,7 +581,7 @@ impl TryFrom<u64> for PlanarConfiguration {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Tsify, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Default)]
 pub enum Predictor {
     #[default]
     None = 1,

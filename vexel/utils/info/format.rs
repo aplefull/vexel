@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use serde::Serialize;
-use tsify::Tsify;
 
 use super::summary::ImageSummary;
 use super::writer::{InfoGroup, InfoWriter};
@@ -12,8 +11,9 @@ pub trait InfoSection {
     fn describe(&self, out: &mut InfoWriter);
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct Section<S> {
     pub offset: u64,
     pub length: Option<u64>,
@@ -26,8 +26,9 @@ impl<S> Section<S> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Tsify)]
-#[tsify(missing_as_null)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
+#[cfg_attr(feature = "tsify", tsify(missing_as_null))]
 pub struct FormatInfo<S> {
     pub summary: Option<ImageSummary>,
     pub sections: Vec<Section<S>>,
