@@ -28,7 +28,7 @@ impl ImageInfo {
     }
 
     pub fn format(&self) -> ImageFormat {
-        self.format.clone()
+        self.format
     }
 
     pub fn summary(&self) -> Option<&ImageSummary> {

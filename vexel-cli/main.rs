@@ -160,7 +160,7 @@ fn process_file(file: &Path, cli: &Cli) -> Result<(), Box<dyn std::error::Error>
     }
 
     if cli.info {
-        let info = decoder.get_info();
+        let info = decoder.info();
         println!("{}", info);
         return Ok(());
     }

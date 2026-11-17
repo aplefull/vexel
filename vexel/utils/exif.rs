@@ -7,7 +7,7 @@ use crate::utils::info::InfoWriter;
 use crate::utils::limits::Limits;
 use crate::utils::stream::StreamReader;
 use crate::utils::tiff::ifd::{read_file_header, type_size, Ifd, IfdCycleGuard, IfdEntry, IfdFormat};
-use crate::utils::types::ByteOrder;
+pub use crate::utils::types::ByteOrder;
 
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]

@@ -119,14 +119,7 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::Jpeg => Decoders::Jpeg(JpegDecoder::new(reader)),
             ImageFormat::JpegLs => Decoders::JpegLs(JpegLsDecoder::new(reader)),
             ImageFormat::Gif => Decoders::Gif(GifDecoder::new(reader)),
-            ImageFormat::NetPbmP1
-            | ImageFormat::NetPbmP2
-            | ImageFormat::NetPbmP3
-            | ImageFormat::NetPbmP4
-            | ImageFormat::NetPbmP5
-            | ImageFormat::NetPbmP6
-            | ImageFormat::NetPbmP7
-            | ImageFormat::Pfm => Decoders::Netpbm(NetPbmDecoder::new(reader)),
+            ImageFormat::Netpbm => Decoders::Netpbm(NetPbmDecoder::new(reader)),
             ImageFormat::Bmp => Decoders::Bmp(BmpDecoder::new(reader)),
             ImageFormat::Png => Decoders::Png(PngDecoder::new(reader)),
             ImageFormat::Hdr => Decoders::Hdr(HdrDecoder::new(reader)),
@@ -135,7 +128,7 @@ impl<R: Read + Seek> Vexel<R> {
             ImageFormat::Tga => Decoders::Tga(TgaDecoder::new(reader)),
             ImageFormat::Jbig1 => Decoders::Jbig1(Jbig1Decoder::new(reader)),
             ImageFormat::Jbig2 => Decoders::Jbig2(Jbig2Decoder::new(reader)),
-            ImageFormat::Ico | ImageFormat::Cur => Decoders::Ico(IcoDecoder::new(reader)),
+            ImageFormat::Ico => Decoders::Ico(IcoDecoder::new(reader)),
             ImageFormat::Dicom => Decoders::Dicom(DicomDecoder::new(reader)),
             ImageFormat::Exr => Decoders::Exr(ExrDecoder::new(reader)),
             ImageFormat::Jpeg2000 => Decoders::Jpeg2000(Jpeg2000Decoder::new(reader)),
@@ -265,8 +258,8 @@ impl<R: Read + Seek> Vexel<R> {
     ///
     /// The format is determined during construction and does not change. If the
     /// format could not be identified, [`ImageFormat::Unknown`] is returned.
-    pub fn get_format(&self) -> ImageFormat {
-        self.format.clone()
+    pub fn format(&self) -> ImageFormat {
+        self.format
     }
 
     /// Returns format-specific metadata for the image.
@@ -274,7 +267,7 @@ impl<R: Read + Seek> Vexel<R> {
     /// Metadata comes from a header walk and does not require a [`decode`](Self::decode).
     /// The result is cached by the decoder. If the format was not detected or the header
     /// could not be read, the returned [`ImageInfo`] has no summary and no tree.
-    pub fn get_info(&mut self) -> ImageInfo {
+    pub fn info(&mut self) -> ImageInfo {
         let decoder = &mut self.decoder;
         let result = catch_decoder_panic(move || {
             Ok(match decoder.as_dyn() {
@@ -291,7 +284,7 @@ impl<R: Read + Seek> Vexel<R> {
             InfoKind::Unknown
         });
 
-        ImageInfo::new(self.format.clone(), kind)
+        ImageInfo::new(self.format, kind)
     }
 
     /// Returns `true` if the detected format can contain multiple pages and the
@@ -376,14 +369,8 @@ impl<R: Read + Seek> Vexel<R> {
         // Netpbm
         if header.starts_with(b"P") {
             match header[1] {
-                b'1' => return Ok(ImageFormat::NetPbmP1),
-                b'2' => return Ok(ImageFormat::NetPbmP2),
-                b'3' => return Ok(ImageFormat::NetPbmP3),
-                b'4' => return Ok(ImageFormat::NetPbmP4),
-                b'5' => return Ok(ImageFormat::NetPbmP5),
-                b'6' => return Ok(ImageFormat::NetPbmP6),
-                b'7' => return Ok(ImageFormat::NetPbmP7),
-                b'F' | b'f' if format_detect::is_netpbm_space(header[2]) => return Ok(ImageFormat::Pfm),
+                b'1'..=b'7' => return Ok(ImageFormat::Netpbm),
+                b'F' | b'f' if format_detect::is_netpbm_space(header[2]) => return Ok(ImageFormat::Netpbm),
                 _ => {}
             }
         }
@@ -400,12 +387,9 @@ impl<R: Read + Seek> Vexel<R> {
 
         // ICO / CUR
         let ico_count = u16::from_le_bytes([header[4], header[5]]);
-        if header.starts_with(&[0x00, 0x00, 0x01, 0x00]) && ico_count > 0 {
+        let ico_or_cur = header.starts_with(&[0x00, 0x00, 0x01, 0x00]) || header.starts_with(&[0x00, 0x00, 0x02, 0x00]);
+        if ico_or_cur && ico_count > 0 {
             return Ok(ImageFormat::Ico);
-        }
-
-        if header.starts_with(&[0x00, 0x00, 0x02, 0x00]) && ico_count > 0 {
-            return Ok(ImageFormat::Cur);
         }
 
         // HDR

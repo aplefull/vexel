@@ -131,13 +131,13 @@ Use `Limits::no_limits()` to remove all constraints.
 
 ### Metadata
 
-`get_info()` returns format-specific metadata without decoding pixels, so it can be called on its own. Every format has the same shape: a summary of what the decoder will produce (dimensions, color model, bit depth, compression, frame or page count, ICC profile, and so on) plus a list of the file's structural sections (chunks, segments, markers, IFDs, boxes) with their offsets and lengths.
+`info()` returns format-specific metadata without decoding pixels, so it can be called on its own. Every format has the same shape: a summary of what the decoder will produce (dimensions, color model, bit depth, compression, frame or page count, ICC profile, and so on) plus a list of the file's structural sections (chunks, segments, markers, IFDs, boxes) with their offsets and lengths.
 
 ```rust
 use vexel::Vexel;
 
 let mut decoder = Vexel::open("image.png")?;
-let info = decoder.get_info();
+let info = decoder.info();
 
 if let Some(summary) = info.summary() {
     println!("{}x{}", summary.width, summary.height);

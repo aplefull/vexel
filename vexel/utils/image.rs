@@ -5,7 +5,7 @@ use crate::utils::convert::{self, Channels};
 use crate::utils::error::{VexelError, VexelResult};
 use crate::utils::sample::{Alpha, Sample, SampleType};
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "tsify", derive(tsify::Tsify))]
 #[non_exhaustive]
 pub enum ImageFormat {
@@ -14,14 +14,7 @@ pub enum ImageFormat {
     Png,
     Gif,
     Bmp,
-    NetPbmP1,
-    NetPbmP2,
-    NetPbmP3,
-    NetPbmP4,
-    NetPbmP5,
-    NetPbmP6,
-    NetPbmP7,
-    Pfm,
+    Netpbm,
     Hdr,
     Tiff,
     Dng,
@@ -29,7 +22,6 @@ pub enum ImageFormat {
     Jbig1,
     Jbig2,
     Ico,
-    Cur,
     Dicom,
     Exr,
     Jpeg2000,

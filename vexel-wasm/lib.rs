@@ -162,7 +162,7 @@ impl WasmDecoder {
         let result = JsImage {
             width: image.width(),
             height: image.height(),
-            image_format: self.decoder.get_format(),
+            image_format: self.decoder.format(),
             pixels: pixels_to_js(image),
         }
         .into_ts()
@@ -255,7 +255,7 @@ impl WasmDecoder {
     /// representable number.
     #[wasm_bindgen(js_name = getInfo)]
     pub fn get_info(&mut self) -> Result<Ts<ImageInfo>, JsError> {
-        let info = self.decoder.get_info();
+        let info = self.decoder.info();
         if let Ok(value) = info.into_ts() {
             return Ok(value);
         }
@@ -274,21 +274,21 @@ impl WasmDecoder {
     /// Returns `"Unknown"` if the format cannot be identified.
     #[wasm_bindgen(js_name = tryGuessFormat)]
     pub fn try_guess_format(data: &[u8]) -> Result<Ts<ImageFormat>, JsError> {
-        let format = Vexel::new(Cursor::new(data)).map_or(ImageFormat::Unknown, |decoder| decoder.get_format());
+        let format = Vexel::new(Cursor::new(data)).map_or(ImageFormat::Unknown, |decoder| decoder.format());
         format.into_ts().map_err(js_error)
     }
 }
 
 impl WasmDecoder {
     fn images_to_js(&self, images: Vec<Image>) -> Result<Vec<Ts<JsImage>>, JsError> {
-        let format = self.decoder.get_format();
+        let format = self.decoder.format();
         images
             .into_iter()
             .map(|image| {
                 JsImage {
                     width: image.width(),
                     height: image.height(),
-                    image_format: format.clone(),
+                    image_format: format,
                     pixels: pixels_to_js(image),
                 }
                 .into_ts()

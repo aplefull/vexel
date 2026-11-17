@@ -66,12 +66,12 @@ fn run(mut decoder: Vexel<Cursor<&[u8]>>, profile: &Profile, operation: Operatio
     match operation {
         Operation::Info => {
             let _ = (
-                decoder.get_format(),
+                decoder.format(),
                 decoder.supports_pages(),
                 decoder.supports_thumbnails(),
                 decoder.supports_frames(),
             );
-            let info = decoder.get_info();
+            let info = decoder.info();
             let _ = info.summary();
             let _ = info.to_tree();
             let _ = info.to_string();

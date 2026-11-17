@@ -388,7 +388,7 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
             "jpeg_xr" => ImageFormat::JpegXr,
             "jpeg_xs" => ImageFormat::JpegXs,
             "lerc" => ImageFormat::Lerc,
-            "netpbm" => ImageFormat::NetPbmP6,
+            "netpbm" => ImageFormat::Netpbm,
             "pgx" => ImageFormat::Pgx,
             "png" => ImageFormat::Png,
             "rpgmvp" => ImageFormat::Rpgmvp,
@@ -399,9 +399,9 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let stages: [ArtifactStage; 5] = [
-        ("get_info", |data, format| {
+        ("info", |data, format| {
             if let Ok(mut decoder) = open(data, format) {
-                let info = decoder.get_info();
+                let info = decoder.info();
                 let _ = info.summary();
                 let _ = info.to_tree();
                 let _ = info.to_string();
@@ -465,7 +465,7 @@ fn test_fuzz_artifacts() -> Result<(), Box<dyn std::error::Error>> {
 
         for (stage, run) in &stages {
             let panics_before = PANIC_COUNT.with(Cell::get);
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&data, format.clone())));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&data, format)));
 
             if !matches!(outcome, Ok(false)) || PANIC_COUNT.with(Cell::get) != panics_before {
                 let message = LAST_PANIC.with(|last| last.borrow().clone());
