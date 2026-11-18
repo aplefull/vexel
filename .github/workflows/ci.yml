@@ -31,7 +31,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
 
       - name: Install toolchain
-        run: rustup toolchain install --profile minimal --component clippy,rustfmt
+        run: |
+          rustup toolchain install --profile minimal
+          rustup component add clippy rustfmt
 
       - uses: extractions/setup-just@v4
 
